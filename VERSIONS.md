@@ -1,5 +1,14 @@
 # SE3 Framework Version History
 
+## 11.24.2 - 2026-07-25
+
+- Fix WebUI chat history returning 404 on shared-filesystem multi-machine deployments by resolving a flow to an online machine before falling back to offline ones
+- Fix `POST /api/flows/{id}/resume` failing with 'machine not connected' when an earlier-connected offline machine shadowed the live one; resume now dispatches to the serving machine and reports its machine_id
+- Apply the same online-first resolution to end and interject routing, so all flow-targeted operations reach the machine that can actually serve them
+- De-duplicate the history list by flow_id, removing ghost entries for the same session reported by multiple machines and keeping the machine_id that matches the serving node
+- Re-fetch cached history bundles when a flow's resolved machine switches, so stale bundles bound to a departed node are no longer served
+- Show the backend's error detail in the WebUI resume toast, distinguishing 'flow not found' from 'machine is not connected', with localized en-US and zh-CN strings
+- Preserve existing behavior when no online machine reports the flow, keeping offline-only lookups unchanged
 ## 11.24.1 - 2026-07-24
 
 - Convert the server's requires_full history self-heal into an incremental cursor-carrying backfill so the WebUI chat panel no longer shrinks then re-grows on daemon reconnect, reserving full re-pulls for no-bundle, machine-change and active-worktree cases

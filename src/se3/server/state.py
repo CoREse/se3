@@ -23,7 +23,7 @@ import secrets
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from se3.daemon import protocol
 
@@ -504,7 +504,50 @@ class ServerState:
         #: issues to disk — writes are dispatched as MSG_ISSUE_COMMAND to the
         #: owning daemon which applies them via IssueManager.
         self._issues: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
+        #: Optional ``machine_id -> bool`` probe of REAL socket connectivity,
+        #: injected at app assembly (see :meth:`set_connectivity_probe`).
+        #: ``None`` in bare/unit use, where ``MachineRecord.online`` is the only
+        #: available truth.
+        self._connectivity_probe: Optional[Callable[[str], bool]] = None
         self._lock = asyncio.Lock()
+
+    def set_connectivity_probe(
+        self, probe: Optional[Callable[[str], bool]]
+    ) -> None:
+        """Inject the live-connection predicate used by flow→machine resolution.
+
+        WHY resolution must NOT read ``MachineRecord.online``: that flag is a
+        *presence-display* value, deliberately debounced by
+        :class:`~se3.server.ws.PresenceDebouncer` (60 s in production) so a
+        lossy-link reconnect does not flap the WebUI badge. For a whole minute
+        after a daemon dies its record therefore still says ``online=True``,
+        which would put a machine that cannot be reached at all into the
+        preferred segment and let it keep shadowing the machine that just took
+        the shared filesystem over — the exact 404 the online-first resolution
+        exists to remove. Routing needs *reachability now*, so the app wires
+        ``ConnectionManager.is_connected`` in here; the presence flag remains
+        the fallback for a bare :class:`ServerState` (unit tests, tooling) that
+        has no connection manager to ask.
+        """
+        self._connectivity_probe = probe
+
+    def _machine_is_reachable(
+        self, machine_id: str, record: Optional["MachineRecord"]
+    ) -> bool:
+        """Whether *machine_id* can be reached RIGHT NOW by a dispatched frame.
+
+        Prefers the injected connectivity probe over the debounced
+        ``record.online`` presence flag (see :meth:`set_connectivity_probe`); a
+        probe failure degrades to the flag rather than declaring the whole fleet
+        unreachable.
+        """
+        probe = self._connectivity_probe
+        if probe is not None:
+            try:
+                return bool(probe(machine_id))
+            except Exception:  # pragma: no cover - defensive
+                logger.debug("connectivity probe failed for %s", machine_id)
+        return record is not None and bool(record.online)
 
     # -- machine lifecycle -------------------------------------------------
 
@@ -742,15 +785,16 @@ class ServerState:
     def _iter_owned_machines_online_first(
         self, owner: Optional[str], *, online_only: bool = False
     ) -> List[Tuple[str, "MachineRecord"]]:
-        """Owner-visible machines, all ONLINE ones first then all offline ones.
+        """Owner-visible machines, all REACHABLE ones first then the rest.
 
         Caller MUST already hold ``self._lock`` — this is a pure read over
         ``self._machines`` and takes no lock of its own. Each segment keeps the
-        original ``self._machines`` insertion order, so with no online machine
-        at all the result is byte-for-byte the previous iteration order.
+        original ``self._machines`` insertion order, so with no reachable
+        machine at all the result is byte-for-byte the previous iteration order.
         *owner* ``None`` is the unscoped/admin view (no owner filtering), matching
-        ``_owned(record, None)``. With *online_only* set only the online segment
-        is returned — used by the callers that resolve in two whole passes.
+        ``_owned(record, None)``. With *online_only* set only the reachable
+        segment is returned — used by the callers that resolve in two whole
+        passes.
 
         WHY: on a shared filesystem (HPC clusters, where a job moves from
         node007 to node008 but reads the same disk) several daemons report the
@@ -758,17 +802,22 @@ class ServerState:
         history index around after ``mark_offline``. Resolving a flow to the
         first machine in insertion order therefore lets a long-gone machine
         permanently shadow the machine that can actually serve the request,
-        which surfaces as 404s on history detail and resume. An offline
-        machine's records are unservable by definition, so online candidates
-        must win; offline ones stay as a last-resort fallback (unchanged
-        behaviour for the single-machine deployment).
+        which surfaces as 404s on history detail and resume. A machine no frame
+        can reach is unservable by definition, so reachable candidates must win;
+        the others stay as a last-resort fallback (unchanged behaviour for the
+        single-machine deployment).
+
+        Reachability is :meth:`_machine_is_reachable`, i.e. live socket state
+        rather than the debounced ``online`` presence flag — during the 60 s
+        offline grace the dead machine still *displays* as online and would
+        otherwise keep winning this ordering.
         """
         online: List[Tuple[str, "MachineRecord"]] = []
         offline: List[Tuple[str, "MachineRecord"]] = []
         for machine_id, record in self._machines.items():
             if not _owned(record, owner):
                 continue
-            if record.online:
+            if self._machine_is_reachable(machine_id, record):
                 online.append((machine_id, record))
             elif not online_only:
                 offline.append((machine_id, record))
@@ -784,12 +833,22 @@ class ServerState:
         different owner are skipped — owner A can neither see nor (via the
         callers that gate on this) control owner B's flows.
 
-        Machine resolution is **online-first with an offline fallback** (see
-        :meth:`_iter_owned_machines_online_first`): when the same flow_id is
+        Machine resolution is **reachable-first with an unreachable fallback**
+        (see :meth:`_iter_owned_machines_online_first`): when the same flow_id is
         reported by several machines sharing one filesystem, the connected one
-        is returned so the routed command actually reaches a daemon. Owner
-        scoping is applied before that ordering, so an online machine belonging
-        to another owner is never selected.
+        is returned so the read is served — and any command routed off this
+        lookup dispatched — to a daemon that can actually be reached. Owner
+        scoping is applied before that ordering, so a connected machine
+        belonging to another owner is never selected.
+
+        INVARIANT: this is the single flow→machine resolution for EVERY caller —
+        detail reads, respond/interject, and the resume/end command gates
+        (:meth:`is_flow_resumable` / :meth:`is_flow_endable`) alike. A machine no
+        frame can reach can only serve a frozen pre-death snapshot and can only
+        fail a dispatch, so it must never be preferred over one that reports the
+        same flow and is reachable — that preference is exactly the shared-
+        filesystem 404 / "machine not connected" this resolution exists to
+        remove.
         """
         async with self._lock:
             for machine_id, record in self._iter_owned_machines_online_first(
@@ -805,7 +864,7 @@ class ServerState:
     ) -> Optional[str]:
         """Return the machine id owning *flow_id*, or ``None``.
 
-        Inherits :meth:`get_flow`'s online-first machine resolution, so a
+        Inherits :meth:`get_flow`'s reachable-first resolution, so a
         shared-filesystem flow resolves to a connected machine when one has it.
         """
         result = await self.get_flow(flow_id, owner=owner)
@@ -833,11 +892,20 @@ class ServerState:
         it MUST be passed so resolution is pinned to that project — otherwise an
         earlier-scanned project's matching call would misroute the detail
         request to the wrong daemon / filesystem target.
+
+        Machine resolution is reachable-first with an unreachable fallback, like
+        every other flow→machine lookup (see
+        :meth:`_iter_owned_machines_online_first`). WHY: pulling a call's full
+        prompt reads ``se3/calls/<id>`` off the flow's project_root, so any
+        daemon mounting that (here shared) filesystem serves the identical bytes.
+        Without this, a shared-filesystem call resolved to the long-gone machine
+        that happened to register first and the detail endpoint answered 503
+        "not connected" forever.
         """
         async with self._lock:
-            for machine_id, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
+            for machine_id, record in self._iter_owned_machines_online_first(
+                owner
+            ):
                 for flow in record.flows.values():
                     if project_root and str(flow.project_root or "") != str(
                         project_root
@@ -863,12 +931,12 @@ class ServerState:
         Used by the detail endpoint's pre-v3 fall-back: when the owning daemon
         does not speak the DETAIL_REQUEST protocol, its STATUS_UPDATE mirror
         already carries the untruncated prompt, so the endpoint serves this dict
-        directly rather than pulling. Scoping mirrors :meth:`find_call_owner`.
+        directly rather than pulling. Scoping and reachable-first resolution
+        both mirror :meth:`find_call_owner`, so an unpinned lookup reads the
+        mirror of the same machine that method would have routed the pull to.
         """
         async with self._lock:
-            for mid, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
+            for mid, record in self._iter_owned_machines_online_first(owner):
                 if machine_id and mid != machine_id:
                     continue
                 for flow in record.flows.values():
@@ -910,8 +978,10 @@ class ServerState:
         completed guard therefore takes precedence over the flag.
 
         The returned ``machine_id`` comes from :meth:`get_flow`, i.e. it is
-        resolved online-first: a shared-filesystem flow known to both a
-        disconnected and a connected machine resumes on the connected one.
+        resolved reachable-first: a shared-filesystem flow known to both a
+        disconnected and a connected machine resumes on the connected one, and
+        the resumability verdict is read off that same machine's snapshot — the
+        one whose daemon will actually receive the dispatch.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
@@ -956,8 +1026,10 @@ class ServerState:
         mirroring the honest receipt the resume gate provides.
 
         As with :meth:`is_flow_resumable`, the ``machine_id`` is resolved
-        online-first by :meth:`get_flow`, so the end command is dispatched to a
-        machine that is actually connected whenever one reports the flow.
+        reachable-first by :meth:`get_flow`, so the end command is dispatched to
+        a machine that is actually connected whenever one reports the flow — a
+        node killed mid-run therefore leaves nothing stuck: the surviving node
+        on the shared filesystem can still end (archive/clean up) the flow.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
@@ -1080,9 +1152,10 @@ class ServerState:
         live machine/flow views.
 
         A ``flow_id`` is collapsed to a single entry across machines, preferring
-        the one reported by an ONLINE machine and, within the same online state,
-        the one with the newest ``updated_at`` (ties keep the first encountered
-        so the result stays deterministic).
+        the one reported by a REACHABLE machine (live socket, not the debounced
+        presence flag) and, within the same reachability state, the one with the
+        newest ``updated_at`` (ties keep the first encountered so the result
+        stays deterministic).
 
         WHY: on a shared filesystem (an HPC job moving from node007 to node008
         reads the same disk) several daemons index the SAME flow, and the server
@@ -1105,7 +1178,7 @@ class ServerState:
                     record is None or not _owned(record, owner)
                 ):
                     continue
-                online = record is not None and record.online
+                online = self._machine_is_reachable(machine_id, record)
                 for session in sessions:
                     entry = dict(session)
                     entry.setdefault("machine_id", machine_id)
@@ -2474,10 +2547,11 @@ class ServerState:
         machine is only accepted when it is bound to that owner, so one owner
         cannot pull another owner's history.
 
-        The whole three-stage resolution runs once over the ONLINE machines and
-        only then over every machine (see
-        :meth:`_find_machine_for_history_flow_locked`), so a still-connected
-        machine wins over a disconnected one that shares the same filesystem.
+        The whole three-stage resolution runs once over the REACHABLE machines
+        (live socket, not the debounced presence flag) and only then over every
+        machine (see :meth:`_find_machine_for_history_flow_locked`), so a
+        still-connected machine wins over a disconnected one that shares the
+        same filesystem.
         """
         async with self._lock:
             return self._find_machine_for_history_flow_locked(flow_id, owner=owner)
@@ -2487,16 +2561,17 @@ class ServerState:
     ) -> Optional[str]:
         """Locked implementation of :meth:`find_machine_for_history_flow`.
 
-        WHY the three stages are replayed as TWO whole passes (online machines
-        first, then all machines) instead of making each stage individually
-        online-first: servability outranks how authoritative the evidence is. A
-        pull routed at a disconnected machine can only fail, so an online
+        WHY the three stages are replayed as TWO whole passes (reachable
+        machines first, then all machines) instead of making each stage
+        individually reachable-first: servability outranks how authoritative the
+        evidence is. A
+        pull routed at a disconnected machine can only fail, so a reachable
         machine that merely carries the flow in its live set is strictly more
-        useful than an offline machine holding a history-index entry for it.
+        useful than an unreachable one holding a history-index entry for it.
         Ordering within a stage would leave the window right after a
         shared-filesystem failover — the new machine connected and pushed
         STATUS_UPDATE but not yet HISTORY_INDEX — resolving to the dead machine,
-        which is exactly the 404 this exists to prevent. With no online
+        which is exactly the 404 this exists to prevent. With no reachable
         candidate the second pass reproduces the original stage order verbatim.
         """
 
@@ -2513,7 +2588,7 @@ class ServerState:
                 if not online_only:
                     return True
                 record = self._machines.get(machine_id)
-                return record is not None and record.online
+                return self._machine_is_reachable(machine_id, record)
 
             for machine_id, sessions in self._history_index.items():
                 if not _candidate(machine_id):
@@ -2557,11 +2632,11 @@ class ServerState:
            authoritative ``project_root`` of each flow's run).
         2. The live flow set (an active flow that has not yet been indexed).
 
-        Both stages run once over the ONLINE machines and only then over every
-        machine. WHY: the resolved root is handed to whichever daemon the pull
-        is routed to, and that routing
-        (:meth:`_find_machine_for_history_flow_locked`) is online-first — a root
-        reported by a disconnected machine would describe a different node's
+        Both stages run once over the REACHABLE machines and only then over
+        every machine. WHY: the resolved root is handed to whichever daemon the
+        pull is routed to, and that routing
+        (:meth:`_find_machine_for_history_flow_locked`) is reachable-first — a
+        root reported by a disconnected machine would describe a different node's
         view of the shared filesystem than the one about to read it. The
         index-before-live-flow priority (which is what keeps a worktree flow's
         main-repo discovery root from shadowing the worktree root) is preserved
@@ -2578,7 +2653,7 @@ class ServerState:
                 return False
             if not online_only:
                 return True
-            return record is not None and record.online
+            return self._machine_is_reachable(machine_id, record)
 
         def _resolve(online_only: bool) -> Optional[str]:
             # 1) History index — the authoritative SessionMeta.project_root.
@@ -2642,10 +2717,18 @@ class ServerState:
         The history write path (:meth:`apply_history_frame`) must consult the
         same predicate to keep its add-only floor scoped to worktree flows, and
         it runs inside ``self._lock`` — re-entering it would deadlock.
+
+        INVARIANT: the verdict is read off the SAME machine snapshot
+        :meth:`get_flow` resolves to, hence the shared reachable-first ordering.
+        On a shared filesystem the machine a resumed worktree flow moved away
+        from keeps a frozen ``completed`` snapshot of that flow_id; judging off
+        it would answer ``False`` for a run that is live on the machine now
+        serving it, silently disabling all three guards this gates (the
+        empty-full rejection in :meth:`apply_history_frame`, the incremental
+        recovery-pull choice, and the history endpoint's self-heal) and
+        re-freezing worktree discovery at round 1.
         """
-        for record in self._machines.values():
-            if not _owned(record, owner):
-                continue
+        for _machine_id, record in self._iter_owned_machines_online_first(owner):
             flow = record.flows.get(flow_id)
             if flow is None:
                 continue
@@ -2655,6 +2738,45 @@ class ServerState:
         return False
 
     # -- issue mirror (from daemon STATUS_UPDATE snapshots) -----------------
+
+    def _iter_issue_mirrors_online_first(
+        self, owner: Optional[str], *, online_only: bool = False
+    ) -> List[Tuple[str, Dict[str, List[Dict[str, Any]]]]]:
+        """Owner-visible issue mirrors, all REACHABLE machines first.
+
+        The issue-mirror twin of :meth:`_iter_owned_machines_online_first`:
+        caller MUST already hold ``self._lock``, each segment keeps the original
+        ``self._issues`` insertion order, and *online_only* trims the result to
+        the reachable segment for callers resolving in two whole passes.
+
+        WHY the issue mirror needs the same ordering as flow resolution: issues
+        live in ``se3/issues/*.yaml`` under the project root, so on a shared
+        filesystem every daemon that ever saw that root mirrors the SAME issue
+        id, and ``mark_offline`` keeps a disconnected machine's mirror. Resolving
+        an issue to the first machine in insertion order therefore hands the
+        issue commands (ISSUE_COMMAND, and the SPAWN_FLOW behind "start flow from
+        issue") a machine no frame can reach — and unlike the debounced presence
+        flag nothing ever expires that choice, so the 404 is permanent until the
+        dead machine's record is evicted, even though a connected machine can
+        read and write the identical YAML file.
+
+        Owner gating matches the pre-existing issue-query semantics exactly: a
+        mirror whose machine record is missing stays visible to the unscoped
+        (``owner is None``) view and is fail-closed out of any owner-scoped one.
+        """
+        online: List[Tuple[str, Dict[str, List[Dict[str, Any]]]]] = []
+        offline: List[Tuple[str, Dict[str, List[Dict[str, Any]]]]] = []
+        for machine_id, by_root in self._issues.items():
+            record = self._machines.get(machine_id)
+            if owner is not None and (
+                record is None or not _owned(record, owner)
+            ):
+                continue
+            if self._machine_is_reachable(machine_id, record):
+                online.append((machine_id, by_root))
+            elif not online_only:
+                offline.append((machine_id, by_root))
+        return online + offline
 
     async def get_issues(
         self,
@@ -2677,18 +2799,31 @@ class ServerState:
         *include_closed* controls whether closed/resolved/won't-fix issues
         are included (default: open only).  *source* and *type_filter* are
         exact-match filters on the respective issue fields.
+
+        An issue is collapsed to a single entry across machines, keyed by
+        ``(project_root, id)`` — the identity of the on-disk YAML file — and
+        preferring the copy mirrored by a REACHABLE machine, then the one with
+        the newest ``updated_at`` (ties keep the first encountered so the result
+        stays deterministic). WHY: on a shared filesystem every daemon that ever
+        saw the root mirrors the same issue, so without collapsing one issue
+        shows up once per machine that ever saw it; the reachability preference
+        additionally keeps the listed ``machine_id`` equal to the one
+        :meth:`get_issue_by_id` will route a command to. The key stays
+        root-scoped because ids are only unique WITHIN a project — two projects
+        each holding an ``I-42`` are two different issues and must both survive.
         """
         async with self._lock:
             result: List[Dict[str, Any]] = []
-            for mid, by_root in self._issues.items():
-                # Owner gate
-                if owner is not None:
-                    record = self._machines.get(mid)
-                    if record is None or not _owned(record, owner):
-                        continue
+            # (project_root, issue_id) -> (index into result, machine reachable)
+            # of the winner currently held for that issue.
+            chosen: Dict[Tuple[str, str], Tuple[int, bool]] = {}
+            for mid, by_root in self._iter_issue_mirrors_online_first(owner):
                 # Machine gate
                 if machine_id and mid != machine_id:
                     continue
+                reachable = self._machine_is_reachable(
+                    mid, self._machines.get(mid)
+                )
                 for root, issues in by_root.items():
                     # Project root gate
                     if project_root and root != project_root:
@@ -2708,7 +2843,28 @@ class ServerState:
                             continue
                         entry = dict(iss)
                         entry.setdefault("machine_id", mid)
-                        result.append(entry)
+                        issue_id = str(entry.get("id") or "")
+                        if not issue_id:
+                            # Unaddressable: no id to collapse on, so it passes
+                            # through rather than being hidden behind another.
+                            result.append(entry)
+                            continue
+                        key = (root, issue_id)
+                        prior = chosen.get(key)
+                        if prior is None:
+                            chosen[key] = (len(result), reachable)
+                            result.append(entry)
+                            continue
+                        index, prior_reachable = prior
+                        if reachable != prior_reachable:
+                            wins = reachable
+                        else:
+                            wins = str(entry.get("updated_at") or "") > str(
+                                result[index].get("updated_at") or ""
+                            )
+                        if wins:
+                            result[index] = entry
+                            chosen[key] = (index, reachable)
             return result
 
     async def get_issue_by_id(
@@ -2724,13 +2880,21 @@ class ServerState:
         With *owner* set, only machines belonging to that owner are searched.
         *machine_id* and *project_root* narrow the scope.  Returns ``None``
         when the issue cannot be found within the scoped machines/roots.
+
+        Machine resolution is **reachable-first with an unreachable fallback**
+        (see :meth:`_iter_issue_mirrors_online_first`), matching every flow→
+        machine lookup.
+
+        INVARIANT: this is the single issue→machine resolution behind every
+        issue write path — the edit/close/reopen ISSUE_COMMANDs and the
+        SPAWN_FLOW of "start flow from issue" alike. All of them dispatch a frame
+        to the machine returned here, so a machine that cannot be reached must
+        never be preferred over one mirroring the same issue off the same shared
+        filesystem: that preference is a permanent "machine ... is not connected"
+        404, since nothing ages a dead machine's issue mirror out.
         """
         async with self._lock:
-            for mid, by_root in self._issues.items():
-                if owner is not None:
-                    record = self._machines.get(mid)
-                    if record is None or not _owned(record, owner):
-                        continue
+            for mid, by_root in self._iter_issue_mirrors_online_first(owner):
                 if machine_id and mid != machine_id:
                     continue
                 for root, issues in by_root.items():
@@ -2753,20 +2917,26 @@ class ServerState:
         for this root.  Falls back to checking ``MachineRecord.project_roots``
         for machines that have no issues but do have the root registered.
         With *owner* set, only machines bound to that owner are candidates.
+
+        Both sources are scanned in TWO WHOLE PASSES — every reachable machine
+        first (issue mirror, then registered roots), and only if none matches the
+        same scan over the rest. WHY reachability outranks which source knows the
+        root: the caller routes a frame to the returned machine, so a connected
+        machine that merely has the root registered can serve it while a
+        disconnected one with a full issue mirror can only fail the dispatch. On
+        a shared filesystem both machines address the identical directory, so
+        there is nothing the unreachable one knows better.
         """
         async with self._lock:
-            # First: check the issue mirror for a direct hit.
-            for mid, by_root in self._issues.items():
-                if project_root in by_root:
-                    if owner is not None:
-                        record = self._machines.get(mid)
-                        if record is None or not _owned(record, owner):
-                            continue
-                    return mid
-            # Second: check MachineRecord.project_roots.
-            for mid, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
-                if project_root in record.project_roots:
-                    return mid
+            for online_only in (True, False):
+                for mid, by_root in self._iter_issue_mirrors_online_first(
+                    owner, online_only=online_only
+                ):
+                    if project_root in by_root:
+                        return mid
+                for mid, record in self._iter_owned_machines_online_first(
+                    owner, online_only=online_only
+                ):
+                    if project_root in record.project_roots:
+                        return mid
         return None

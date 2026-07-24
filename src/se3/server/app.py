@@ -462,6 +462,13 @@ def create_app(
     wire_metrics = WireMetrics()
     state = ServerState()
     manager = ConnectionManager(metrics=wire_metrics)
+    # Flow→machine resolution must ask the connection pool, not the machine
+    # record's ``online`` flag: that flag is debounced by 60 s (below) for the
+    # presence badge, so for a whole minute after a daemon dies its record still
+    # claims to be online and would keep shadowing the machine that just took a
+    # shared filesystem over. The pool is the only component that knows whether
+    # a frame can actually be delivered right now.
+    state.set_connectivity_probe(manager.is_connected)
     # Presence wiring (revision 4): the hub is the only component that knows
     # the exact browser connection count, the manager the only one that can
     # reach every daemon — so the 0↔non-0 edge is bridged here at assembly
@@ -1005,6 +1012,12 @@ def create_app(
         identity_: OwnerIdentity = Depends(require_owner),
     ) -> dict:
         # Ownership gate: a flow on another owner's machine reads as absent.
+        # WHY reachable-first resolution matters here: a response is a file drop
+        # — the daemon writes ``se3/calls/<id>.response`` under the flow's
+        # project_root, which the live ``se3 run`` drains from that same (here
+        # shared) disk. Any reachable daemon mounting it serves the answer, so
+        # routing to a disconnected peer that merely reported the flow first
+        # would bounce the operator's reply while the flow sits blocked.
         result = await state.get_flow(flow_id, owner=_scope_for(identity_))
         if result is None:
             raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
@@ -1053,6 +1066,9 @@ def create_app(
         if not text:
             raise HTTPException(status_code=422, detail="'text' must not be empty")
         # Ownership gate: a flow on another owner's machine reads as absent.
+        # Same reasoning as ``/respond``: an interjection is a file drop into the
+        # flow's shared call directory, so it must go to a daemon that can be
+        # reached rather than the first one that reported the flow.
         result = await state.get_flow(flow_id, owner=_scope_for(identity_))
         if result is None:
             raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
@@ -1101,6 +1117,8 @@ def create_app(
         * resumable → dispatch and return 202 ``resume_dispatched``.
         """
         scope = _scope_for(identity_)
+        # Same reachable-first resolution the resumability gate below uses, so
+        # the 409 reason is read off the SAME snapshot it judged, not a peer's.
         existing = await state.get_flow(flow_id, owner=scope)
         if existing is None:
             # Unknown flow or owned by a different owner — leak nothing.
@@ -1177,6 +1195,7 @@ def create_app(
         * otherwise dispatch and return 202 ``end_dispatched``.
         """
         scope = _scope_for(identity_)
+        # Same reachable-first resolution the endability gate judges.
         existing = await state.get_flow(flow_id, owner=scope)
         if existing is None:
             raise HTTPException(
