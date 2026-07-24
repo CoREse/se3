@@ -739,6 +739,41 @@ class ServerState:
                 return None
             return [f.to_dict() for f in record.flows.values()]
 
+    def _iter_owned_machines_online_first(
+        self, owner: Optional[str], *, online_only: bool = False
+    ) -> List[Tuple[str, "MachineRecord"]]:
+        """Owner-visible machines, all ONLINE ones first then all offline ones.
+
+        Caller MUST already hold ``self._lock`` — this is a pure read over
+        ``self._machines`` and takes no lock of its own. Each segment keeps the
+        original ``self._machines`` insertion order, so with no online machine
+        at all the result is byte-for-byte the previous iteration order.
+        *owner* ``None`` is the unscoped/admin view (no owner filtering), matching
+        ``_owned(record, None)``. With *online_only* set only the online segment
+        is returned — used by the callers that resolve in two whole passes.
+
+        WHY: on a shared filesystem (HPC clusters, where a job moves from
+        node007 to node008 but reads the same disk) several daemons report the
+        SAME flow_id, and the server keeps a disconnected machine's flows and
+        history index around after ``mark_offline``. Resolving a flow to the
+        first machine in insertion order therefore lets a long-gone machine
+        permanently shadow the machine that can actually serve the request,
+        which surfaces as 404s on history detail and resume. An offline
+        machine's records are unservable by definition, so online candidates
+        must win; offline ones stay as a last-resort fallback (unchanged
+        behaviour for the single-machine deployment).
+        """
+        online: List[Tuple[str, "MachineRecord"]] = []
+        offline: List[Tuple[str, "MachineRecord"]] = []
+        for machine_id, record in self._machines.items():
+            if not _owned(record, owner):
+                continue
+            if record.online:
+                online.append((machine_id, record))
+            elif not online_only:
+                offline.append((machine_id, record))
+        return online + offline
+
     async def get_flow(
         self, flow_id: str, *, owner: Optional[str] = None
     ) -> Optional[Tuple[str, Dict[str, Any]]]:
@@ -748,11 +783,18 @@ class ServerState:
         flow with that id. With *owner* set, flows on machines belonging to a
         different owner are skipped — owner A can neither see nor (via the
         callers that gate on this) control owner B's flows.
+
+        Machine resolution is **online-first with an offline fallback** (see
+        :meth:`_iter_owned_machines_online_first`): when the same flow_id is
+        reported by several machines sharing one filesystem, the connected one
+        is returned so the routed command actually reaches a daemon. Owner
+        scoping is applied before that ordering, so an online machine belonging
+        to another owner is never selected.
         """
         async with self._lock:
-            for machine_id, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
+            for machine_id, record in self._iter_owned_machines_online_first(
+                owner
+            ):
                 flow = record.flows.get(flow_id)
                 if flow is not None:
                     return machine_id, flow.to_dict()
@@ -761,7 +803,11 @@ class ServerState:
     async def find_machine_for_flow(
         self, flow_id: str, *, owner: Optional[str] = None
     ) -> Optional[str]:
-        """Return the machine id owning *flow_id*, or ``None``."""
+        """Return the machine id owning *flow_id*, or ``None``.
+
+        Inherits :meth:`get_flow`'s online-first machine resolution, so a
+        shared-filesystem flow resolves to a connected machine when one has it.
+        """
         result = await self.get_flow(flow_id, owner=owner)
         return result[0] if result is not None else None
 
@@ -862,6 +908,10 @@ class ServerState:
         daemon resume validator rejects a COMPLETED flow, so honoring the flag
         here would let the UI dispatch a resume the daemon then bounces. The
         completed guard therefore takes precedence over the flag.
+
+        The returned ``machine_id`` comes from :meth:`get_flow`, i.e. it is
+        resolved online-first: a shared-filesystem flow known to both a
+        disconnected and a connected machine resumes on the connected one.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
@@ -904,6 +954,10 @@ class ServerState:
         Returns ``None`` for an unknown / cross-owner flow (caller maps to 404)
         and for an ordinary already-completed flow (caller maps to 409),
         mirroring the honest receipt the resume gate provides.
+
+        As with :meth:`is_flow_resumable`, the ``machine_id`` is resolved
+        online-first by :meth:`get_flow`, so the end command is dispatched to a
+        machine that is actually connected whenever one reports the flow.
         """
         result = await self.get_flow(flow_id, owner=owner)
         if result is None:
@@ -2382,6 +2436,11 @@ class ServerState:
         whether it is historical or still active. With *owner* set, a candidate
         machine is only accepted when it is bound to that owner, so one owner
         cannot pull another owner's history.
+
+        The whole three-stage resolution runs once over the ONLINE machines and
+        only then over every machine (see
+        :meth:`_find_machine_for_history_flow_locked`), so a still-connected
+        machine wins over a disconnected one that shares the same filesystem.
         """
         async with self._lock:
             return self._find_machine_for_history_flow_locked(flow_id, owner=owner)
@@ -2389,7 +2448,20 @@ class ServerState:
     def _find_machine_for_history_flow_locked(
         self, flow_id: str, *, owner: Optional[str] = None
     ) -> Optional[str]:
-        """Locked implementation of :meth:`find_machine_for_history_flow`."""
+        """Locked implementation of :meth:`find_machine_for_history_flow`.
+
+        WHY the three stages are replayed as TWO whole passes (online machines
+        first, then all machines) instead of making each stage individually
+        online-first: servability outranks how authoritative the evidence is. A
+        pull routed at a disconnected machine can only fail, so an online
+        machine that merely carries the flow in its live set is strictly more
+        useful than an offline machine holding a history-index entry for it.
+        Ordering within a stage would leave the window right after a
+        shared-filesystem failover — the new machine connected and pushed
+        STATUS_UPDATE but not yet HISTORY_INDEX — resolving to the dead machine,
+        which is exactly the 404 this exists to prevent. With no online
+        candidate the second pass reproduces the original stage order verbatim.
+        """
 
         def _accept(machine_id: str) -> bool:
             if owner is None:
@@ -2397,23 +2469,34 @@ class ServerState:
             record = self._machines.get(machine_id)
             return record is not None and _owned(record, owner)
 
-        for machine_id, sessions in self._history_index.items():
-            if not _accept(machine_id):
-                continue
-            for session in sessions:
-                if str(session.get("flow_id") or "") == flow_id:
+        def _resolve(online_only: bool) -> Optional[str]:
+            def _candidate(machine_id: str) -> bool:
+                if not _accept(machine_id):
+                    return False
+                if not online_only:
+                    return True
+                record = self._machines.get(machine_id)
+                return record is not None and record.online
+
+            for machine_id, sessions in self._history_index.items():
+                if not _candidate(machine_id):
+                    continue
+                for session in sessions:
+                    if str(session.get("flow_id") or "") == flow_id:
+                        return machine_id
+            cached = self._history_data.get(flow_id)
+            if cached is not None and cached.get("machine_id"):
+                cached_mid = str(cached["machine_id"])
+                if _candidate(cached_mid):
+                    return cached_mid
+            for machine_id, record in self._iter_owned_machines_online_first(
+                owner, online_only=online_only
+            ):
+                if flow_id in record.flows:
                     return machine_id
-        cached = self._history_data.get(flow_id)
-        if cached is not None and cached.get("machine_id"):
-            cached_mid = str(cached["machine_id"])
-            if _accept(cached_mid):
-                return cached_mid
-        for machine_id, record in self._machines.items():
-            if not _owned(record, owner):
-                continue
-            if flow_id in record.flows:
-                return machine_id
-        return None
+            return None
+
+        return _resolve(True) or _resolve(False)
 
     async def get_history_flow_project_root(
         self, flow_id: str, *, owner: Optional[str] = None
@@ -2437,21 +2520,33 @@ class ServerState:
            authoritative ``project_root`` of each flow's run).
         2. The live flow set (an active flow that has not yet been indexed).
 
+        Both stages run once over the ONLINE machines and only then over every
+        machine. WHY: the resolved root is handed to whichever daemon the pull
+        is routed to, and that routing
+        (:meth:`_find_machine_for_history_flow_locked`) is online-first — a root
+        reported by a disconnected machine would describe a different node's
+        view of the shared filesystem than the one about to read it. The
+        index-before-live-flow priority (which is what keeps a worktree flow's
+        main-repo discovery root from shadowing the worktree root) is preserved
+        inside each pass.
+
         Returns the non-empty ``project_root`` string, or ``None`` when the
         flow is unknown, owner-scoped out, or has no recorded root (the caller
         then degrades to the legacy empty-``project_root`` behaviour).
         """
 
-        def _accept(machine_id: str) -> bool:
-            if owner is None:
-                return True
+        def _accept(machine_id: str, online_only: bool) -> bool:
             record = self._machines.get(machine_id)
-            return record is not None and _owned(record, owner)
+            if owner is not None and (record is None or not _owned(record, owner)):
+                return False
+            if not online_only:
+                return True
+            return record is not None and record.online
 
-        async with self._lock:
+        def _resolve(online_only: bool) -> Optional[str]:
             # 1) History index — the authoritative SessionMeta.project_root.
             for machine_id, sessions in self._history_index.items():
-                if not _accept(machine_id):
+                if not _accept(machine_id, online_only):
                     continue
                 for session in sessions:
                     if str(session.get("flow_id") or "") == flow_id:
@@ -2459,15 +2554,18 @@ class ServerState:
                         if root:
                             return root
             # 2) Fall back to the live flow set.
-            for machine_id, record in self._machines.items():
-                if not _owned(record, owner):
-                    continue
+            for _machine_id, record in self._iter_owned_machines_online_first(
+                owner, online_only=online_only
+            ):
                 flow = record.flows.get(flow_id)
                 if flow is not None:
                     root = str(flow.project_root or "")
                     if root:
                         return root
             return None
+
+        async with self._lock:
+            return _resolve(True) or _resolve(False)
 
     async def is_active_worktree_flow(
         self, flow_id: str, *, owner: Optional[str] = None
