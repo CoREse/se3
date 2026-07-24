@@ -196,6 +196,46 @@ check("isResumeInProgress returns true when flow is in the set", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resumeErrorText — 404 detail branches (shared-FS machine switch)
+// ---------------------------------------------------------------------------
+// In this Node environment no i18n dictionary is loaded, so tf() returns its
+// fallback: for the machine-offline branch that fallback is the backend detail
+// itself. The assertions therefore pin the *branch* (offline wording is
+// carried through, never replaced by the generic not-found text) rather than
+// the localized string, which only exists in the browser.
+check("404 with an offline-machine detail is not the generic not-found text", () => {
+  const detail = "machine 'node007' owning flow 'f1' is not connected";
+  const out = app.resumeErrorText(404, detail);
+  assert.ok(out, "expected a non-empty message");
+  assert.notEqual(out, "Flow not found or not resumable.");
+  assert.match(out, /not connected/);
+});
+
+check("404 with a flow-not-found detail is passed through verbatim", () => {
+  assert.equal(
+    app.resumeErrorText(404, "flow 'f1' not found"),
+    "flow 'f1' not found",
+  );
+});
+
+check("404 without a detail falls back to the default not-found text", () => {
+  assert.equal(app.resumeErrorText(404, ""), "Flow not found or not resumable.");
+  assert.equal(app.resumeErrorText(404, "   "), "Flow not found or not resumable.");
+  assert.equal(app.resumeErrorText(404, null), "Flow not found or not resumable.");
+  assert.equal(app.resumeErrorText(404, undefined), "Flow not found or not resumable.");
+});
+
+check("non-404 statuses pass the detail through unchanged", () => {
+  // The 409/other branches keep their own fallback wording via `|| tf(...)`,
+  // so the helper must not inject the 404-specific default there — and must
+  // not apply the machine-offline mapping either.
+  assert.equal(app.resumeErrorText(409, "该 flow 仍在运行，无法 resume"), "该 flow 仍在运行，无法 resume");
+  assert.equal(app.resumeErrorText(409, ""), "");
+  assert.equal(app.resumeErrorText(503, "machine 'node007' is not connected"), "machine 'node007' is not connected");
+  assert.equal(app.resumeErrorText(500, undefined), "");
+});
+
+// ---------------------------------------------------------------------------
 // Done
 // ---------------------------------------------------------------------------
 console.log(`\n  ${passed} checks passed.`);
