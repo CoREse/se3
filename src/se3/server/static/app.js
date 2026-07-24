@@ -3372,6 +3372,35 @@ function isResumeInProgress(flowId) {
   return state.resumeFlowRequests.has(flowId);
 }
 
+// Pure helper: pick the toast text for a failed resume dispatch.
+//
+// WHY: a 404 has two very different causes and the generic "not found" wording
+// misleads on the second one. On a shared filesystem (HPC-style clusters) the
+// same flow is reported by whichever node currently runs the job; once the
+// owning machine goes offline the backend answers 404 with
+// "machine '<id>' owning flow '<id>' is not connected", which is actionable
+// (the session moved nodes) rather than "this flow does not exist".
+//
+// The offline case is recognised by substring-matching the backend's ENGLISH
+// detail — a deliberately weak contract (app.py builds that string with an
+// f-string, so a reword there silently breaks the match). The degradation is
+// benign and explicit: an unmatched non-empty detail is shown verbatim, so the
+// user still sees the backend's own reason; only the localized phrasing is
+// lost. A backend detail change should therefore be mirrored here, but never
+// leaves the UI without a message.
+//
+// Non-404 statuses are intentionally passed straight through (detail verbatim,
+// "" when absent) so the 409/other branches keep their own fallback wording.
+function resumeErrorText(status, detail) {
+  const text = typeof detail === "string" ? detail.trim() : "";
+  if (status !== 404) return text;
+  if (/is not connected/.test(text)) {
+    return tf("toast.resumeMachineOffline", text);
+  }
+  if (text) return text;
+  return tf("toast.resumeNotFound", "Flow not found or not resumable.");
+}
+
 async function resumeFlow(flowId) {
   if (!flowId) return;
   if (state.resumeFlowRequests.has(flowId)) return; // debounce
@@ -3390,7 +3419,11 @@ async function resumeFlow(flowId) {
     if (resp.ok) {
       showToast("success", tf("toast.resumeDispatched", `Resume dispatched for ${flowId.slice(0, 8)}…`, { id: flowId.slice(0, 8) }));
     } else if (resp.status === 404) {
-      showToast("error", tf("toast.resumeNotFound", "Flow not found or not resumable."));
+      // Either the flow is genuinely unknown or its owning machine went
+      // offline (shared-FS node switch) — resumeErrorText tells them apart.
+      let detail = "";
+      try { detail = (await resp.json()).detail || ""; } catch (_) {}
+      showToast("error", resumeErrorText(404, detail));
     } else if (resp.status === 409) {
       // The flow exists but is not resumable right now — typically it is still
       // running (a live process holds it). Surface the backend's explicit
@@ -15270,6 +15303,7 @@ if (typeof module !== "undefined" && module.exports) {
     isFlowResumable,
     RESUMABLE_STATUSES,
     isResumeInProgress,
+    resumeErrorText,
     // End-session pure helpers (G4) — exposed for the DOM-free tests in
     // tests/frontend/end_session.test.mjs.
     isFlowEndable,

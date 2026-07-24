@@ -176,6 +176,7 @@
   "toast.unknownError": "unknown error",
   "toast.resumeDispatched": "Resume dispatched for {id}…",
   "toast.resumeNotFound": "Flow not found or not resumable.",
+  "toast.resumeMachineOffline": "The machine that owns this flow is not connected — it may have moved to another node.",
   "toast.resumeStillRunning": "This flow is still running and cannot be resumed",
   "toast.resumeFailed": "Resume failed ({status}).",
   "toast.resumeNetworkError": "Network error — could not dispatch resume.",
