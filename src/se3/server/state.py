@@ -1078,19 +1078,56 @@ class ServerState:
         field sort last). With *owner* set, only sessions reported by machines
         bound to that owner are included — history is owner-scoped just like the
         live machine/flow views.
+
+        A ``flow_id`` is collapsed to a single entry across machines, preferring
+        the one reported by an ONLINE machine and, within the same online state,
+        the one with the newest ``updated_at`` (ties keep the first encountered
+        so the result stays deterministic).
+
+        WHY: on a shared filesystem (an HPC job moving from node007 to node008
+        reads the same disk) several daemons index the SAME flow, and the server
+        keeps a disconnected machine's index after ``mark_offline`` — so without
+        collapsing, one session shows up once per machine that ever saw it. The
+        online preference also keeps the ``machine_id`` shown in the list equal
+        to the machine :meth:`_find_machine_for_history_flow_locked` will
+        actually route the detail fetch to. Entries with no usable ``flow_id``
+        are unaddressable and pass through untouched rather than being merged
+        into (and hidden behind) each other.
         """
         async with self._lock:
             entries: List[Dict[str, Any]] = []
+            # flow_id -> (index into entries, machine is online) of the winner
+            # currently held for that flow.
+            chosen: Dict[str, Tuple[int, bool]] = {}
             for machine_id, sessions in self._history_index.items():
                 record = self._machines.get(machine_id)
                 if owner is not None and (
                     record is None or not _owned(record, owner)
                 ):
                     continue
+                online = record is not None and record.online
                 for session in sessions:
                     entry = dict(session)
                     entry.setdefault("machine_id", machine_id)
-                    entries.append(entry)
+                    flow_id = str(entry.get("flow_id") or "")
+                    if not flow_id:
+                        entries.append(entry)
+                        continue
+                    prior = chosen.get(flow_id)
+                    if prior is None:
+                        chosen[flow_id] = (len(entries), online)
+                        entries.append(entry)
+                        continue
+                    index, prior_online = prior
+                    if online != prior_online:
+                        wins = online
+                    else:
+                        wins = str(entry.get("updated_at") or "") > str(
+                            entries[index].get("updated_at") or ""
+                        )
+                    if wins:
+                        entries[index] = entry
+                        chosen[flow_id] = (index, online)
         entries.sort(key=lambda e: str(e.get("updated_at") or ""), reverse=True)
         return entries
 

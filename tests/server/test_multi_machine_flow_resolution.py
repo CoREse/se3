@@ -15,7 +15,9 @@ The invariants locked here:
   while the offline one holds the (more authoritative) history-index entry;
 * with no online candidate at all, resolution falls back to exactly the
   pre-fix answer;
-* owner scoping is never bypassed by the online preference.
+* owner scoping is never bypassed by the online preference;
+* ``get_history_index`` collapses the resulting multi-machine duplicates of one
+  ``flow_id`` to a single row, picking the same machine resolution would.
 
 Follows the sibling server tests' convention of driving coroutines with
 ``asyncio.run`` from plain sync test functions rather than the pytest-asyncio
@@ -279,3 +281,181 @@ def test_unscoped_admin_view_still_prefers_the_online_machine():
     resolved = asyncio.run(scenario())
     assert _machines(resolved) == ["node008"] * 5
     assert resolved["project_root"] == ROOT_B
+
+
+# --------------------------------------------------------------------------- #
+# history index dedupe
+# --------------------------------------------------------------------------- #
+
+
+def _row(
+    flow_id: Optional[str], updated_at: str, **extra: Any
+) -> Dict[str, Any]:
+    """A history-index row; *flow_id* ``None`` models a malformed daemon row."""
+    row: Dict[str, Any] = {"updated_at": updated_at, "status": "paused"}
+    if flow_id is not None:
+        row["flow_id"] = flow_id
+    row.update(extra)
+    return row
+
+
+def _by_flow(
+    entries: List[Dict[str, Any]], flow_id: str
+) -> List[Dict[str, Any]]:
+    return [e for e in entries if e.get("flow_id") == flow_id]
+
+
+def test_history_index_collapses_shared_flow_onto_the_online_machine():
+    """One row per session, reported by the machine that can actually serve it.
+
+    node007's index entry is even the newer of the two, so only the online
+    preference can produce node008 here — and it must, or the list would offer
+    a machine_id the detail fetch never routes to.
+    """
+
+    async def scenario():
+        state = ServerState()
+        await _seed_machine(
+            state,
+            "node007",
+            owner=OWNER,
+            project_root=ROOT_A,
+            index_updated_at="2026-07-24T12:00:00",
+            offline=True,
+        )
+        await _seed_machine(
+            state,
+            "node008",
+            owner=OWNER,
+            project_root=ROOT_B,
+            index_updated_at="2026-07-24T11:00:00",
+        )
+        return await state.get_history_index(owner=OWNER)
+
+    entries = asyncio.run(scenario())
+    assert len(entries) == 1
+    assert entries[0]["machine_id"] == "node008"
+    assert entries[0]["project_root"] == ROOT_B
+
+
+def test_history_index_dedupe_falls_back_to_newest_updated_at():
+    """With both reporters in the same online state, the fresher row wins."""
+
+    async def scenario():
+        both_offline = ServerState()
+        both_online = ServerState()
+        for state, offline in ((both_offline, True), (both_online, False)):
+            await _seed_machine(
+                state,
+                "node007",
+                owner=OWNER,
+                project_root=ROOT_A,
+                index_updated_at="2026-07-24T09:00:00",
+                offline=offline,
+            )
+            await _seed_machine(
+                state,
+                "node008",
+                owner=OWNER,
+                project_root=ROOT_B,
+                index_updated_at="2026-07-24T13:00:00",
+                offline=offline,
+            )
+        return (
+            await both_offline.get_history_index(owner=OWNER),
+            await both_online.get_history_index(owner=OWNER),
+        )
+
+    offline_entries, online_entries = asyncio.run(scenario())
+    for entries in (offline_entries, online_entries):
+        assert len(entries) == 1
+        assert entries[0]["machine_id"] == "node008"
+        assert entries[0]["updated_at"] == "2026-07-24T13:00:00"
+
+
+def test_history_index_keeps_rows_without_a_flow_id():
+    """An unaddressable row cannot be merged — never collapse those together."""
+
+    async def scenario():
+        state = ServerState()
+        await state.register_machine("node007", owner_id=OWNER)
+        await state.update_history_index(
+            "node007",
+            [
+                _row(None, "2026-07-24T08:00:00"),
+                _row("", "2026-07-24T07:00:00"),
+            ],
+        )
+        await state.register_machine("node008", owner_id=OWNER)
+        await state.update_history_index(
+            "node008", [_row(None, "2026-07-24T06:00:00")]
+        )
+        return await state.get_history_index(owner=OWNER)
+
+    entries = asyncio.run(scenario())
+    assert len(entries) == 3
+    assert [e["machine_id"] for e in entries] == [
+        "node007",
+        "node007",
+        "node008",
+    ]
+
+
+def test_history_index_dedupe_preserves_ordering_and_other_flows():
+    """Only same-id rows collapse; the list stays ``updated_at``-descending."""
+
+    async def scenario():
+        state = ServerState()
+        await state.register_machine("node007", owner_id=OWNER)
+        await state.update_history_index(
+            "node007",
+            [
+                _row(FLOW_ID, "2026-07-24T10:00:00", project_root=ROOT_A),
+                _row("flow-old", "2026-07-20T10:00:00"),
+            ],
+        )
+        await state.mark_offline("node007")
+        await state.register_machine("node008", owner_id=OWNER)
+        await state.update_history_index(
+            "node008",
+            [
+                _row(FLOW_ID, "2026-07-24T10:00:00", project_root=ROOT_B),
+                _row("flow-new", "2026-07-24T18:00:00"),
+            ],
+        )
+        return await state.get_history_index(owner=OWNER)
+
+    entries = asyncio.run(scenario())
+    assert len(entries) == 3
+    updated = [str(e["updated_at"]) for e in entries]
+    assert updated == sorted(updated, reverse=True)
+    assert entries[0]["flow_id"] == "flow-new"
+    assert entries[-1]["flow_id"] == "flow-old"
+    # Equal timestamps: only the online preference decides this one.
+    shared = _by_flow(entries, FLOW_ID)
+    assert len(shared) == 1
+    assert shared[0]["machine_id"] == "node008"
+    assert shared[0]["project_root"] == ROOT_B
+    # A flow only the offline machine ever had is still listed.
+    assert _by_flow(entries, "flow-old")[0]["machine_id"] == "node007"
+
+
+def test_history_index_single_machine_deployment_is_untouched():
+    """Baseline: dedupe is a no-op when only one machine ever reports."""
+
+    async def scenario():
+        state = ServerState()
+        await state.register_machine("node007", owner_id=OWNER)
+        await state.update_history_index(
+            "node007",
+            [
+                _row("flow-a", "2026-07-24T10:00:00"),
+                _row("flow-b", "2026-07-24T12:00:00"),
+                _row("flow-c", "2026-07-24T11:00:00"),
+            ],
+        )
+        return await state.get_history_index(owner=OWNER)
+
+    entries = asyncio.run(scenario())
+    assert [e["flow_id"] for e in entries] == ["flow-b", "flow-c", "flow-a"]
+    assert {e["machine_id"] for e in entries} == {"node007"}
