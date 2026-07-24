@@ -1070,6 +1070,34 @@ class ServerState:
         )
         return outcome.resolves_pull
 
+    @staticmethod
+    def _cursor_base_at_watermark(
+        existing_cursor: Dict[str, Any], cursor_base: Dict[str, Any]
+    ) -> bool:
+        """Whether an append frame's *cursor_base* is anchored EXACTLY at the
+        bundle's current water mark — it continues the bundle from where it
+        stands, with no hole and no re-delivery.
+
+        Used to rescue a cursored backfill drain that a racing live push
+        re-flagged ``requires_full``: the frame we requested resumes from the
+        server's own cursor, so every file it declares a base for must start at
+        the line that file currently holds (0 for a file the bundle has not seen
+        yet). A base sitting BEFORE the water mark (an overlap re-send) or PAST
+        it (a real gap) does NOT match — only the precise anchor is exempted, so
+        this cannot smuggle a hole past the ``requires_full`` guard.
+        """
+        if not cursor_base:
+            return False
+        for name, base in cursor_base.items():
+            try:
+                base_i = int(base)
+                mark_i = int(existing_cursor.get(name, 0) or 0)
+            except (TypeError, ValueError):
+                return False
+            if base_i != mark_i:
+                return False
+        return True
+
     async def apply_history_frame(
         self,
         flow_id: str,
@@ -1138,12 +1166,41 @@ class ServerState:
                 mode == protocol.HISTORY_MODE_APPEND
                 and flow_id in self._history_requires_full
             ):
-                logger.debug(
-                    "hist-diag append_history DISCARD flow=%s reason=requires_full-set "
-                    "records=%d (stuck until a full frame)",
-                    flow_id, len(new_records),
-                )
-                return HistoryWriteOutcome(resolves_pull=False)
+                # WHY: an append is normally refused while ``requires_full`` is
+                # armed — the flow awaits a rebuild and any live push is a
+                # potential hole. But the incremental self-heal
+                # (:meth:`plan_recovery_pull`) requests a CURSORED backfill
+                # anchored at the server's own water mark, and a live push the
+                # daemon queued ~1 RTT before that request landed can arrive
+                # first (FIFO on the socket), trip the cursor-gap guard and
+                # RE-ARM ``requires_full``. Discarding the backfill drain we
+                # explicitly asked for would then stall convergence for a whole
+                # recovery TTL PER racing push — the exact bad-network scenario
+                # the fix targets. A frame whose ``cursor_base`` meets the water
+                # mark EXACTLY is contiguous by construction (no hole, no
+                # re-delivery), so one stale live push must not void it: clear
+                # ``requires_full`` and fall through to the normal append path.
+                # A frame not so anchored is a genuine gap / first-tail and stays
+                # discarded.
+                if existing is not None and self._cursor_base_at_watermark(
+                    existing.get("cursor") or {}, cursor_base or {}
+                ):
+                    self._history_requires_full.discard(flow_id)
+                    logger.info(
+                        "hist-diag append_history BACKFILL-RESUMED flow=%s "
+                        "records=%d (append anchored at server water mark; "
+                        "requires_full cleared, accepting cursored backfill "
+                        "despite a racing re-arm)",
+                        flow_id, len(new_records),
+                    )
+                    # fall through to the append processing below
+                else:
+                    logger.debug(
+                        "hist-diag append_history DISCARD flow=%s reason=requires_full-set "
+                        "records=%d (stuck until a full frame)",
+                        flow_id, len(new_records),
+                    )
+                    return HistoryWriteOutcome(resolves_pull=False)
             if mode == protocol.HISTORY_MODE_APPEND:
                 # An ordinary append keeps the bundle ``generation`` stable so a
                 # progress token issued before the append still validates. A
@@ -1217,11 +1274,29 @@ class ServerState:
                 if machine_id:
                     existing["machine_id"] = machine_id
                 existing["updated_at"] = time.time()
-                logger.debug(
-                    "hist-diag append_history APPLIED-append flow=%s records=%d "
-                    "total=%d",
-                    flow_id, len(new_records), len(existing["records"]),
-                )
+                if flow_id in self._history_recovery_inflight:
+                    # INFO-visible backfill CONVERGENCE signal: an append landed
+                    # while a self-heal recovery is in flight for this flow, so
+                    # the requested [water mark, now) window is being filled. The
+                    # ordinary APPLIED-append is DEBUG-only; without this an
+                    # operator tailing journalctl at INFO would see the recovery
+                    # START (plan_recovery_pull kind=incremental) but never a
+                    # completion, unable to tell convergence from a discard. The
+                    # recovery-inflight marker ages out via the TTL, so this only
+                    # fires for the recovery window, not for every live append.
+                    logger.info(
+                        "hist-diag append_history BACKFILL-APPLIED flow=%s "
+                        "records=%d total=%d (recovery backfill append accepted "
+                        "— bundle extended from the server water mark; self-heal "
+                        "converging)",
+                        flow_id, len(new_records), len(existing["records"]),
+                    )
+                else:
+                    logger.debug(
+                        "hist-diag append_history APPLIED-append flow=%s records=%d "
+                        "total=%d",
+                        flow_id, len(new_records), len(existing["records"]),
+                    )
                 return HistoryWriteOutcome(resolves_pull=True)
             else:
                 # INVARIANT: an EMPTY full frame may never be made AUTHORITATIVE
@@ -1412,7 +1487,14 @@ class ServerState:
                 return HistoryWriteOutcome(resolves_pull=True)
 
     async def take_recovery_pull(self, flow_id: str) -> bool:
-        """Return ``True`` when a self-heal full pull should be sent for *flow_id*.
+        """Return ``True`` when a self-heal pull should be sent for *flow_id*.
+
+        This is the bare ARM/dedup view of the recovery gate: it answers only
+        *whether* a pull should fire, sharing the exact ``_history_requires_full``
+        / ``_history_recovery_inflight`` state and TTL logic as
+        :meth:`plan_recovery_pull`, which the receive loop now uses to also decide
+        *how* to pull (an incremental append backfill vs a cursorless full). It is
+        retained as the primitive the recovery-dedup regression tests probe.
 
         A flow lands in ``_history_requires_full`` when a live ``append`` frame
         arrives with no authoritative bundle to extend — a first sighting (e.g.
@@ -1479,6 +1561,88 @@ class ServerState:
         """
         async with self._lock:
             self._history_recovery_inflight.pop(flow_id, None)
+
+    async def plan_recovery_pull(
+        self, flow_id: str, machine_id: str
+    ) -> Optional[Tuple[str, Optional[Dict[str, Any]]]]:
+        """Decide how to self-heal a ``requires_full`` flow, atomically.
+
+        Returns ``None`` when no recovery should be dispatched (the flow is not
+        flagged ``requires_full``, or one is already in flight within the TTL —
+        the same dedup :meth:`take_recovery_pull` enforces). Otherwise arms a
+        recovery in flight and returns one of:
+
+        * ``("incremental", cursor)`` — the server already holds a NON-EMPTY,
+          cursor-bearing bundle for this flow, produced by THIS machine, and the
+          flow is not an active worktree flow. The gap that flagged
+          ``requires_full`` is a tail the server missed, not a lost bundle, so we
+          ask the daemon for an ``append`` pull anchored at the server's own
+          water mark (*cursor*): the reply extends the bundle from exactly where
+          it stands. On a bad network this is what makes the bundle converge —
+          every disconnect only shortens the append window, never rebuilds the
+          bundle from a short prefix.
+
+          INVARIANT: clearing ``requires_full`` here is the PRECONDITION for the
+          backfill append to be accepted — :meth:`apply_history_frame` discards
+          any append while the flag is set. The append path only EXTENDS the
+          bundle (it never replaces it or rolls the generation), so a truncated
+          backfill drain leaves the bundle shorter-but-hole-free, and the next
+          reconnect re-arms another incremental from the new water mark. The
+          server's exposed coverage is therefore monotonic non-decreasing within
+          a generation.
+
+        * ``("full", None)`` — no trustworthy bundle to extend (no cache, a
+          different machine now owns the flow, or an active worktree flow whose
+          history is split across roots), so ``requires_full`` STAYS armed and
+          the caller sends a cursorless full pull that rebuilds the bundle.
+
+        Consolidating the decision here (under ``self._lock``) keeps it
+        consistent with :meth:`apply_history_frame`'s invariants: the bundle
+        presence/machine/cursor reads and the ``requires_full`` / recovery-inflight
+        writes all happen in one critical section, so a racing append cannot slip
+        between the decision and its dedup marker.
+        """
+        async with self._lock:
+            if flow_id not in self._history_requires_full:
+                return None
+            dispatched_at = self._history_recovery_inflight.get(flow_id)
+            # Same monotonic-clock TTL dedup as ``take_recovery_pull``: at most
+            # one recovery per flow is in flight, and a lost pull re-arms only
+            # after the TTL, never on a backward wall-clock step.
+            if (
+                dispatched_at is not None
+                and (time.monotonic() - dispatched_at) < self._HISTORY_RECOVERY_TTL
+            ):
+                return None
+            existing = self._history_data.get(flow_id)
+            can_incremental = (
+                existing is not None
+                and bool(existing.get("records"))
+                and bool(existing.get("cursor"))
+                and str(existing.get("machine_id") or "") == machine_id
+                and not self._is_active_worktree_flow_locked(flow_id)
+            )
+            self._history_recovery_inflight[flow_id] = time.monotonic()
+            if can_incremental:
+                # DISARM requires_full so the daemon's append backfill is
+                # accepted (see the INVARIANT above); the bundle and its cursor
+                # are left untouched — the backfill only extends them.
+                self._history_requires_full.discard(flow_id)
+                cursor_copy = dict(existing.get("cursor") or {})
+                logger.info(
+                    "hist-diag plan_recovery_pull flow=%s kind=incremental "
+                    "machine=%s cursor=%s (backfilling [server water mark, now) "
+                    "as append; requires_full cleared, generation preserved)",
+                    flow_id, machine_id, cursor_copy,
+                )
+                return ("incremental", cursor_copy)
+            logger.info(
+                "hist-diag plan_recovery_pull flow=%s kind=full machine=%s "
+                "(no reusable bundle / machine-change / active-worktree; "
+                "requires_full kept armed, full rebuild)",
+                flow_id, machine_id,
+            )
+            return ("full", None)
 
     def _detect_cursor_gap(
         self,

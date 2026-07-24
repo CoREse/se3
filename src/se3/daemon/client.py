@@ -539,6 +539,15 @@ class DaemonClient:
             self.server_url,
             open_timeout=10,
             max_size=protocol.MAX_WS_MESSAGE_BYTES,
+            # WHY: relax our own keepalive tolerance for lossy/high-latency links
+            # (e.g. node007). The library default ping_timeout=20 meant a single
+            # PONG lost on a bad network tripped a "keepalive ping timeout" close
+            # roughly every ~45s, and each drop truncated an in-flight full
+            # history reload — driving the presence flap + chat-record jitter.
+            # ping_interval=20 keeps liveness detection; ping_timeout=60 rides
+            # out transient stalls. Server-side heartbeat is widened to match.
+            ping_interval=20,
+            ping_timeout=60,
             # Explicitly enable permessage-deflate. ``websockets`` negotiates it
             # by default, but pinning ``compression="deflate"`` here makes the
             # second layer of traffic reduction (WS-level compression, orthogonal

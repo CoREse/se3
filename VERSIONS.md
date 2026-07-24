@@ -1,5 +1,13 @@
 # SE3 Framework Version History
 
+## 11.24.1 - 2026-07-24
+
+- Convert the server's requires_full history self-heal into an incremental cursor-carrying backfill so the WebUI chat panel no longer shrinks then re-grows on daemon reconnect, reserving full re-pulls for no-bundle, machine-change and active-worktree cases
+- Guarantee the server-exposed history bundle never regresses within a generation, so a disconnect that truncates a drain leaves a shorter but hole-free bundle that converges on the next reconnect instead of looping full re-pulls
+- Relax daemon WebSocket keepalive (explicit ping_interval=20, ping_timeout=60) to stop periodic 'keepalive ping timeout' disconnects under high-latency, high-loss networks
+- Relax server heartbeat thresholds (PING_INTERVAL 15->20, HEARTBEAT_TIMEOUT 45->90) to reduce reconnect churn on poor links
+- Add a 60-second presence grace period so a daemon that reconnects within the window stays continuously 'online' in the WebUI instead of flapping online/offline
+- Add unit tests for incremental backfill, the monotonic-bundle invariant, post-truncation convergence, and presence debounce
 ## 11.24.0 - 2026-07-23
 
 - Add a project management dialog to each machine card in the WebUI, listing that machine's registered projects with add and delete actions

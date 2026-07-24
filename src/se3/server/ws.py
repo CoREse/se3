@@ -19,7 +19,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Optional,
+    Tuple,
+)
 
 from se3.daemon import protocol
 from se3.daemon.wire_metrics import WireMetrics
@@ -54,9 +62,15 @@ logger = logging.getLogger(__name__)
 
 
 # Heartbeat tuning (seconds).
-PING_INTERVAL = 15.0
+# WHY: widened from 15/45 to 20/90 to tolerate lossy/high-latency daemon links
+# (e.g. node007). Tighter thresholds evicted daemons on transient PONG loss ~every
+# 45s, and each eviction truncated an in-flight full history reload. This pairs
+# with the daemon's ping_timeout=60: a truly dead connection is still reclaimed
+# within ~90s, while presence 60s debounce + incremental gap backfill absorb the
+# brief reconnect windows so the WebUI shows no flap and never loses records.
+PING_INTERVAL = 20.0
 #: A daemon is dropped if no PONG (or any frame) arrives within this window.
-HEARTBEAT_TIMEOUT = 45.0
+HEARTBEAT_TIMEOUT = 90.0
 
 # Server identity advertised in WELCOME.
 try:  # pragma: no cover - import guard
@@ -197,6 +211,76 @@ class ConnectionManager:
         except Exception:
             logger.warning("Failed to send %s to %s", message.type, machine_id)
             return False
+
+
+class PresenceDebouncer:
+    """Debounces daemon-offline transitions with a per-machine grace window.
+
+    WHY: on a lossy/high-latency link (e.g. node007) the daemon keepalive
+    times out and reconnects every ~45s. Marking the machine offline the
+    instant its socket drops makes the WebUI online badge flap online/offline
+    on every one of those churns, even though the flow is still live and a new
+    connection is seconds away. So on disconnect we do NOT mark offline
+    immediately: we arm a *grace* task that only performs the mark_offline +
+    push after ``delay`` seconds, and cancel it the moment the daemon
+    reconnects. Net effect: a reconnect within the grace window is invisible to
+    the UI (stays online throughout), and only a daemon that stays gone past
+    the window is shown offline. No intermediate "reconnecting" state is
+    introduced — the record simply keeps its last ``online`` value until the
+    grace expires.
+    """
+
+    def __init__(self, delay: float = 60.0) -> None:
+        self._delay = delay
+        # machine_id -> the pending "go offline" grace task. At most one per
+        # machine; a re-arm supersedes (and cancels) the previous one.
+        self._pending: Dict[str, "asyncio.Task"] = {}
+
+    def schedule_offline(
+        self,
+        machine_id: str,
+        action: Callable[[], Awaitable[None]],
+        delay: Optional[float] = None,
+    ) -> None:
+        """Arm a grace task that runs *action* after the grace window.
+
+        *action* is the offline effect (mark_offline + push). It fires only if
+        the task is not cancelled first (by a reconnect via :meth:`cancel`).
+        Re-arming for the same machine cancels any prior pending task so the
+        table never leaks or double-fires.
+        """
+        self.cancel(machine_id)
+        wait = self._delay if delay is None else delay
+
+        async def _grace() -> None:
+            try:
+                await asyncio.sleep(wait)
+            except asyncio.CancelledError:  # reconnected within the window
+                raise
+            # Drop our own table entry before running the effect so a
+            # concurrent cancel() during ``action`` cannot cancel a task that
+            # has already committed to going offline.
+            self._pending.pop(machine_id, None)
+            await action()
+
+        self._pending[machine_id] = asyncio.ensure_future(_grace())
+
+    def cancel(self, machine_id: str) -> None:
+        """Cancel and drop any pending offline task for *machine_id*.
+
+        Called on reconnect (register/connect succeeded) so the machine that
+        just came back is never subsequently marked offline by a stale grace
+        task armed by the previous disconnect.
+        """
+        task = self._pending.pop(machine_id, None)
+        if task is not None:
+            task.cancel()
+
+    def shutdown(self) -> None:
+        """Cancel every pending offline task (server teardown)."""
+        for task in self._pending.values():
+            task.cancel()
+        self._pending.clear()
 
 
 class _PullAbandoned(Exception):
@@ -1211,6 +1295,7 @@ async def handle_daemon_connection(
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
+    presence_debouncer: Optional["PresenceDebouncer"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -1315,6 +1400,12 @@ async def handle_daemon_connection(
             protocol_version=peer_protocol_version,
         )
         await manager.connect(machine_id, websocket)
+        # The daemon is back: defuse any grace task armed by the previous
+        # disconnect so a reconnect inside the window keeps the machine shown
+        # online throughout (no offline flap). Done after register/connect
+        # succeed so the record is already online again when we cancel.
+        if presence_debouncer is not None:
+            presence_debouncer.cancel(machine_id)
         await _send_welcome(protocol.make_welcome(SERVER_VERSION))
         # Hand a presence-aware daemon the current viewers level right after
         # the handshake: a daemon that reconnects while browsers are watching
@@ -1346,8 +1437,37 @@ async def handle_daemon_connection(
     finally:
         if machine_id is not None:
             await manager.disconnect(machine_id, websocket)
-            await state.mark_offline(machine_id)
-            await _push_state(hub, state, "status_update")
+            if presence_debouncer is not None:
+                # Defer the offline transition: only mark offline + push if the
+                # daemon has not reconnected within the grace window. A reconnect
+                # cancels this task (see the register path above), so a fast
+                # keepalive-churn reconnect never surfaces as an offline flap.
+                mid = machine_id
+
+                async def _go_offline() -> None:
+                    # BACKSTOP for the reconnect-before-old-cleanup overlap: on a
+                    # silent link drop (1006, no close frame) the daemon can
+                    # redial and register a NEW connection while this old handler
+                    # is still parked in receive(). manager.connect closes the
+                    # stale socket, waking THIS handler only afterwards — so its
+                    # cancel() at register time already ran as a no-op (nothing
+                    # was pending yet) and the grace task armed here has nothing
+                    # to defuse it. The widened HEARTBEAT_TIMEOUT (90s) makes that
+                    # overlap MORE likely. So before flipping the badge offline,
+                    # verify the machine is still actually disconnected: a live
+                    # newer connection means the daemon is back and healthy and
+                    # must stay shown online.
+                    if manager.is_connected(mid):
+                        return
+                    await state.mark_offline(mid)
+                    await _push_state(hub, state, "status_update")
+
+                presence_debouncer.schedule_offline(machine_id, _go_offline)
+            else:
+                # No debouncer wired (bare tests / pre-debounce behaviour):
+                # mark offline immediately.
+                await state.mark_offline(machine_id)
+                await _push_state(hub, state, "status_update")
             if interjection_tracker is not None:
                 # A reconnecting daemon's first STATUS_UPDATE should be
                 # treated as a brand-new state — drop the per-machine
@@ -1674,20 +1794,39 @@ async def _handle_message(
             # dozens of ``append`` tails, and the state marker deliberately stays
             # armed until that drain converges (or its TTL expires). So if a
             # cursor-gap discard among the still-arriving tails re-flags the flow
-            # ``requires_full``, this gate returns ``False`` and we do NOT dispatch
-            # a rival pull that would fight the drain already in flight — closing
-            # the DISCARD ⇄ HISTORY_REQUEST livelock at the dispatch side too.
-            if (
-                not applied
-                and mode == protocol.HISTORY_MODE_APPEND
-                and manager is not None
-                and await state.take_recovery_pull(flow_id)
-            ):
+            # ``requires_full``, ``plan_recovery_pull`` returns ``None`` and we do
+            # NOT dispatch a rival pull that would fight the drain already in
+            # flight — closing the DISCARD ⇄ HISTORY_REQUEST livelock at the
+            # dispatch side too.
+            #
+            # WHY (incremental backfill over cursorless full): on a high-loss link
+            # the daemon's keepalive ping times out every ~45s and every
+            # reconnect truncated the previous cursorless full drain, so the
+            # bundle was perpetually rebuilt to a short prefix and the UI saw
+            # records vanish then re-grow. When the server still holds a good
+            # bundle from THIS machine, ``plan_recovery_pull`` returns
+            # ``('incremental', cursor)`` and we ask the daemon for an ``append``
+            # anchored at the server's own water mark: the reply only extends the
+            # bundle, so a truncated drain leaves it shorter-but-hole-free and the
+            # next reconnect continues from the new mark — it converges instead of
+            # oscillating. A cursorless full is reserved for the cases where there
+            # is genuinely no bundle to extend (``('full', None)``).
+            plan = (
+                await state.plan_recovery_pull(flow_id, machine_id)
+                if (
+                    not applied
+                    and mode == protocol.HISTORY_MODE_APPEND
+                    and manager is not None
+                )
+                else None
+            )
+            if plan is not None:
+                kind, recovery_cursor = plan
                 # Resolve the authoritative root exactly as the REST cache-miss
                 # pull does: a worktree-mode flow splits its history across the
                 # main repo root (discovery) and the worktree root (later steps),
-                # so a cursorless pull with the wrong root would return only the
-                # discovery slice — the freeze the worktree fix already closed.
+                # so a pull with the wrong root would return only the discovery
+                # slice — the freeze the worktree fix already closed.
                 flow_project_root = await state.get_history_flow_project_root(
                     flow_id
                 )
@@ -1697,12 +1836,16 @@ async def _handle_message(
                     flow_id,
                     machine_id=machine_id,
                     connection=connection,
+                    # ``incremental`` carries the server's water mark so the
+                    # daemon replies with an ``append`` from there; ``full``
+                    # carries no cursor and rebuilds the whole bundle.
+                    cursor=recovery_cursor,
                     project_root=flow_project_root or "",
                 )
-                logger.debug(
-                    "hist-diag ws HISTORY_DATA recovery-pull flow=%s sent=%s "
-                    "(self-heal requires_full)",
-                    flow_id, sent,
+                logger.info(
+                    "hist-diag ws HISTORY_DATA recovery-pull flow=%s kind=%s "
+                    "sent=%s (self-heal requires_full)",
+                    flow_id, kind, sent,
                 )
                 if not sent:
                     # The daemon vanished between the append and this dispatch;

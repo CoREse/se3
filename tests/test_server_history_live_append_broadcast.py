@@ -826,6 +826,80 @@ def test_recovery_marker_expires_when_reply_never_arrives():
     assert asyncio.run(scenario()) is True
 
 
+# --------------------------------------------------------------------------
+# plan_recovery_pull — the richer decision the receive loop now dispatches on
+# (incremental append backfill vs cursorless full). It shares take_recovery_pull's
+# arm/dedup/TTL state, so the same invariants are re-asserted against it here.
+# --------------------------------------------------------------------------
+
+
+def test_plan_recovery_pull_dedup_and_ttl_rearm_parity():
+    """``plan_recovery_pull`` dedups within the TTL and re-arms once it lapses."""
+
+    async def scenario():
+        state = ServerState()
+        # A first-sighting append flags requires_full (no bundle to extend).
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 1}], machine_id="m1"
+        )
+        # No bundle → the decision is a cursorless full, and the flag stays armed.
+        first = await state.plan_recovery_pull("f1", "m1")
+        assert first == ("full", None)
+        # A second consult while the pull is fresh is deduped (no storm).
+        assert await state.plan_recovery_pull("f1", "m1") is None
+        # Backdate the dispatch past the TTL on the monotonic clock → re-arm.
+        state._history_recovery_inflight["f1"] = (
+            time.monotonic() - ServerState._HISTORY_RECOVERY_TTL - 1.0
+        )
+        second = await state.plan_recovery_pull("f1", "m1")
+        return first, second
+
+    first, second = asyncio.run(scenario())
+    assert first == ("full", None)
+    assert second == ("full", None)
+
+
+def test_machine_change_releases_marker_so_new_machine_can_plan_full():
+    """A cross-machine delta drops the marker so the NEW machine re-arms a full.
+
+    An append from a different daemon is not an authoritative replacement:
+    ``append_history`` discards both the stale bundle and the unanchored delta,
+    flags requires_full, AND releases the in-flight recovery marker so the new
+    machine's recovery is not wedged behind the superseded one's.
+    """
+
+    async def scenario():
+        state = ServerState()
+        # Establish a bundle owned by m1 (with a known water mark) and arm a
+        # recovery. A cursor is required so the bundle has a judgeable water mark.
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_FULL, [{"line": 1}],
+            cursor={"s": 1}, machine_id="m1",
+        )
+        assert await state.take_recovery_pull("f1") is False  # healthy, not armed
+        # A gap on m1 arms requires_full; planning it arms an in-flight marker.
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 5}],
+            cursor={"s": 6}, cursor_base={"s": 5}, machine_id="m1",
+        )
+        assert await state.plan_recovery_pull("f1", "m1") is not None
+        marker_before = "f1" in state._history_recovery_inflight
+        # A delta from a DIFFERENT daemon supersedes the bundle and releases the
+        # old marker (so ``take_recovery_pull`` can fire fresh for m2).
+        await state.append_history(
+            "f1", protocol.HISTORY_MODE_APPEND, [{"line": 9}], machine_id="m2"
+        )
+        marker_after = "f1" in state._history_recovery_inflight
+        # No cached bundle for m2 to extend → the new machine plans a full rebuild.
+        plan = await state.plan_recovery_pull("f1", "m2")
+        return marker_before, marker_after, plan
+
+    marker_before, marker_after, plan = asyncio.run(scenario())
+    assert marker_before is True
+    assert marker_after is False  # machine-change released the stale marker
+    assert plan == ("full", None)
+
+
 class _RecordingDaemonWS:
     """Fake daemon socket capturing the ``MSG_HISTORY_REQUEST`` frames sent it.
 

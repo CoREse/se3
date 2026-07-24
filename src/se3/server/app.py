@@ -31,6 +31,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -67,6 +68,7 @@ from .ws import (
     IndexRefreshRegistry,
     InterjectionEventTracker,
     IssueCommandRegistry,
+    PresenceDebouncer,
     ProjectCommandRegistry,
     UiHub,
     _PullAbandoned,
@@ -432,7 +434,21 @@ def create_app(
     provider selection (``None`` ⇒ the built-in local provider). *session_store*
     / *rate_limiter* are injectable for tests.
     """
-    app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        yield
+        # Teardown: cancel any in-flight presence offline-grace tasks so
+        # server shutdown leaves no dangling asyncio task and no pending
+        # mark_offline fires against a torn-down state.
+        debouncer = getattr(app.state, "presence_debouncer", None)
+        if debouncer is not None:
+            debouncer.shutdown()
+
+    app = FastAPI(
+        title="SE3 Central Server",
+        version=protocol.PROTOCOL_VERSION,
+        lifespan=_lifespan,
+    )
     # GZip the large JSON responses (chiefly a real ``delivery: "full"`` history
     # bundle re-build, which stays multi-MB even after differential/​not-modified
     # shrinks the steady state). Compression is the second, orthogonal止血 layer
@@ -459,6 +475,10 @@ def create_app(
     project_command_registry = ProjectCommandRegistry()
     detail_registry = DetailRequestRegistry()
     interjection_tracker = InterjectionEventTracker()
+    # Grace the daemon-offline transition by 60s so a lossy-link reconnect
+    # (keepalive churn on node007-class networks) does not flap the WebUI
+    # online badge; only a daemon gone past the window is shown offline.
+    presence_debouncer = PresenceDebouncer(delay=60.0)
 
     # -- auth / identity wiring (fail-closed) ------------------------------
     if store is None:
@@ -492,6 +512,7 @@ def create_app(
     app.state.detail_registry = detail_registry
     app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
+    app.state.presence_debouncer = presence_debouncer
     app.state.store = store
     app.state.identity = identity
     app.state.sessions = sessions
@@ -529,6 +550,7 @@ def create_app(
             issue_registry=issue_command_registry,
             detail_registry=detail_registry,
             project_registry=project_command_registry,
+            presence_debouncer=presence_debouncer,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
