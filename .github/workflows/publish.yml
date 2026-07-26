@@ -1,0 +1,40 @@
+# PyPI release via Trusted Publishing (OIDC) — no stored secrets.
+#
+# Trigger: push a version tag (v12.0.1, v12.1.0, ...). The job builds the
+# sdist + wheel with the standard `build` frontend and publishes through
+# PyPI's trusted-publisher exchange, which must be configured on the PyPI
+# project (Publishing → GitHub: owner CoREse, repository tianluo, workflow
+# publish.yml, environment pypi).
+name: publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC token for the trusted-publisher exchange
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+      - name: Sanity-check the tag matches pyproject
+        run: |
+          version=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "tag v$tag does not match pyproject version $version" >&2
+            exit 1
+          fi
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
