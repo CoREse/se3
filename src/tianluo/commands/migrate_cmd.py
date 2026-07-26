@@ -734,6 +734,172 @@ SPEC_TO_NEW_SYSTEM = register_migrator(
 
 
 # ---------------------------------------------------------------------------
+# Rename migrator: se3/ layout -> tianluo/ layout (issue #270)
+# ---------------------------------------------------------------------------
+
+def _rename_git(root: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+
+
+def _rewrite_gitignore_names(root: Path) -> bool:
+    """Rewrite se3-name rules in ``.gitignore`` to their tianluo equivalents.
+
+    Pure textual line mapping (``/se3/`` -> ``/tianluo/``, ``se3.yaml`` ->
+    ``tianluo.yaml``, ...); returns whether the file changed.
+    """
+    gi = root / ".gitignore"
+    if not gi.is_file():
+        return False
+    original = gi.read_text(encoding="utf-8")
+    text = original
+    for old, new in (
+        ("se3.local.yaml", "tianluo.local.yaml"),
+        ("se3.yaml", "tianluo.yaml"),
+        ("/se3/", "/tianluo/"),
+        ("se3/", "tianluo/"),
+        ("!/se3", "!/tianluo"),
+        ("/se3", "/tianluo"),
+    ):
+        text = text.replace(old, new)
+    if text != original:
+        gi.write_text(text, encoding="utf-8")
+    return text != original
+
+
+def run_rename_to_tianluo(project_root: Path, **_opts) -> MigrationReport:
+    """One-shot layout rename for an existing project: ``se3/`` -> ``tianluo/``.
+
+    Moves the runtime directory (``git mv``, preserving history and carrying
+    untracked runtime content along), renames ``se3.yaml`` ->
+    ``tianluo.yaml`` and ``se3.local.yaml`` -> ``tianluo.local.yaml``,
+    rewrites the se3-name rules in ``.gitignore``, and lands everything as
+    ONE reviewable, ``git revert``-able commit.
+
+    Every step is tolerant and reported; the commit step is skipped (with a
+    note) when the git index already carried unrelated staged changes before
+    the migration started, so the commit never swallows foreign work. Safe to
+    re-run: an already-renamed project reports SKIP everywhere.
+    """
+    report = MigrationReport()
+    root = Path(project_root)
+
+    # -- step 0: preconditions -------------------------------------------
+    probe = _rename_git(root, "rev-parse", "--is-inside-work-tree")
+    in_git = probe.returncode == 0 and probe.stdout.strip() == "true"
+    if not in_git:
+        report.add("preflight", "FAIL", "not a git repository")
+        return report
+    staged = _rename_git(root, "diff", "--cached", "--name-only")
+    index_was_clean = staged.returncode == 0 and not staged.stdout.strip()
+    if not index_was_clean:
+        report.notes.append(
+            "git index already has staged changes; the migration will stage "
+            "its renames but NOT create a commit — review and commit manually."
+        )
+    report.add("preflight", "OK", "git repository")
+
+    # -- step 1: runtime directory ---------------------------------------
+    src_dir, dst_dir = root / "se3", root / "tianluo"
+    if dst_dir.exists():
+        report.add("rename-dir", "SKIP", "tianluo/ already exists")
+    elif not src_dir.is_dir():
+        report.add("rename-dir", "SKIP", "no se3/ directory")
+    else:
+        mv = _rename_git(root, "mv", "se3", "tianluo")
+        if mv.returncode == 0:
+            report.add("rename-dir", "OK", "git mv se3 tianluo")
+        else:
+            # e.g. nothing under se3/ is tracked — fall back to a plain
+            # filesystem rename (nothing to stage in that case).
+            try:
+                src_dir.rename(dst_dir)
+                report.add(
+                    "rename-dir", "OK",
+                    "filesystem rename (no tracked content): "
+                    + (mv.stderr.strip().splitlines() or ["git mv failed"])[0],
+                )
+            except OSError as exc:
+                report.add("rename-dir", "FAIL", f"{mv.stderr.strip()} / {exc}")
+                return report
+
+    # -- step 2: config files --------------------------------------------
+    for old_name, new_name in (
+        ("se3.yaml", "tianluo.yaml"),
+        ("se3.local.yaml", "tianluo.local.yaml"),
+    ):
+        old_p, new_p = root / old_name, root / new_name
+        step = f"rename-{old_name}"
+        if not old_p.is_file():
+            report.add(step, "SKIP", f"no {old_name}")
+            continue
+        if new_p.exists():
+            report.add(step, "SKIP", f"{new_name} already exists; {old_name} left in place")
+            continue
+        tracked = _rename_git(root, "ls-files", "--error-unmatch", old_name).returncode == 0
+        if tracked:
+            mv = _rename_git(root, "mv", old_name, new_name)
+            if mv.returncode == 0:
+                report.add(step, "OK", f"git mv {old_name} {new_name}")
+            else:
+                report.add(step, "FAIL", mv.stderr.strip())
+        else:
+            try:
+                old_p.rename(new_p)
+                report.add(step, "OK", f"renamed {old_name} (untracked)")
+            except OSError as exc:
+                report.add(step, "FAIL", str(exc))
+
+    # -- step 3: .gitignore ----------------------------------------------
+    try:
+        changed = _rewrite_gitignore_names(root)
+    except (OSError, UnicodeDecodeError) as exc:
+        report.add("gitignore", "FAIL", str(exc))
+        changed = False
+    else:
+        if changed:
+            _rename_git(root, "add", "--", ".gitignore")
+            report.add("gitignore", "OK", "se3-name rules rewritten to tianluo")
+        else:
+            report.add("gitignore", "SKIP", "no se3-name rules found")
+
+    # -- step 4: one reviewable commit -----------------------------------
+    if not report.ok:
+        report.add("commit", "SKIP", "earlier step failed")
+        return report
+    if not index_was_clean:
+        report.add("commit", "SKIP", "pre-existing staged changes (see notes)")
+        return report
+    now_staged = _rename_git(root, "diff", "--cached", "--name-only")
+    if now_staged.returncode != 0 or not now_staged.stdout.strip():
+        report.add("commit", "SKIP", "nothing staged (already migrated?)")
+        return report
+    commit = _rename_git(
+        root, "commit", "-m",
+        "migrate(rename): se3 -> tianluo runtime layout\n\n"
+        "Produced by `luo migrate run rename-to-tianluo` (issue #270): "
+        "git mv se3/ tianluo/, config file renames, .gitignore rule rewrite. "
+        "Revert this commit to restore the legacy layout.",
+    )
+    if commit.returncode == 0:
+        report.add("commit", "OK", "one reviewable rename commit created")
+    else:
+        report.add("commit", "FAIL", commit.stderr.strip())
+    return report
+
+
+RENAME_TO_TIANLUO = register_migrator(
+    Migrator(
+        id="rename-to-tianluo",
+        description="migrate.migrator.rename_to_tianluo.desc",
+        run=run_rename_to_tianluo,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Result rendering
 # ---------------------------------------------------------------------------
 

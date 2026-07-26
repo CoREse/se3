@@ -895,5 +895,6 @@
   "merge.strategy.removed_robust": "Merge strategy 'robust' has been removed; use 'fast' instead (LLM-resolves conflicts, never falls back to take-theirs or human).",
   "merge.strategy.unknown": "Unknown merge strategy {value}; must be one of: {allowed}",
   "migrate.note.charter_llm_failed": "charter LLM assembly failed; wrote a review-flagged fallback that preserves the base spec verbatim — review tianluo/charter.md",
-  "migrate.reason.file_not_found": "file not found"
+  "migrate.reason.file_not_found": "file not found",
+  "migrate.migrator.rename_to_tianluo.desc": "Rename an existing project's layout from se3/ + se3.yaml to tianluo/ + tianluo.yaml (git mv, .gitignore rewrite; one reviewable, revertable commit)."
 }

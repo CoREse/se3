@@ -894,5 +894,6 @@
   "merge.strategy.removed_robust": "合并策略 'robust' 已移除；请改用 'fast'（由 LLM 解决冲突，绝不回退到 take-theirs 或人工）。",
   "merge.strategy.unknown": "未知的合并策略 {value}；必须是以下之一：{allowed}",
   "migrate.note.charter_llm_failed": "charter 的 LLM 组装失败；已写入一份标记为待审阅的回退版本，其中逐字保留了基础 spec —— 请审阅 tianluo/charter.md",
-  "migrate.reason.file_not_found": "文件未找到"
+  "migrate.reason.file_not_found": "文件未找到",
+  "migrate.migrator.rename_to_tianluo.desc": "把存量项目布局从 se3/ + se3.yaml 一键搬到 tianluo/ + tianluo.yaml(git mv、.gitignore 重写;产出一条可 review、可 revert 的 commit)。"
 }

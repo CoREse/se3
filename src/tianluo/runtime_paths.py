@@ -7,10 +7,10 @@ root, on every call:
 1. ``<root>/tianluo/`` exists → use it (canonical);
 2. otherwise ``<root>/se3/`` exists → use it (legacy layout keeps working
    through 12.x; a one-line migration hint is logged once per root per
-   process — ``luo migrate rename`` moves a project over);
+   process — ``luo migrate run rename-to-tianluo`` moves a project over);
 3. neither exists (fresh project) → the canonical ``tianluo``.
 
-Deliberately *not* cached: ``luo migrate rename`` and tests mutate layouts
+Deliberately *not* cached: ``luo migrate run rename-to-tianluo`` and tests mutate layouts
 mid-process, and two ``is_dir()`` probes are far too cheap to earn a
 staleness bug. Legacy fallback is removed in 13.0.0.
 """
@@ -40,7 +40,7 @@ def runtime_dir_name(project_root: Union[str, Path]) -> str:
             _HINTED_ROOTS.add(key)
             logger.info(
                 "using legacy runtime directory %s/ under %s — run "
-                "`luo migrate rename` to move to %s/ (legacy fallback is "
+                "`luo migrate run rename-to-tianluo` to move to %s/ (legacy fallback is "
                 "removed in 13.0.0)",
                 LEGACY_RUNTIME_DIR_NAME,
                 root,
