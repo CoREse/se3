@@ -1,23 +1,23 @@
-# SE3 Daemon 与中心服务器
+# tianluo Daemon 与中心服务器
 
-SE3 的核心（`se3 run`、`se3 sync` ……）是一次性的 CLI：每个命令在前台运行、
+tianluo 的核心（`luo run`、`luo sync` ……）是一次性的 CLI：每个命令在前台运行、
 随即退出。**daemon** 与**中心服务器**在该核心之上,叠加了一个可选的、常驻的
 控制面:
 
-- **`se3 daemon`** —— 每台机器上的常驻进程。它发现并监管本机的 `se3 run` 流程,
+- **`luo daemon`** —— 每台机器上的常驻进程。它发现并监管本机的 `luo run` 流程,
   可代为远端调用者 spawn 新流程,把每个流程在磁盘上的状态聚合为单一快照,并
   (可选地)维持一条到中心服务器的出站连接。
-- **`se3-server`** —— 独立的中心服务器,接受任意数量 daemon 的连接,把它们的
+- **`tianluo-server`** —— 独立的中心服务器,接受任意数量 daemon 的连接,把它们的
   快照合并为多机 / 多流程视图,暴露 REST API,并提供自带的网页前端。
 
-两者都完全可选。普通的 `pip install se3` 加上 `se3 run` 不需要其中任何一个。
+两者都完全可选。普通的 `pip install tianluo` 加上 `luo run` 不需要其中任何一个。
 
 ## 目录
 
 1. [快速上手](#快速上手)
    - [安装](#安装)
-   - [`se3 daemon` 命令](#se3-daemon-命令)
-   - [`se3-server` 命令](#se3-server-命令)
+   - [`luo daemon` 命令](#luo-daemon-命令)
+   - [`tianluo-server` 命令](#tianluo-server-命令)
    - [一次典型会话](#一次典型会话)
 2. [部署与运维](#部署与运维)
    - [出站连接模型](#出站连接模型)
@@ -44,52 +44,52 @@ SE3 的核心（`se3 run`、`se3 sync` ……）是一次性的 CLI：每个命�
 
 ### 安装
 
-daemon 随核心 `se3` 包一起发布 —— 普通安装之后 `se3 daemon` 即可开箱即用。
+daemon 随核心 `tianluo` 包一起发布 —— 普通安装之后 `luo daemon` 即可开箱即用。
 **中心服务器**会引入较重的 web 依赖(FastAPI、uvicorn、websockets),因此这些
 依赖被收进一个可选的 `server` extra:
 
 ```bash
-# 核心安装 —— 已包含 `se3 daemon` 命令。
-pip install se3
+# 核心安装 —— 已包含 `luo daemon` 命令。
+pip install tianluo
 
-# 加装中心服务器(`se3-server`)与 daemon 的 WebSocket 客户端。
-pip install 'se3[server]'
+# 加装中心服务器(`tianluo-server`)与 daemon 的 WebSocket 客户端。
+pip install 'tianluo[server]'
 ```
 
 daemon 的*出站客户端*在拨入服务器时同样依赖 `server` extra。未带 `--server-url`
 启动的 daemon 纯本地运行,完全不触及该 extra;带了 `--server-url` 但未安装该
 extra 的 daemon 会记录一条安装提示,并降级为纯本地运行,而不是崩溃。
 
-### `se3 daemon` 命令
+### `luo daemon` 命令
 
-`se3 daemon` 是核心 CLI 的一个子命令组(并非独立的二进制):
+`luo daemon` 是核心 CLI 的一个子命令组(并非独立的二进制):
 
 ```bash
-se3 daemon start                          # 启动 daemon(脱离终端的后台进程)
-se3 daemon start --foreground             # 在当前终端中运行 daemon
-se3 daemon start --server-url ws://host   # 启动并拨入中心服务器
-se3 daemon stop                           # 停止运行中的 daemon
-se3 daemon status                         # 显示运行状态与已跟踪的流程
-se3 daemon status --json                  # 以 JSON 形式输出状态
+luo daemon start                          # 启动 daemon(脱离终端的后台进程)
+luo daemon start --foreground             # 在当前终端中运行 daemon
+luo daemon start --server-url ws://host   # 启动并拨入中心服务器
+luo daemon stop                           # 停止运行中的 daemon
+luo daemon status                         # 显示运行状态与已跟踪的流程
+luo daemon status --json                  # 以 JSON 形式输出状态
 ```
 
 | 子命令 | 选项 | 行为 |
 |--------|------|------|
-| `start` | `--server-url <url>`、`--daemon-key <key>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址 —— 端口可显式指定(`ws://host:9000`、`wss://host:8443`),未指定时**按 scheme 补全**:`wss://`(及 `https://`)默认补 **443**,`ws://`(及 `http://`)默认补 **8080**(`se3-server` 的明文默认值)。因此裸写 `wss://host` 会拨 `:443`,而不是 `:8080` —— 见[端口处理](#出站连接模型)。`--daemon-key` 记录 daemon 在 HELLO 中出示的密钥,使多租户服务器把机器绑定到某个 owner。若已有 daemon 在运行,命令会报告并以非零码退出。 |
+| `start` | `--server-url <url>`、`--daemon-key <key>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址 —— 端口可显式指定(`ws://host:9000`、`wss://host:8443`),未指定时**按 scheme 补全**:`wss://`(及 `https://`)默认补 **443**,`ws://`(及 `http://`)默认补 **8080**(`tianluo-server` 的明文默认值)。因此裸写 `wss://host` 会拨 `:443`,而不是 `:8080` —— 见[端口处理](#出站连接模型)。`--daemon-key` 记录 daemon 在 HELLO 中出示的密钥,使多租户服务器把机器绑定到某个 owner。若已有 daemon 在运行,命令会报告并以非零码退出。 |
 | `stop` | —— | 停止运行中的 daemon(发送 `SIGTERM` 并等待其退出)。若没有 daemon 在运行,报告 `not running` 并以 `0` 退出;若进程在宽限期内未退出,报告停止超时并以非零码退出。 |
 | `status` | `--json`、`-j` | 报告 daemon 是否在运行、其 pid、机器 id、配置的服务器地址、**真实的出站连接状态**(见下文),以及已跟踪流程的列表。`--json` 以 JSON 形式输出同样的信息,而非渲染的面板。 |
 
-### `se3-server` 命令
+### `tianluo-server` 命令
 
-中心服务器通过它自己的 `console_scripts` 入口 `se3-server` 启动(由
-`se3[server]` extra 安装):
+中心服务器通过它自己的 `console_scripts` 入口 `tianluo-server` 启动(由
+`tianluo[server]` extra 安装):
 
 ```bash
-se3-server                                # 绑定到 127.0.0.1:8080(默认值)
-se3-server --host 0.0.0.0 --port 9000     # 监听所有网卡,端口 9000
-se3-server --db-path /var/lib/se3.db      # 覆盖 sqlite 存储位置
-se3-server --log-level debug              # 提高 uvicorn 日志级别
-se3-server bootstrap-token                # 铸发一次性的 break-glass admin token
+tianluo-server                                # 绑定到 127.0.0.1:8080(默认值)
+tianluo-server --host 0.0.0.0 --port 9000     # 监听所有网卡,端口 9000
+tianluo-server --db-path /var/lib/tianluo.db      # 覆盖 sqlite 存储位置
+tianluo-server --log-level debug              # 提高 uvicorn 日志级别
+tianluo-server bootstrap-token                # 铸发一次性的 break-glass admin token
 ```
 
 | 选项 / 子命令 | 默认值 | 说明 |
@@ -100,7 +100,7 @@ se3-server bootstrap-token                # 铸发一次性的 break-glass admin
 | `--log-level` | `info` | uvicorn 日志级别。 |
 | `bootstrap-token` | —— | 铸发一次性的 **break-glass admin token**,把明文向控制台打印且仅打印一次,只存其 hash。这是进入一台全新服务器的首个入口 —— 见 [鉴权与多租户访问](#鉴权与多租户访问)。可重复铸发。 |
 
-`se3-server` 在前台运行并阻塞。若需常驻部署,请把它放在进程管理器(systemd、
+`tianluo-server` 在前台运行并阻塞。若需常驻部署,请把它放在进程管理器(systemd、
 supervisor、容器 ……)下运行。
 
 > **服务器要求鉴权。** 自 8.0.0 起,每个 web/REST 请求与每条 daemon 连接都必须
@@ -111,24 +111,24 @@ supervisor、容器 ……)下运行。
 
 ```bash
 # 在托管控制面的机器上 —— 启动服务器。
-pip install 'se3[server]'
-se3-server --host 0.0.0.0 --port 8080
+pip install 'tianluo[server]'
+tianluo-server --host 0.0.0.0 --port 8080
 
 # 铸发一个一次性的 break-glass admin token,然后在浏览器中打开服务器、用它登录,
 # 并为你的工作机签发一把 daemon key(见下文「鉴权与多租户访问」)。
-se3-server bootstrap-token
+tianluo-server bootstrap-token
 
 # 在一台工作机上 —— 启动一个拨入你的中心服务器的 daemon,携带 daemon key
 # 以便把该机器绑定到你这个 owner。
-pip install 'se3[server]'
-se3 daemon start --server-url ws://control.example.com:8080 --daemon-key <key>
-se3 daemon status
+pip install 'tianluo[server]'
+luo daemon start --server-url ws://control.example.com:8080 --daemon-key <key>
+luo daemon status
 
 # 然后在浏览器中打开 http://control.example.com:8080、登录,即可观察你已连接的
 # 机器及其流程,并发布新任务。
 
 # 结束时:
-se3 daemon stop
+luo daemon stop
 ```
 
 ---
@@ -143,12 +143,12 @@ WebSocket。服务器永远不会反向主动连接 daemon。
 ```
   机器 A                             机器 B
   ┌─────────────┐                    ┌─────────────┐
-  │ se3 daemon  │──┐              ┌──│ se3 daemon  │
+  │ luo daemon  │──┐              ┌──│ luo daemon  │
   └─────────────┘  │  出站         │  └─────────────┘
                    │  WebSocket   │
                    ▼   /ws        ▼
               ┌────────────────────────┐
-              │       se3-server       │
+              │       tianluo-server       │
               │   (聚合 A + B ……)       │
               └────────────────────────┘
 ```
@@ -174,36 +174,36 @@ WebSocket。服务器永远不会反向主动连接 daemon。
 
 | Scheme(归一 `http→ws`、`https→wss` 之后) | 补全的默认端口 |
 |--------------------------------------------|----------------|
-| `ws://`(及 `http://`) | **8080** —— `se3-server` 的明文默认端口 |
+| `ws://`(及 `http://`) | **8080** —— `tianluo-server` 的明文默认端口 |
 | `wss://`(及 `https://`) | **443** —— TLS 反向代理监听的标准 HTTPS 端口 |
 
 这之所以重要,是因为 `wss://` 的 daemon 几乎总是在反向代理的 **443** 端口终结
-TLS,而不是 se3-server 的明文 **8080**。在引入此规则之前,裸写的 `wss://host`
+TLS,而不是 tianluo-server 的明文 **8080**。在引入此规则之前,裸写的 `wss://host`
 会被错误补全为 `wss://host:8080`,于是 daemon 把 TLS 拨到了错误的端口、永远连
-不上(`se3 daemon status` 显示 `not connected`)。现在 `wss://host` 开箱即拨
+不上(`luo daemon status` 显示 `not connected`)。现在 `wss://host` 开箱即拨
 `:443`,而 `ws://host` 仍与不带 `--port` 启动的服务器一致。明文 / TLS 两个默认
-端口都定义在同一个共享模块(`se3.daemon.protocol`)里,使两端不会漂移。需要非标准
+端口都定义在同一个共享模块(`tianluo.daemon.protocol`)里,使两端不会漂移。需要非标准
 端口?显式写出即可 —— `wss://host:8443` 会被原样保留。
 
-**查看真实的连接状态。** 连上服务器是尽力而为的:若缺少 `se3[server]` extra 或
+**查看真实的连接状态。** 连上服务器是尽力而为的:若缺少 `tianluo[server]` extra 或
 拨号失败,daemon 会记录原因并降级为纯本地运行,而不是崩溃。由于 `--server-url`
 只是*记录*一个 URL,它并不能证明 daemon 真的连上了 —— 请始终用
-`se3 daemon status` 确认(见下文
+`luo daemon status` 确认(见下文
 [运行时文件](#运行时文件pidfile-与状态文件)),它会报告真实的出站连接状态。
 
 ### 前台模式 vs 后台(detached)模式
 
-`se3 daemon start` 支持两种模式:
+`luo daemon start` 支持两种模式:
 
 - **后台(默认)。** daemon 通过双重 fork 完全脱离终端:其父进程变为 `init`,
   因此它不会成为启动它的 shell 的僵尸进程,也能在终端关闭后继续存活。
-  `se3 daemon start` 在 daemon 占用其 pidfile 之后立即返回。标准流被重定向到
+  `luo daemon start` 在 daemon 占用其 pidfile 之后立即返回。标准流被重定向到
   一个日志文件(见下文)。
-- **前台(`--foreground`)。** daemon 在当前终端中运行,`se3 daemon start` 会
+- **前台(`--foreground`)。** daemon 在当前终端中运行,`luo daemon start` 会
   阻塞直到它停止。适用于调试、在期望非脱离进程的进程管理器(systemd、Docker
   ……)下运行,以及实时查看 daemon 日志。
 
-两种模式下,每个 pid 目录都只能运行一个 daemon —— 第二次 `se3 daemon start`
+两种模式下,每个 pid 目录都只能运行一个 daemon —— 第二次 `luo daemon start`
 会检测到存活的 pidfile 并以非零码退出。
 
 ### 运行时文件:pidfile 与状态文件
@@ -214,7 +214,7 @@ daemon 默认把运行时文件放在 `~/.se3/`。该目录可用 `SE3_DAEMON_DI
 | 文件 | 用途 |
 |------|------|
 | `~/.se3/daemon.pid` | pidfile。保存 daemon 的 pid、启动时间、服务器地址与机器 id。用于防止重复启动,也是 `stop` / `status` 的事实来源。干净关停时被删除。 |
-| `~/.se3/daemon_status.json` | 最新的聚合状态快照,每次轮询时被改写。`se3 daemon status` 读取它来列出已跟踪流程,无需联系 daemon 进程本身。它还携带**真实的出站连接状态** —— 见下文。干净关停时被删除。 |
+| `~/.se3/daemon_status.json` | 最新的聚合状态快照,每次轮询时被改写。`luo daemon status` 读取它来列出已跟踪流程,无需联系 daemon 进程本身。它还携带**真实的出站连接状态** —— 见下文。干净关停时被删除。 |
 | `~/.se3/daemon.log` | 脱离终端(后台)运行的 daemon 的日志输出 —— 其 stdout 与 stderr 被重定向到这里。每一行都带时间戳,因此可分辨日志出自哪一次 daemon 启动。 |
 
 pidfile 与状态文件都以原子方式写入(临时文件 + rename),因此写到一半崩溃也不会
@@ -223,32 +223,32 @@ pidfile 与状态文件都以原子方式写入(临时文件 + rename),因此写
 #### `status` 中的连接状态
 
 `daemon_status.json` 记录的是 daemon **真实的**出站连接结果,而不仅是配置的
-URL;`se3 daemon status` 会把它呈现在专门的 `Connection:` 行上:
+URL;`luo daemon status` 会把它呈现在专门的 `Connection:` 行上:
 
 - `Connection: local-only (no server configured)` —— 启动时未带 `--server-url`。
 - `Connection: connected` —— 到服务器的出站 WebSocket 已建立。
 - `Connection: not connected (<原因>)` —— 给了 `--server-url` 但 daemon 未连接;
   会原样显示**真实、可读的原因**,因此你无需翻日志即可诊断失败。该原因在每条失败
-  路径上都会被写入 —— 缺依赖(`websockets not installed`,即缺 `se3[server]`
+  路径上都会被写入 —— 缺依赖(`websockets not installed`,即缺 `tianluo[server]`
   extra)、握手失败、连接被拒 / 超时(`TimeoutError`)、TLS / 端口错配,或对 daemon
   key 的 `WELCOME(accepted=false)` 拒绝 —— 且绝不会塌缩成空的 `()`(消息为空的纯
-  超时会回退到异常类型名)。正是这种情形下,即便 `se3 daemon start` 报告了成功,
+  超时会回退到异常类型名)。正是这种情形下,即便 `luo daemon start` 报告了成功,
   该机器仍**不会**出现在服务器的机器列表中。万一原因实在不可得,该行会指引你去看
   `~/.se3/daemon.log`,而不是重复一句没有信息量的字面量。
 
 因此,配置了 `Server:` URL 却同时出现 `Connection: not connected` 行,就是静默
-降级的特征 —— 修复办法通常是 `pip install 'se3[server]'`,或更正 URL / 端口。
+降级的特征 —— 修复办法通常是 `pip install 'tianluo[server]'`,或更正 URL / 端口。
 
 ### 流程的发现与监管
 
-daemon 在本机上跟踪两类 `se3 run` 流程:
+daemon 在本机上跟踪两类 `luo run` 流程:
 
 - **spawn 出来的流程** —— daemon 自己启动的流程(通常是为响应远端的任务发布
   请求)。daemon 是这些流程的父进程。
-- **发现到的流程** —— 由用户在同一台机器上独立启动的 `se3 run` 进程。daemon
+- **发现到的流程** —— 由用户在同一台机器上独立启动的 `luo run` 进程。daemon
   通过扫描进程命令行(尽力而为,经 `psutil`)找到它们,并纳入自己的跟踪表。
 
-对每个被跟踪的流程,daemon 从该项目的 `se3/state/engine.json` 解析出 `flow_id`。
+对每个被跟踪的流程,daemon 从该项目的 `tianluo/state/engine.json` 解析出 `flow_id`。
 它以固定间隔(默认每 2 秒)轮询存活状态,清除已退出进程的记录,并在关停时优雅
 终止它自己 spawn 的所有流程(先 `SIGTERM`,宽限期后再 `SIGKILL`)。发现到的
 流程*不会*被杀死:daemon 只监管它自己拥有的进程的生命周期。
@@ -261,27 +261,27 @@ daemon 在本机上跟踪两类 `se3 run` 流程:
 
 daemon 是一个单一的、长寿命的 `asyncio` 进程,由四个部件组成:
 
-- **Supervisor(监管器)** —— 发现并跟踪本机的 `se3 run` 进程(spawn 出来的 +
+- **Supervisor(监管器)** —— 发现并跟踪本机的 `luo run` 进程(spawn 出来的 +
   发现到的),轮询存活状态并回收已退出的流程。
-- **Spawner(spawn 器)** —— 以 `se3 run <task> --type <type>
+- **Spawner(spawn 器)** —— 以 `luo run <task> --type <type>
   --output-format json` 子进程的形式启动新流程。daemon 是每个流程的*父进程*,
   绝不在进程内调用,因此 daemon 崩溃绝不会连带拖垮某个流程。子进程的
-  stdout/stderr 被重定向到 `<project_root>/se3/logs/daemon/` 下的 per-flow 日志
+  stdout/stderr 被重定向到 `<project_root>/tianluo/logs/daemon/` 下的 per-flow 日志
   文件(子进程发出结构化的 NDJSON 事件流,daemon 之后可对其做 tail)。
 - **Aggregator(聚合器)** —— 一个纯粹的磁盘文件读取者。它轮询每个被跟踪项目的
-  `se3/state/`(引擎状态 + 摘要)、`se3/calls/`(人工调用队列)、`se3/logs/` 与
-  `se3/issues/`,把它们折叠成单一的 `MachineStatus` 快照:每个流程的进度、当前
+  `tianluo/state/`(引擎状态 + 摘要)、`tianluo/calls/`(人工调用队列)、`tianluo/logs/` 与
+  `tianluo/issues/`,把它们折叠成单一的 `MachineStatus` 快照:每个流程的进度、当前
   step、待处理的调用、日志与 issue 计数。它从不伸手进流程的进程内部。
 - **Client(客户端)** —— 可选的、到中心服务器的出站 WebSocket 客户端。它推送
   `MachineStatus` 快照、应答心跳,并把入站指令(`SPAWN_FLOW` → spawner、
-  `RESPOND_CALL` → 一个 `se3/calls/` 响应文件)路由回本机。
+  `RESPOND_CALL` → 一个 `tianluo/calls/` 响应文件)路由回本机。
 
 监管器、聚合器轮询循环与出站客户端都作为并发任务跑在 daemon 的单一事件循环上,
 并共享同一个优雅停止信号。
 
 ### 中心服务器内部
 
-`se3-server` 是一个 FastAPI 应用,它:
+`tianluo-server` 是一个 FastAPI 应用,它:
 
 - 在 `/ws` 上接受 daemon 的 WebSocket 连接,校验每个 daemon 的开场握手,并维护
   一个带心跳的 `machine_id → 连接` 连接池;
@@ -299,7 +299,7 @@ daemon 是一个单一的、长寿命的 `asyncio` 进程,由四个部件组成:
   owner 过滤;
 - 提供自带的网页前端,以及位于 `/ws/ui` 的前端 WebSocket。
 
-daemon↔服务器的线上协议有单一事实来源 —— `se3.daemon.protocol` 模块 —— 由两端
+daemon↔服务器的线上协议有单一事实来源 —— `tianluo.daemon.protocol` 模块 —— 由两端
 共同 import,因此 schema 不会漂移。
 
 ### 端到端:从远端机器发布任务
@@ -310,15 +310,15 @@ daemon↔服务器的线上协议有单一事实来源 —— `se3.daemon.protoc
 2. 服务器查出该机器存活的 daemon 连接,把一条 `SPAWN_FLOW` 指令*沿着*既有的
    出站 WebSocket 下发。
 3. 目标 **daemon** 收到 `SPAWN_FLOW`,让它的 spawner 在请求指定的项目中启动一个
-   真实的 `se3 run --output-format json` 子进程。
-4. 这个新流程的运行方式与任何本地 `se3 run` 完全一样。它在磁盘上的状态会在
+   真实的 `luo run --output-format json` 子进程。
+4. 这个新流程的运行方式与任何本地 `luo run` 完全一样。它在磁盘上的状态会在
    daemon 的**聚合器**下一次轮询时被拾取。
 5. daemon 向服务器推送一份更新后的 `MachineStatus` 快照,服务器将其合并进
    `ServerState`,并向每个已连接的网页前端广播该变更。
 
 应答某个流程待处理的介入/调用走的是镜像路径:
 `POST /api/flows/{id}/respond` → 服务器 → `RESPOND_CALL` 沿 socket 下发 →
-daemon 向该项目的 `se3/calls/` 队列写入一个响应文件,从而解除被暂停流程的阻塞。
+daemon 向该项目的 `tianluo/calls/` 队列写入一个响应文件,从而解除被暂停流程的阻塞。
 
 ---
 
@@ -327,20 +327,20 @@ daemon 向该项目的 `se3/calls/` 队列写入一个响应文件,从而解除�
 自 8.0.0 起,中心服务器是一个**多租户控制面**:每个 web/REST 请求与每条 daemon
 连接都必须解析到一个 *owner*,所有可见范围与控制权都按该 owner 过滤。早先那种
 身份无关的「裸」模式 —— 任何能访问到服务器的人都能列出全部机器、并经
-`POST /api/flows` 在任意 daemon 上派发 `se3 run` —— 已被移除。
+`POST /api/flows` 在任意 daemon 上派发 `luo run` —— 已被移除。
 
 本节按端到端的搭建动线讲解:
 
 ```
-se3-server bootstrap-token   →   登录(break-glass)   →   建本地用户
-        →   每个 owner 签发 daemon key   →   se3 daemon start --daemon-key
+tianluo-server bootstrap-token   →   登录(break-glass)   →   建本地用户
+        →   每个 owner 签发 daemon key   →   luo daemon start --daemon-key
         →   机器与 flow 按 owner 隔离
 ```
 
 ### 为什么鉴权是强制的
 
 服务器**fail-closed**(无可用 provider 即拒绝服务)。鉴权 provider 集合由
-`se3.yaml` 的 `server.auth.providers` 配置,默认为 `["local"]`(内置的
+`tianluo.yaml` 的 `server.auth.providers` 配置,默认为 `["local"]`(内置的
 用户名 + 口令 provider)。可识别的名称为 `local`、`oidc`、`proxy_header`;其中
 `oidc` 与 `proxy_header` 是默认关闭、v1 不要求的接缝。若解析后的 provider 链
 最终**没有任何可用 provider**(例如 `local` 被显式禁用且无其他 provider 启用),
@@ -350,8 +350,8 @@ se3-server bootstrap-token   →   登录(break-glass)   →   建本地用户
 ### 持久化层(`~/.se3/server.db`)
 
 服务器唯一的持久化是一个**嵌入式单文件 sqlite 存储**(标准库 `sqlite3`,不引入
-额外依赖),默认位于 `~/.se3/server.db`。其路径来自 `se3.yaml` 的
-`server.db_path`,并可用 `se3-server --db-path <path>` 对单次启动覆盖(显式的
+额外依赖),默认位于 `~/.se3/server.db`。其路径来自 `tianluo.yaml` 的
+`server.db_path`,并可用 `tianluo-server --db-path <path>` 对单次启动覆盖(显式的
 `--db-path` 优先)。它**只存储那些 daemon 重连无法重建的身份事实**:
 
 - owner 记录(以不透明、稳定的内部 `owner_id` 为主键);
@@ -368,7 +368,7 @@ se3-server bootstrap-token   →   登录(break-glass)   →   建本地用户
 全新服务器没有任何账号,因此存在一个与 IdP 无关的唯一入口:
 
 ```bash
-se3-server bootstrap-token
+tianluo-server bootstrap-token
 ```
 
 它会铸发一个**一次性的 break-glass admin token**,把明文向服务器控制台打印且
@@ -421,9 +421,9 @@ DELETE /api/daemon-keys/{key_id}  # 吊销一把 key
 让它的机器加入该 owner 的信任域:
 
 ```bash
-se3 daemon start --daemon-key <key> --server-url wss://control.example.com
+luo daemon start --daemon-key <key> --server-url wss://control.example.com
 # 或者等价地:
-SE3_DAEMON_KEY=<key> se3 daemon start --server-url wss://control.example.com
+SE3_DAEMON_KEY=<key> luo daemon start --server-url wss://control.example.com
 ```
 
 daemon 在它的 HELLO 握手中携带该 key;服务器解析 `key → owner_id`,绑定机器
@@ -439,9 +439,9 @@ daemon→服务器的反向信任由 **TLS** 承载:daemon 拨入一个已知的
 
 ### 在 TLS 反向代理后部署(wss)
 
-`se3-server` 只讲明文 HTTP/WebSocket,自身**不**终结 TLS。要做公网 `wss://`
+`tianluo-server` 只讲明文 HTTP/WebSocket,自身**不**终结 TLS。要做公网 `wss://`
 部署,你需要在它前面放一个反向代理(nginx、Caddy ……)来终结 TLS,并转发到
-`se3-server` 的明文端口(默认 `8080`)。代理把两类很不一样的流量转发到**同一个**
+`tianluo-server` 的明文端口(默认 `8080`)。代理把两类很不一样的流量转发到**同一个**
 后端:
 
 - **静态网页请求** —— 自带前端的普通 HTTP `GET`/`POST`(`/`、`/app.js`、
@@ -470,10 +470,10 @@ map $http_upgrade $connection_upgrade {
 
 server {
     listen 443 ssl;
-    server_name se3.example.com;
+    server_name tianluo.example.com;
 
-    ssl_certificate     /etc/ssl/se3.example.com.crt;
-    ssl_certificate_key /etc/ssl/se3.example.com.key;
+    ssl_certificate     /etc/ssl/tianluo.example.com.crt;
+    ssl_certificate_key /etc/ssl/tianluo.example.com.key;
 
     # 一个 location 同时兜住静态前端与 /ws、/ws/ui 长连接。^~ 胜过面板可能注入的
     # 正则 location。
@@ -516,7 +516,7 @@ Caddy 自动终结 TLS(Let's Encrypt),并无需任何额外指令即可代理 We
 `reverse_proxy` 透明处理升级:
 
 ```caddy
-se3.example.com {
+tianluo.example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
@@ -524,7 +524,7 @@ se3.example.com {
 若你想要和上面 nginx 范例一样宽松的空闲超时:
 
 ```caddy
-se3.example.com {
+tianluo.example.com {
     reverse_proxy 127.0.0.1:8080 {
         transport http {
             read_timeout 3600s
@@ -544,7 +544,7 @@ curl -i --http1.1 \
   -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" \
   -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom | base64)" \
-  https://se3.example.com/ws
+  https://tianluo.example.com/ws
 ```
 
 期望的响应(升级端到端成功):
@@ -559,7 +559,7 @@ Sec-WebSocket-Accept: <你的 key 的 base64 摘要>
 读结果时的避坑点:
 
 - **对 `/ws` 发普通 `GET` 返回 FastAPI 的 `404 {"detail":"Not Found"}` 是预期的
-  —— 而且是*好消息*。** 它证明请求穿过了代理、抵达了 se3-server 后端;`/ws` 只是
+  —— 而且是*好消息*。** 它证明请求穿过了代理、抵达了 tianluo-server 后端;`/ws` 只是
   拒绝一个非升级的 GET。如果你看到的是代理自己的 404/502 页面,说明请求根本没到
   后端。
 - **WebSocket 握手只能走 HTTP/1.1。** 在 HTTP/2 上你*永远*拿不到 `101` —— 去掉
@@ -567,7 +567,7 @@ Sec-WebSocket-Accept: <你的 key 的 base64 摘要>
   范例要钉死 `proxy_http_version 1.1` 的原因。
 - **默认端口随 scheme 走。** 不带端口的 `wss://host` 会被补全为 **443**(TLS 反向
   代理的 HTTPS 端口),`ws://host` 则补 **8080**(见
-  [端口处理](#出站连接模型))。因此裸写的 `wss://se3.example.com` 会自动拨
+  [端口处理](#出站连接模型))。因此裸写的 `wss://tianluo.example.com` 会自动拨
   `:443` —— 只有当你的代理监听在别处时才需要显式加 `:port`。
 
 ### owner 隔离
@@ -588,8 +588,8 @@ Sec-WebSocket-Accept: <你的 key 的 base64 摘要>
 
 ## 网页前端
 
-`se3-server` 自带一个小巧的、纯静态的网页前端(`index.html`、`style.css`、
-`app.js` —— 无构建步骤)。它被挂载在服务器根路径上,因此只要 `se3-server` 在
+`tianluo-server` 自带一个小巧的、纯静态的网页前端(`index.html`、`style.css`、
+`app.js` —— 无构建步骤)。它被挂载在服务器根路径上,因此只要 `tianluo-server` 在
 运行,你在浏览器中打开服务器地址即可:
 
 ```
@@ -616,7 +616,7 @@ http://<server-host>:<port>/        # 例如 http://127.0.0.1:8080/
   远端机器上运行。
 - **响应介入/调用。** 当某个流程暂停等待人工输入时,它会在 UI 中浮现一条待处理
   的调用。响应对话框让你键入答复并发送;服务器把它作为 `RESPOND_CALL` 路由给
-  拥有该流程的 daemon,daemon 将响应写入该项目的 `se3/calls/` 队列并恢复流程。
+  拥有该流程的 daemon,daemon 将响应写入该项目的 `tianluo/calls/` 队列并恢复流程。
 
 前端在 WebSocket 上是只读的(它只*监听*状态推送);New Task 与响应操作走的是
 服务器的 REST API。
