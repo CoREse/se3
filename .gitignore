@@ -15,10 +15,11 @@
 !/VERSIONS.md
 !/progress.md
 !/pyproject.toml
-!/se3.yaml
+!/tianluo.example.yaml
 !/docs/
 !/scripts/
 !/se3/
+!/tianluo/
 !/src/
 !/tests/
 
@@ -39,11 +40,23 @@ prompts/
 # But the built-in preset prompts shipped as package data MUST be tracked
 # (the broad `prompts/` rule above would otherwise swallow them, so the
 # root-cause doc-sync fix could never be committed/shipped).
-!/src/se3/templates/prompts/
+!/src/tianluo/templates/prompts/
 e2e
 materials
 
-# SE3: ignore runtime content, whitelist committed artifacts
+# tianluo runtime dir (post-rename layout): ignore runtime content,
+# whitelist committed artifacts. Mirrors the legacy /se3/* block below so
+# `luo migrate run rename-to-tianluo` on this repo needs no gitignore edit.
+/tianluo/*
+!/tianluo/code-index.md
+!/tianluo/charter.md
+!/tianluo/issues/
+!/tianluo/scripts/
+!/tianluo/prompts/
+!/tianluo/version-rules.md
+!/tianluo/version-intents/
+
+# SE3: ignore runtime content, whitelist committed artifacts (legacy layout)
 /se3/*
 !/se3/code-index.md
 !/se3/charter.md
@@ -61,9 +74,11 @@ tmp*.prompt
 # SE3 session file
 .claude/.session.json
 
-# SE3 local project config override (not checked in)
+# tianluo local/live project config (not checked in; tianluo.example.yaml
+# is the shipped reference). Legacy se3.* names honoured through 12.x.
+tianluo.local.yaml
 se3.local.yaml
-src/se3/__pycache__/
+src/tianluo/__pycache__/
 *.egg-info/
 
 # Userspace-installed system libraries for the headless-browser acceptance

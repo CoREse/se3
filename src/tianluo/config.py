@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 # lookup tier the canonical name wins over the legacy one.
 PROJECT_CONFIG_FILENAME = "tianluo.yaml"
 PROJECT_LOCAL_CONFIG_FILENAME = "tianluo.local.yaml"
-LEGACY_PROJECT_CONFIG_FILENAME = "tianluo.yaml"
-LEGACY_PROJECT_LOCAL_CONFIG_FILENAME = "tianluo.local.yaml"
+LEGACY_PROJECT_CONFIG_FILENAME = "se3.yaml"
+LEGACY_PROJECT_LOCAL_CONFIG_FILENAME = "se3.local.yaml"
 
 # Per-tier candidate name lists (canonical first).
 _LOCAL_CONFIG_FILENAMES = (

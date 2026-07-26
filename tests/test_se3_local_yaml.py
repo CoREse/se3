@@ -1547,3 +1547,41 @@ class TestWorktreeWarningDedup:
             f"deprecation warning must dedup across worktree label "
             f"transition; got: {second_warnings}"
         )
+
+
+class TestLegacyFilenameConstants:
+    """Regression guard: the legacy fallback names must stay se3.* (a
+    rename-sweep once clobbered them to the canonical names, silently
+    disabling the 12.x fallback)."""
+
+    def test_legacy_constants_are_legacy(self):
+        from tianluo.config import (
+            LEGACY_PROJECT_CONFIG_FILENAME,
+            LEGACY_PROJECT_LOCAL_CONFIG_FILENAME,
+            PROJECT_CONFIG_FILENAME,
+            PROJECT_LOCAL_CONFIG_FILENAME,
+        )
+
+        assert PROJECT_CONFIG_FILENAME == "tianluo.yaml"
+        assert PROJECT_LOCAL_CONFIG_FILENAME == "tianluo.local.yaml"
+        assert LEGACY_PROJECT_CONFIG_FILENAME == "se3.yaml"
+        assert LEGACY_PROJECT_LOCAL_CONFIG_FILENAME == "se3.local.yaml"
+
+    def test_legacy_local_yaml_still_resolves(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.local.yaml").write_text("a: 1\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "se3.local.yaml"
+
+    def test_legacy_main_yaml_still_resolves(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.yaml").write_text("a: 1\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "se3.yaml"
+
+    def test_canonical_wins_over_legacy(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.local.yaml").write_text("a: 1\n", encoding="utf-8")
+        (tmp_path / "tianluo.local.yaml").write_text("a: 2\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "tianluo.local.yaml"

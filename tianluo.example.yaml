@@ -1,9 +1,15 @@
-# SE 3.0 Framework Configuration
-# Place in project root
+# tianluo (SE 3.0) framework configuration — EXAMPLE
+#
+# This file is a shipped reference and is NOT read by the engine.
+# To configure a project, either:
+#   cp tianluo.example.yaml tianluo.yaml        # committed project config
+# or maintain a gitignored local override:
+#   tianluo.local.yaml                          # wins over tianluo.yaml
+# (Legacy se3.yaml / se3.local.yaml keep working through 12.x.)
 
 human_call:
   timeout_days: 7
-  directory: se3/calls  # Human calls directory (legacy: human-calls)
+  directory: tianluo/calls  # Human calls directory (legacy: human-calls)
 
 session:
   progress_file: progress.md
@@ -54,7 +60,7 @@ confirmation:
     # a ruling (including one that rewrites the *task description*) auto-passes
     # with no human/LLM门. Overriding the task description is high-impact, so if
     # an unattended run must NOT silently rewrite it, opt in to human review via
-    # se3/calls (PAUSED approval) by uncommenting the block below. A plan-only
+    # tianluo/calls (PAUSED approval) by uncommenting the block below. A plan-only
     # ruling is never human-gated even then; point `reviewer` at an LLM agent
     # name to auto-review plan-only overrides.
     # adjudicate:
@@ -69,18 +75,18 @@ version:
   include_in_commit_message: true     # Include version in commit message
   auto_bump: true                     # Auto-apply bump without human confirmation
 
-  # Optional: customize version rules by creating se3/version-rules.md
+  # Optional: customize version rules by creating tianluo/version-rules.md
   # (natural-language Markdown). When absent, default SemVer 2.0.0 applies.
 
 # Language Configuration
 # Two independent language settings, merged project-over-global with
-# ~/.se3/config.yaml.
+# ~/.tianluo/config.yaml.
 language:
   # Unified human language: drives BOTH the CLI's fixed UI copy AND the
   # LLM human-facing step outputs (summarize / discovery / confirmed steps).
   # (The central WebUI console's interface language is a per-user browser /
   #  localStorage preference and does NOT follow this project setting.)
-  # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
+  # CLI resolution precedence: SE3_LANG env > this key > ~/.tianluo/config.yaml >
   # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
   # null = no LLM-output restriction (CLI UI copy still resolves via the chain).
   language: zh-CN
@@ -103,7 +109,7 @@ e2e:
 # results, the engine treats the run as unverified (tests_passed=False) instead
 # of accepting "skip == no failures". Entries are matched as substrings against
 # pytest's per-test ids (file::test), so a fully-qualified id is the precise
-# anchor. Requires the browser extra: `pip install se3[browser]` then
+# anchor. Requires the browser extra: `pip install tianluo[browser]` then
 # `playwright install chromium`.
 test:
   critical_tests:
@@ -113,7 +119,7 @@ workflow:
   # Backstop only: with the deterministic pre-implement test baseline, a
   # correctly-scoped flow no longer loops on inherited failures, so this cap is
   # rarely reached. Kept at the documented default (100) and intentionally
-  # identical to se3.local.yaml so the local override does not silently shadow a
+  # identical to tianluo.local.yaml so the local override does not silently shadow a
   # different value (config loading is whole-file select-one, not key-merge).
   max_fix_iterations: 100
 
@@ -134,12 +140,12 @@ workflow:
   # self_check_defer_fix_threshold: 3
 
 # Preset Prompts (common-task library)
-# Project-level presets override the built-in presets shipped with se3
-# (read at runtime from the package, never copied by `se3 init`). Each
+# Project-level presets override the built-in presets shipped with tianluo
+# (read at runtime from the package, never copied by `luo init`). Each
 # entry carries its task type and points at a prompt file committed with
-# the project. Run with `se3 run --preset <name>`; list with
-# `se3 run --preset list`.
+# the project. Run with `luo run --preset <name>`; list with
+# `luo run --preset list`.
 presets:
   doc-sync:
     type: feature
-    prompt_file: se3/prompts/doc-sync.md
+    prompt_file: tianluo/prompts/doc-sync.md
