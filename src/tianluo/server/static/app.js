@@ -1,5 +1,5 @@
 /*
- * SE3 Control Plane — web frontend.
+ * tianluo Control Plane — web frontend.
  *
  * Connects to the central server's `/ws/ui` WebSocket for realtime machine /
  * flow state, renders the dashboard, and drives the REST API for flow detail,
@@ -421,10 +421,12 @@ function projectDisplayLabel(projectRoot) {
   // Normalize separators to '/' so segment matching is separator-agnostic.
   const normalized = projectRoot.replace(/\\/g, "/");
   const segments = normalized.replace(/\/+$/, "").split("/");
-  // Find the 'se3' segment immediately followed by 'worktrees'.
+  // Find the runtime-dir segment ('tianluo', legacy 'se3') immediately
+  // followed by 'worktrees'.
   for (let i = 0; i + 1 < segments.length; i++) {
-    if (segments[i] === "se3" && segments[i + 1] === "worktrees") {
-      // The real project root is everything before the 'se3' segment.
+    if ((segments[i] === "tianluo" || segments[i] === "se3") &&
+        segments[i + 1] === "worktrees") {
+      // The real project root is everything before the runtime-dir segment.
       const prefix = segments.slice(0, i).join("/");
       const projectName = projectBasename(prefix) || projectBasename(projectRoot);
       return `${projectName} (worktree)`;
@@ -1281,7 +1283,7 @@ function repaintConnStatus() {
 // boot and after every language switch) from the same key as the in-page h1.
 function applyDocumentTitle() {
   if (typeof document === "undefined") return;
-  document.title = tf("topbar.title", "SE3 Control Plane");
+  document.title = tf("topbar.title", "tianluo Control Plane");
 }
 
 // Toggle the "data may be stale" banners shown over the history view and the
@@ -3478,8 +3480,8 @@ function makeResumeButton(flow) {
 // `isFlowEndable` predicate (a UI gate mirroring the server's
 // `ServerState.is_flow_endable`) and debounced via `state.endSessionRequests`.
 
-// Pure helper: is *projectRoot* an se3 `--worktree` isolation directory
-// (`<main>/se3/worktrees/<name>`)?  This is the structural check the server's
+// Pure helper: is *projectRoot* a `--worktree` isolation directory
+// (`<main>/tianluo/worktrees/<name>`, legacy `<main>/se3/worktrees/<name>`)?  This is the structural check the server's
 // `_is_worktree_session_path` mirrors — a live (possibly dangling) worktree run
 // is reported with its worktree sandbox as `project_root`.
 function isWorktreeSessionPath(projectRoot) {
@@ -3489,7 +3491,9 @@ function isWorktreeSessionPath(projectRoot) {
     .split("/")
     .filter(Boolean);
   if (parts.length < 3) return false;
-  return parts[parts.length - 2] === "worktrees" && parts[parts.length - 3] === "se3";
+  const runtimeSeg = parts[parts.length - 3];
+  return parts[parts.length - 2] === "worktrees" &&
+    (runtimeSeg === "tianluo" || runtimeSeg === "se3");
 }
 
 // Pure UI gate: may *flow* be ended from the console?  A flow is endable when

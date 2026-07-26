@@ -2,9 +2,7 @@
   "lang.label": "语言",
   "lang.en-US": "English",
   "lang.zh-CN": "中文",
-
   "topbar.title": "SE3 控制台",
-
   "nav.history": "历史记录",
   "nav.issues": "Issues",
   "nav.keys": "Daemon 密钥",
@@ -12,7 +10,6 @@
   "nav.newTask": "+ 新建任务",
   "nav.logout": "登出",
   "nav.menu": "菜单",
-
   "login.title": "登录",
   "login.subtitle": "登录以查看和控制你的 daemon。",
   "login.username": "用户名",
@@ -21,21 +18,17 @@
   "login.breakglassToggle": "使用 break-glass 管理员令牌",
   "login.breakglassLabel": "Break-glass 令牌",
   "login.breakglassSubmit": "以管理员身份进入",
-
   "machines.title": "机器",
   "machines.empty": "没有已连接的机器。",
-
   "flows.back": "← 机器",
   "flows.backAria": "返回机器列表",
   "flows.title": "Flows",
   "flows.empty": "选择一台机器查看其 flows。",
-
   "common.cancel": "取消",
   "common.size.chars": "{n} 字符",
   "common.staleBanner": "⚠ 连接断开，数据可能陈旧",
   "common.absolutePathPlaceholder": "/absolute/path/to/project",
   "common.worktreeOption": "隔离运行（worktree 模式——flow 在独立 worktree 中运行，随后自动合并回主分支）",
-
   "history.title": "历史记录",
   "history.sessions": "会话",
   "history.loading": "加载历史记录…",
@@ -44,7 +37,6 @@
   "history.detailTitle": "会话",
   "history.detailEmpty": "选择一个会话查看其步骤记录。",
   "history.usageTitle": "本次 session 已消耗的 token 与成本合计",
-
   "issues.title": "Issues",
   "issues.showClosed": "显示已关闭",
   "issues.sourceAll": "全部来源",
@@ -58,7 +50,6 @@
   "issues.backAria": "返回 Issue 列表",
   "issues.detailTitle": "Issue",
   "issues.detailEmpty": "选择一个 issue 查看详情。",
-
   "issueModal.title": "新建 Issue",
   "issueModal.machine": "机器",
   "issueModal.project": "项目",
@@ -71,20 +62,16 @@
   "issueModal.tags": "标签（可选，逗号分隔）",
   "issueModal.tagsPlaceholder": "例如: ui, performance, docs",
   "issueModal.submit": "创建",
-
   "issueAction.title": "确认操作",
   "issueAction.reasonLabel": "关闭原因（可选）",
   "issueAction.reasonPlaceholder": "关闭原因…",
   "issueAction.confirm": "确认",
-
   "endSession.title": "结束 Session",
   "endSession.message": "确认结束并归档该 session；若为 worktree 会被清理归档，未提交的工作不会合并进主分支。",
   "endSession.confirm": "结束并归档",
-
   "issueLaunch.title": "从 Issue 启动 Flow",
   "issueLaunch.discover": "先进入 discovery 步骤（多轮需求澄清）",
   "issueLaunch.confirm": "启动 flow",
-
   "flow.sidebarToggleTitle": "显示 / 隐藏 flow 详情",
   "flow.title": "Flow",
   "flow.sidebarLoading": "加载 flow 详情…",
@@ -94,12 +81,11 @@
   "flow.interjectTitle": "插入这个正在运行的 flow",
   "flow.replyPlaceholder": "暂无待处理项…",
   "flow.replySubmit": "发送",
-
   "newTask.title": "发布新任务",
   "newTask.machine": "目标机器",
   "newTask.project": "项目",
   "newTask.projectEmpty": "该 daemon 没有已注册的项目根目录——选择“其他路径…”手动输入一个。",
-  "newTask.projectManualHint": "输入一个绝对路径。若该目录还不是 SE3 项目，daemon 会先在那里运行 <code>se3 init</code>。",
+  "newTask.projectManualHint": "输入一个绝对路径。若该目录还不是 tianluo 项目，daemon 会先在那里运行 <code>luo init</code>。",
   "newTask.type": "任务类型",
   "newTask.typeAuto": "自动",
   "taskType.feature": "功能",
@@ -122,14 +108,12 @@
   "newTask.taskPlaceholder": "描述要运行的任务…",
   "newTask.discover": "从 discovery 步骤开始（多轮需求澄清）",
   "newTask.submit": "发布",
-
   "keys.title": "Daemon 密钥",
   "keys.hint": "daemon 使用绑定到你所有者账户的密钥向本 server 认证。明文<strong>只在创建时显示一次</strong>——把它复制到 daemon 的 <code>--daemon-key</code> 配置中。",
   "keys.labelPlaceholder": "标签（可选）",
   "keys.create": "创建密钥",
   "keys.revealNote": "现在就复制此密钥——它不会再次显示。",
   "keys.loading": "加载密钥…",
-
   "users.title": "用户管理",
   "users.hint": "创建、删除本地用户，重置本地用户密码，或切换管理员标志。所有权限判定均在服务端强制执行——你无法删除或降权自己、系统中最后一个管理员，或保留的 break-glass 管理账户。",
   "users.usernamePlaceholder": "用户名",
@@ -138,7 +122,6 @@
   "users.isAdmin": "管理员",
   "users.create": "新建用户",
   "users.loading": "加载用户…",
-
   "status.step.running": "进行中",
   "status.step.retrying": "重试中",
   "status.step.paused": "已暂停",
@@ -146,13 +129,11 @@
   "status.step.failed": "失败",
   "status.step.partial": "部分完成",
   "status.step.waiting_for_lock": "等待锁",
-
   "status.group.queued": "排队中",
   "status.group.running": "正在 worktree 实施中",
   "status.group.completed": "已完成",
   "status.group.failed": "失败",
   "status.group.skipped": "已跳过",
-
   "status.flow.running": "运行中",
   "status.flow.completed": "已完成",
   "status.flow.failed": "失败",
@@ -160,16 +141,13 @@
   "status.flow.init": "初始化",
   "status.flow.recovering": "恢复中",
   "status.flow.unknown": "未知",
-
   "status.issue.open": "待处理",
   "status.issue.inProgress": "进行中",
   "status.issue.resolved": "已解决",
   "status.issue.wontFix": "不修复",
   "status.issue.closed": "已关闭",
-
   "indexProgress.withTotal": "更新 code-index：{path} ({done}/{total})",
   "indexProgress.noTotal": "更新 code-index：{path}",
-
   "toast.interjectionDelivered": "插话已送达，等待 flow 消费",
   "toast.interjectionConsumed": "插话已被消费",
   "toast.taskLaunchFailed": "启动任务失败{where}：{reason}",
@@ -214,7 +192,6 @@
   "toast.passwordReset": "已重置 {name} 的密码。",
   "toast.adminGranted": "已设为管理员。",
   "toast.adminRevoked": "已取消管理员。",
-
   "flow.resume": "继续",
   "flow.resuming": "继续中…",
   "flow.resumeTitle": "继续此 flow",
@@ -230,12 +207,9 @@
   "flow.detailRetrying": "{message} 重试中…",
   "flow.noStepHistory": "未报告步骤历史。",
   "flow.noConversationRecords": "该 session 没有对话记录。",
-
   "endSession.confirmMessage": "确认结束并归档该 session（{id}…）？若为 worktree，它会被清理归档，未提交的工作不会合并进主分支。",
-
   "flows.titleWith": "Flows — {name}",
   "flows.emptyMachine": "该机器上没有 flow。",
-
   "flowSidebar.overview": "概览",
   "flowSidebar.status": "状态",
   "flowSidebar.type": "类型",
@@ -247,7 +221,6 @@
   "flowSidebar.machineSection": "机器",
   "flowSidebar.machine": "机器",
   "flowSidebar.flowId": "Flow id",
-
   "intervention.call.label": "待回复",
   "intervention.call.hint": "运行流程正在等待你的回复。",
   "intervention.interjection.label": "插话",
@@ -260,10 +233,8 @@
   "intervention.discoveryConfirm.hint": "Discovery 已生成精炼后的任务描述。输入 1 确认并继续,或回复其它内容继续完善需求。",
   "intervention.confirm.label": "需要审批",
   "intervention.confirm.hint": "运行流程正在等待你的审批。点击 批准 通过,或 打回 并说明需要修改之处。",
-
   "interject.cancelTitle": "取消插话",
   "interject.title": "向运行中的流程补一条额外指令。",
-
   "reply.empty.canDraftMobile": "可先草拟回复,或点 ✎ 插话…",
   "reply.empty.canDraft": "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…",
   "reply.empty.active": "目前没有待处理的交互项 — 没有可以回复的对象。",
@@ -279,7 +250,6 @@
   "reply.revisionConfirm": "你的回复将被视为修改请求,确定?",
   "reply.echo.approveNote": "批准:{note}",
   "reply.echo.rejectNote": "打回:{note}",
-
   "adjudicate.title": "裁决审批",
   "adjudicate.rationaleLabel": "裁决理由",
   "adjudicate.taskDescLabel": "任务描述",
@@ -287,25 +257,20 @@
   "adjudicate.sameAsBaseline": "任务描述与基线一致(无变更)。",
   "adjudicate.coveredSurfacesLabel": "边界条款覆盖的表面",
   "adjudicate.coveredSurfaceJustification": "论证:",
-
   "prompt.expandDetail": "▸ 展开消息详情",
   "prompt.collapseDetail": "▾ 收起消息详情",
   "prompt.templatePrefix": "模板前缀",
   "prompt.frameworkSuffix": "框架后缀",
   "prompt.chipLabel": "{role} 提示词 · {ctx}",
   "prompt.chipLabelNoCtx": "{role} 提示词",
-
   "fold.expandAll": "▸ 展开全部 ({size})",
   "fold.collapse": "▾ 收起",
   "fold.expandAllSimple": "▸ 展开全部",
   "fold.collapseAll": "▾ 收起全部",
-
   "raw.view": "查看原始",
   "raw.hide": "隐藏原始 ({kind})",
-
   "error.serverReturned": "服务器返回 {status}。",
   "error.networkReach": "网络错误 — 无法连接服务器。",
-
   "history.projectLabel": "项目",
   "history.unknownProject": "未知项目",
   "history.refreshing": "正在刷新历史…",
@@ -314,7 +279,6 @@
   "history.loadingRecords": "加载记录…",
   "history.loadError": "无法加载该 session 的历史（{status}）。",
   "history.networkError": "加载会话历史时网络错误。",
-
   "issueLaunch.reason.inProgress": "issue 进行中，无法重复启动 flow",
   "issueLaunch.reason.resolved": "issue 已解决，无需启动 flow",
   "issueLaunch.reason.wontFix": "issue 已标记为不修复",
@@ -325,9 +289,7 @@
   "issueLaunch.buttonTitle": "从此 issue 启动一个新的 flow",
   "issueLaunch.dispatching": "正在派发…",
   "issueLaunch.message": "将从 Issue #{id}（{title}）启动一个新的 flow。",
-
   "issues.empty": "暂无 issue。",
-
   "issueDetail.notFound": "Issue 未找到。",
   "issueDetail.field.type": "类型",
   "issueDetail.field.priority": "优先级",
@@ -340,7 +302,6 @@
   "issueDetail.edit": "编辑",
   "issueDetail.reopen": "重开",
   "issueDetail.close": "关闭",
-
   "issueModal.noMachines": "(无已连接的机器)",
   "issueModal.noProjects": "(该机器无已注册项目)",
   "issueModal.selectProject": "(选择一个项目…)",
@@ -351,12 +312,10 @@
   "issueModal.errDescRequired": "描述不能为空。",
   "issueModal.errNoMachine": "没有可用的在线机器。",
   "issueModal.errInvalidPath": "请选择或输入一个有效的项目路径。",
-
   "issueAction.closeTitle": "关闭 Issue",
   "issueAction.closeMessage": "确认关闭 Issue #{id}？",
   "issueAction.reopenTitle": "重开 Issue",
   "issueAction.reopenMessage": "确认重开 Issue #{id}？",
-
   "stepHeader.discovery": "需求发现",
   "stepHeader.analyze": "分析",
   "stepHeader.project_summary": "项目概览",
@@ -376,7 +335,6 @@
   "stepHeader.merge_integrate": "合并",
   "stepHeader.version_reconcile": "版本校准",
   "stepHeader.summarize": "总结",
-
   "stepReport.discovery": "需求发现",
   "stepReport.analyze": "分析",
   "stepReport.project_summary": "项目概览",
@@ -399,20 +357,16 @@
   "stepReport.summarize": "工作总结",
   "stepReport.usageLabel": "tokens",
   "stepReport.errorPrefix": "错误：",
-
   "stepReportSuffix.summarize": "总结",
   "stepReportSuffix.default": "结果",
-
   "usage.roundFootnote": "本轮 {roundIn} in / {roundOut} out · 累计 {cumIn} in / {cumOut} out",
   "usage.sessionLabel": "会话",
-
   "newTask.otherPath": "其他路径…",
   "newTask.errSelectMachine": "请选择目标机器。",
   "newTask.errTaskEmpty": "任务描述不能为空。",
   "newTask.errSelectProject": "请为该任务选择一个项目根目录。",
   "newTask.errEnterPath": "请输入项目的绝对路径。",
   "newTask.errPathAbsolute": "项目路径必须是绝对路径（以 '/' 开头）。",
-
   "login.errUsername": "请输入用户名。",
   "login.errPassword": "请输入密码。",
   "login.errTooMany": "尝试次数过多 — 请稍候再试。",
@@ -420,14 +374,12 @@
   "login.errInvalid": "用户名或密码无效。",
   "login.errPasteToken": "请粘贴 break-glass 令牌。",
   "login.errInvalidToken": "break-glass 令牌无效或已过期。",
-
   "keys.empty": "暂无 daemon 密钥。",
   "keys.revoke": "吊销",
   "keys.statusActive": "生效中",
   "keys.statusRevoked": "已吊销",
   "keys.errCreateNetwork": "网络错误 — 无法创建密钥。",
   "keys.errRevokeNetwork": "网络错误 — 无法吊销密钥。",
-
   "users.empty": "没有可管理的用户。",
   "users.self": "（本人）",
   "users.roleAdmin": "管理员",
@@ -444,7 +396,6 @@
   "users.errDeleteNetwork": "网络错误 — 无法删除用户。",
   "users.errResetNetwork": "网络错误 — 无法重置密码。",
   "users.errAdminNetwork": "网络错误 — 无法修改管理员状态。",
-
   "projects.title": "已登记项目",
   "projects.hint": "该机器 daemon 上已登记的项目。它们驱动 New Task 的项目下拉、History 的项目分组与 Issue 的项目筛选。移除只是取消登记 — 磁盘上的任何数据都不会被删除。",
   "projects.manage": "管理已登记项目",
@@ -456,7 +407,7 @@
   "projects.stale": "路径已失效",
   "projects.remove": "移除",
   "projects.removeTitle": "移除项目",
-  "projects.removeMessage": "确认从该机器取消登记此项目？仅移除登记 — 项目目录及其 se3/ 历史一概不动，此后该目录再次运行 flow 时会自动重新登记。",
+  "projects.removeMessage": "确认从该机器取消登记此项目？仅移除登记 — 项目目录及其 运行时历史一概不动，此后该目录再次运行 flow 时会自动重新登记。",
   "projects.removeConfirm": "移除",
   "projects.errEmptyPath": "请输入项目路径。",
   "projects.errNotAbsolute": "请输入绝对路径。",
@@ -472,18 +423,14 @@
   "projects.errGeneric": "该操作在 daemon 侧失败。",
   "projects.errAddNetwork": "网络错误 — 无法登记该项目。",
   "projects.errRemoveNetwork": "网络错误 — 无法移除该项目。",
-
   "flow.badge.waitingLock": "⏳ 等待锁",
   "flow.badge.needsResponse": "⚠ 需要响应",
   "flow.stepType.response": "{label} 回复",
   "flow.statusWaitingLock": "等待锁",
   "keys.unlabeled": "(未命名)",
-
   "history.badge.live": "● 实时",
-
   "discovery.proposedTaskDescription": "拟定的任务描述",
   "discovery.questions": "问题",
-
   "stepReport.section.reasoning": "推理",
   "stepReport.section.summary": "摘要",
   "stepReport.section.rationale": "理由",
@@ -494,20 +441,16 @@
   "stepReport.empty.noSummary": "（无总结）",
   "stepReport.status": "状态：{status}",
   "stepOutput.inProgress": "{label}（进行中）",
-
   "conn.connecting": "连接中…",
   "conn.reconnecting": "重新连接中…",
   "conn.connected": "已连接",
   "conn.disconnected": "已断开",
-
   "stepReport.chip.completed": "步骤已完成",
   "stepReport.chip.failed": "步骤失败",
-
   "stepReport.label.task": "任务",
   "stepReport.label.complexity": "复杂度",
   "stepReport.label.scope": "范围",
   "stepReport.versionAnalyze.subline": "{bumpType} 版本递增  │  置信度：{confidence}",
-
   "stepReport.count.relevantSpecItems": "相关规格条目 ({n})",
   "stepReport.count.filesToModify": "待修改文件 ({n})",
   "stepReport.count.filesToCreate": "待创建文件 ({n})",
@@ -519,10 +462,8 @@
   "stepReport.count.interfaces": "接口 ({n})",
   "stepReport.count.keyDecisions": "关键决策 ({n})",
   "stepReport.count.taskGroups": "任务组 ({n})",
-
   "stepReport.restricted.applied": "受限编辑已应用：{n}",
   "stepReport.restricted.failed": "受限编辑失败：{n}",
-
   "stepReport.section.overview": "概览",
   "stepReport.section.proposal": "提案",
   "stepReport.section.design": "设计",
@@ -540,7 +481,6 @@
   "stepReport.section.suggestedUpdate": "建议更新",
   "stepReport.section.notAutoApplied": "未自动应用：{reason}",
   "stepReport.section.charterAdmission": "章程准入",
-
   "stepReport.status.passed": "通过",
   "stepReport.status.failed": "失败",
   "stepReport.status.unknown": "？",
@@ -554,8 +494,7 @@
   "stepReport.charter.updateAdvised": "建议更新章程",
   "stepReport.charter.fresh": "章程无需更新",
   "stepReport.charter.touched": "涉及：{list}",
-  "stepReport.charter.autoUpdatedNote": "se3/charter.md 已更新以描述该已审阅的变更。",
-
+  "stepReport.charter.autoUpdatedNote": "tianluo/charter.md 已更新以描述该已审阅的变更。",
   "stepReport.design.reasonPrefix": "原因：",
   "stepReport.plan.groupMeta": "{tasks} 个任务 · ~{loc} LOC · 依赖：{deps}",
   "stepReport.plan.dependsNone": "无",
@@ -573,7 +512,6 @@
   "stepReport.severity.low": "低",
   "stepReport.scope.inScope": "范围内",
   "stepReport.scope.outOfScope": "范围外",
-
   "tool.detail.empty": "(无可用详情)",
   "tool.detail.truncated": "…（输出已截断）",
   "tool.detail.stderr": "标准错误",
@@ -590,7 +528,6 @@
   "stepReport.empty": "(无报告字段)",
   "record.attempt": "第 {n} 次尝试",
   "usage.valueLine": "输入 {in} · 输出 {out} · 缓存 读/写 {cacheRead}/{cacheWrite} · {cost}",
-
   "issue.untitled": "未命名",
   "flow.untitled": "（未命名 flow）",
   "flow.card.currentStep": "步骤：{step}",

@@ -28,6 +28,7 @@
 - `luo init` scaffolds the canonical layout; packaged templates, i18n catalogs (en-US/zh-CN), step prompts, injections, and help text all speak `luo` / `tianluo/`
 - Ship `tianluo.example.yaml` as the tracked configuration reference; the live project config (`tianluo.yaml` or `tianluo.local.yaml`) is no longer tracked in this repository
 - Unify the version story: badge, README body, and pyproject now all say 12.0.0 (they had drifted to 11.24.2 / 10.8.1)
+- Add the brand icon (gold snail-shell with a wavy shell mouth and a four-point sparkle in its core, amber `#EFB24F` on deep navy `#07163F`): web-console favicon, README logo, and full asset set; the WebUI console is retitled "tianluo Control Plane"
 - Deprecation schedule: every `se3` compatibility surface (command aliases, import shim, layout/config fallbacks) is removed in **13.0.0**
 
 ## 11.24.2 - 2026-07-25

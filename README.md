@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/assets/tianluo-icon.png" width="128" alt="tianluo icon"></p>
+
 # tianluo (田螺) — the Software Engineering 3.0 flow engine
 
 ![Version](https://img.shields.io/badge/version-12.0.0-blue)

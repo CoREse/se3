@@ -2,9 +2,7 @@
   "lang.label": "Language",
   "lang.en-US": "English",
   "lang.zh-CN": "中文",
-
-  "topbar.title": "SE3 Control Plane",
-
+  "topbar.title": "tianluo Control Plane",
   "nav.history": "History",
   "nav.issues": "Issues",
   "nav.keys": "Daemon Keys",
@@ -12,7 +10,6 @@
   "nav.newTask": "+ New Task",
   "nav.logout": "Logout",
   "nav.menu": "Menu",
-
   "login.title": "Sign in",
   "login.subtitle": "Authenticate to view and control your daemons.",
   "login.username": "Username",
@@ -21,21 +18,17 @@
   "login.breakglassToggle": "Use a break-glass admin token",
   "login.breakglassLabel": "Break-glass token",
   "login.breakglassSubmit": "Enter as admin",
-
   "machines.title": "Machines",
   "machines.empty": "No machines connected.",
-
   "flows.back": "← Machines",
   "flows.backAria": "Back to machine list",
   "flows.title": "Flows",
   "flows.empty": "Select a machine to view its flows.",
-
   "common.cancel": "Cancel",
   "common.size.chars": "{n} chars",
   "common.staleBanner": "⚠ Connection lost — data may be stale",
   "common.absolutePathPlaceholder": "/absolute/path/to/project",
   "common.worktreeOption": "Run in isolation (worktree mode — flow runs in an isolated worktree, then auto-merges back)",
-
   "history.title": "History",
   "history.sessions": "Sessions",
   "history.loading": "Loading history…",
@@ -44,7 +37,6 @@
   "history.detailTitle": "Session",
   "history.detailEmpty": "Select a session to view its step records.",
   "history.usageTitle": "Total tokens and cost consumed by this session",
-
   "issues.title": "Issues",
   "issues.showClosed": "Show closed",
   "issues.sourceAll": "All sources",
@@ -58,7 +50,6 @@
   "issues.backAria": "Back to issue list",
   "issues.detailTitle": "Issue",
   "issues.detailEmpty": "Select an issue to view details.",
-
   "issueModal.title": "New Issue",
   "issueModal.machine": "Machine",
   "issueModal.project": "Project",
@@ -71,20 +62,16 @@
   "issueModal.tags": "Tags (optional, comma-separated)",
   "issueModal.tagsPlaceholder": "e.g. ui, performance, docs",
   "issueModal.submit": "Create",
-
   "issueAction.title": "Confirm action",
   "issueAction.reasonLabel": "Close reason (optional)",
   "issueAction.reasonPlaceholder": "Close reason…",
   "issueAction.confirm": "Confirm",
-
   "endSession.title": "End Session",
   "endSession.message": "Confirm ending and archiving this session; a worktree session will be cleaned up and archived, and uncommitted work will not be merged into the main branch.",
   "endSession.confirm": "End and archive",
-
   "issueLaunch.title": "Launch Flow from Issue",
   "issueLaunch.discover": "Start from discovery step (multi-turn requirement clarification)",
   "issueLaunch.confirm": "Launch flow",
-
   "flow.sidebarToggleTitle": "Show / hide flow details",
   "flow.title": "Flow",
   "flow.sidebarLoading": "Loading flow details…",
@@ -94,12 +81,11 @@
   "flow.interjectTitle": "Interject into this running flow",
   "flow.replyPlaceholder": "No pending items…",
   "flow.replySubmit": "Send",
-
   "newTask.title": "Publish New Task",
   "newTask.machine": "Target machine",
   "newTask.project": "Project",
   "newTask.projectEmpty": "This daemon has no registered project roots — pick “Other path…” to enter one manually.",
-  "newTask.projectManualHint": "Enter an absolute path. The daemon will run <code>se3 init</code> there first if the directory is not yet an SE3 project.",
+  "newTask.projectManualHint": "Enter an absolute path. The daemon will run <code>luo init</code> there first if the directory is not yet an tianluo project.",
   "newTask.type": "Task type",
   "newTask.typeAuto": "auto",
   "taskType.feature": "feature",
@@ -122,14 +108,12 @@
   "newTask.taskPlaceholder": "Describe the task to run…",
   "newTask.discover": "Start from discovery step (multi-turn requirement clarification)",
   "newTask.submit": "Publish",
-
   "keys.title": "Daemon Keys",
   "keys.hint": "A daemon authenticates to this server with a key bound to your owner account. The plaintext is shown <strong>only once</strong> at creation — copy it into the daemon's <code>--daemon-key</code> config.",
   "keys.labelPlaceholder": "Label (optional)",
   "keys.create": "Create key",
   "keys.revealNote": "Copy this key now — it will not be shown again.",
   "keys.loading": "Loading keys…",
-
   "users.title": "User Management",
   "users.hint": "Create and delete local users, reset local-user passwords, or toggle the admin flag. All permission checks are enforced server-side — you cannot delete or demote yourself, the last admin in the system, or the reserved break-glass admin account.",
   "users.usernamePlaceholder": "Username",
@@ -138,7 +122,6 @@
   "users.isAdmin": "Admin",
   "users.create": "Create user",
   "users.loading": "Loading users…",
-
   "status.step.running": "In progress",
   "status.step.retrying": "Retrying",
   "status.step.paused": "Paused",
@@ -146,13 +129,11 @@
   "status.step.failed": "Failed",
   "status.step.partial": "Partially complete",
   "status.step.waiting_for_lock": "Waiting for lock",
-
   "status.group.queued": "Queued",
   "status.group.running": "Implementing in worktree",
   "status.group.completed": "Completed",
   "status.group.failed": "Failed",
   "status.group.skipped": "Skipped",
-
   "status.flow.running": "running",
   "status.flow.completed": "completed",
   "status.flow.failed": "failed",
@@ -160,16 +141,13 @@
   "status.flow.init": "init",
   "status.flow.recovering": "recovering",
   "status.flow.unknown": "unknown",
-
   "status.issue.open": "open",
   "status.issue.inProgress": "in-progress",
   "status.issue.resolved": "resolved",
   "status.issue.wontFix": "won't-fix",
   "status.issue.closed": "closed",
-
   "indexProgress.withTotal": "Updating code-index: {path} ({done}/{total})",
   "indexProgress.noTotal": "Updating code-index: {path}",
-
   "toast.interjectionDelivered": "Interjection delivered — waiting for the flow to consume it",
   "toast.interjectionConsumed": "Interjection consumed",
   "toast.taskLaunchFailed": "Failed to launch task{where}: {reason}",
@@ -214,7 +192,6 @@
   "toast.passwordReset": "Reset password for {name}.",
   "toast.adminGranted": "Set as admin.",
   "toast.adminRevoked": "Removed admin.",
-
   "flow.resume": "Resume",
   "flow.resuming": "Resuming…",
   "flow.resumeTitle": "Resume this flow",
@@ -230,12 +207,9 @@
   "flow.detailRetrying": "{message} Retrying…",
   "flow.noStepHistory": "No step history reported.",
   "flow.noConversationRecords": "No conversation records for this session.",
-
   "endSession.confirmMessage": "Confirm ending and archiving this session ({id}…)? A worktree session will be cleaned up and archived, and uncommitted work will not be merged into the main branch.",
-
   "flows.titleWith": "Flows — {name}",
   "flows.emptyMachine": "No flows on this machine.",
-
   "flowSidebar.overview": "Overview",
   "flowSidebar.status": "Status",
   "flowSidebar.type": "Type",
@@ -247,7 +221,6 @@
   "flowSidebar.machineSection": "Machine",
   "flowSidebar.machine": "Machine",
   "flowSidebar.flowId": "Flow id",
-
   "intervention.call.label": "Awaiting reply",
   "intervention.call.hint": "The running flow is waiting for your reply.",
   "intervention.interjection.label": "Interject",
@@ -260,10 +233,8 @@
   "intervention.discoveryConfirm.hint": "Discovery has produced a refined task description. Enter 1 to confirm and continue, or reply with anything else to keep refining.",
   "intervention.confirm.label": "Approval needed",
   "intervention.confirm.hint": "The running flow is waiting for your approval. Click Approve to pass, or Reject and explain what needs changing.",
-
   "interject.cancelTitle": "Cancel interjection",
   "interject.title": "Add an extra instruction to the running flow.",
-
   "reply.empty.canDraftMobile": "You can draft a reply, or tap ✎ to interject…",
   "reply.empty.canDraft": "No pending items — you can draft a reply first, or click ✎ to interject…",
   "reply.empty.active": "There are no pending interaction items right now — nothing to reply to.",
@@ -279,7 +250,6 @@
   "reply.revisionConfirm": "Your reply will be treated as a revision request. Continue?",
   "reply.echo.approveNote": "Approved: {note}",
   "reply.echo.rejectNote": "Rejected: {note}",
-
   "adjudicate.title": "Adjudication approval",
   "adjudicate.rationaleLabel": "Adjudication rationale",
   "adjudicate.taskDescLabel": "Task description",
@@ -287,25 +257,20 @@
   "adjudicate.sameAsBaseline": "The task description matches the baseline (no change).",
   "adjudicate.coveredSurfacesLabel": "Surfaces covered by the boundary clause",
   "adjudicate.coveredSurfaceJustification": "Why:",
-
   "prompt.expandDetail": "▸ Expand message detail",
   "prompt.collapseDetail": "▾ Collapse message detail",
   "prompt.templatePrefix": "Template prefix",
   "prompt.frameworkSuffix": "Framework suffix",
   "prompt.chipLabel": "{role} prompt · {ctx}",
   "prompt.chipLabelNoCtx": "{role} prompt",
-
   "fold.expandAll": "▸ Expand all ({size})",
   "fold.collapse": "▾ Collapse",
   "fold.expandAllSimple": "▸ Expand all",
   "fold.collapseAll": "▾ Collapse all",
-
   "raw.view": "View raw",
   "raw.hide": "Hide raw ({kind})",
-
   "error.serverReturned": "Server returned {status}.",
   "error.networkReach": "Network error — could not reach the server.",
-
   "history.projectLabel": "Project",
   "history.unknownProject": "Unknown project",
   "history.refreshing": "Refreshing history…",
@@ -314,7 +279,6 @@
   "history.loadingRecords": "Loading records…",
   "history.loadError": "Could not load history for this session ({status}).",
   "history.networkError": "Network error loading session history.",
-
   "issueLaunch.reason.inProgress": "The issue is in progress; a flow cannot be launched again.",
   "issueLaunch.reason.resolved": "The issue is resolved; no flow needs to be launched.",
   "issueLaunch.reason.wontFix": "The issue is marked won't-fix.",
@@ -325,9 +289,7 @@
   "issueLaunch.buttonTitle": "Launch a new flow from this issue",
   "issueLaunch.dispatching": "Dispatching…",
   "issueLaunch.message": "A new flow will be launched from Issue #{id} ({title}).",
-
   "issues.empty": "No issues yet.",
-
   "issueDetail.notFound": "Issue not found.",
   "issueDetail.field.type": "Type",
   "issueDetail.field.priority": "Priority",
@@ -340,7 +302,6 @@
   "issueDetail.edit": "Edit",
   "issueDetail.reopen": "Reopen",
   "issueDetail.close": "Close",
-
   "issueModal.noMachines": "(no machines connected)",
   "issueModal.noProjects": "(this machine has no registered projects)",
   "issueModal.selectProject": "(select a project…)",
@@ -351,12 +312,10 @@
   "issueModal.errDescRequired": "Description must not be empty.",
   "issueModal.errNoMachine": "No online machine is available.",
   "issueModal.errInvalidPath": "Select or enter a valid project path.",
-
   "issueAction.closeTitle": "Close Issue",
   "issueAction.closeMessage": "Confirm closing Issue #{id}?",
   "issueAction.reopenTitle": "Reopen Issue",
   "issueAction.reopenMessage": "Confirm reopening Issue #{id}?",
-
   "stepHeader.discovery": "DISCOVERY",
   "stepHeader.analyze": "ANALYZE",
   "stepHeader.project_summary": "PROJECT SUMMARY",
@@ -376,7 +335,6 @@
   "stepHeader.merge_integrate": "MERGE",
   "stepHeader.version_reconcile": "VERSION RECONCILE",
   "stepHeader.summarize": "SUMMARY",
-
   "stepReport.discovery": "Discovery",
   "stepReport.analyze": "Analysis",
   "stepReport.project_summary": "Project Summary",
@@ -399,20 +357,16 @@
   "stepReport.summarize": "Work Summary",
   "stepReport.usageLabel": "tokens",
   "stepReport.errorPrefix": "Error: ",
-
   "stepReportSuffix.summarize": "Summary",
   "stepReportSuffix.default": "Result",
-
   "usage.roundFootnote": "This round {roundIn} in / {roundOut} out · Total {cumIn} in / {cumOut} out",
   "usage.sessionLabel": "Session",
-
   "newTask.otherPath": "Other path…",
   "newTask.errSelectMachine": "Select a target machine.",
   "newTask.errTaskEmpty": "Task description must not be empty.",
   "newTask.errSelectProject": "Select a project root for this task.",
   "newTask.errEnterPath": "Enter an absolute path for the project.",
   "newTask.errPathAbsolute": "Project path must be absolute (start with '/').",
-
   "login.errUsername": "Enter your username.",
   "login.errPassword": "Enter your password.",
   "login.errTooMany": "Too many attempts — wait a moment and retry.",
@@ -420,14 +374,12 @@
   "login.errInvalid": "Invalid username or password.",
   "login.errPasteToken": "Paste the break-glass token.",
   "login.errInvalidToken": "Invalid or expired break-glass token.",
-
   "keys.empty": "No daemon keys yet.",
   "keys.revoke": "Revoke",
   "keys.statusActive": "Active",
   "keys.statusRevoked": "Revoked",
   "keys.errCreateNetwork": "Network error — could not create the key.",
   "keys.errRevokeNetwork": "Network error — could not revoke the key.",
-
   "users.empty": "No manageable users.",
   "users.self": "(You)",
   "users.roleAdmin": "admin",
@@ -444,7 +396,6 @@
   "users.errDeleteNetwork": "Network error — could not delete the user.",
   "users.errResetNetwork": "Network error — could not reset the password.",
   "users.errAdminNetwork": "Network error — could not change admin status.",
-
   "projects.title": "Registered Projects",
   "projects.hint": "Projects registered on this machine's daemon. They drive the New Task project list, the History grouping and the Issue project filter. Removing one only deregisters it — nothing on disk is deleted.",
   "projects.manage": "Manage registered projects",
@@ -456,7 +407,7 @@
   "projects.stale": "missing",
   "projects.remove": "Remove",
   "projects.removeTitle": "Remove project",
-  "projects.removeMessage": "Deregister this project from the machine? Only the registration is removed — the project directory and its se3/ history are left untouched, and a later flow there re-registers it automatically.",
+  "projects.removeMessage": "Deregister this project from the machine? Only the registration is removed — the project directory and its runtime history are left untouched, and a later flow there re-registers it automatically.",
   "projects.removeConfirm": "Remove",
   "projects.errEmptyPath": "Enter a project path.",
   "projects.errNotAbsolute": "Enter an absolute path.",
@@ -472,18 +423,14 @@
   "projects.errGeneric": "The operation failed on the daemon.",
   "projects.errAddNetwork": "Network error — could not register the project.",
   "projects.errRemoveNetwork": "Network error — could not remove the project.",
-
   "flow.badge.waitingLock": "⏳ waiting for lock",
   "flow.badge.needsResponse": "⚠ needs response",
   "flow.stepType.response": "{label} response",
   "flow.statusWaitingLock": "waiting for lock",
   "keys.unlabeled": "(unlabeled)",
-
   "history.badge.live": "● live",
-
   "discovery.proposedTaskDescription": "Proposed Task Description",
   "discovery.questions": "Questions",
-
   "stepReport.section.reasoning": "Reasoning",
   "stepReport.section.summary": "Summary",
   "stepReport.section.rationale": "Rationale",
@@ -494,20 +441,16 @@
   "stepReport.empty.noSummary": "(no summary)",
   "stepReport.status": "Status: {status}",
   "stepOutput.inProgress": "{label} (in progress)",
-
   "conn.connecting": "connecting…",
   "conn.reconnecting": "reconnecting…",
   "conn.connected": "connected",
   "conn.disconnected": "disconnected",
-
   "stepReport.chip.completed": "Step completed",
   "stepReport.chip.failed": "Step failed",
-
   "stepReport.label.task": "task",
   "stepReport.label.complexity": "complexity",
   "stepReport.label.scope": "scope",
   "stepReport.versionAnalyze.subline": "{bumpType} bump  │  confidence: {confidence}",
-
   "stepReport.count.relevantSpecItems": "Relevant Spec Items ({n})",
   "stepReport.count.filesToModify": "Files to Modify ({n})",
   "stepReport.count.filesToCreate": "Files to Create ({n})",
@@ -519,10 +462,8 @@
   "stepReport.count.interfaces": "Interfaces ({n})",
   "stepReport.count.keyDecisions": "Key Decisions ({n})",
   "stepReport.count.taskGroups": "Task Groups ({n})",
-
   "stepReport.restricted.applied": "Restricted edits applied: {n}",
   "stepReport.restricted.failed": "Restricted edits failed: {n}",
-
   "stepReport.section.overview": "Overview",
   "stepReport.section.proposal": "Proposal",
   "stepReport.section.design": "Design",
@@ -540,7 +481,6 @@
   "stepReport.section.suggestedUpdate": "Suggested update",
   "stepReport.section.notAutoApplied": "Not auto-applied: {reason}",
   "stepReport.section.charterAdmission": "Charter admission",
-
   "stepReport.status.passed": "PASSED",
   "stepReport.status.failed": "FAILED",
   "stepReport.status.unknown": "?",
@@ -554,8 +494,7 @@
   "stepReport.charter.updateAdvised": "charter update advised",
   "stepReport.charter.fresh": "charter fresh",
   "stepReport.charter.touched": "touched: {list}",
-  "stepReport.charter.autoUpdatedNote": "se3/charter.md was updated to describe the already-reviewed change.",
-
+  "stepReport.charter.autoUpdatedNote": "tianluo/charter.md was updated to describe the already-reviewed change.",
   "stepReport.design.reasonPrefix": "Reason: ",
   "stepReport.plan.groupMeta": "{tasks} tasks · ~{loc} LOC · depends: {deps}",
   "stepReport.plan.dependsNone": "none",
@@ -573,7 +512,6 @@
   "stepReport.severity.low": "low",
   "stepReport.scope.inScope": "In-scope",
   "stepReport.scope.outOfScope": "Out-of-scope",
-
   "tool.detail.empty": "(no details available)",
   "tool.detail.truncated": "… (output truncated)",
   "tool.detail.stderr": "stderr",
@@ -590,7 +528,6 @@
   "stepReport.empty": "(no report fields)",
   "record.attempt": "attempt {n}",
   "usage.valueLine": "in {in} · out {out} · cache r/w {cacheRead}/{cacheWrite} · {cost}",
-
   "issue.untitled": "untitled",
   "flow.untitled": "(untitled flow)",
   "flow.card.currentStep": "step: {step}",

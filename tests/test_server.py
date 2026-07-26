@@ -376,7 +376,7 @@ def test_index_serves_frontend(client_and_app):
     client, app = client_and_app
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "SE3" in resp.text
+    assert "tianluo" in resp.text
 
 
 def test_machines_empty(client_and_app):
@@ -625,7 +625,7 @@ def test_respond_flow_unknown_flow_404(client_and_app):
 def test_static_assets_served(client_and_app):
     client, app = client_and_app
     # index.html (via html=True directory serving)
-    assert "SE3" in client.get("/").text
+    assert "tianluo" in client.get("/").text
     css = client.get("/style.css")
     assert css.status_code == 200 and "control plane" in css.text.lower()
     js = client.get("/app.js")

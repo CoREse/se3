@@ -6,12 +6,13 @@
   <!-- The tab title is user-visible chrome, so it localizes too: app.js's
        initI18n()/setLang() write document.title from the `topbar.title` key.
        The literal here is the pre-JS / fetch-failure fallback. -->
-  <title>SE3 Control Plane</title>
+  <title>tianluo Control Plane</title>
+  <link rel="icon" href="favicon.ico">
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header class="topbar">
-    <h1 data-i18n="topbar.title">SE3&nbsp;Control&nbsp;Plane</h1>
+    <h1 data-i18n="topbar.title">tianluo&nbsp;Control&nbsp;Plane</h1>
     <div class="topbar-right">
       <span id="se3-version" class="se3-version"></span>
       <!-- Deliberately NOT data-i18n: this badge shows LIVE connection state.
@@ -441,8 +442,8 @@
                autocomplete="off"
                spellcheck="false" />
         <p id="nt-project-manual-hint" class="form-hint hidden" data-i18n-html="newTask.projectManualHint">
-          Enter an absolute path. The daemon will run <code>se3 init</code>
-          there first if the directory is not yet an SE3 project.
+          Enter an absolute path. The daemon will run <code>luo init</code>
+          there first if the directory is not yet a tianluo project.
         </p>
 
         <label for="nt-type" data-i18n="newTask.type">Task type</label>
@@ -610,7 +611,7 @@
       <div class="modal-body">
         <p data-i18n="projects.removeMessage">
           Deregister this project from the machine? Only the registration is
-          removed — the project directory and its se3/ history are left
+          removed — the project directory and its runtime history are left
           untouched, and a later flow there re-registers it automatically.
         </p>
         <p id="project-remove-path" class="project-remove-path"></p>
