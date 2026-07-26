@@ -17,10 +17,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.steps.test import _extract_failure_reason
-from se3.engine.issue_discovery import IssueDiscovery
-from se3.engine.issue_manager import IssueManager
-from se3.engine.models import (
+from tianluo.engine.steps.test import _extract_failure_reason
+from tianluo.engine.issue_discovery import IssueDiscovery
+from tianluo.engine.issue_manager import IssueManager
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -200,10 +200,10 @@ class TestFixLoopLogic:
             "passed": passed,
         }
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_inherited_failure_no_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -221,10 +221,10 @@ class TestFixLoopLogic:
         assert step.outputs["test_results"]["overall_passed"] is False
         assert step.outputs.get("fix_needed") is not True
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_new_test_failure_triggers_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -242,10 +242,10 @@ class TestFixLoopLogic:
         assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["fix_needed"] is True
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_introduced_regression_triggers_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -263,10 +263,10 @@ class TestFixLoopLogic:
         assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["fix_needed"] is True
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_mixed_inherited_and_new_triggers_fix_loop(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -286,10 +286,10 @@ class TestFixLoopLogic:
 
         assert result == StepStatus.REVISION_NEEDED
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_all_pass_returns_completed(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -303,10 +303,10 @@ class TestFixLoopLogic:
         assert result == StepStatus.COMPLETED
         assert step.outputs["test_results"]["overall_passed"] is True
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_overall_passed_reflects_actual_exit_status(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -353,10 +353,10 @@ class TestInheritedFailuresOutput:
             "passed": passed,
         }
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_inherited_in_outputs(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -378,10 +378,10 @@ class TestInheritedFailuresOutput:
             assert entries[0]["test_id"] == "tests/test_old.py::test_broken"
             assert "1 == 2" in entries[0]["reason"]
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_introduced_regression_not_persisted(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -402,10 +402,10 @@ class TestInheritedFailuresOutput:
         assert "tests/test_new_reg.py::test_regressed" in tr["introduced_failures"]
         assert tr["inherited_failures"] == []
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_no_inherited_when_all_pass(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -419,10 +419,10 @@ class TestInheritedFailuresOutput:
         assert step.outputs["pre_existing_failures"] == []
         assert step.outputs["inherited_failures"] == []
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_report_called_for_inherited(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -439,10 +439,10 @@ class TestInheritedFailuresOutput:
         call_args = mock_report.call_args
         assert len(call_args[0][2]) == 1  # 1 inherited failure
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_report_not_called_when_no_inherited(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -455,10 +455,10 @@ class TestInheritedFailuresOutput:
 
         mock_report.assert_not_called()
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.engine.steps.test._detect_test_command", return_value=["pytest", "-v"])
     def test_inherited_issue_filed_once_across_iterations(
         self, mock_detect, mock_run, mock_history, mock_report, project_root,
     ):
@@ -499,7 +499,7 @@ def step_handler_call(step, flow):
     failures (introduced failures still loop). Mechanism B's in-budget looping
     is covered in ``tests/engine/test_baseline_fix_loop.py``.
     """
-    from se3.engine.steps.test import test_handler
+    from tianluo.engine.steps.test import test_handler
 
     mock_config = MagicMock()
     mock_config.command = None
@@ -507,8 +507,8 @@ def step_handler_call(step, flow):
     mock_config.critical_tests = []
     mock_config.get_phases_for_run.return_value = []
 
-    with patch("se3.config.TestConfig") as MockTestConfig, \
-         patch("se3.config.WorkflowConfig") as MockWorkflowConfig:
+    with patch("tianluo.config.TestConfig") as MockTestConfig, \
+         patch("tianluo.config.WorkflowConfig") as MockWorkflowConfig:
         MockTestConfig.load.return_value = mock_config
         MockWorkflowConfig.load.return_value = MagicMock(baseline_fix_max_attempts=0)
         return test_handler(step, flow)

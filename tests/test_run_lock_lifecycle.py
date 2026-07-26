@@ -22,10 +22,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.commands.run import _ensure_main_lock_for_step
-from se3.commands.merge.merge_lock import MergeLock
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.persistence import PersistenceManager
+from tianluo.commands.run import _ensure_main_lock_for_step
+from tianluo.commands.merge.merge_lock import MergeLock
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.persistence import PersistenceManager
 
 
 @pytest.fixture
@@ -229,7 +229,7 @@ def test_stale_lock_reclaimed_without_waiting(project: Path) -> None:
 # --------------------------------------------------------------------------
 
 def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> None:
-    from se3.commands.run import run_flow
+    from tianluo.commands.run import run_flow
 
     flow = FlowInstance(
         flow_id="interrupt-wait-001",
@@ -258,12 +258,12 @@ def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> No
         persistence.save_flow(f)
         raise KeyboardInterrupt
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run.render_full"
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run.render_full"
     ), patch(
-        "se3.commands.run._ensure_main_lock_for_step", side_effect=_ensure
+        "tianluo.commands.run._ensure_main_lock_for_step", side_effect=_ensure
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm

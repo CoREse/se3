@@ -10,7 +10,7 @@ against PATH and uses every one it finds, in declared order. Covers:
 - The probe filter applies to level 4 ONLY: an explicitly configured
   ``llm_caller.defaults`` is never filtered, even when nothing is on PATH.
 
-Every case mocks ``se3.config.shutil.which``, so results never depend on
+Every case mocks ``tianluo.config.shutil.which``, so results never depend on
 whether the host running the suite happens to have claude or codex
 installed.
 """
@@ -19,8 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.config as _cfg
-from se3.config import _builtin_default_chain, load_agents, load_claude_commands
+import tianluo.config as _cfg
+from tianluo.config import _builtin_default_chain, load_agents, load_claude_commands
 
 
 @pytest.fixture(autouse=True)
@@ -38,11 +38,11 @@ def _which_only(*available: str):
     def fake_which(cmd, *args, **kwargs):
         return f"/fake/bin/{cmd}" if cmd in available else None
 
-    return patch("se3.config.shutil.which", side_effect=fake_which)
+    return patch("tianluo.config.shutil.which", side_effect=fake_which)
 
 
 def _no_global(tmp_path):
-    return patch("se3.config.Path.home", return_value=tmp_path)
+    return patch("tianluo.config.Path.home", return_value=tmp_path)
 
 
 class TestBuiltinDefaultChain:

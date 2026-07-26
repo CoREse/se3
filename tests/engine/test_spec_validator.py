@@ -1,4 +1,4 @@
-"""Unit tests for ``se3.engine.spec_validator.validate_spec_structure``.
+"""Unit tests for ``tianluo.engine.spec_validator.validate_spec_structure``.
 
 Covers each of the five v1 structural rules (positive + negative case
 each), plus the high-priority documentation-updater meta-summary
@@ -7,7 +7,7 @@ fixture that motivated the validator.
 
 from __future__ import annotations
 
-from se3.engine.spec_validator import (
+from tianluo.engine.spec_validator import (
     V1_MARKER,
     ValidationResult,
     extract_spec_body,

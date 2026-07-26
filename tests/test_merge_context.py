@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     _is_spec_path,
     _looks_binary,

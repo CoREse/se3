@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.issue_manager import IssueManager, IssueStatus
-from se3.engine.merge.runtime_sync import (
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.merge.runtime_sync import (
     IssueMergeRecord,
     merge_worktree_issues,
 )
@@ -275,7 +275,7 @@ def test_adopt_scopes_rewrite_when_kept_owner_has_mismatched_filename(
     filename-prefix-only check saw no ``005_*.yaml`` and rewrote store-wide,
     corrupting the reference — this pins the fix.
     """
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_root = tmp_path / "main"
     main_mgr = IssueManager(main_root)
@@ -303,7 +303,7 @@ def test_adopt_scopes_rewrite_when_kept_owner_has_mismatched_filename(
 
 def test_adopt_issue_rejects_empty_description(tmp_path: Path) -> None:
     """Adopting an issue with an empty description raises ValueError."""
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_mgr = IssueManager(tmp_path / "main")
     bad = Issue(id="009", description="   ")
@@ -319,7 +319,7 @@ def test_renumber_rewrites_self_reference_and_records_trace(tmp_path: Path) -> N
     to ``#<new>``, a traceable "old -> new" line is recorded, both sides survive,
     and ``.next_id`` lands at ``max(ID) + 1``.
     """
-    from se3.engine.merge.issue_renumber import format_renumber_trace
+    from tianluo.engine.merge.issue_renumber import format_renumber_trace
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -375,7 +375,7 @@ def test_batch_retired_number_rewrites_preexisting_store_reference(
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
 
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_mgr = IssueManager(main_root)
     main_mgr.create("keep")            # 001
@@ -458,8 +458,8 @@ def test_colliding_old_ids_in_source_leave_own_references_ambiguous(
     distinct new IDs with the token left as written and the ambiguity
     recorded durably in each holder.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -522,8 +522,8 @@ def test_ambiguous_shared_old_id_reference_left_and_recorded(
     (listing both candidates) recorded in the adopted copy, and the batch must
     stay idempotent on re-run.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -585,7 +585,7 @@ def test_runtime_sync_ambiguity_surfaced_via_out_param(tmp_path: Path) -> None:
     one ``{"file", "old_id", "candidates"}`` entry per affected file into the
     caller-supplied out list.
     """
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -636,8 +636,8 @@ def test_shared_old_id_with_identity_keeper_stays_ambiguous(
     references. The tokens must keep their digits and both candidates
     (including the kept number) must be recorded.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"

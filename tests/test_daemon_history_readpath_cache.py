@@ -1,9 +1,9 @@
 """Regression lock for the daemon *history* read-path disk-JSON cache (#243 / A1-A2).
 
-The daemon history reader (:mod:`se3.daemon.history`) re-touches the SAME
+The daemon history reader (:mod:`tianluo.daemon.history`) re-touches the SAME
 ``se3/state/archive/engine_*.json`` and ``se3/history/<flow>/_meta.json`` files
 on every historical enumeration. Group G3 routes those reads through the unified
-``(path, mtime, size)``-keyed :mod:`se3.daemon.disk_json_cache`
+``(path, mtime, size)``-keyed :mod:`tianluo.daemon.disk_json_cache`
 (``read_engine_header`` / ``read_json_cached``), superseding the earlier
 content-keyed ``_read_engine_cached``. Two guardrails must hold on this path and
 are locked here (regression section item **(b)**):
@@ -32,9 +32,9 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-import se3.daemon.history as history_mod
-from se3.daemon.history import enumerate_historical_project_roots
+import tianluo.daemon.disk_json_cache as disk_cache
+import tianluo.daemon.history as history_mod
+from tianluo.daemon.history import enumerate_historical_project_roots
 
 # Comfortably above the 5 MiB guard so the file is always degraded, kept modest
 # so the test's temp write stays fast.
@@ -202,7 +202,7 @@ def test_degraded_extraction_failure_is_skipped_and_warned(
 
     counter = _count_full_parses(monkeypatch)
 
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         roots = enumerate_historical_project_roots([root])
 
     assert counter["n"] == 0, "an unparseable oversized file must not be fully parsed"
@@ -211,7 +211,7 @@ def test_degraded_extraction_failure_is_skipped_and_warned(
     assert "unreadable archive file" in caplog.text
     # warn-once: a second enumeration of the same corrupt file does not re-warn.
     caplog.clear()
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         enumerate_historical_project_roots([root])
     assert "unreadable archive file" not in caplog.text
 

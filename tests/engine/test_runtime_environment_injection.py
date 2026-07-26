@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import context_builder
-from se3.engine.context_builder import (
+from tianluo.engine import context_builder
+from tianluo.engine.context_builder import (
     RUNTIME_ENV_INJECTION_DEFAULT_STEPS,
     RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS,
     _reset_runtime_environment_cache,
@@ -156,7 +156,7 @@ def test_missing_markdown_returns_empty_and_warns_once(tmp_path, caplog, monkeyp
         context_builder, "_load_runtime_environment_markdown", _broken_path_loader
     )
 
-    with caplog.at_level(logging.WARNING, logger="se3.engine.context_builder"):
+    with caplog.at_level(logging.WARNING, logger="tianluo.engine.context_builder"):
         result1 = get_runtime_environment_injection("plan", tmp_path)
         result2 = get_runtime_environment_injection("implement", tmp_path)
         result3 = get_runtime_environment_injection("self_check", tmp_path)
@@ -247,7 +247,7 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
     """
     from unittest.mock import MagicMock, patch
 
-    from se3.engine.models import FlowInstance, Step, StepType
+    from tianluo.engine.models import FlowInstance, Step, StepType
 
     single_group = [
         {
@@ -282,8 +282,8 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
 
     mock_caller.call.side_effect = _capture_call
 
-    with patch("se3.engine.steps.implement.LLMCaller", return_value=mock_caller), \
-         patch("se3.engine.steps.implement.parse_json_response", return_value={
+    with patch("tianluo.engine.steps.implement.LLMCaller", return_value=mock_caller), \
+         patch("tianluo.engine.steps.implement.parse_json_response", return_value={
              "files_changed": ["a.py"],
              "tests_added": [],
              "test_mapping": {},
@@ -292,7 +292,7 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
              "incomplete_tasks": [],
              "restricted_edits": [],
          }):
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         implement_handler(step, flow)
 
     assert captured_prompts, "implement_handler should have invoked the LLM at least once"

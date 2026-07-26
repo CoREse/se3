@@ -24,12 +24,12 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.engine import chat_history
-from se3.engine.chat_history import (
+from tianluo.engine import chat_history
+from tianluo.engine.chat_history import (
     extract_model_name_from_ndjson,
     extract_model_name_from_obj,
 )
-from se3.engine.llm_caller import LLMCaller, StreamJSONTracker
+from tianluo.engine.llm_caller import LLMCaller, StreamJSONTracker
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ def test_call_emits_identity_seed_before_result(monkeypatch, tmp_path):
             return ["-p", prompt]
 
         def detect_infra_error(self, returncode, output, stderr_tail):
-            from se3.agent_runner import InfraErrorType
+            from tianluo.agent_runner import InfraErrorType
 
             return InfraErrorType.NONE
 
@@ -464,7 +464,7 @@ class _RotationRunner:
         return ["-p", prompt]
 
     def detect_infra_error(self, returncode, output, stderr_tail):
-        from se3.agent_runner import InfraErrorType
+        from tianluo.agent_runner import InfraErrorType
 
         return InfraErrorType.NONE
 

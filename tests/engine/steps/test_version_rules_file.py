@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.steps.version_analyze import (
+from tianluo.engine.steps.version_analyze import (
     VERSION_RULES_FILE_RELPATH,
     VERSION_RULES_MAX_BYTES,
     _read_version_rules_file,

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_respond import process_merge_response
+from tianluo.commands.merge_respond import process_merge_response
 
 
 def _init_repo(path: Path) -> None:
@@ -373,10 +373,10 @@ class TestMainWorktreeLockRoot:
 
         sentinel_root = Path("/resolved/main/repo")
         with patch(
-            "se3.commands.run._resolve_main_lock_root",
+            "tianluo.commands.run._resolve_main_lock_root",
             return_value=sentinel_root,
         ) as mock_resolve, patch(
-            "se3.commands.merge.merge_lock.MergeLock"
+            "tianluo.commands.merge.merge_lock.MergeLock"
         ) as MockLock:
             MockLock.return_value = MagicMock()
             exit_code = process_merge_response(call_file, project_root=tmp_path)
@@ -469,11 +469,11 @@ class TestGuardrailsAfterAccept:
 
         # Mock guardrails to pass
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -524,7 +524,7 @@ class TestGuardrailsAfterAccept:
 
         # Mock guardrails to fail (violation detected)
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             return GuardrailReport(
                 passed=False,
                 violations=[
@@ -537,7 +537,7 @@ class TestGuardrailsAfterAccept:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -604,7 +604,7 @@ class TestGitAddReturncode:
         monkeypatch.setattr(subprocess_mod, "run", fake_run)
         # The merge_respond module imported subprocess at the top, so we
         # also need to patch it via the imported module's namespace.
-        from se3.commands import merge_respond as merge_respond_mod
+        from tianluo.commands import merge_respond as merge_respond_mod
         monkeypatch.setattr(
             merge_respond_mod.subprocess, "run", fake_run
         )
@@ -617,7 +617,7 @@ class TestFirstParentSha:
     """G8 task 42 (G1): _first_parent_sha helper for octopus-safe parent walk."""
 
     def test_two_parent_merge_first_parent(self, tmp_path: Path) -> None:
-        from se3.commands.merge_respond import _first_parent_sha
+        from tianluo.commands.merge_respond import _first_parent_sha
 
         _init_repo(tmp_path)
         # Create a feature branch and merge it
@@ -653,7 +653,7 @@ class TestFirstParentSha:
         assert first_parent == first_parent_expected
 
     def test_root_commit_raises_runtime_error(self, tmp_path: Path) -> None:
-        from se3.commands.merge_respond import _first_parent_sha
+        from tianluo.commands.merge_respond import _first_parent_sha
 
         _init_repo(tmp_path)
         # _init_repo only created the initial commit; HEAD has no parents
@@ -665,26 +665,26 @@ class TestIsSpecPath:
     """G8 task 43 (G2): _is_spec_path uses pathlib.PurePosixPath."""
 
     def test_forward_slash_path(self) -> None:
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3/specs/base/spec.md") is True
         assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
 
     def test_backslash_path_normalized(self) -> None:
         """G2: Windows paths with backslashes are normalised before check."""
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3\\specs\\base\\spec.md") is True
         assert _is_spec_path("se3\\specs\\foo\\bar\\spec.md") is True
 
     def test_mixed_separators(self) -> None:
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3\\specs/base/spec.md") is True
         assert _is_spec_path("se3/specs\\base\\spec.md") is True
 
     def test_non_spec_paths_rejected(self) -> None:
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("README.md") is False
         assert _is_spec_path("se3/state/foo.json") is False
@@ -749,7 +749,7 @@ class TestPendingGuardrailsStashResetFailure:
 
         # Mock guardrails to fail so the stash+reset path is reached
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             return GuardrailReport(
                 passed=False,
                 violations=[
@@ -762,7 +762,7 @@ class TestPendingGuardrailsStashResetFailure:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -786,7 +786,7 @@ class TestPendingGuardrailsStashResetFailure:
                     )
             return original_run(cmd, *args, **kwargs)
 
-        from se3.commands import merge_respond as merge_respond_mod
+        from tianluo.commands import merge_respond as merge_respond_mod
         monkeypatch.setattr(merge_respond_mod.subprocess, "run", fake_run)
 
         exit_code = process_merge_response(call_file, project_root=tmp_path)
@@ -841,7 +841,7 @@ class TestPendingGuardrailsStashResetFailure:
         )
 
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             return GuardrailReport(
                 passed=False,
                 violations=[
@@ -854,7 +854,7 @@ class TestPendingGuardrailsStashResetFailure:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -876,7 +876,7 @@ class TestPendingGuardrailsStashResetFailure:
                     )
             return original_run(cmd, *args, **kwargs)
 
-        from se3.commands import merge_respond as merge_respond_mod
+        from tianluo.commands import merge_respond as merge_respond_mod
         monkeypatch.setattr(merge_respond_mod.subprocess, "run", fake_run)
 
         rendered_texts: list[str] = []
@@ -950,11 +950,11 @@ class TestPendingGuardrailsMultiCommitGuard:
         )
 
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1065,11 +1065,11 @@ class TestPendingGuardrailsMultiCommitGuard:
         )
 
         def mock_check(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1089,7 +1089,7 @@ class TestPendingGuardrailsMultiCommitGuard:
                 )
             return original_run(cmd, *args, **kwargs)
 
-        from se3.commands import merge_respond as merge_respond_mod
+        from tianluo.commands import merge_respond as merge_respond_mod
         monkeypatch.setattr(merge_respond_mod.subprocess, "run", fake_run)
 
         exit_code = process_merge_response(call_file, project_root=tmp_path)

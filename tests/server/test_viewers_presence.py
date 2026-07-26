@@ -22,16 +22,16 @@ import json
 
 import pytest
 
-from se3.daemon import protocol
-from se3.server import ws as ws_module
-from se3.server.state import ServerState
-from se3.server.ws import (
+from tianluo.daemon import protocol
+from tianluo.server import ws as ws_module
+from tianluo.server.state import ServerState
+from tianluo.server.ws import (
     ConnectionManager,
     UiHub,
     _serve_loop,
     handle_daemon_connection,
 )
-from se3.daemon.wire_metrics import WireMetrics
+from tianluo.daemon.wire_metrics import WireMetrics
 
 
 # --------------------------------------------------------------------------
@@ -439,7 +439,7 @@ def test_handshake_without_hub_sends_no_viewers():
 def test_daemon_ping_with_viewers_still_replies_pong():
     """The daemon replies PONG to a PING regardless of extra payload fields —
     the contract that makes the level field safe to send to every daemon."""
-    from se3.daemon.client import DaemonClient
+    from tianluo.daemon.client import DaemonClient
 
     class _FakeClientWS:
         def __init__(self):
@@ -473,8 +473,8 @@ def test_daemon_ping_with_viewers_still_replies_pong():
 # server→daemon frame straight into the client.
 # --------------------------------------------------------------------------
 
-from se3.daemon import client as client_module
-from se3.daemon.client import DaemonClient
+from tianluo.daemon import client as client_module
+from tianluo.daemon.client import DaemonClient
 
 
 class _ClientOutWS:

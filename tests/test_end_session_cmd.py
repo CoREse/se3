@@ -10,9 +10,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands import end_session_cmd
-from se3.commands.end_session_cmd import end_session
-from se3.engine.worktree import _branch_safe_name, exists_for_branch
+from tianluo.commands import end_session_cmd
+from tianluo.commands.end_session_cmd import end_session
+from tianluo.engine.worktree import _branch_safe_name, exists_for_branch
 
 
 # --------------------------------------------------------------------------
@@ -682,7 +682,7 @@ def test_archive_failure_preserves_worktree_and_branch(
         raise OSError("No space left on device")
 
     monkeypatch.setattr(
-        "se3.engine.merge.cleanup._archive_worktree", _boom
+        "tianluo.engine.merge.cleanup._archive_worktree", _boom
     )
 
     rc = end_session(project_root=main, flow_id=flow_id)
@@ -710,7 +710,7 @@ def test_step_failure_does_not_abort_and_exit_nonzero(
         raise RuntimeError("promotion exploded")
 
     monkeypatch.setattr(
-        "se3.engine.merge.cleanup._promote_completed_engine_state", _boom
+        "tianluo.engine.merge.cleanup._promote_completed_engine_state", _boom
     )
 
     rc = end_session(project_root=main, flow_id=flow_id)

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_cmd import (
+from tianluo.commands.merge_cmd import (
     _branch_exists,
     run_merge,
     validate_branch_names,
@@ -174,7 +174,7 @@ class TestBranchExistsHardening:
             raise FileNotFoundError("git: not found")
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._run_git", fake_run_git
+            "tianluo.commands.merge_cmd._run_git", fake_run_git
         )
         assert _branch_exists(tmp_path, "feature") is False
 
@@ -188,7 +188,7 @@ class TestBranchExistsHardening:
             raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._run_git", fake_run_git
+            "tianluo.commands.merge_cmd._run_git", fake_run_git
         )
         assert _branch_exists(tmp_path, "feature") is False
 
@@ -225,7 +225,7 @@ class TestCliMergeBadInput:
         os.chdir(str(tmp_path))
         try:
             from typer.testing import CliRunner
-            from se3.cli import app
+            from tianluo.cli import app
 
             runner = CliRunner()
             return runner.invoke(app, ["merge"] + extra_args)
@@ -261,7 +261,7 @@ class TestSplitMergedBuckets:
     """Defect I3: split helper used by run_merge to bucket branches."""
 
     def test_split_with_typed_buckets(self) -> None:
-        from se3.commands.merge_cmd import _split_merged_buckets
+        from tianluo.commands.merge_cmd import _split_merged_buckets
 
         class StubReport:
             newly_merged_branches = ["a", "b"]
@@ -274,7 +274,7 @@ class TestSplitMergedBuckets:
 
     def test_split_falls_back_to_legacy_aggregate(self) -> None:
         """When new buckets are empty but legacy is populated, treat all as newly."""
-        from se3.commands.merge_cmd import _split_merged_buckets
+        from tianluo.commands.merge_cmd import _split_merged_buckets
 
         class StubReport:
             newly_merged_branches: list = []
@@ -286,7 +286,7 @@ class TestSplitMergedBuckets:
         assert already == []
 
     def test_split_empty_when_nothing_merged(self) -> None:
-        from se3.commands.merge_cmd import _split_merged_buckets
+        from tianluo.commands.merge_cmd import _split_merged_buckets
 
         class StubReport:
             newly_merged_branches: list = []
@@ -303,7 +303,7 @@ class TestSplitMergedBuckets:
         """When new buckets are empty and project_root is given, the legacy
         fallback checks git ancestry instead of treating all as newly merged."""
         import subprocess
-        from se3.commands.merge_cmd import _split_merged_buckets
+        from tianluo.commands.merge_cmd import _split_merged_buckets
 
         # Init repo
         subprocess.run(
@@ -393,7 +393,7 @@ class TestCliRendersBucketSplit:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """When all merges produced new commits, only the newly-merged section appears."""
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=True,
@@ -408,7 +408,7 @@ class TestCliRendersBucketSplit:
             captured.append({"content": content, "title": title})
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd.render_text", capture_render_text,
+            "tianluo.commands.merge_cmd.render_text", capture_render_text,
         )
 
         class MockOrchestrator:
@@ -419,21 +419,21 @@ class TestCliRendersBucketSplit:
                 return report
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._branch_exists",
+            "tianluo.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
         )
         # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
         # does not git-read a nonexistent ref (which now raises IntentReadError).
         monkeypatch.setattr(
-            "se3.engine.version_intent.intent_flow_ids_introduced",
+            "tianluo.engine.version_intent.intent_flow_ids_introduced",
             lambda *_a, **_k: set(),
         )
 
         _init_repo(tmp_path)
-        from se3.commands.merge_cmd import run_merge
+        from tianluo.commands.merge_cmd import run_merge
 
         exit_code = run_merge(["feat-a", "feat-b"], project_root=tmp_path)
         assert exit_code == 0
@@ -450,7 +450,7 @@ class TestCliRendersBucketSplit:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """When all branches were already ancestors, only the already section appears."""
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=True,
@@ -465,7 +465,7 @@ class TestCliRendersBucketSplit:
             captured.append({"content": content, "title": title})
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd.render_text", capture_render_text,
+            "tianluo.commands.merge_cmd.render_text", capture_render_text,
         )
 
         class MockOrchestrator:
@@ -476,21 +476,21 @@ class TestCliRendersBucketSplit:
                 return report
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._branch_exists",
+            "tianluo.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
         )
         # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
         # does not git-read a nonexistent ref (which now raises IntentReadError).
         monkeypatch.setattr(
-            "se3.engine.version_intent.intent_flow_ids_introduced",
+            "tianluo.engine.version_intent.intent_flow_ids_introduced",
             lambda *_a, **_k: set(),
         )
 
         _init_repo(tmp_path)
-        from se3.commands.merge_cmd import run_merge
+        from tianluo.commands.merge_cmd import run_merge
 
         exit_code = run_merge(["scn"], project_root=tmp_path)
         assert exit_code == 0
@@ -509,7 +509,7 @@ class TestCliRendersBucketSplit:
         the two so the user can tell what actually changed — this is
         the exact output the user reported as confusing.
         """
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=True,
@@ -524,7 +524,7 @@ class TestCliRendersBucketSplit:
             captured.append({"content": content, "title": title})
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd.render_text", capture_render_text,
+            "tianluo.commands.merge_cmd.render_text", capture_render_text,
         )
 
         class MockOrchestrator:
@@ -535,21 +535,21 @@ class TestCliRendersBucketSplit:
                 return report
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._branch_exists",
+            "tianluo.commands.merge_cmd._branch_exists",
             lambda _root, _branch: True,
         )
         # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
         # does not git-read a nonexistent ref (which now raises IntentReadError).
         monkeypatch.setattr(
-            "se3.engine.version_intent.intent_flow_ids_introduced",
+            "tianluo.engine.version_intent.intent_flow_ids_introduced",
             lambda *_a, **_k: set(),
         )
 
         _init_repo(tmp_path)
-        from se3.commands.merge_cmd import run_merge
+        from tianluo.commands.merge_cmd import run_merge
 
         exit_code = run_merge(["scn", "discoverbug"], project_root=tmp_path)
         assert exit_code == 0
@@ -583,7 +583,7 @@ class TestCliMergeBadInput:
         os.chdir(str(tmp_path))
         try:
             from typer.testing import CliRunner
-            from se3.cli import app
+            from tianluo.cli import app
 
             runner = CliRunner()
             return runner.invoke(app, ["merge"] + extra_args)
@@ -712,7 +712,7 @@ class TestRunMergeEndToEndAcceptance:
             check=True, capture_output=True,
         )
 
-        from se3.commands.merge_cmd import run_merge
+        from tianluo.commands.merge_cmd import run_merge
 
         # delete_merged=False: this test references feat-e2e after merge to
         # verify ancestry; with the new default-on cleanup, the branch would

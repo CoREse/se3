@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.steps import invariant_check
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps import invariant_check
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 import pytest
 
-from se3.core.utils import truncate_preview
+from tianluo.core.utils import truncate_preview
 
 
 class TestTruncatePreview:

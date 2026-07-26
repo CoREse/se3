@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.implement import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.implement import (
     _format_fix_context_structured,
     _sanitize_estimated_test_duration,
     implement_handler,
@@ -157,9 +157,9 @@ class TestEstimatedDurationSingleCall:
             outputs={},
         )
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_extracts_estimated_duration_from_llm_response(
         self, mock_parse, mock_caller_cls, mock_inj,
     ):
@@ -180,9 +180,9 @@ class TestEstimatedDurationSingleCall:
         assert result == StepStatus.COMPLETED
         assert step.outputs["estimated_test_duration"] == 240.0
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_missing_estimated_duration_yields_none(
         self, mock_parse, mock_caller_cls, mock_inj,
     ):
@@ -202,9 +202,9 @@ class TestEstimatedDurationSingleCall:
         assert result == StepStatus.COMPLETED
         assert step.outputs.get("estimated_test_duration") is None
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_bool_estimated_duration_coerced_to_none(
         self, mock_parse, mock_caller_cls, mock_inj,
     ):
@@ -224,9 +224,9 @@ class TestEstimatedDurationSingleCall:
 
         assert step.outputs["estimated_test_duration"] is None
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_parse_failure_sets_estimated_duration_none(
         self, mock_parse, mock_caller_cls, mock_inj,
     ):
@@ -275,9 +275,9 @@ class TestEstimatedDurationEndToEnd:
             outputs={},
         )
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_implement_output_feeds_state_machine_forward(
         self, mock_parse, mock_caller_cls, mock_inj,
     ):

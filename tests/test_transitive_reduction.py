@@ -6,7 +6,7 @@ import copy
 
 import pytest
 
-from se3.engine.transitive_reduction import transitive_reduce
+from tianluo.engine.transitive_reduction import transitive_reduce
 
 
 # ---------------------------------------------------------------------------

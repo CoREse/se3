@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.config import (
+from tianluo.config import (
     ConfigError,
     DEFAULT_ADJUDICATE_PERIOD,
     DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
@@ -397,7 +397,7 @@ workflow:
         """Repeated load() calls for the same config path log the source once."""
         import logging as _logging
 
-        from se3 import config as _config
+        from tianluo import config as _config
 
         # Isolate the module-level dedup set for this path.
         key = str((tmp_path / "se3.yaml").resolve())

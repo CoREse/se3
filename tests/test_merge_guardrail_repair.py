@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.guardrail_repair import GuardrailRepairer, RepairResult
-from se3.engine.merge.guardrails import GuardrailViolation, GuardrailReport
-from se3.engine.worktree import _run_git
+from tianluo.engine.merge.guardrail_repair import GuardrailRepairer, RepairResult
+from tianluo.engine.merge.guardrails import GuardrailViolation, GuardrailReport
+from tianluo.engine.worktree import _run_git
 
 
 # --------- helpers ---------
@@ -118,7 +118,7 @@ class TestGuardrailRepairerSuccessfulRepair:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -195,7 +195,7 @@ class TestGuardrailRepairerSuccessfulRepair:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -273,7 +273,7 @@ class TestGuardrailRepairerFailures:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -621,7 +621,7 @@ class TestGuardrailRepairerFailures:
             raise RuntimeError("Simulated guardrails re-check crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_crash,
         )
 
@@ -699,11 +699,11 @@ class TestGuardrailRepairerFailures:
                     cmd=["git"] + list(args), timeout=30,
                 )
             # Fall through to real _run_git
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", mock_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", mock_run_git,
         )
 
         violations = _make_violations()
@@ -779,7 +779,7 @@ class TestGuardrailRepairerFailures:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -876,7 +876,7 @@ class TestGuardrailRepairerFailures:
 
     def test_is_spec_path_method(self, tmp_path: Path) -> None:
         """_is_spec_path accepts only se3/specs/**/spec.md."""
-        from se3.engine.merge.guardrails import _is_spec_path
+        from tianluo.engine.merge.guardrails import _is_spec_path
         assert _is_spec_path("se3/specs/base/spec.md") is True
         assert _is_spec_path("se3/specs/nested/deep/spec.md") is True
         assert _is_spec_path("README.md") is False
@@ -1035,7 +1035,7 @@ class TestGuardrailRepairerFailures:
             })
 
         monkeypatch.setattr(
-            "se3.engine.llm_caller.LLMCaller.call",
+            "tianluo.engine.llm_caller.LLMCaller.call",
             mock_llm_call,
         )
 
@@ -1043,7 +1043,7 @@ class TestGuardrailRepairerFailures:
             raise ValueError("simulated two-phase extraction crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.extract_json_two_phase",
+            "tianluo.engine.merge.guardrail_repair.extract_json_two_phase",
             mock_extract_json,
         )
 
@@ -1243,7 +1243,7 @@ class TestGuardrailRepairInconsistentState:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -1264,7 +1264,7 @@ class TestGuardrailRepairInconsistentState:
             return original_run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", fake_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", fake_run_git,
         )
 
         violations = _make_violations()
@@ -1374,7 +1374,7 @@ class TestProbeBranchVerifiable:
             raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", _fake_run_git
+            "tianluo.engine.merge.guardrail_repair._run_git", _fake_run_git
         )
         import logging as _logging
         with caplog.at_level(_logging.WARNING):

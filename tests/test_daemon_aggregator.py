@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import (
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import (
     DaemonAggregator,
     PendingCall,
     ProjectRegistryError,
@@ -296,9 +296,9 @@ def test_run_fallback_completion_advances_index_to_total(tmp_path: Path) -> None
     the aggregator to confirm the end-to-end value, rather than hand-crafting a
     completed snapshot.
     """
-    from se3.commands import run as run_mod
-    from se3.engine import persistence as persistence_mod
-    from se3.engine.models import (
+    from tianluo.commands import run as run_mod
+    from tianluo.engine import persistence as persistence_mod
+    from tianluo.engine.models import (
         FlowInstance,
         FlowStatus,
         State,
@@ -586,7 +586,7 @@ def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
 
 def test_all_project_roots_caches_historical_enumeration(monkeypatch) -> None:
     """Within the TTL window, the disk history walk runs at most once."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
 
@@ -612,7 +612,7 @@ def test_all_project_roots_caches_historical_enumeration(monkeypatch) -> None:
 
 def test_all_project_roots_active_root_visible_immediately(monkeypatch) -> None:
     """A newly added active root appears at once, not after the TTL."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     monkeypatch.setattr(
         agg_mod, "enumerate_historical_project_roots", lambda base: []
@@ -637,7 +637,7 @@ def test_readd_existing_root_keeps_history_cache_warm(monkeypatch) -> None:
     ``se3/history`` walk would re-run every tick — the exact high-frequency
     disk scan the cache exists to eliminate.
     """
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -666,7 +666,7 @@ def test_readd_existing_root_keeps_history_cache_warm(monkeypatch) -> None:
 
 def test_all_project_roots_reenumerates_after_ttl(monkeypatch) -> None:
     """Once the TTL elapses the disk history walk runs again."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -693,7 +693,7 @@ def test_all_project_roots_reenumerates_after_ttl(monkeypatch) -> None:
 
 def test_all_project_roots_reenumerates_on_base_change(monkeypatch) -> None:
     """A changed base fingerprint forces re-enumeration even within the TTL."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -771,7 +771,7 @@ def test_get_snapshot_archived_root_no_flowless_flow(tmp_path: Path) -> None:
     ``.flows`` for such a root, while its issues still reach
     ``MachineStatus.issues`` via the independent ``_collect_issues`` pass.
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(tmp_path, "042", subdir="open", title="Lingering issue")
     aggregator = DaemonAggregator()
@@ -789,7 +789,7 @@ def test_get_snapshot_archived_root_no_flowless_flow(tmp_path: Path) -> None:
 
 def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
     """_collect_issues reads both open/ and closed/ directories."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(tmp_path, "001", subdir="open", title="First")
     _write_issue(tmp_path, "002", subdir="closed", title="Second", status="closed")
@@ -803,7 +803,7 @@ def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
 
 def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
     """Each IssueSnapshot carries all webui-relevant fields."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(
         tmp_path,
@@ -838,7 +838,7 @@ def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
 
 def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
     """Malformed YAML files are silently skipped."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     issues_dir = tmp_path / "se3" / "issues" / "open"
     issues_dir.mkdir(parents=True, exist_ok=True)
@@ -853,14 +853,14 @@ def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
 
 
 def test_collect_issues_returns_empty_when_no_dir(tmp_path: Path) -> None:
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     assert DaemonAggregator()._collect_issues(tmp_path) == []
 
 
 def test_machine_status_includes_issues(tmp_path: Path) -> None:
     """MachineStatus.issues is populated by get_snapshot."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write(tmp_path / "se3" / "state" / "engine.json", {
         "flow_id": "f1",
@@ -893,7 +893,7 @@ def test_machine_status_includes_issues(tmp_path: Path) -> None:
 
 def test_issue_snapshot_to_dict_omits_none_optional_fields(tmp_path: Path) -> None:
     """to_dict omits title/priority/type when they are None."""
-    from se3.daemon.aggregator import IssueSnapshot
+    from tianluo.daemon.aggregator import IssueSnapshot
 
     snap = IssueSnapshot(
         id="001",

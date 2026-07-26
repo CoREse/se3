@@ -15,8 +15,8 @@ from pathlib import Path
 
 import yaml
 
-from se3.engine.issue_manager import Issue, IssueManager, IssueStatus
-from se3.engine.merge.issue_renumber import (
+from tianluo.engine.issue_manager import Issue, IssueManager, IssueStatus
+from tianluo.engine.merge.issue_renumber import (
     advance_next_id_to_max,
     append_description_note,
     count_reference_tokens,

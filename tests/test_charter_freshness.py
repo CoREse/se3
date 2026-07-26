@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.steps import charter_freshness
-from se3.engine.steps import summarize
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine import charter
+from tianluo.engine.steps import charter_freshness
+from tianluo.engine.steps import summarize
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine import charter
 
 
 # ---------------------------------------------------------------------------

@@ -17,10 +17,10 @@ The fix makes the cursor a *delivery* water mark rather than a *read* water mark
 socket. Retaining the old cursor makes ``read_flow`` fall back to a full re-read
 from that mark next round, so the dropped batch is re-sent.
 
-These tests drive the real :class:`~se3.daemon.history.DaemonHistoryReader` over
+These tests drive the real :class:`~tianluo.daemon.history.DaemonHistoryReader` over
 real jsonl files (so the re-read semantics are the genuine ones, not a stub's
 idea of them) behind a minimal provider, and feed the frames that actually
-reached the socket into a real :class:`~se3.server.state.ServerState` to assert
+reached the socket into a real :class:`~tianluo.server.state.ServerState` to assert
 the server ends up with the complete, duplicate-free history.
 
 The async cases drive their own event loop via ``asyncio.run``: pytest-asyncio is
@@ -35,10 +35,10 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import DaemonHistoryReader
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def test_server_bundle_is_complete_and_duplicate_free_after_a_drop(flow_env):
     must not cost the server any records, and the re-send must not duplicate
     any either.
     """
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     async def scenario():
         root, flow_id, step, provider = flow_env

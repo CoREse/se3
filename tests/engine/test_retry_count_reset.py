@@ -17,14 +17,14 @@ from __future__ import annotations
 import pytest
 from pathlib import Path
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import (
+from tianluo.engine.state_machine import (
     StateMachine,
     _reset_retry_counter_for_new_call,
 )
@@ -187,7 +187,7 @@ class TestDiscoveryUserResponseResetsRetryCount:
         # Lazy import + patching to keep this test hermetic (no state machine
         # wiring needed — we exercise only the run-loop branch of interest).
         from unittest.mock import MagicMock, patch
-        from se3.commands import run as run_mod
+        from tianluo.commands import run as run_mod
 
         flow = FlowInstance(
             flow_id="test-reset-discovery",
@@ -242,7 +242,7 @@ class TestDiscoveryUserResponseResetsRetryCount:
         touching the behavioral test above.
         """
         import inspect
-        from se3.commands import run as run_mod
+        from tianluo.commands import run as run_mod
 
         src = inspect.getsource(run_mod)
         # Find the branch header and confirm the pop appears within ~40 lines.

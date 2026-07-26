@@ -30,8 +30,8 @@ import threading
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
-from se3.server.state import ServerState, bundle_signature, encode_progress
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState, bundle_signature, encode_progress
 
 
 @pytest.fixture()

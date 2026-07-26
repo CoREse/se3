@@ -15,8 +15,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
-from se3.engine.steps.plan import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
+from tianluo.engine.steps.plan import (
     FULL_JSON_SCHEMA,
     MEDIUM_JSON_SCHEMA,
     SHALLOW_JSON_SCHEMA,
@@ -31,12 +31,12 @@ class TestSpecMachineryRetired:
     """The retired spec-governance constants are gone from the plan module."""
 
     def test_spec_changes_section_constant_removed(self):
-        import se3.engine.steps.plan as plan_mod
+        import tianluo.engine.steps.plan as plan_mod
 
         assert not hasattr(plan_mod, "SPEC_CHANGES_SECTION")
 
     def test_spec_write_protection_section_constant_removed(self):
-        import se3.engine.steps.plan as plan_mod
+        import tianluo.engine.steps.plan as plan_mod
 
         assert not hasattr(plan_mod, "SPEC_WRITE_PROTECTION_SECTION")
 
@@ -150,15 +150,15 @@ class TestPlanHandlerSpecChanges:
         }
         return json.dumps(data)
 
-    @patch("se3.engine.context_builder.get_runtime_environment_injection", return_value="")
-    @patch("se3.engine.context_builder.get_code_index_injection", return_value="")
-    @patch("se3.engine.context_builder.ensure_code_index_fresh", return_value=None)
-    @patch("se3.engine.context_builder.get_charter_injection", return_value="")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    @patch("tianluo.engine.context_builder.get_runtime_environment_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_code_index_injection", return_value="")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh", return_value=None)
+    @patch("tianluo.engine.context_builder.get_charter_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_step_language_instruction", return_value="")
     def test_spec_changes_defaults_to_empty_list(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
         """When the LLM omits spec_changes, the output defaults to []."""
-        with patch("se3.engine.steps.plan.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.plan.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = self._mock_llm_response()
             mock_cls.return_value = mock_caller
@@ -168,16 +168,16 @@ class TestPlanHandlerSpecChanges:
         assert result == StepStatus.COMPLETED
         assert step.outputs["spec_changes"] == []
 
-    @patch("se3.engine.context_builder.get_runtime_environment_injection", return_value="")
-    @patch("se3.engine.context_builder.get_code_index_injection", return_value="")
-    @patch("se3.engine.context_builder.ensure_code_index_fresh", return_value=None)
-    @patch("se3.engine.context_builder.get_charter_injection", return_value="")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    @patch("tianluo.engine.context_builder.get_runtime_environment_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_code_index_injection", return_value="")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh", return_value=None)
+    @patch("tianluo.engine.context_builder.get_charter_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.context_builder.get_step_language_instruction", return_value="")
     def test_display_not_affected(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
         """Display logic should not crash."""
-        with patch("se3.engine.steps.plan.LLMCaller") as mock_cls, \
-             patch("se3.engine.steps.plan._display_plan") as mock_display:
+        with patch("tianluo.engine.steps.plan.LLMCaller") as mock_cls, \
+             patch("tianluo.engine.steps.plan._display_plan") as mock_display:
             mock_caller = Mock()
             mock_caller.call.return_value = self._mock_llm_response()
             mock_cls.return_value = mock_caller

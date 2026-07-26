@@ -3,11 +3,11 @@
 Covers the three layers that turn every human-in-the-loop interaction in a
 running flow into one artifact — a JSON call file under ``se3/calls/``:
 
-* :mod:`se3.daemon.protocol` — the ``MSG_INTERJECT_FLOW`` message, the
+* :mod:`tianluo.daemon.protocol` — the ``MSG_INTERJECT_FLOW`` message, the
   ``CALL_KIND_*`` constants and decode backward-compatibility;
-* :class:`se3.daemon.aggregator.DaemonAggregator` — parsing call files of
+* :class:`tianluo.daemon.aggregator.DaemonAggregator` — parsing call files of
   every ``kind`` *and* legacy call files written before the field existed;
-* :mod:`se3.engine.interaction_calls` — writing call files, reading sibling
+* :mod:`tianluo.engine.interaction_calls` — writing call files, reading sibling
   response files, and draining queued mid-flow interjections.
 
 A dedicated backward-compatibility case feeds the aggregator and the reader a
@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator
-from se3.engine import interaction_calls
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.engine import interaction_calls
 
 
 # --------------------------------------------------------------------------

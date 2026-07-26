@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from se3.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.aggregator import DaemonAggregator
 
 
 def _write_issue(

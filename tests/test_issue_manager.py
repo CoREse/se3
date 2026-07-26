@@ -9,8 +9,8 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from se3.engine.issue_discovery import apply_discovery_issue_operations
-from se3.engine.issue_manager import (
+from tianluo.engine.issue_discovery import apply_discovery_issue_operations
+from tianluo.engine.issue_manager import (
     KNOWN_TYPES,
     Issue,
     IssueManager,

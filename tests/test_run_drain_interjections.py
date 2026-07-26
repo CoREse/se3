@@ -20,9 +20,9 @@ from types import SimpleNamespace
 
 import pytest
 
-from se3.commands import run as run_mod
-from se3.engine import interaction_calls
-from se3.engine.models import StepStatus, StepType
+from tianluo.commands import run as run_mod
+from tianluo.engine import interaction_calls
+from tianluo.engine.models import StepStatus, StepType
 
 
 class _RecordingPersistence:

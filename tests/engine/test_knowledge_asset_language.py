@@ -31,10 +31,10 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import code_index
-from se3.engine.code_index import SummaryTarget, _make_llm_summarizer
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.steps import charter_freshness
+from tianluo.engine import code_index
+from tianluo.engine.code_index import SummaryTarget, _make_llm_summarizer
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps import charter_freshness
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ def _isolated_global_home(tmp_path_factory, monkeypatch):
     the zero-injection assertions. Every case here runs against a clean home.
     """
     home = tmp_path_factory.mktemp("home")
-    monkeypatch.setattr("se3.config.Path.home", lambda: home)
+    monkeypatch.setattr("tianluo.config.Path.home", lambda: home)
     return home
 
 
@@ -159,10 +159,10 @@ def _install_fake_summary_caller(monkeypatch) -> dict:
     each group's summary prompt.
 
     ``_make_llm_summarizer`` does ``from .llm_caller import LLMCaller`` inside the
-    worker, so the stub must live on ``se3.engine.llm_caller`` (patching the name
+    worker, so the stub must live on ``tianluo.engine.llm_caller`` (patching the name
     on ``code_index`` would miss the fresh local import).
     """
-    from se3.engine import llm_caller
+    from tianluo.engine import llm_caller
 
     state = {"prompts": []}
 

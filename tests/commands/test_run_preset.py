@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.cli import app
+from tianluo.cli import app
 
 runner = CliRunner()
 
@@ -34,8 +34,8 @@ def project_root(tmp_path):
 def _invoke(args, project_root, run_flow_mock=None):
     """Invoke the CLI `run` command with project root + run_flow patched."""
     rf = run_flow_mock if run_flow_mock is not None else MagicMock(return_value=0)
-    with patch("se3.commands.run.get_project_root", return_value=project_root), patch(
-        "se3.commands.run.run_flow", rf
+    with patch("tianluo.commands.run.get_project_root", return_value=project_root), patch(
+        "tianluo.commands.run.run_flow", rf
     ):
         result = runner.invoke(app, ["run"] + args)
     return result, rf

@@ -18,13 +18,13 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import ConflictFile
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_context import ConflictFile
+from tianluo.engine.merge.conflict_resolver import (
     BatchContext,
     ConflictResolver,
     MergeStrategy,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider
 
 
 # --------- helpers shared with task 1 ---------
@@ -168,7 +168,7 @@ def test_run_merge_default_strategy_is_fast(monkeypatch) -> None:
     """``run_merge`` signature defaults to strategy='fast'."""
     import inspect
 
-    from se3.commands.merge_cmd import run_merge
+    from tianluo.commands.merge_cmd import run_merge
 
     sig = inspect.signature(run_merge)
     assert sig.parameters["strategy"].default == "fast"
@@ -201,14 +201,14 @@ def test_cli_merge_defaults_to_fast(tmp_path: Path, monkeypatch) -> None:
         captured["delete_merged"] = delete_merged
         return 0
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", stub_run_merge)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", stub_run_merge)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["merge", "feature"])
@@ -224,7 +224,7 @@ def test_cli_merge_defaults_to_fast(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_legacy_robust_strategy_name_rejected() -> None:
-    from se3.engine.merge.conflict_resolver import MergeStrategy
+    from tianluo.engine.merge.conflict_resolver import MergeStrategy
 
     with pytest.raises(ValueError) as exc:
         MergeStrategy.from_str("robust")
@@ -233,7 +233,7 @@ def test_legacy_robust_strategy_name_rejected() -> None:
 
 
 def test_legacy_default_strategy_name_rejected() -> None:
-    from se3.engine.merge.conflict_resolver import MergeStrategy
+    from tianluo.engine.merge.conflict_resolver import MergeStrategy
 
     with pytest.raises(ValueError) as exc:
         MergeStrategy.from_str("default")
@@ -256,14 +256,14 @@ def test_cli_rejects_robust_strategy(tmp_path: Path, monkeypatch) -> None:
     def should_not_be_called(*args, **kwargs):
         raise AssertionError("run_merge must not be invoked for legacy strategy")
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", should_not_be_called)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", should_not_be_called)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["merge", "feature", "--strategy", "robust"])
@@ -288,14 +288,14 @@ def test_cli_rejects_default_strategy(tmp_path: Path, monkeypatch) -> None:
     def should_not_be_called(*args, **kwargs):
         raise AssertionError("run_merge must not be invoked for legacy strategy")
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", should_not_be_called)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", should_not_be_called)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["merge", "feature", "--strategy", "default"])

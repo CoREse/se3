@@ -18,9 +18,9 @@ import pytest
 from _authsrv import authed_hello, recv_daemon_frame
 from fastapi.middleware.gzip import GZipMiddleware
 
-from se3.daemon import protocol
-from se3.server.state import ServerState, bundle_signature
-from se3.server.ws import DetailRequestRegistry, _handle_message
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState, bundle_signature
+from tianluo.server.ws import DetailRequestRegistry, _handle_message
 
 
 # --------------------------------------------------------------------------
@@ -427,7 +427,7 @@ def test_detail_registry_scopes_coalescing_to_machine_and_root():
 @pytest.fixture()
 def client_and_app(monkeypatch):
     from fastapi.testclient import TestClient
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
     from _authsrv import authed_app, login
 
     monkeypatch.setattr(app_module, "HISTORY_INDEX_REFRESH_TIMEOUT", 0.3)
@@ -463,7 +463,7 @@ def test_run_enables_ws_per_message_deflate(monkeypatch):
     import sys
     import types
 
-    from se3.server import app as app_mod
+    from tianluo.server import app as app_mod
 
     captured = {}
 
@@ -488,7 +488,7 @@ def test_run_falls_back_when_uvicorn_lacks_deflate_kwarg(monkeypatch):
     import sys
     import types
 
-    from se3.server import app as app_mod
+    from tianluo.server import app as app_mod
 
     calls = []
 

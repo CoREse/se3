@@ -34,11 +34,11 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.commands.merge_cmd import run_merge
-from se3.engine.merge.reconcile import read_current_version, reconcile
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.commit import _guard_version_race, commit_handler
-from se3.engine.version_intent import (
+from tianluo.commands.merge_cmd import run_merge
+from tianluo.engine.merge.reconcile import read_current_version, reconcile
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.commit import _guard_version_race, commit_handler
+from tianluo.engine.version_intent import (
     VersionIntent,
     is_consumed,
     mark_consumed,
@@ -194,7 +194,7 @@ class TestConcurrentWorktreeCollision:
         assert version_after_b == "11.13.0"
 
         # Monotonic, no regression: 11.11.2 < 11.12.0 < 11.13.0.
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
 
         assert Version.parse(version_after_b) > Version.parse(version_after_a)
         assert Version.parse(version_after_a) > Version.parse("11.11.2")
@@ -437,7 +437,7 @@ class TestReconcileCommitFailureRecovery:
         )
         _git(root, "merge", "--ff-only", "feature")  # intent on master, unconsumed
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
         real_commit = reconcile_mod._commit_reconcile
         calls = {"n": 0}
 
@@ -479,7 +479,7 @@ class TestReconcileCommitFailureRecovery:
         commit. A resumed reconcile must NOT treat that uncommitted consumed flag
         as proof of completion — it restores to HEAD, recomputes, and commits.
         """
-        from se3.engine.merge.reconcile import (
+        from tianluo.engine.merge.reconcile import (
             _merge_changelog,
             _write_final_version,
         )
@@ -520,7 +520,7 @@ class TestReconcileCommitFailureRecovery:
         from master's COMMITTED 11.11.2 (not the dirty 11.12.0) and reconcile to
         11.12.0 — NOT double-bump to 11.13.0 and strand 11.12.0 as a ghost.
         """
-        from se3.engine.merge.reconcile import _write_final_version
+        from tianluo.engine.merge.reconcile import _write_final_version
 
         root = _make_project(tmp_path, "11.11.2")
         _make_feature_with_intent(
@@ -569,7 +569,7 @@ class TestNonWorktreeDriftGuard:
         step.inputs["bump_type"] = "patch"
         return step
 
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_drift_recomputes_to_avoid_collision(
         self, mock_reanalyze, tmp_path: Path
     ) -> None:
@@ -610,7 +610,7 @@ class TestNonWorktreeDriftGuard:
         # The refreshed changelog artifact is forwarded so the commit matches.
         assert step.inputs["suggested_version"] == "10.7.2"
 
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_no_drift_passes_target_through_unchanged(
         self, mock_reanalyze, tmp_path: Path
     ) -> None:
@@ -631,7 +631,7 @@ class TestNonWorktreeDriftGuard:
         assert not mock_reanalyze.called
         assert result == "10.7.1"
 
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_drift_reanalysis_returning_disk_version_halts(
         self, mock_reanalyze, tmp_path: Path
     ) -> None:
@@ -692,8 +692,8 @@ class TestFlowWroteVersionBlobDetection:
     def test_own_replay_detected_without_version_commit_line(
         self, tmp_path: Path
     ) -> None:
-        from se3.engine.steps.commit import _flow_wrote_version
-        from se3.engine.version_bumper import VersionBumper, VersionConfig
+        from tianluo.engine.steps.commit import _flow_wrote_version
+        from tianluo.engine.version_bumper import VersionBumper, VersionConfig
 
         root = tmp_path
         (root / "pyproject.toml").write_text(
@@ -756,8 +756,8 @@ class TestNonWorktreeCommitHandlerDriftGuard:
         flow.state.add_step(commit)
         return flow, commit
 
-    @patch("se3.engine.context_builder.ensure_code_index_fresh")
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_commit_handler_recomputes_on_concurrent_disk_drift(
         self, mock_reanalyze, _mock_index, tmp_path: Path
     ) -> None:
@@ -802,8 +802,8 @@ class TestNonWorktreeCommitHandlerDriftGuard:
         # in-lock re-read (10.7.1) drove the recompute, not the stale suggestion.
         assert read_current_version(root) == "10.7.2"
 
-    @patch("se3.engine.context_builder.ensure_code_index_fresh")
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_commit_handler_no_drift_writes_resolved_target(
         self, mock_reanalyze, _mock_index, tmp_path: Path
     ) -> None:
@@ -826,8 +826,8 @@ class TestNonWorktreeCommitHandlerDriftGuard:
         assert not mock_reanalyze.called
         assert read_current_version(root) == "10.7.1"
 
-    @patch("se3.engine.context_builder.ensure_code_index_fresh")
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_commit_handler_own_session_advance_is_not_drift(
         self, mock_reanalyze, _mock_index, tmp_path: Path
     ) -> None:
@@ -870,8 +870,8 @@ class TestNonWorktreeCommitHandlerDriftGuard:
         assert not mock_reanalyze.called
         assert read_current_version(root) == "10.8.0"
 
-    @patch("se3.engine.context_builder.ensure_code_index_fresh")
-    @patch("se3.engine.steps.version_analyze.version_analyze_handler")
+    @patch("tianluo.engine.context_builder.ensure_code_index_fresh")
+    @patch("tianluo.engine.steps.version_analyze.version_analyze_handler")
     def test_commit_handler_halts_when_reanalysis_still_collides(
         self, mock_reanalyze, _mock_index, tmp_path: Path
     ) -> None:

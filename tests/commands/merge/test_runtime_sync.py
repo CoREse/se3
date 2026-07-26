@@ -30,8 +30,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.engine.merge.runtime_sync as _rs
-from se3.engine.merge.runtime_sync import (
+import tianluo.engine.merge.runtime_sync as _rs
+from tianluo.engine.merge.runtime_sync import (
     DEST_HASH_UNAVAILABLE,
     BypassedCollision,
     RuntimeSyncCollision,
@@ -539,7 +539,7 @@ class TestBoundedReadAndWrite:
                 return 0  # Always reports no-progress.
 
         fake_write = _FakeOSWrite()
-        with patch("se3.engine.merge.runtime_sync.os.write", fake_write):
+        with patch("tianluo.engine.merge.runtime_sync.os.write", fake_write):
             with pytest.raises(OSError) as exc_info:
                 _bounded_write_all(fd=99, content=b"data", path_for_error="x")
             assert exc_info.value.errno == errno.EIO

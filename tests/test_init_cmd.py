@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.init_cmd import (
+from tianluo.commands.init_cmd import (
     run_init,
     is_git_repository,
     init_repository,
@@ -527,7 +527,7 @@ class TestReadSpecBaseLoading:
 
     def test_base_spec_loaded_when_exists(self, tmp_path):
         """ContextBuilder._load_spec_content auto-loads base spec when it exists."""
-        from se3.engine.context_builder import ContextBuilder
+        from tianluo.engine.context_builder import ContextBuilder
 
         # Create base spec
         specs_dir = tmp_path / "se3" / "specs" / "base"
@@ -542,7 +542,7 @@ class TestReadSpecBaseLoading:
 
     def test_base_spec_none_when_missing(self, tmp_path):
         """_load_spec_content returns None when base spec doesn't exist."""
-        from se3.engine.context_builder import ContextBuilder
+        from tianluo.engine.context_builder import ContextBuilder
 
         # Create specs dir without base spec
         specs_dir = tmp_path / "se3" / "specs"

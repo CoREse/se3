@@ -15,14 +15,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.version_script_interface import (
+from tianluo.engine.version_script_interface import (
     VersionScriptRunner,
     find_version_script,
     validate_script,
     generate_version_script,
     _validate_generated_script,
 )
-from se3.engine.version_bumper import Version, VersionBumper, VersionConfig, BumpType
+from tianluo.engine.version_bumper import Version, VersionBumper, VersionConfig, BumpType
 
 
 # ---------------------------------------------------------------------------
@@ -411,13 +411,13 @@ class TestVersionConfigNewFields:
     """Tests for new VersionConfig fields."""
 
     def test_defaults(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         config = AppVersionConfig()
         assert config.script_path is None
         assert config.auto_generate_script is True
 
     def test_from_dict(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         data = {
             "version": {
                 "script_path": "tools/ver.py",
@@ -429,7 +429,7 @@ class TestVersionConfigNewFields:
         assert config.auto_generate_script is False
 
     def test_from_dict_defaults(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         config = AppVersionConfig.from_dict({})
         assert config.script_path is None
         assert config.auto_generate_script is True
@@ -439,7 +439,7 @@ class TestVersionConfigNewFields:
         deprecation warning; the rest of the section still loads."""
         import logging
 
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
 
         data = {
             "version": {
@@ -448,7 +448,7 @@ class TestVersionConfigNewFields:
                 "confidence_threshold": "high",
             }
         }
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             config = AppVersionConfig.from_dict(data)
 
         assert not hasattr(config, "bump_rules")
@@ -461,7 +461,7 @@ class TestVersionConfigNewFields:
         a deprecation warning."""
         import logging
 
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
 
         data = {
             "version": {
@@ -469,7 +469,7 @@ class TestVersionConfigNewFields:
                 "smart_version_analysis": False,
             }
         }
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             config = AppVersionConfig.from_dict(data)
 
         assert not hasattr(config, "smart_version_analysis")

@@ -7,8 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from se3.engine.models import StepType, get_default_step_sequence
-from se3.config import StepConfig, load_step_config, apply_step_config
+from tianluo.engine.models import StepType, get_default_step_sequence
+from tianluo.config import StepConfig, load_step_config, apply_step_config
 
 
 ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "directive", "discovery"]

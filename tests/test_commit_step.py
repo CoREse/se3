@@ -13,9 +13,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.commit import commit_handler
-from se3.engine.version_bumper import VersionBumper, VersionConfig
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.commit import commit_handler
+from tianluo.engine.version_bumper import VersionBumper, VersionConfig
 
 
 @pytest.fixture
@@ -54,9 +54,9 @@ def _make_step(suggested_version: str = "0.2.0") -> Step:
 class TestCommitHandlerVersionlessFile:
     """commit_handler must not crash when a version file exists but has no version."""
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="test: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="test: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_initializes_version_when_read_raises_value_error(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -78,7 +78,7 @@ class TestCommitHandlerVersionlessFile:
         step = _make_step()
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         # Should NOT fail — the handler should recover by initializing the version
@@ -87,9 +87,9 @@ class TestCommitHandlerVersionlessFile:
         # Version should have been bumped
         assert step.outputs.get("version_bumped") is True
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="test: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="test: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_version_is_readable_after_recovery(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -107,20 +107,20 @@ class TestCommitHandlerVersionlessFile:
         step = _make_step()
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             commit_handler(step, flow)
 
         # The pyproject.toml should now contain a version
-        from se3.engine.version_bumper import TomlVersionHandler
+        from tianluo.engine.version_bumper import TomlVersionHandler
 
         handler = TomlVersionHandler()
         version = handler.read_version(temp_dir / "pyproject.toml")
         # Should be bumped from 0.1.0 (initialized) -> next version
         assert version is not None
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="fix: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="fix: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_init_py_without_version_does_not_crash(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -142,15 +142,15 @@ class TestCommitHandlerVersionlessFile:
         step = _make_step()
         flow = _make_flow(temp_dir, task_type="bugfix")
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         # Should complete successfully, not raise ValueError
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feat: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="feat: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_normal_version_file_still_works(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -170,7 +170,7 @@ class TestCommitHandlerVersionlessFile:
         step = _make_step()
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -182,9 +182,9 @@ class TestCommitHandlerVersionlessFile:
 class TestCommitHandlerSuggestedVersionDriven:
     """commit_handler writes the suggested_version from version_analyze verbatim."""
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feat: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="feat: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_suggested_version_written_verbatim_to_pyproject(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -211,7 +211,7 @@ class TestCommitHandlerSuggestedVersionDriven:
         step.inputs["bump_type"] = "patch"
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -219,14 +219,14 @@ class TestCommitHandlerSuggestedVersionDriven:
         assert step.outputs["version_bumped"] is True
 
         # File on disk reflects the LLM-supplied version verbatim
-        from se3.engine.version_bumper import TomlVersionHandler
+        from tianluo.engine.version_bumper import TomlVersionHandler
 
         handler = TomlVersionHandler()
         assert handler.read_version(temp_dir / "pyproject.toml") == "9.4.2"
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feat: msg")
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="feat: msg")
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_suggested_version_supports_major_jump(
         self, mock_subprocess, mock_gen_msg, mock_has_changes, temp_dir: Path
     ):
@@ -243,19 +243,19 @@ class TestCommitHandlerSuggestedVersionDriven:
         step = _make_step(suggested_version="3.0.0")
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
-        from se3.engine.version_bumper import TomlVersionHandler
+        from tianluo.engine.version_bumper import TomlVersionHandler
         assert TomlVersionHandler().read_version(temp_dir / "pyproject.toml") == "3.0.0"
 
 
 class TestCommitHandlerMissingSuggestedVersion:
     """commit_handler halts with a guided error when suggested_version is absent."""
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_missing_suggested_version_raises_with_current_version(
         self, mock_subprocess, mock_has_changes, temp_dir: Path
     ):
@@ -278,7 +278,7 @@ class TestCommitHandlerMissingSuggestedVersion:
         step.inputs = {"task_description": "test"}
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.FAILED
@@ -293,8 +293,8 @@ class TestCommitHandlerMissingSuggestedVersion:
         # Human-intervention hint
         assert "human" in msg.lower() or "rerun" in msg.lower() or "call" in msg.lower()
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit.subprocess")
     def test_empty_string_suggested_version_raises(
         self, mock_subprocess, mock_has_changes, temp_dir: Path
     ):
@@ -311,7 +311,7 @@ class TestCommitHandlerMissingSuggestedVersion:
         step.inputs = {"task_description": "test", "suggested_version": "   "}
         flow = _make_flow(temp_dir)
 
-        with patch("se3.engine.steps.commit._load_version_config", return_value=config):
+        with patch("tianluo.engine.steps.commit._load_version_config", return_value=config):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.FAILED

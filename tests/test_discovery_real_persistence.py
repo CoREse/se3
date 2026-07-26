@@ -7,7 +7,7 @@ actual step handler — they either mock ``LLMCaller`` wholesale or call
 ``record_prompt`` directly with a hand-rendered prompt.
 
 This module closes that last gap for G4's "用真实 discovery 流程核验" criterion:
-it drives the **real** :func:`se3.engine.steps.discovery.discovery_handler`
+it drives the **real** :func:`tianluo.engine.steps.discovery.discovery_handler`
 end-to-end (real ``LLMCaller.call`` → ``_call_two_phase`` → ``_call_with_retry``
 → ``_record_prompt`` → ``record_prompt``), stubbing only the subprocess
 boundary (``LLMCaller._get_current_runner``) so no real ``claude`` process is
@@ -25,13 +25,13 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.prompt_markers import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
 )
-from se3.engine.steps.discovery import discovery_handler
+from tianluo.engine.steps.discovery import discovery_handler
 
 
 # A user-typed initial description with non-ASCII prose and an embedded session
@@ -67,7 +67,7 @@ class _FakeRunner:
         return _FakeResult(self._output)
 
     def detect_infra_error(self, *args, **kwargs):
-        from se3.agent_runner import InfraErrorType
+        from tianluo.agent_runner import InfraErrorType
 
         return InfraErrorType.NONE
 
@@ -120,7 +120,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
 
     # Stub ONLY the subprocess boundary; everything above it is the real engine.
     with patch(
-        "se3.engine.llm_caller.LLMCaller._get_current_runner",
+        "tianluo.engine.llm_caller.LLMCaller._get_current_runner",
         return_value=fake_runner,
     ):
         result = discovery_handler(step, flow)

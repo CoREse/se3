@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 from rich.console import Console
 
-from se3.engine.dag_scheduler import classify_chains
-from se3.engine.formatters import TaskFormatter
-from se3.engine.transitive_reduction import transitive_reduce
+from tianluo.engine.dag_scheduler import classify_chains
+from tianluo.engine.formatters import TaskFormatter
+from tianluo.engine.transitive_reduction import transitive_reduce
 
 
 def _make_group(group_id, name, order, depends_on=None):

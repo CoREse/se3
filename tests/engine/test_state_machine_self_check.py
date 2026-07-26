@@ -12,7 +12,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -20,7 +20,7 @@ from se3.engine.models import (
     StepType,
     get_default_step_sequence,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 # ---------------------------------------------------------------------------
@@ -29,7 +29,7 @@ from se3.engine.state_machine import StateMachine
 
 
 def _make_state_machine(tmp_path):
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         return StateMachine(project_root=tmp_path)
 
 
@@ -590,19 +590,19 @@ class TestHandlerRegistration:
     """Verify SELF_CHECK handler is registered in STEP_HANDLERS."""
 
     def test_self_check_in_step_handlers(self):
-        from se3.engine.steps import STEP_HANDLERS
+        from tianluo.engine.steps import STEP_HANDLERS
 
         assert StepType.SELF_CHECK in STEP_HANDLERS
 
     def test_self_check_handler_is_callable(self):
-        from se3.engine.steps import STEP_HANDLERS
+        from tianluo.engine.steps import STEP_HANDLERS
 
         handler = STEP_HANDLERS[StepType.SELF_CHECK]
         assert callable(handler)
 
     def test_self_check_handler_is_correct_function(self):
-        from se3.engine.steps import STEP_HANDLERS
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps import STEP_HANDLERS
+        from tianluo.engine.steps.self_check import self_check_handler
 
         assert STEP_HANDLERS[StepType.SELF_CHECK] is self_check_handler
 
@@ -624,7 +624,7 @@ class TestHandlerRegistration:
 
 def _make_handler(status, usage_input=100, usage_output=50):
     """Create a fake handler that injects token usage and returns *status*."""
-    from se3.engine.token_usage import add_call_usage, UsageTotals
+    from tianluo.engine.token_usage import add_call_usage, UsageTotals
 
     def handler(step, flow):
         add_call_usage(UsageTotals(

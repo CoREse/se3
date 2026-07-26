@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as cache_mod
-from se3.daemon.disk_json_cache import (
+import tianluo.daemon.disk_json_cache as cache_mod
+from tianluo.daemon.disk_json_cache import (
     SIZE_GUARD_BYTES,
     read_engine_header,
     read_json_cached,
@@ -399,7 +399,7 @@ def test_oversized_extraction_failure_warns_once(tmp_path, monkeypatch, caplog):
     path.write_text("y" * (SIZE_GUARD_BYTES + 1024 * 1024), encoding="utf-8")
     counter = _count_parses(monkeypatch)
 
-    with caplog.at_level("WARNING", logger="se3.daemon.disk_json_cache"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.disk_json_cache"):
         assert read_engine_header(path) is None
         assert read_engine_header(path) is None
         assert read_engine_header(path) is None

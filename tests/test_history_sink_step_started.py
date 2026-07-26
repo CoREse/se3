@@ -30,7 +30,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -59,7 +59,7 @@ def _read_lines(path: Path) -> list[dict]:
 
 
 def test_record_step_started_writes_running_record():
-    from se3.engine.chat_history import record_step_started
+    from tianluo.engine.chat_history import record_step_started
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -80,7 +80,7 @@ def test_record_step_started_writes_running_record():
 
 
 def test_record_step_started_default_timestamp_is_iso_string():
-    from se3.engine.chat_history import record_step_started
+    from tianluo.engine.chat_history import record_step_started
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -90,7 +90,7 @@ def test_record_step_started_default_timestamp_is_iso_string():
 
 
 def test_has_step_started_event_detection():
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         has_step_started_event,
         record_step_started,
     )
@@ -108,7 +108,7 @@ def test_has_step_started_event_detection():
 def test_get_step_history_skips_step_started():
     """A jsonl containing only a step_started line yields no chat session, and a
     step_started line interleaved with real messages is silently skipped."""
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         get_step_history,
         record_prompt,
         record_step_started,
@@ -139,7 +139,7 @@ def test_get_step_history_skips_step_started():
 
 
 def _make_event(event_type, *, step=None, step_id="01_test_abc", step_type="test"):
-    from se3.engine import new_event
+    from tianluo.engine import new_event
 
     kwargs = dict(flow_id="flow-1", step_id=step_id, step_type=step_type)
     if step is not None:
@@ -148,7 +148,7 @@ def _make_event(event_type, *, step=None, step_id="01_test_abc", step_type="test
 
 
 def test_history_sink_persists_step_started():
-    from se3.engine import EventType, HistorySink
+    from tianluo.engine import EventType, HistorySink
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -163,7 +163,7 @@ def test_history_sink_persists_step_started():
 def test_history_sink_step_started_is_idempotent_while_running():
     """A re-emitted STEP_STARTED while the step is ALREADY running must not
     append a second started record (no stacked duplicate '进行中' anchor)."""
-    from se3.engine import EventType, HistorySink
+    from tianluo.engine import EventType, HistorySink
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -180,8 +180,8 @@ def test_history_sink_step_started_rearms_after_pause():
     """A step that paused and then resumes (its last lifecycle anchor is
     'paused') MUST re-arm a fresh 'running' anchor, so the web region switches
     back from 已暂停 to 进行中 instead of staying frozen on the paused state."""
-    from se3.engine import EventType, HistorySink
-    from se3.engine.chat_history import (
+    from tianluo.engine import EventType, HistorySink
+    from tianluo.engine.chat_history import (
         last_step_lifecycle_status,
         record_step_status,
     )
@@ -219,7 +219,7 @@ def test_history_sink_step_started_rearms_after_pause():
 def test_history_sink_step_started_skipped_after_terminal():
     """Once a terminal event exists for the step, a late STEP_STARTED is a
     no-op — a finished step must never gain a 'running' anchor."""
-    from se3.engine import EventType, HistorySink
+    from tianluo.engine import EventType, HistorySink
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -240,7 +240,7 @@ def test_history_sink_step_started_skipped_after_terminal():
 def test_history_sink_terminal_events_unchanged():
     """STEP_COMPLETED / STEP_FAILED / STEP_OUTPUT keep persisting their full
     step record exactly as before (regression guard)."""
-    from se3.engine import EventType, HistorySink
+    from tianluo.engine import EventType, HistorySink
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -291,14 +291,14 @@ def _build_flow(step_type: StepType) -> FlowInstance:
 
 
 def _run_single_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
-    from se3.commands.run import run_flow
+    from tianluo.commands.run import run_flow
 
     (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run.render_full"
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run.render_full"
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
@@ -394,7 +394,7 @@ def test_run_flow_resume_after_pause_rearms_running_then_completes():
 
 
 def test_record_step_status_writes_status_record():
-    from se3.engine.chat_history import record_step_status
+    from tianluo.engine.chat_history import record_step_status
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -411,7 +411,7 @@ def test_record_step_status_writes_status_record():
 
 
 def test_has_step_status_event_is_status_specific():
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         has_step_status_event,
         record_step_status,
     )
@@ -428,7 +428,7 @@ def test_has_step_status_event_is_status_specific():
 
 
 def test_get_step_history_skips_step_status():
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         get_step_history,
         record_prompt,
         record_step_status,
@@ -450,16 +450,16 @@ def _run_discovery_pause(project_root: Path, flow: FlowInstance):
     """Drive run_flow for a DISCOVERY step that returns PAUSED, with the
     interactive pause handler stubbed to "user exits" so the loop returns
     cleanly (130) right after the orchestrator persists the step_status."""
-    from se3.commands.run import run_flow
+    from tianluo.commands.run import run_flow
 
     (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run.render_full"
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run.render_full"
     ), patch(
-        "se3.commands.run._handle_discovery_pause", return_value=None
+        "tianluo.commands.run._handle_discovery_pause", return_value=None
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
@@ -515,7 +515,7 @@ def test_run_flow_step_status_records_paused_after_running_rearm():
     appeared anywhere earlier" — records it. Suppressing it (the old bug) would
     leave 'running' as the latest persisted status while the step is paused,
     making the web region wrongly show 进行中."""
-    from se3.engine.chat_history import last_step_lifecycle_status
+    from tianluo.engine.chat_history import last_step_lifecycle_status
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -542,7 +542,7 @@ def test_run_flow_step_status_dedups_back_to_back_paused():
     """Without an intervening 'running' anchor, a re-recorded 'paused' is
     suppressed — the dedup still prevents stacking two identical status rows
     when the latest lifecycle anchor is ALREADY that status."""
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         last_step_lifecycle_status,
         record_step_started,
         record_step_status,

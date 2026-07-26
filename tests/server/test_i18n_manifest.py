@@ -14,7 +14,7 @@ import json
 import pytest
 
 from _authsrv import authed_app
-from se3.server import app as app_mod
+from tianluo.server import app as app_mod
 
 
 @pytest.fixture()

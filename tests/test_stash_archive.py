@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.stash_utils import (
+from tianluo.engine.stash_utils import (
     ARCHIVE_DIR,
     StashPopOutcome,
     archive_stash_payload,
@@ -23,7 +23,7 @@ from se3.engine.stash_utils import (
 )
 # The LLM-aware case-a resolver now lives in its own integration-layer module
 # (stash_utils is kept LLM-free); the G3 tests below drive it from there.
-from se3.engine.stashpop_llm_resolver import make_llm_stashpop_resolver
+from tianluo.engine.stashpop_llm_resolver import make_llm_stashpop_resolver
 
 
 def _git_nocheck(path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -518,7 +518,7 @@ def test_resolve_stashpop_case_a_unresolved_keeps_stash(tmp_path: Path) -> None:
     assert "STASHED" in (tmp_path / by_side["stashed"].archive_path).read_text()
     assert "MERGED" in (tmp_path / by_side["head"].archive_path).read_text()
     # The path is genuinely still unmerged (the precondition that blocked drop).
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
     assert "app.py" in get_conflicting_files(tmp_path)
 
 
@@ -599,7 +599,7 @@ def test_llm_resolver_applies_llm_output_and_stages(tmp_path, monkeypatch) -> No
             assert "<<<<<<<" in prompt
             return "l1\nLLM-RECONCILED\nl3\n"
 
-    monkeypatch.setattr("se3.engine.llm_caller.LLMCaller", _StubCaller)
+    monkeypatch.setattr("tianluo.engine.llm_caller.LLMCaller", _StubCaller)
 
     outcome = resolve_stashpop_safely(
         tmp_path, label, pop, timestamp="20260630T180000",
@@ -631,7 +631,7 @@ def test_llm_resolver_falls_back_to_take_ours_on_llm_failure(
         def call(self, prompt: str) -> str:
             raise RuntimeError("LLM unavailable")
 
-    monkeypatch.setattr("se3.engine.llm_caller.LLMCaller", _BoomCaller)
+    monkeypatch.setattr("tianluo.engine.llm_caller.LLMCaller", _BoomCaller)
 
     outcome = resolve_stashpop_safely(
         tmp_path, label, pop, timestamp="20260630T181000",

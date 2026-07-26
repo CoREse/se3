@@ -12,8 +12,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import se3.commands.run as run
-from se3.engine.issue_manager import IssueManager, IssueStatus
+import tianluo.commands.run as run
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
 
 # --------------------------------------------------------------------------
@@ -45,11 +45,11 @@ class TestBranchNameHelpers:
 # run_flow main-worktree lock
 # --------------------------------------------------------------------------
 class TestRunFlowMainLock:
-    @patch("se3.commands.run._resolve_main_lock_root", return_value=Path("/main"))
-    @patch("se3.commands.run._run_flow_impl", return_value=0)
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.merge.merge_lock.MergeLock")
+    @patch("tianluo.commands.run._resolve_main_lock_root", return_value=Path("/main"))
+    @patch("tianluo.commands.run._run_flow_impl", return_value=0)
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_sync_run_defers_acquire_and_releases_lock(
         self, MockLock, _MockPersist, _MockSM, mock_impl, mock_resolve
     ):
@@ -71,10 +71,10 @@ class TestRunFlowMainLock:
         _, kwargs = mock_impl.call_args
         assert kwargs["main_lock"] is lock
 
-    @patch("se3.commands.run._run_flow_impl", return_value=0)
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.merge.merge_lock.MergeLock")
+    @patch("tianluo.commands.run._run_flow_impl", return_value=0)
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_worktree_body_takes_no_lock(
         self, MockLock, _MockPersist, _MockSM, mock_impl
     ):
@@ -86,11 +86,11 @@ class TestRunFlowMainLock:
         assert rc == 0
         MockLock.assert_not_called()
 
-    @patch("se3.commands.run._resolve_main_lock_root", return_value=Path("/main"))
-    @patch("se3.commands.run._run_flow_impl")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.merge.merge_lock.MergeLock")
+    @patch("tianluo.commands.run._resolve_main_lock_root", return_value=Path("/main"))
+    @patch("tianluo.commands.run._run_flow_impl")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_lock_released_even_when_impl_raises(
         self, MockLock, _MockPersist, _MockSM, mock_impl, _mock_resolve
     ):
@@ -111,12 +111,12 @@ class TestRunFlowMainLock:
 # run_worktree_mode orchestration
 # --------------------------------------------------------------------------
 class TestRunWorktreeMode:
-    @patch("se3.commands.run._worktree_flow_status", return_value="completed")
-    @patch("se3.commands.run._finalize_worktree_cleanup", return_value=0)
-    @patch("se3.commands.run.run_flow", return_value=0)
-    @patch("se3.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/worktree-x"))
-    @patch("se3.engine.worktree.get_current_branch", return_value="main")
-    @patch("se3.commands.run.clear_main_repo_root_cache")
+    @patch("tianluo.commands.run._worktree_flow_status", return_value="completed")
+    @patch("tianluo.commands.run._finalize_worktree_cleanup", return_value=0)
+    @patch("tianluo.commands.run.run_flow", return_value=0)
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/worktree-x"))
+    @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
+    @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_success_merges_back(
         self, _mock_clear, mock_branch, mock_fork, mock_run_flow, mock_cleanup,
         _mock_status,
@@ -148,11 +148,11 @@ class TestRunWorktreeMode:
             Path("/repo"), wt_branch, "main", Path("/repo/se3/worktrees/worktree-x")
         )
 
-    @patch("se3.commands.merge_cmd.run_merge")
-    @patch("se3.commands.run.run_flow", return_value=2)
-    @patch("se3.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
-    @patch("se3.engine.worktree.get_current_branch", return_value="main")
-    @patch("se3.commands.run.clear_main_repo_root_cache")
+    @patch("tianluo.commands.merge_cmd.run_merge")
+    @patch("tianluo.commands.run.run_flow", return_value=2)
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
+    @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
+    @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_failure_preserves_and_skips_merge(
         self, _mock_clear, _mock_branch, _mock_fork, _mock_run_flow, mock_merge
     ):
@@ -160,12 +160,12 @@ class TestRunWorktreeMode:
         assert rc == 2
         mock_merge.assert_not_called()
 
-    @patch("se3.commands.run._worktree_flow_status", return_value="PAUSED")
-    @patch("se3.commands.merge_cmd.run_merge")
-    @patch("se3.commands.run.run_flow", return_value=0)
-    @patch("se3.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
-    @patch("se3.engine.worktree.get_current_branch", return_value="main")
-    @patch("se3.commands.run.clear_main_repo_root_cache")
+    @patch("tianluo.commands.run._worktree_flow_status", return_value="PAUSED")
+    @patch("tianluo.commands.merge_cmd.run_merge")
+    @patch("tianluo.commands.run.run_flow", return_value=0)
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
+    @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
+    @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_paused_json_flow_skips_merge(
         self, _mock_clear, _mock_branch, _mock_fork, _mock_run_flow, mock_merge,
         _mock_status,
@@ -178,8 +178,8 @@ class TestRunWorktreeMode:
         assert rc == 0
         mock_merge.assert_not_called()
 
-    @patch("se3.engine.worktree.fork_worktree", side_effect=RuntimeError("git fail"))
-    @patch("se3.engine.worktree.get_current_branch", return_value="main")
+    @patch("tianluo.engine.worktree.fork_worktree", side_effect=RuntimeError("git fail"))
+    @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
     def test_worktree_creation_failure_returns_error(
         self, _mock_branch, _mock_fork
     ):
@@ -216,12 +216,12 @@ class TestRunWorktreeMode:
             seen["during_merge"] = pid_file.read_text().strip()
             return 0
 
-        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
-             patch("se3.commands.run._finalize_worktree_cleanup", side_effect=fake_cleanup), \
-             patch("se3.commands.run._worktree_flow_status", return_value="completed"), \
-             patch("se3.engine.worktree.fork_worktree", return_value=wt_path), \
-             patch("se3.engine.worktree.get_current_branch", return_value="main"), \
-             patch("se3.commands.run.clear_main_repo_root_cache"):
+        with patch("tianluo.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("tianluo.commands.run._finalize_worktree_cleanup", side_effect=fake_cleanup), \
+             patch("tianluo.commands.run._worktree_flow_status", return_value="completed"), \
+             patch("tianluo.engine.worktree.fork_worktree", return_value=wt_path), \
+             patch("tianluo.engine.worktree.get_current_branch", return_value="main"), \
+             patch("tianluo.commands.run.clear_main_repo_root_cache"):
             rc = run.run_worktree_mode(project_root=tmp_path, task="Add feature")
 
         assert rc == 0
@@ -279,7 +279,7 @@ class TestWorktreeRunDiscovery:
 
 
 class TestResumeRun:
-    @patch("se3.commands.run.run_flow", return_value=0)
+    @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_resume_main_repo_flow(self, mock_run_flow, tmp_path):
         # No worktree runs → plain main-repo resume (lock acquired by default).
         rc = run.resume_run(tmp_path, "main-flow", output_format="cli")
@@ -290,9 +290,9 @@ class TestResumeRun:
         # acquire_main_lock not overridden → default True (a sync resume)
         assert "acquire_main_lock" not in kwargs or kwargs["acquire_main_lock"] is True
 
-    @patch("se3.commands.run._worktree_flow_status", return_value="completed")
-    @patch("se3.commands.run._finalize_worktree_cleanup", return_value=0)
-    @patch("se3.commands.run.run_flow", return_value=0)
+    @patch("tianluo.commands.run._worktree_flow_status", return_value="completed")
+    @patch("tianluo.commands.run._finalize_worktree_cleanup", return_value=0)
+    @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_resume_worktree_run_then_merge(
         self, mock_run_flow, mock_merge, _mock_status, tmp_path
     ):
@@ -313,8 +313,8 @@ class TestResumeRun:
             tmp_path / "se3" / "worktrees" / "worktree-x-1",
         )
 
-    @patch("se3.commands.run._finalize_worktree_cleanup")
-    @patch("se3.commands.run.run_flow", return_value=3)
+    @patch("tianluo.commands.run._finalize_worktree_cleanup")
+    @patch("tianluo.commands.run.run_flow", return_value=3)
     def test_resume_worktree_run_failure_skips_merge(
         self, mock_run_flow, mock_merge, tmp_path
     ):
@@ -323,8 +323,8 @@ class TestResumeRun:
         assert rc == 3
         mock_merge.assert_not_called()
 
-    @patch("se3.commands.run._finalize_worktree_cleanup")
-    @patch("se3.commands.run.run_flow", return_value=0)
+    @patch("tianluo.commands.run._finalize_worktree_cleanup")
+    @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_resume_worktree_run_paused_again_skips_merge(
         self, mock_run_flow, mock_merge, tmp_path
     ):
@@ -336,10 +336,10 @@ class TestResumeRun:
         assert rc == 0
         mock_merge.assert_not_called()
 
-    @patch("se3.commands.run._worktree_flow_status", return_value="completed")
-    @patch("se3.commands.run._resolve_main_lock_root", return_value=Path("/main"))
-    @patch("se3.commands.run._finalize_worktree_cleanup", return_value=0)
-    @patch("se3.commands.run.run_flow", return_value=0)
+    @patch("tianluo.commands.run._worktree_flow_status", return_value="completed")
+    @patch("tianluo.commands.run._resolve_main_lock_root", return_value=Path("/main"))
+    @patch("tianluo.commands.run._finalize_worktree_cleanup", return_value=0)
+    @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_resume_when_project_root_is_the_worktree_itself(
         self, mock_run_flow, mock_merge, mock_resolve, _mock_status, tmp_path
     ):
@@ -382,7 +382,7 @@ class TestResumeRun:
             Path("/main"), "worktree/x-1", "main", wt_root
         )
 
-    @patch("se3.commands.run.run_flow", return_value=0)
+    @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_self_worktree_run_ignores_completed(self, mock_run_flow, tmp_path):
         """A COMPLETED worktree engine.json at project_root is not self-resumed."""
         wt_root = tmp_path / "se3" / "worktrees" / "worktree-x-1"
@@ -538,11 +538,11 @@ class TestRunWorktreeModeSourceIssue:
             return flow_exit
 
         cleanup = cleanup if cleanup is not None else MagicMock(return_value=0)
-        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
-             patch("se3.commands.run._finalize_worktree_cleanup", cleanup), \
-             patch("se3.engine.worktree.fork_worktree", return_value=wt), \
-             patch("se3.engine.worktree.get_current_branch", return_value="main"), \
-             patch("se3.commands.run.clear_main_repo_root_cache"):
+        with patch("tianluo.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("tianluo.commands.run._finalize_worktree_cleanup", cleanup), \
+             patch("tianluo.engine.worktree.fork_worktree", return_value=wt), \
+             patch("tianluo.engine.worktree.get_current_branch", return_value="main"), \
+             patch("tianluo.commands.run.clear_main_repo_root_cache"):
             rc = run.run_worktree_mode(project_root=tmp_path, task="Fix the bug")
         return rc, cleanup
 
@@ -591,9 +591,9 @@ class TestFinalizeWorktreeCleanup:
         # finalize ancestry guard (branch landed on master?) is stubbed True — this
         # unit assumes the in-flow merge already landed the branch (a not-landed
         # branch is covered separately by the resume E2E tests).
-        with patch("se3.engine.merge.cleanup.CleanupManager") as MockCleanup, \
-             patch("se3.commands.merge.merge_lock.MergeLock") as MockLock, \
-             patch("se3.commands.run._worktree_branch_landed", return_value=True):
+        with patch("tianluo.engine.merge.cleanup.CleanupManager") as MockCleanup, \
+             patch("tianluo.commands.merge.merge_lock.MergeLock") as MockLock, \
+             patch("tianluo.commands.run._worktree_branch_landed", return_value=True):
             MockLock.return_value.acquire.return_value = None
             MockLock.return_value.release.return_value = None
             rc = run._finalize_worktree_cleanup(
@@ -628,8 +628,8 @@ class TestResumeWorktreeSourceIssue:
             wt, status="failed", source_issue_id=issue_id, branch="worktree/x-1"
         )
         cleanup = cleanup if cleanup is not None else MagicMock(return_value=0)
-        with patch("se3.commands.run.run_flow", side_effect=fake_run_flow), \
-             patch("se3.commands.run._finalize_worktree_cleanup", cleanup):
+        with patch("tianluo.commands.run.run_flow", side_effect=fake_run_flow), \
+             patch("tianluo.commands.run._finalize_worktree_cleanup", cleanup):
             rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
         return rc, cleanup
 

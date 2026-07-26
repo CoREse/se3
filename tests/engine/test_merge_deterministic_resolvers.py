@@ -14,8 +14,8 @@ from typing import Sequence
 
 import pytest
 
-from se3.engine.merge import deterministic_resolvers as dr
-from se3.engine.merge.deterministic_resolvers import (
+from tianluo.engine.merge import deterministic_resolvers as dr
+from tianluo.engine.merge.deterministic_resolvers import (
     CodeIndexResolver,
     FileBlock,
     NextIdResolver,
@@ -455,7 +455,7 @@ def _git(repo: Path, *args: str) -> str:
 
 def _real_fp(text: str) -> str:
     """The content fingerprint code_index would record for a file of *text*."""
-    from se3.engine.code_index import _fp, _sha256_prefix
+    from tianluo.engine.code_index import _fp, _sha256_prefix
 
     return _fp(_sha256_prefix(text.encode("utf-8")))
 
@@ -558,7 +558,7 @@ def conflicted_repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def no_llm(monkeypatch):
     """Any LLM call from this point on is a test failure."""
-    from se3.engine.llm_caller import LLMCaller
+    from tianluo.engine.llm_caller import LLMCaller
 
     def _forbidden(*args, **kwargs):
         raise AssertionError("the LLM must not be called for deterministic conflicts")
@@ -567,7 +567,7 @@ def no_llm(monkeypatch):
 
 
 def test_real_merge_conflict_is_resolved_without_the_llm(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     conflicts = get_conflicting_files(repo)
@@ -583,7 +583,7 @@ def test_real_merge_conflict_is_resolved_without_the_llm(conflicted_repo, no_llm
 
 
 def test_resolved_index_unions_entries_and_drops_the_deleted_file(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
@@ -608,7 +608,7 @@ def test_resolved_index_unions_entries_and_drops_the_deleted_file(conflicted_rep
 
 
 def test_staged_index_matches_the_working_tree(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
@@ -618,7 +618,7 @@ def test_staged_index_matches_the_working_tree(conflicted_repo, no_llm):
 
 
 def test_next_id_takes_the_larger_counter(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
@@ -627,7 +627,7 @@ def test_next_id_takes_the_larger_counter(conflicted_repo, no_llm):
 
 
 def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
@@ -653,7 +653,7 @@ def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_rep
 @pytest.fixture
 def orchestrator_repo(conflicted_repo, monkeypatch):
     """``conflicted_repo`` with the LLM, guardrails and context-build disarmed."""
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     # The short-circuit must return before any conflict context is built: that
     # call reads merge metadata whose failure would abort a merge with nothing
@@ -669,8 +669,8 @@ def orchestrator_repo(conflicted_repo, monkeypatch):
 
 
 def _handle_conflict(repo: Path, strategy: str):
-    from se3.commands.merge.result_model import MergeReport
-    from se3.engine.merge.orchestrator import MergeOrchestrator
+    from tianluo.commands.merge.result_model import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
     pre_merge_sha = _git(repo, "rev-parse", "HEAD").strip()
     orch = MergeOrchestrator(
@@ -706,7 +706,7 @@ def test_a_fully_deterministic_conflict_merges_without_the_llm(
 
 def test_a_leftover_conflict_still_reaches_the_context_builder(orchestrator_repo, monkeypatch):
     """One non-deterministic path is enough to keep the whole LLM path alive."""
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     repo = orchestrator_repo
     # Make a third path conflict so ``remaining`` is non-empty.
@@ -743,7 +743,7 @@ def test_a_broken_deterministic_pass_degrades_to_the_pre_change_behaviour(
     the conflicts itself) is the required hand-off — not a half-filled outcome,
     and not an ``AttributeError`` on ``None.remaining``.
     """
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     repo = orchestrator_repo
 

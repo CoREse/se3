@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as djc
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as djc
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
 
 
 @pytest.fixture(autouse=True)

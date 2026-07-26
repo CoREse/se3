@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.supervisor import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.supervisor import (
     DaemonSupervisor,
     is_worktree_copy_root,
     resolve_worktree_main_root,
@@ -148,7 +148,7 @@ def test_scan_external_registers_main_root_for_worktree_proc(
 ) -> None:
     """A discovered ``se3 run`` process running in a worktree is attributed
     to the main project root, not the worktree path."""
-    import se3.daemon.supervisor as sup_mod
+    import tianluo.daemon.supervisor as sup_mod
 
     main = _make_project(tmp_path / "main")
     wt = main / "se3" / "worktrees" / "wt-1"
@@ -252,7 +252,7 @@ def test_entry_point_seam_keeps_worktree_out_of_active_and_registry(
     shared seam and asserts neither the in-memory active set nor the persisted
     registry retains the ``/se3/worktrees/`` copy.
     """
-    from se3.daemon.daemon import Daemon, DaemonConfig, _read_project_roots
+    from tianluo.daemon.daemon import Daemon, DaemonConfig, _read_project_roots
 
     main = _make_project(tmp_path / "main")
     wt = main / "se3" / "worktrees" / "wt-1"
@@ -274,7 +274,7 @@ def test_entry_point_seam_keeps_worktree_out_of_active_and_registry(
 
 def test_append_project_root_defence_normalizes_worktree(tmp_path: Path) -> None:
     """The disk write backstop folds a worktree path to its main root."""
-    from se3.daemon.daemon import _append_project_root, _read_project_roots
+    from tianluo.daemon.daemon import _append_project_root, _read_project_roots
 
     main = _make_project(tmp_path / "main")
     wt = main / "se3" / "worktrees" / "wt-1"
@@ -294,7 +294,7 @@ def test_startup_sanitize_cleans_polluted_registry_to_main_only(
     Mirrors a registry persisted before normalization existed: the one-time
     sanitize must atomically rewrite it dropping the worktree copy.
     """
-    from se3.daemon.daemon import (
+    from tianluo.daemon.daemon import (
         _atomic_write_json,
         _read_project_roots,
         _sanitize_project_roots,
@@ -320,7 +320,7 @@ def test_startup_sanitize_clean_registry_not_rewritten(tmp_path: Path) -> None:
     """A registry with no worktree pollution is left byte-for-byte untouched."""
     import time
 
-    from se3.daemon.daemon import (
+    from tianluo.daemon.daemon import (
         _append_project_root,
         _read_project_roots,
         _sanitize_project_roots,

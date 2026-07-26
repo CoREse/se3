@@ -19,23 +19,23 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     ConflictFile,
     ConflictHunk,
 )
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     FileResolution,
     HunkResolution,
     LLMResolution,
 )
-from se3.engine.merge.human_call import (
+from tianluo.engine.merge.human_call import (
     HumanCallWriter,
     _atomic_write_json,
     _generate_call_filename,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecision
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecision
 
 
 # --------- helpers ---------

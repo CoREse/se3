@@ -20,13 +20,13 @@ import json
 import subprocess
 from pathlib import Path
 
-from se3.commands import run
-from se3.commands.merge_cmd import (
+from tianluo.commands import run
+from tianluo.commands.merge_cmd import (
     _backfill_resolved_source_issues,
     _map_branches_to_source_issues,
     run_merge,
 )
-from se3.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
 
 # --------------------------------------------------------------------------
@@ -99,7 +99,7 @@ def _make_in_progress_issue(project_root: Path, description: str) -> str:
 
 def _make_report(**kwargs):
     """Build a successful MergeReport with sane defaults."""
-    from se3.engine.merge.orchestrator import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeReport
 
     defaults = dict(
         success=True,
@@ -126,7 +126,7 @@ def _patch_merge(monkeypatch, report, captured):
         captured.append({"content": content, "title": title})
 
     monkeypatch.setattr(
-        "se3.commands.merge_cmd.render_text", capture_render_text,
+        "tianluo.commands.merge_cmd.render_text", capture_render_text,
     )
 
     class MockOrchestrator:
@@ -137,17 +137,17 @@ def _patch_merge(monkeypatch, report, captured):
             return report
 
     monkeypatch.setattr(
-        "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+        "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
     )
     monkeypatch.setattr(
-        "se3.commands.merge_cmd._branch_exists",
+        "tianluo.commands.merge_cmd._branch_exists",
         lambda _root, _branch: True,
     )
     # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
     # does not git-read a nonexistent ref (which now raises IntentReadError and
     # would flip run_merge to a non-zero exit before the backfill under test).
     monkeypatch.setattr(
-        "se3.engine.version_intent.intent_flow_ids_introduced",
+        "tianluo.engine.version_intent.intent_flow_ids_introduced",
         lambda *_a, **_k: set(),
     )
 
@@ -470,15 +470,15 @@ class TestRunMergeBackfill:
         # Force the stash-pop-incomplete recovery path: pretend the operator
         # had WIP, a stash was taken, and the post-merge pop did not finalize.
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._has_user_uncommitted_changes",
+            "tianluo.commands.merge_cmd._has_user_uncommitted_changes",
             lambda _root: True,
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._fast_stash_dirty",
+            "tianluo.commands.merge_cmd._fast_stash_dirty",
             lambda _root, _msgs: "se3-fast-stash-label",
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._fast_stash_pop",
+            "tianluo.commands.merge_cmd._fast_stash_pop",
             lambda _root, _label, _msgs: True,  # pop did NOT finalize
         )
 

@@ -25,10 +25,10 @@ The fix (this group):
    drain's end-of-history water mark, making the NEXT push append's ``cursor_base``
    meet the server's water mark exactly.
 
-These tests drive the real :class:`~se3.daemon.history.DaemonHistoryReader` over a
+These tests drive the real :class:`~tianluo.daemon.history.DaemonHistoryReader` over a
 real multi-frame backlog, interleave a concurrent ``_push_history`` into the
 middle of a drain, and replay the frames — in the true socket order — into a real
-:class:`~se3.server.state.ServerState` to assert the server never gaps and the
+:class:`~tianluo.server.state.ServerState` to assert the server never gaps and the
 bundle converges monotonically to the file's end.
 
 The async cases drive their own event loop via ``asyncio.run``: pytest-asyncio is
@@ -41,9 +41,9 @@ import asyncio
 import json
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import DaemonHistoryReader
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 # --------------------------------------------------------------------------
@@ -199,7 +199,7 @@ def test_push_during_drain_is_skipped_and_server_never_gaps(tmp_path):
     server assembles the whole backlog with no cursor-gap discard."""
 
     async def scenario():
-        from se3.server.state import ServerState
+        from tianluo.server.state import ServerState
 
         flow_id = "20260722-104526_a82315a9"
         step = "05_implement_9772ce1d.jsonl"
@@ -295,7 +295,7 @@ def test_drain_syncs_push_cursor_so_next_append_is_accepted(tmp_path):
     next ``_push_history`` append meets the server's mark and is extended."""
 
     async def scenario():
-        from se3.server.state import ServerState
+        from tianluo.server.state import ServerState
 
         flow_id = "20260722-104526_a82315a9"
         step = "05_implement_9772ce1d.jsonl"

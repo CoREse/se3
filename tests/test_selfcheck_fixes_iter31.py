@@ -29,16 +29,16 @@ from pathlib import Path
 
 import pytest
 
-import se3.config as cfg
-from se3.config import (
+import tianluo.config as cfg
+from tianluo.config import (
     MainRepoProbeError,
     _resolve_main_repo_root,
     clear_main_repo_root_cache,
     probe_main_repo_root,
 )
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.state_machine import MergeCheckoutResolutionError, StateMachine
-from se3.engine.steps.commit import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.state_machine import MergeCheckoutResolutionError, StateMachine
+from tianluo.engine.steps.commit import (
     _guard_version_race,
     _record_flow_committed_version,
 )
@@ -237,11 +237,11 @@ class TestMergeCheckoutResolutionStrict:
         fake_lock = MagicMock()
         acquired: list = []
         monkeypatch.setattr(
-            "se3.commands.merge.merge_lock.is_lock_held_in_process",
+            "tianluo.commands.merge.merge_lock.is_lock_held_in_process",
             lambda root: False,
         )
         monkeypatch.setattr(
-            "se3.commands.merge.merge_lock.MergeLock",
+            "tianluo.commands.merge.merge_lock.MergeLock",
             lambda root, blocking=True: fake_lock,
         )
         monkeypatch.setattr(
@@ -268,7 +268,7 @@ class TestMergeCheckoutResolutionStrict:
         step.cwd = None
 
         boom = MagicMock(side_effect=AssertionError("must not lock a non-merge step"))
-        monkeypatch.setattr("se3.commands.merge.merge_lock.MergeLock", boom)
+        monkeypatch.setattr("tianluo.commands.merge.merge_lock.MergeLock", boom)
 
         with sm._step_cwd_override(flow=sm.create_flow(
             task_description="x", task_type="feature",
@@ -326,7 +326,7 @@ class TestScriptModeOwnReplayGuard:
         called = {}
 
         # Stub the re-analysis so no real LLM/repo is needed; assert we reach it.
-        import se3.engine.steps.commit as commit_mod
+        import tianluo.engine.steps.commit as commit_mod
 
         def _fake_reanalyze(_step, _flow, new_baseline):
             called["baseline"] = new_baseline
@@ -359,7 +359,7 @@ class TestAcquireMergeStepLockWaitingCleanup:
     types, not just KeyboardInterrupt."""
 
     def _busy_then_raise_lock(self, exc):
-        from se3.commands.merge.merge_lock import MergeLockBusy
+        from tianluo.commands.merge.merge_lock import MergeLockBusy
 
         class _Lock:
             def __init__(self):
@@ -393,7 +393,7 @@ class TestAcquireMergeStepLockWaitingCleanup:
 
         # Silence the streaming history anchors — bookkeeping is best-effort and
         # not what this test exercises.
-        import se3.engine.chat_history as ch
+        import tianluo.engine.chat_history as ch
         monkeypatch.setattr(ch, "record_waiting_for_lock", lambda **kw: None)
         monkeypatch.setattr(ch, "record_lock_acquired", lambda **kw: None)
 

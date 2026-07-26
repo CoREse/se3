@@ -12,7 +12,7 @@ works on real daemon data" fix. It stands up a fully isolated instance —
 * a throwaway ``se3 init`` project,
 
 and then proves, against records the *real* daemon produced (file-name →
-``step_type`` injection in :mod:`se3.daemon.history`), that:
+``step_type`` injection in :mod:`tianluo.daemon.history`), that:
 
 (a) the rendering paradigm takes effect — step headers read the paradigm names
     (DISCOVERY / IMPLEMENT / VERSION ANALYZE …) rather than the raw
@@ -206,8 +206,8 @@ class _IsolatedConsole:
         server subprocess later opens. The admin owns the daemon (via the key)
         and authenticates the HTTP/browser clients.
         """
-        import se3.server.crypto as crypto
-        from se3.server.persistence import Store
+        import tianluo.server.crypto as crypto
+        from tianluo.server.persistence import Store
 
         store = Store(str(self.db_path))
         owner_id = store.create_owner("admin", is_admin=True)
@@ -243,7 +243,7 @@ class _IsolatedConsole:
 
         # 1. Initialise a throwaway SE3 project from the worktree.
         init = subprocess.run(
-            [_PY, "-m", "se3.cli", "init", "-p", str(self.project)],
+            [_PY, "-m", "tianluo.cli", "init", "-p", str(self.project)],
             env=env,
             cwd=str(self.project),
             capture_output=True,
@@ -264,8 +264,8 @@ class _IsolatedConsole:
         self._sfh = open(self._server_log, "wb")
         server_launcher = (
             "import uvicorn;"
-            "from se3.server.app import create_app;"
-            "from se3.server.auth.session import SessionStore, CookieConfig;"
+            "from tianluo.server.app import create_app;"
+            "from tianluo.server.auth.session import SessionStore, CookieConfig;"
             f"app=create_app(db_path={str(self.db_path)!r}, "
             "session_store=SessionStore(cookie_config=CookieConfig(secure=False)));"
             f"uvicorn.run(app, host='127.0.0.1', port={self.port}, log_level='warning')"
@@ -288,7 +288,7 @@ class _IsolatedConsole:
         #    External ``se3 run`` process scanning is disabled so the daemon can
         #    never aggregate the user's real flows.
         launcher = (
-            "from se3.daemon.daemon import Daemon, DaemonConfig;"
+            "from tianluo.daemon.daemon import Daemon, DaemonConfig;"
             "d=Daemon(DaemonConfig("
             f"server_url='ws://127.0.0.1:{self.port}',"
             f"pid_dir=r'{self.daemon_dir}',"
@@ -853,7 +853,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
     # pause stays RUNNING and dual-waits the terminal + web response file.
     master_fd, slave_fd = pty.openpty()
     run = subprocess.Popen(
-        [_PY, "-m", "se3.cli", "run", "--discover", "Add a health endpoint"],
+        [_PY, "-m", "tianluo.cli", "run", "--discover", "Add a health endpoint"],
         env=env,
         cwd=str(project),
         stdin=slave_fd,

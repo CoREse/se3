@@ -22,13 +22,13 @@ import pytest
 # server extra present.
 CORE_MODULES = [
     "se3",
-    "se3.cli",
-    "se3.commands",
-    "se3.commands.run",
-    "se3.engine",
-    "se3.engine.state_machine",
-    "se3.daemon",
-    "se3.daemon.daemon",
+    "tianluo.cli",
+    "tianluo.commands",
+    "tianluo.commands.run",
+    "tianluo.engine",
+    "tianluo.engine.state_machine",
+    "tianluo.daemon",
+    "tianluo.daemon.daemon",
 ]
 
 # `se3` command-family subcommands whose `--help` must not trigger a server
@@ -66,14 +66,14 @@ def test_core_modules_import_without_server_modules_leaking() -> None:
 
 
 def test_importing_se3_does_not_import_server_package() -> None:
-    """`import se3` (and the CLI) must not import the `se3.server` package."""
+    """`import tianluo` (and the CLI) must not import the `tianluo.server` package."""
     code = """
         import sys
-        import se3
-        import se3.cli  # building the Typer command tree
-        leaked = [m for m in sys.modules if m == "se3.server"
-                  or m.startswith("se3.server.")]
-        assert not leaked, "se3.server leaked into core import: " + repr(leaked)
+        import tianluo
+        import tianluo.cli  # building the Typer command tree
+        leaked = [m for m in sys.modules if m == "tianluo.server"
+                  or m.startswith("tianluo.server.")]
+        assert not leaked, "tianluo.server leaked into core import: " + repr(leaked)
         print("OK")
     """
     proc = _run_python(code)
@@ -85,7 +85,7 @@ def test_importing_se3_does_not_import_server_package() -> None:
 def test_core_command_help_has_no_import_error(command: str) -> None:
     """`se3 <command> --help` must succeed and never load the server extra."""
     proc = subprocess.run(
-        [sys.executable, "-m", "se3.cli", command, "--help"],
+        [sys.executable, "-m", "tianluo.cli", command, "--help"],
         capture_output=True,
         text=True,
     )
@@ -112,7 +112,7 @@ def test_se3_server_reports_clear_hint_when_extra_missing() -> None:
             return _real_import(name, *args, **kwargs)
 
         builtins.__import__ = _blocked
-        from se3.server import main
+        from tianluo.server import main
         try:
             main([])
         except SystemExit as exc:

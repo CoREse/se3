@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.commands.merge.failure_reason import (
+from tianluo.commands.merge.failure_reason import (
     FailureReason,
     from_legacy_string,
     to_legacy_string,
@@ -157,7 +157,7 @@ class TestLegacyString:
         in the map would silently resolve to ``FailureReason.UNEXPECTED``
         at runtime. This test fails loudly on such drift.
         """
-        from se3.commands.merge.failure_reason import _LEGACY_STRING_MAP
+        from tianluo.commands.merge.failure_reason import _LEGACY_STRING_MAP
 
         for member in FailureReason:
             if member is FailureReason.NONE:

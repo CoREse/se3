@@ -10,17 +10,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from se3.engine.llm_caller import LLMCallError
-from se3.engine.models import StepStatus
-from se3.engine.steps import discovery as discovery_mod
-from se3.i18n import set_language, t
+from tianluo.engine.llm_caller import LLMCallError
+from tianluo.engine.models import StepStatus
+from tianluo.engine.steps import discovery as discovery_mod
+from tianluo.i18n import set_language, t
 
 
 @pytest.fixture
 def captured_panels(monkeypatch):
     panels = []
     monkeypatch.setattr(
-        "se3.engine.output.render_full",
+        "tianluo.engine.output.render_full",
         lambda content, title=None, **kw: panels.append((content, title)),
     )
     return panels

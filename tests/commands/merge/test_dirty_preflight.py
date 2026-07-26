@@ -16,8 +16,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.commands.merge.failure_reason import FailureReason, from_legacy_string
-from se3.engine.merge.orchestrator import MergeOrchestrator, MergeReport
+from tianluo.commands.merge.failure_reason import FailureReason, from_legacy_string
+from tianluo.engine.merge.orchestrator import MergeOrchestrator, MergeReport
 
 
 def _git(path: Path, *args: str) -> subprocess.CompletedProcess:

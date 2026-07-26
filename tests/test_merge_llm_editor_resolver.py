@@ -30,13 +30,13 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import ConflictFile
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_context import ConflictFile
+from tianluo.engine.merge.conflict_resolver import (
     BatchContext,
     ConflictResolver,
     MergeStrategy,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider
 
 
 # --------- git helpers ---------
@@ -339,11 +339,11 @@ def test_no_take_theirs_helper_remains_in_merge_package() -> None:
     callable any more — the entire take-theirs fallback was excised in
     G4, and this test guards against accidental reintroduction.
     """
-    import se3.engine.merge as merge_pkg
+    import tianluo.engine.merge as merge_pkg
 
     seen: list[str] = []
     for _finder, name, _ispkg in pkgutil.iter_modules(merge_pkg.__path__):
-        mod = importlib.import_module(f"se3.engine.merge.{name}")
+        mod = importlib.import_module(f"tianluo.engine.merge.{name}")
         for forbidden in (
             "_robust_take_theirs_commit",
             "_record_take_theirs_event",
@@ -409,8 +409,8 @@ def test_synthesis_osfailure_does_not_synthesise_deletion(
     resolved file would cause ``git rm -f`` to erase the file the LLM
     had just fixed.
     """
-    from se3.engine.merge.conflict_context import ConflictContext
-    from se3.engine.merge.conflict_resolver import (
+    from tianluo.engine.merge.conflict_context import ConflictContext
+    from tianluo.engine.merge.conflict_resolver import (
         BatchResolveOutcome,
         Confidence,
     )

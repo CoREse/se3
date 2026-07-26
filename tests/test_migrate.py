@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands import migrate_cmd
-from se3.commands.migrate_cmd import (
+from tianluo.commands import migrate_cmd
+from tianluo.commands.migrate_cmd import (
     ColocatedWhy,
     Migrator,
     SalvageResult,
@@ -133,7 +133,7 @@ def test_list_migrators_sorted():
 # ---------------------------------------------------------------------------
 
 def test_cli_registers_migrate():
-    from se3 import cli
+    from tianluo import cli
 
     # add_typer registers a (typer_instance, name) entry.
     names = {getattr(g, "name", None) for g in cli.app.registered_groups}
@@ -143,7 +143,7 @@ def test_cli_registers_migrate():
 def test_migrate_list_command_runs():
     from typer.testing import CliRunner
 
-    from se3 import cli
+    from tianluo import cli
 
     result = CliRunner().invoke(cli.app, ["migrate", "list"])
     assert result.exit_code == 0
@@ -153,7 +153,7 @@ def test_migrate_list_command_runs():
 def test_migrate_run_unknown_id_errors():
     from typer.testing import CliRunner
 
-    from se3 import cli
+    from tianluo import cli
 
     result = CliRunner().invoke(cli.app, ["migrate", "run", "no-such-migrator"])
     assert result.exit_code == 1

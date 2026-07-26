@@ -9,7 +9,7 @@ from unittest.mock import call, patch
 
 import pytest
 
-from se3.engine.worktree import (
+from tianluo.engine.worktree import (
     WorktreeContext,
     _branch_safe_name,
     _cleanup_git_worktree_metadata,
@@ -379,7 +379,7 @@ class TestFlowInstanceWorktreeFields:
     """Test that FlowInstance serializes/deserializes worktree fields."""
 
     def test_round_trip_with_worktree_fields(self) -> None:
-        from se3.engine.models import FlowInstance
+        from tianluo.engine.models import FlowInstance
 
         flow = FlowInstance(
             task_description="test",
@@ -402,7 +402,7 @@ class TestFlowInstanceWorktreeFields:
         assert restored.worktree_branch == "wt/20260324-120000"
 
     def test_round_trip_without_worktree_fields(self) -> None:
-        from se3.engine.models import FlowInstance
+        from tianluo.engine.models import FlowInstance
 
         flow = FlowInstance(task_description="test")
         data = flow.to_dict()
@@ -418,7 +418,7 @@ class TestFlowInstanceWorktreeFields:
 
     def test_backward_compat_missing_fields(self) -> None:
         """Old persisted state without new fields should deserialize fine."""
-        from se3.engine.models import FlowInstance
+        from tianluo.engine.models import FlowInstance
 
         data = {
             "flow_id": "test-123",
@@ -442,7 +442,7 @@ class TestFlowInstanceWorktreeFields:
         reads the worktree_* keys via data.get), so a flow persisted by a
         pre-worktree build still deserializes cleanly.
         """
-        from se3.engine.models import FlowInstance
+        from tianluo.engine.models import FlowInstance
 
         data = {
             "flow_id": "legacy-1",
@@ -561,7 +561,7 @@ class TestCreateWorktreeRetry:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-ok")
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         call_count = 0
@@ -577,7 +577,7 @@ class TestCreateWorktreeRetry:
                     )
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             wt_path = create_worktree(tmp_path, branch_name)
 
         assert wt_path.exists()
@@ -591,7 +591,7 @@ class TestCreateWorktreeRetry:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-fail")
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         call_count = 0
@@ -606,7 +606,7 @@ class TestCreateWorktreeRetry:
                 )
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             with pytest.raises(subprocess.TimeoutExpired):
                 create_worktree(tmp_path, branch_name)
 
@@ -630,7 +630,7 @@ class TestCreateWorktreeRetry:
             # Allow prune calls through without error
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             with pytest.raises(subprocess.TimeoutExpired):
                 create_worktree(tmp_path, branch_name)
 
@@ -645,7 +645,7 @@ class TestCreateWorktreeRetry:
         worktree_path = tmp_path / "se3" / "worktrees" / safe_name
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         call_count = 0
@@ -664,7 +664,7 @@ class TestCreateWorktreeRetry:
                     )
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             wt_path = create_worktree(tmp_path, branch_name)
 
         # The partial file should not exist (directory was cleaned)
@@ -708,7 +708,7 @@ class TestForceCleanupWorktreeFaultTolerance:
         wt_path = create_worktree(tmp_path, branch_name)
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         steps_called = []
@@ -727,7 +727,7 @@ class TestForceCleanupWorktreeFaultTolerance:
                 steps_called.append("list")
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             force_cleanup_worktree(tmp_path, branch_name)
 
         assert "unlock" in steps_called
@@ -741,7 +741,7 @@ class TestForceCleanupWorktreeFaultTolerance:
         wt_path = create_worktree(tmp_path, branch_name)
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         steps_called = []
@@ -761,7 +761,7 @@ class TestForceCleanupWorktreeFaultTolerance:
                 return original_run_git(project_root, *args, **kwargs)
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             force_cleanup_worktree(tmp_path, branch_name)
 
         assert "unlock" in steps_called
@@ -776,7 +776,7 @@ class TestForceCleanupWorktreeFaultTolerance:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-timeout")
 
         original_run_git = __import__(
-            "se3.engine.worktree", fromlist=["_run_git"]
+            "tianluo.engine.worktree", fromlist=["_run_git"]
         )._run_git
 
         timeouts_seen = []
@@ -793,7 +793,7 @@ class TestForceCleanupWorktreeFaultTolerance:
                 timeouts_seen.append(timeout)
             return original_run_git(project_root, *args, **kwargs)
 
-        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+        with patch("tianluo.engine.worktree._run_git", side_effect=mock_run_git):
             force_cleanup_worktree(tmp_path, branch_name)
 
         # All cleanup _run_git calls should use timeout=60
@@ -806,7 +806,7 @@ class TestForceCleanupWorktreeFaultTolerance:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="ft-meta")
 
         with patch(
-            "se3.engine.worktree._cleanup_git_worktree_metadata"
+            "tianluo.engine.worktree._cleanup_git_worktree_metadata"
         ) as mock_meta:
             force_cleanup_worktree(tmp_path, branch_name)
 
@@ -849,7 +849,7 @@ class TestCleanupGitWorktreeMetadata:
         metadata_path = tmp_path / ".git" / "worktrees" / safe_name
         metadata_path.mkdir(parents=True)
 
-        with patch("se3.engine.worktree.shutil.rmtree", side_effect=OSError("permission denied")):
+        with patch("tianluo.engine.worktree.shutil.rmtree", side_effect=OSError("permission denied")):
             # Should not raise
             _cleanup_git_worktree_metadata(tmp_path, branch_name)
 
@@ -865,7 +865,7 @@ class TestDeleteBranchWorktreeVerification:
         _init_repo(tmp_path)
         branch_name, _ = _make_test_branch(tmp_path, timestamp="db-direct")
 
-        with patch("se3.engine.worktree.force_cleanup_worktree") as mock_cleanup:
+        with patch("tianluo.engine.worktree.force_cleanup_worktree") as mock_cleanup:
             delete_branch(tmp_path, branch_name)
 
         mock_cleanup.assert_not_called()
@@ -901,7 +901,7 @@ class TestDeleteBranchWorktreeVerification:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="db-fail")
 
         original_exists = __import__(
-            "se3.engine.worktree", fromlist=["exists_for_branch"]
+            "tianluo.engine.worktree", fromlist=["exists_for_branch"]
         ).exists_for_branch
 
         call_count = {"exists": 0}
@@ -913,8 +913,8 @@ class TestDeleteBranchWorktreeVerification:
                 return True
             return original_exists(project_root, branch)
 
-        with patch("se3.engine.worktree.exists_for_branch", side_effect=mock_exists), \
-             patch("se3.engine.worktree.force_cleanup_worktree") as mock_cleanup:
+        with patch("tianluo.engine.worktree.exists_for_branch", side_effect=mock_exists), \
+             patch("tianluo.engine.worktree.force_cleanup_worktree") as mock_cleanup:
             delete_branch(tmp_path, branch_name)
 
         # force_cleanup_worktree should have been called
@@ -1066,8 +1066,8 @@ class TestImplementEntryPreflight:
     def test_dag_entry_auto_recovers_stale_unmerged(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
 
-        from se3.engine.models import StepStatus
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps import implement as impl_mod
 
         _make_modify_delete_unmerged(tmp_path, "foo.yaml")
         assert detect_unmerged_paths(tmp_path) == ["foo.yaml"]
@@ -1100,8 +1100,8 @@ class TestImplementEntryPreflight:
     def test_dag_entry_fails_fast_when_merge_in_progress(self, tmp_path: Path) -> None:
         from unittest.mock import MagicMock
 
-        from se3.engine.models import StepStatus
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps import implement as impl_mod
 
         # Same setup but leave MERGE_HEAD in place
         _init_repo(tmp_path)

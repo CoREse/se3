@@ -12,9 +12,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3.cli import app
-from se3.config import SpecGovernanceConfig
-from se3.engine.merge.guardrails import (
+from tianluo.cli import app
+from tianluo.config import SpecGovernanceConfig
+from tianluo.engine.merge.guardrails import (
     SIZE_BASE,
     SIZE_REQUIREMENT,
     SIZE_SPEC_FILE,

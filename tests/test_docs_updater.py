@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import docs_updater
-from se3.engine.docs_updater import (
+from tianluo.engine import docs_updater
+from tianluo.engine.docs_updater import (
     DocumentationUpdater,
     Template,
     _versions_entry_template_from_file,

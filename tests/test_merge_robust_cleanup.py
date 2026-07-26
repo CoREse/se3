@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.merge.cleanup import (
+from tianluo.engine.merge.cleanup import (
     CleanupManager,
     CleanupReport,
     _archive_worktree,
@@ -145,7 +145,7 @@ class TestArchiveWorktreeHelper:
         # First archive
         a1 = _archive_worktree(tmp_path, branch, wt_path)
         # Force a same-timestamp collision by pre-creating the slot
-        with patch("se3.engine.merge.cleanup.time.time", return_value=int(
+        with patch("tianluo.engine.merge.cleanup.time.time", return_value=int(
             a1.name.rsplit("-", 1)[-1]
         )):
             a2 = _archive_worktree(tmp_path, branch, wt_path)
@@ -200,7 +200,7 @@ class TestCleanupArchiveIntegration:
         mgr = CleanupManager(tmp_path)
         # Mock copytree to fail.
         with patch(
-            "se3.engine.merge.cleanup.shutil.copytree",
+            "tianluo.engine.merge.cleanup.shutil.copytree",
             side_effect=PermissionError("simulated disk full"),
         ):
             report = mgr.delete_merged_branches([branch])

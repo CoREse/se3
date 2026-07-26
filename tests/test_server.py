@@ -7,10 +7,10 @@ import threading
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.server.state import FlowSnapshot, ServerState
+from tianluo.server.state import FlowSnapshot, ServerState
 
 
 # --------------------------------------------------------------------------
@@ -333,9 +333,9 @@ def client_and_app():
     """
     from fastapi.testclient import TestClient
 
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     # The TestClient speaks plain HTTP, so a Secure cookie would never be sent
     # back; use a non-secure session cookie for the test transport only.
@@ -692,7 +692,7 @@ def test_run_passes_ws_max_size_to_uvicorn(monkeypatch):
     import sys
     import types
 
-    from se3.server import app as app_module
+    from tianluo.server import app as app_module
 
     captured = {}
 
@@ -1195,7 +1195,7 @@ def _patch_reconcile_timeouts(
     closures in ``create_app``, so patching the module attributes takes effect
     for in-flight requests.
     """
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     monkeypatch.setattr(app_module, "ISSUE_COMMAND_TIMEOUT", ack)
     monkeypatch.setattr(app_module, "ISSUE_RECONCILE_TIMEOUT", reconcile)

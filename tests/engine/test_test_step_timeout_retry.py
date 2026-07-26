@@ -21,7 +21,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------
@@ -29,10 +29,10 @@ from se3.engine.models import FlowInstance, Step, StepStatus, StepType
 # ---------------------------------------------------------------------------
 
 _PATCHES = {
-    "config": "se3.config.TestConfig",
-    "run_cmd": "se3.engine.steps.test._run_command",
-    "record": "se3.engine.steps.test._record_test_history",
-    "report": "se3.engine.steps.test._report_pre_existing_issues",
+    "config": "tianluo.config.TestConfig",
+    "run_cmd": "tianluo.engine.steps.test._run_command",
+    "record": "tianluo.engine.steps.test._record_test_history",
+    "report": "tianluo.engine.steps.test._report_pre_existing_issues",
 }
 
 
@@ -134,7 +134,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -159,7 +159,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -195,7 +195,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100, fix_iteration=2)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         fix_context = step.outputs["fix_context"]
@@ -218,7 +218,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(tests_added=["tests/test_new.py"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -253,7 +253,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -287,7 +287,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         # Phase recovered on retry → no fix loop.
@@ -320,7 +320,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         # Hung required phase blocks the run → fix loop.
@@ -361,7 +361,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -394,7 +394,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -428,7 +428,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step(estimated_test_duration=100)
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -463,7 +463,7 @@ class TestTimeoutRetry:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -510,7 +510,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -553,7 +553,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step(tests_added=["tests/test_new.py"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -591,7 +591,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -626,7 +626,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -659,7 +659,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -686,7 +686,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -725,7 +725,7 @@ class TestPassedPhaseArchiveSlimming:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         tr = step.outputs["test_results"]

@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from se3.engine.models import FlowInstance, Step, StepStatus
-from se3.engine.steps.commit import _generate_commit_message
+from tianluo.engine.models import FlowInstance, Step, StepStatus
+from tianluo.engine.steps.commit import _generate_commit_message
 
 
 def _make_flow(**kwargs) -> FlowInstance:

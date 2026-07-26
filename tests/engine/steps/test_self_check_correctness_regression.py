@@ -17,8 +17,8 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.steps.self_check import (
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps.self_check import (
     SELF_CHECK_PROMPT,
     _build_source_pool,
     _validate_and_filter_issues,
@@ -409,7 +409,7 @@ def test_handler_prompt_carries_new_sections(flow):
         },
     )
     response = json.dumps({"issues": [], "summary": "ok"})
-    with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
         mock_caller = Mock()
         mock_caller.call.return_value = response
         mock_cls.return_value = mock_caller

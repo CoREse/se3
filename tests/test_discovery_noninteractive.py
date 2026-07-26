@@ -4,14 +4,14 @@ When ``se3 run --discover`` runs under a daemon (``--output-format json``,
 no terminal), the discovery step cannot block on a terminal read. Instead it
 writes the clarifying question to a ``se3/calls/`` call file and pauses; the
 web answers it through the existing call/response mechanism. These tests
-exercise that path in :mod:`se3.commands.run`.
+exercise that path in :mod:`tianluo.commands.run`.
 """
 
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from se3.commands.run import (
+from tianluo.commands.run import (
     _DISCOVERY_AWAITING,
     _PROGRAMMATIC_CONFIRM,
     _handle_discovery_pause_noninteractive,

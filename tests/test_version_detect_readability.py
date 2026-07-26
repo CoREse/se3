@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.version_bumper import VersionDetector
+from tianluo.engine.version_bumper import VersionDetector
 
 
 @pytest.fixture

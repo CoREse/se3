@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.config as _cfg
-from se3.config import load_agents, load_claude_commands
+import tianluo.config as _cfg
+from tianluo.config import load_agents, load_claude_commands
 
 
 def _which_claude_only():
@@ -22,7 +22,7 @@ def _which_claude_only():
     without this, results would vary with the host's installed agents.
     """
     return patch(
-        "se3.config.shutil.which",
+        "tianluo.config.shutil.which",
         side_effect=lambda cmd, *a, **k: (
             "/fake/bin/claude" if cmd == "claude" else None
         ),
@@ -51,7 +51,7 @@ class TestLoadAgents:
 
     def test_default_when_no_config(self, tmp_path):
         """Should return the available built-in agents when no config exists."""
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
         assert len(agents) == 1
         assert agents[0]["name"] == "claude"
@@ -68,7 +68,7 @@ class TestLoadAgents:
 llm_caller:
   defaults: [main-claude, backup-claude]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -88,7 +88,7 @@ llm_caller:
   - cmd: kclaude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -109,7 +109,7 @@ claude_commands:
   - cmd: legacy-claude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 1
@@ -131,7 +131,7 @@ llm_caller:
 llm_caller:
   defaults: [project-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 1
@@ -146,7 +146,7 @@ llm_caller:
 llm_caller:
   defaults: [global-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert agents[0]["name"] == "global-agent"
@@ -162,7 +162,7 @@ llm_caller:
 llm_caller:
   defaults: [low, high, mid]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         # Order is the written defaults order, NOT priority descending.
@@ -178,8 +178,8 @@ llm_caller:
 llm_caller:
   defaults: [a, b]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 load_agents(tmp_path)
 
         priority_warnings = [
@@ -198,7 +198,7 @@ llm_caller:
 llm_caller:
   defaults: [primary, backup]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -215,7 +215,7 @@ llm_caller:
 llm_caller:
   defaults: [no-type]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert agents[0]["type"] == "claude-code"
@@ -229,7 +229,7 @@ llm_caller:
 llm_caller:
   defaults: [global-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(None)
 
         assert agents[0]["name"] == "global-agent"
@@ -242,7 +242,7 @@ llm_caller:
   - cmd: global-claude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(None)
 
         assert agents[0]["type"] == "claude-code"
@@ -258,7 +258,7 @@ llm_caller:
         (tmp_path / "se3.yaml").write_text("""agents:
   extra: {cmd: extra-claude}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
 
         # Without explicit llm_caller.defaults and without legacy
@@ -275,7 +275,7 @@ llm_caller:
 llm_caller:
   defaults: [a, doesnotexist]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             with pytest.raises(ValueError) as exc_info:
                 load_agents(tmp_path)
         msg = str(exc_info.value)
@@ -294,7 +294,7 @@ class TestLoadClaudeCommandsBackwardCompat:
 llm_caller:
   defaults: [test]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
 
         assert len(commands) == 1
@@ -305,7 +305,7 @@ llm_caller:
 
     def test_default_still_works(self, tmp_path):
         """Default behavior unchanged."""
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"

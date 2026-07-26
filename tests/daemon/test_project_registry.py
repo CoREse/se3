@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon.daemon import (
+from tianluo.daemon.daemon import (
     Daemon,
     DaemonConfig,
     ProjectCommandError,
@@ -25,8 +25,8 @@ from se3.daemon.daemon import (
     _remove_project_root,
     _sanitize_project_roots,
 )
-from se3.daemon import daemon as daemon_mod
-from se3.daemon.supervisor import DaemonSupervisor
+from tianluo.daemon import daemon as daemon_mod
+from tianluo.daemon.supervisor import DaemonSupervisor
 
 
 def _write_registry(path: Path, roots: list) -> None:

@@ -48,8 +48,8 @@ import threading
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
-from se3.daemon.history import DaemonHistoryReader
+from tianluo.daemon import protocol
+from tianluo.daemon.history import DaemonHistoryReader
 
 FLOW_ID = "20260711-191420_75f3d89f"
 
@@ -171,7 +171,7 @@ def test_read_flow_unresolvable_root_falls_back_to_the_registry_walk(
     reach the records, and re-expands from the root it found so the main+worktree
     merge is still complete (round 2 included).
     """
-    caplog.set_level(logging.WARNING, logger="se3.daemon.history")
+    caplog.set_level(logging.WARNING, logger="tianluo.daemon.history")
     main_root, _worktree_root = _build_two_root_history(tmp_path)
     ghost_root = tmp_path / "pruned-worktree"
     ghost_root.mkdir()
@@ -204,7 +204,7 @@ def test_read_flow_truly_unknown_flow_returns_empty_with_a_warning(
     "the flow really has no records", and the server's no-rollback invariant now
     refuses to act on the frame either way.
     """
-    caplog.set_level(logging.WARNING, logger="se3.daemon.history")
+    caplog.set_level(logging.WARNING, logger="tianluo.daemon.history")
     main_root, _worktree_root = _build_two_root_history(tmp_path)
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(main_root)])
 
@@ -357,7 +357,7 @@ def test_paused_worktree_reconcile_must_not_empty_the_cached_bundle(
 
     The assertions state the invariant: reconcile may only ever ADD.
     """
-    caplog.set_level(logging.DEBUG, logger="se3.server.state")
+    caplog.set_level(logging.DEBUG, logger="tianluo.server.state")
     client, app = client_and_app
     _main_root, worktree_root = _build_two_root_history(tmp_path)
     # The 5 s throttle floor only decides *when* a reconcile may fire, never

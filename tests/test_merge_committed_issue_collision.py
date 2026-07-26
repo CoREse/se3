@@ -26,9 +26,9 @@ from pathlib import Path
 
 import yaml
 
-from se3.commands.merge.result_model import MergeReport
-from se3.engine.merge.orchestrator import MergeOrchestrator
-from se3.engine.merge.runtime_sync import IssueMergeRecord
+from tianluo.commands.merge.result_model import MergeReport
+from tianluo.engine.merge.orchestrator import MergeOrchestrator
+from tianluo.engine.merge.runtime_sync import IssueMergeRecord
 
 
 # --------------------------------------------------------------------------
@@ -915,8 +915,8 @@ def test_llm_resolved_conflict_merge_still_reconciles_issue_ids(
     otherwise a duplicate numeric ID survives whenever the branch happens to
     conflict elsewhere.
     """
-    from se3.engine.merge.conflict_context import build as build_conflict_context
-    from se3.engine.merge.conflict_resolver import (
+    from tianluo.engine.merge.conflict_context import build as build_conflict_context
+    from tianluo.engine.merge.conflict_resolver import (
         Confidence, FileResolution, LLMResolution,
     )
 

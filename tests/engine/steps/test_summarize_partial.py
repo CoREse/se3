@@ -7,8 +7,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step
-from se3.engine.steps.summarize import (
+from tianluo.engine.models import FlowInstance, Step
+from tianluo.engine.steps.summarize import (
     _build_completion_section,
     _create_basic_summary_text,
 )

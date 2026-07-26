@@ -22,8 +22,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.daemon import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.daemon import (
     Daemon,
     DaemonConfig,
     _append_project_root,
@@ -144,7 +144,7 @@ def test_sanitize_removes_worktree_entry(tmp_path: Path) -> None:
 
     # Pre-pollute the registry with a worktree-copy entry plus the main root,
     # bypassing the (now-normalizing) _append_project_root.
-    from se3.daemon.daemon import _atomic_write_json
+    from tianluo.daemon.daemon import _atomic_write_json
 
     _atomic_write_json(
         path,
@@ -201,7 +201,7 @@ def test_daemon_init_sanitizes_on_startup(tmp_path: Path) -> None:
     pid_dir.mkdir(parents=True, exist_ok=True)
     registry = pid_dir / "project_roots.json"
 
-    from se3.daemon.daemon import _atomic_write_json
+    from tianluo.daemon.daemon import _atomic_write_json
 
     _atomic_write_json(
         registry,

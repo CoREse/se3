@@ -14,11 +14,11 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from se3.engine.chat_history import record_group_status
-from se3.engine.dag_scheduler import GroupResult, RelayContext
-from se3.engine.llm_caller import LLMCaller
-from se3.engine.models import FlowInstance, Step, StepType
-from se3.engine.steps.implement import _run_dag_parallel, _salvage_results_history
+from tianluo.engine.chat_history import record_group_status
+from tianluo.engine.dag_scheduler import GroupResult, RelayContext
+from tianluo.engine.llm_caller import LLMCaller
+from tianluo.engine.models import FlowInstance, Step, StepType
+from tianluo.engine.steps.implement import _run_dag_parallel, _salvage_results_history
 
 
 def _read_step_records(project_root: Path, flow_id: str, step_id: str) -> list[dict]:
@@ -61,13 +61,13 @@ class _FakeScheduler:
 
 
 class TestDagGroupStatusWiring:
-    @patch("se3.engine.steps.implement.DAGScheduler", _FakeScheduler)
-    @patch("se3.engine.steps.implement.merge_in_progress", return_value=False)
+    @patch("tianluo.engine.steps.implement.DAGScheduler", _FakeScheduler)
+    @patch("tianluo.engine.steps.implement.merge_in_progress", return_value=False)
     @patch(
-        "se3.engine.steps.implement.recover_stale_unmerged_paths",
+        "tianluo.engine.steps.implement.recover_stale_unmerged_paths",
         return_value=([], []),
     )
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
     def test_running_and_completed_records_written(
         self, mock_branch, mock_recover, mock_merge_prog, tmp_path
     ):
@@ -145,7 +145,7 @@ class _AgentStreamRunner:
         return ["-p", prompt]
 
     def detect_infra_error(self, returncode, output, stderr_tail):
-        from se3.agent_runner import InfraErrorType
+        from tianluo.agent_runner import InfraErrorType
 
         return InfraErrorType.NONE
 
@@ -295,20 +295,20 @@ class _GitStub:
 
 
 class TestDagAgentModelRelay:
-    @patch("se3.engine.steps.implement.DAGScheduler", _ExecutingScheduler)
-    @patch("se3.engine.steps.implement.merge_in_progress", return_value=False)
+    @patch("tianluo.engine.steps.implement.DAGScheduler", _ExecutingScheduler)
+    @patch("tianluo.engine.steps.implement.merge_in_progress", return_value=False)
     @patch(
-        "se3.engine.steps.implement.recover_stale_unmerged_paths",
+        "tianluo.engine.steps.implement.recover_stale_unmerged_paths",
         return_value=([], []),
     )
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._restore_history_to_worktree")
-    @patch("se3.engine.steps.implement.parse_json_response", return_value={})
-    @patch("se3.engine.steps.implement._run_git", side_effect=lambda *a, **k: _GitStub())
-    @patch("se3.engine.steps.implement.LLMCaller", _RelayCaller)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._restore_history_to_worktree")
+    @patch("tianluo.engine.steps.implement.parse_json_response", return_value={})
+    @patch("tianluo.engine.steps.implement._run_git", side_effect=lambda *a, **k: _GitStub())
+    @patch("tianluo.engine.steps.implement.LLMCaller", _RelayCaller)
     @patch(
-        "se3.engine.context_builder.get_runtime_context_injection",
+        "tianluo.engine.context_builder.get_runtime_context_injection",
         return_value="",
     )
     def test_running_and_completed_records_carry_agent_and_model(
@@ -346,7 +346,7 @@ class TestDagAgentModelRelay:
         flow = FlowInstance(task_description="t", flow_id="flow-relay")
 
         with patch(
-            "se3.engine.steps.implement.create_worktree", return_value=wt_dir
+            "tianluo.engine.steps.implement.create_worktree", return_value=wt_dir
         ):
             _run_dag_parallel(
                 groups=groups,

@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.config import (
+from tianluo.config import (
     DEFAULT_CODE_INDEX_CHUNK_BYTES,
     DEFAULT_CODE_INDEX_CHUNK_LINES,
     DEFAULT_CODE_INDEX_DEGRADE_TRIGGER_BYTES,
@@ -30,8 +30,8 @@ from se3.config import (
     CodeIndexConfig,
     load_code_index_config,
 )
-from se3.engine import charter
-from se3.engine.charter import (
+from tianluo.engine import charter
+from tianluo.engine.charter import (
     CHARTER_ADMISSION_STANDARD,
     DEFAULT_CHARTER_MAX_BYTES,
     AdmissionResult,
@@ -41,7 +41,7 @@ from se3.engine.charter import (
     load_charter_template,
     render_charter_template,
 )
-from se3.engine.context_builder import (
+from tianluo.engine.context_builder import (
     get_charter_injection,
     get_code_index_injection,
 )

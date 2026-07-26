@@ -25,9 +25,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3 import i18n
-from se3.cli import app
-from se3.i18n import loader
+from tianluo import i18n
+from tianluo.cli import app
+from tianluo.i18n import loader
 
 # Repo ``src/`` root (this file is tests/commands/, so up two + /src).
 _SRC = Path(__file__).resolve().parents[2] / "src"
@@ -165,7 +165,7 @@ def test_multiline_prompt_chrome_is_resolved_at_call_time(monkeypatch):
     import inspect
     import io
 
-    from se3 import cli
+    from tianluo import cli
 
     sig = inspect.signature(cli._read_multiline_input)
     assert sig.parameters["prompt_title"].default is None
@@ -214,8 +214,8 @@ def test_issue_list_and_show_localize_status_values(tmp_path, monkeypatch):
     table: the status token is user-facing text and must follow the UI language."""
     from unittest.mock import patch
 
-    from se3.commands import issue_cmd
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.commands import issue_cmd
+    from tianluo.engine.issue_manager import IssueManager
 
     (tmp_path / ".git").mkdir()
     mgr = IssueManager(tmp_path)
@@ -238,7 +238,7 @@ def test_issue_list_and_show_localize_status_values(tmp_path, monkeypatch):
 def test_history_tables_localize_status_values(monkeypatch):
     """Flow-list and step-detail tables render engine status tokens; under zh-CN
     they must show translated text, not the raw enum value."""
-    from se3.commands import history_cmd
+    from tianluo.commands import history_cmd
 
     monkeypatch.setenv("SE3_LANG", "zh-CN")
     i18n.reset_language()

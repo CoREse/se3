@@ -10,7 +10,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FIX_HISTORY_MAX_ENTRIES,
     FlowInstance,
     FlowStatus,
@@ -19,8 +19,8 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.config import DEFAULT_MAX_FIX_ITERATIONS, ConfigError, WorkflowConfig
-from se3.engine.state_machine import StateMachine
+from tianluo.config import DEFAULT_MAX_FIX_ITERATIONS, ConfigError, WorkflowConfig
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestFixIterationTracking:
@@ -795,7 +795,7 @@ class TestBuildStepInputsSelfCheck:
 
     def test_propagates_prev_self_check_issues_with_convergence_enabled(self, state_machine, flow_in_fix_loop):
         """Same behavior with convergence_enabled=True (no longer gated)."""
-        from se3.config import WorkflowConfig
+        from tianluo.config import WorkflowConfig
         with patch.object(WorkflowConfig, 'load', return_value=WorkflowConfig(
             self_check_convergence_enabled=True,
         )):
@@ -823,7 +823,7 @@ class TestPrevInputsDeepCopy:
         return StateMachine(project_root=tmp_path)
 
     def test_self_check_prev_issues_is_deep_copied(self, state_machine):
-        from se3.config import WorkflowConfig
+        from tianluo.config import WorkflowConfig
         flow = FlowInstance(
             flow_id="test-deepcopy-sc",
             task_description="Test task",
@@ -912,7 +912,7 @@ class TestMultiIterationAccumulation:
         assert len(flow.state.fix_history) == 1
 
     def test_transition_to_fix_caps_previous_output_size(self, tmp_path):
-        from se3.engine.state_machine import _PREVIOUS_OUTPUT_MAX_BYTES
+        from tianluo.engine.state_machine import _PREVIOUS_OUTPUT_MAX_BYTES
 
         sm = StateMachine(project_root=tmp_path)
         flow = FlowInstance(
@@ -989,13 +989,13 @@ class TestMultiIterationAccumulation:
 
 class TestInferFixReason:
     def test_known_trigger_types(self):
-        from se3.engine.state_machine import _infer_fix_reason
+        from tianluo.engine.state_machine import _infer_fix_reason
         assert _infer_fix_reason("test") == "test_failure"
         assert _infer_fix_reason("self_check") == "self_check"
         assert _infer_fix_reason("verify_spec") == "spec_compliance"
 
     def test_unknown_type_returns_trigger_itself(self):
-        from se3.engine.state_machine import _infer_fix_reason
+        from tianluo.engine.state_machine import _infer_fix_reason
         # Not silently labeled as "spec_compliance" anymore — returns the input.
         assert _infer_fix_reason("lint") == "lint"
         assert _infer_fix_reason("") == "unknown"
@@ -1006,7 +1006,7 @@ class TestMaxFixIterations:
 
     def test_get_max_fix_iterations_default(self, tmp_path):
         """Test that default max fix iterations is 100."""
-        from se3.config import DEFAULT_MAX_FIX_ITERATIONS
+        from tianluo.config import DEFAULT_MAX_FIX_ITERATIONS
 
         state_machine = StateMachine(project_root=tmp_path)
 
@@ -1108,7 +1108,7 @@ class TestUnlimitedSentinelEndToEnd:
         """Same end-to-end check for SELF_CHECK: se3.yaml(0) → inputs(0) →
         prompt('unlimited').
         """
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
 
         self._write_unlimited_yaml(tmp_path)
         sm = StateMachine(project_root=tmp_path)
@@ -1125,7 +1125,7 @@ class TestUnlimitedSentinelEndToEnd:
 
         mock_response = '{"issues": [], "summary": "ok"}'
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_class:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
@@ -1138,7 +1138,7 @@ class TestUnlimitedSentinelEndToEnd:
 
     def test_self_check_initial_iteration_unlimited_no_warning(self, tmp_path):
         """Same contract for SELF_CHECK at fix_iteration=0."""
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
 
         flow = self._flow_in_fix_loop(0)
         flow.change_path = tmp_path
@@ -1156,7 +1156,7 @@ class TestUnlimitedSentinelEndToEnd:
 
         mock_response = '{"issues": [], "summary": "ok"}'
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_class:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
@@ -1247,7 +1247,7 @@ class TestUnlimitedAndConvergenceInteraction:
         previous self-check issues → COMPLETED (loop breaks). Without
         convergence this would loop forever in unlimited mode.
         """
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
         import json
 
         # Non-critical/high severities: the convergence shortcut may only fire
@@ -1276,7 +1276,7 @@ class TestUnlimitedAndConvergenceInteraction:
         flow.change_path = tmp_path
         mock_response = json.dumps({"issues": prev_issues, "summary": "same as before"})
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_cls.return_value = mock_caller
@@ -1304,7 +1304,7 @@ class TestUnlimitedAndConvergenceInteraction:
         commit so the new ``previous_issue_resolutions`` schema works).
         Convergence as a runtime *short-circuit* still requires the flag.
         """
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
         import json
 
         prev_issues = [
@@ -1330,7 +1330,7 @@ class TestUnlimitedAndConvergenceInteraction:
         flow.change_path = tmp_path
         mock_response = json.dumps({"issues": prev_issues, "summary": "same"})
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_cls.return_value = mock_caller
@@ -1359,7 +1359,7 @@ class TestUnlimitedOutputDiskShape:
 
     def test_self_check_outputs_serialize_with_sentinel(self, tmp_path):
         """self_check → JSON → back: max_fix_iterations stays ``0`` (int)."""
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
         import json as _json
 
         flow = FlowInstance(
@@ -1407,7 +1407,7 @@ class TestUnlimitedOutputDiskShape:
             "summary": "issue",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -1425,7 +1425,7 @@ class TestFixLoopIntegration:
     @pytest.fixture
     def state_machine(self, tmp_path):
         """Create a test state machine with mocked persistence."""
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
             return sm
 
@@ -1611,13 +1611,13 @@ class TestNPassSentinelComposition:
         """N=3 + max_fix_iterations=0: state machine must still create
         self_check instances #1, #2, #3 sequentially as each completes clean,
         then advance to verify_spec on the 4th transition."""
-        from se3.config import WorkflowConfig
+        from tianluo.config import WorkflowConfig
 
         cfg = WorkflowConfig(
             max_fix_iterations=0,
             self_check_passes_required=3,
         )
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
         sm._get_workflow_config = lambda **kwargs: cfg
 
@@ -1711,7 +1711,7 @@ class TestWorkflowConfigFallbackContract:
         # First load: simulate IOError → fallback to defaults for the
         # current transition only.
         with patch(
-            "se3.engine.state_machine.WorkflowConfig.load",
+            "tianluo.engine.state_machine.WorkflowConfig.load",
             side_effect=IOError("disk full"),
         ):
             cfg1 = sm._get_workflow_config()
@@ -1727,7 +1727,7 @@ class TestWorkflowConfigFallbackContract:
         # MUST propagate.
         sm._workflow_config_cache = None
         with patch(
-            "se3.engine.state_machine.WorkflowConfig.load",
+            "tianluo.engine.state_machine.WorkflowConfig.load",
             side_effect=ConfigError("invalid yaml"),
         ):
             with pytest.raises(ConfigError):
@@ -1736,13 +1736,13 @@ class TestWorkflowConfigFallbackContract:
     def test_successful_load_then_configerror_uses_last_good(self, tmp_path):
         """After at least one successful load, a subsequent ConfigError
         falls back to last-known-good rather than crashing the flow."""
-        from se3.config import WorkflowConfig
+        from tianluo.config import WorkflowConfig
 
         sm = StateMachine(project_root=tmp_path)
         good = WorkflowConfig(max_fix_iterations=7)
 
         with patch(
-            "se3.engine.state_machine.WorkflowConfig.load",
+            "tianluo.engine.state_machine.WorkflowConfig.load",
             return_value=good,
         ):
             assert sm._get_workflow_config().max_fix_iterations == 7
@@ -1750,7 +1750,7 @@ class TestWorkflowConfigFallbackContract:
         # Mid-flow yaml hot-edit introduces an invalid value.
         sm._workflow_config_cache = None
         with patch(
-            "se3.engine.state_machine.WorkflowConfig.load",
+            "tianluo.engine.state_machine.WorkflowConfig.load",
             side_effect=ConfigError("hot-edit gone wrong"),
         ):
             cfg = sm._get_workflow_config()
@@ -1854,7 +1854,7 @@ class TestUnlimitedSentinelHighIterationDrive:
 
     @pytest.fixture
     def state_machine(self, tmp_path):
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     @pytest.fixture

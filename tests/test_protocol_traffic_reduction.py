@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.protocol import (
+from tianluo.daemon import protocol
+from tianluo.daemon.protocol import (
     DETAIL_KIND_CALL,
     DETAIL_KIND_ISSUE,
     MSG_DETAIL_DATA,

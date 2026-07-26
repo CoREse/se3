@@ -15,14 +15,14 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_resolver import MergeStrategy
-from se3.engine.merge.guardrails import (
+from tianluo.engine.merge.conflict_resolver import MergeStrategy
+from tianluo.engine.merge.guardrails import (
     GuardrailViolation,
     MergeGuardrailsCheck,
     _get_changed_spec_files,
     check_spec_diff,
 )
-from se3.engine.merge.orchestrator import MergeOrchestrator
+from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
 
 # --------- helpers ---------
@@ -646,7 +646,7 @@ class TestPairStrongWeakLines:
 
     def test_exact_equivalent_pairing(self) -> None:
         """Identical content (modulo role word) should pair perfectly."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = ["The system SHALL validate inputs."]
         weak = ["The system SHOULD validate inputs."]
@@ -658,7 +658,7 @@ class TestPairStrongWeakLines:
 
     def test_extension_scenario_no_cross_pairing(self) -> None:
         """SHALL A → SHALL A. SHOULD B should NOT pair with SHOULD B."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         # If we extend SHALL A to SHALL A. and the new text has SHOULD B,
         # the missing strong is "SHALL A" and weak-only is "SHOULD B".
@@ -670,7 +670,7 @@ class TestPairStrongWeakLines:
 
     def test_unrelated_weak_line_no_pairing(self) -> None:
         """An unrelated weak line in the file should not pair with missing strong."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = ["The system SHALL validate inputs."]
         weak = ["Developers MAY use shortcuts."]
@@ -679,7 +679,7 @@ class TestPairStrongWeakLines:
 
     def test_same_sentence_shall_to_should_pairs(self) -> None:
         """A direct SHALL→SHOULD on the same sentence should pair."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = ["The system SHALL validate all user inputs."]
         weak = ["The system SHOULD validate all user inputs."]
@@ -689,7 +689,7 @@ class TestPairStrongWeakLines:
 
     def test_multiple_strong_one_weakened_pairs_best_match(self) -> None:
         """When multiple strong lines exist and one is weakened, pair the weakened one."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = [
             "The system SHALL validate inputs.",
@@ -718,7 +718,7 @@ class TestPairStrongWeakLines:
         and leave B unmatched.  The new sorted-global approach assigns B↔X
         (1.00) first, which is the optimal pairing.
         """
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = [
             "SHALL foo bar baz qux.",
@@ -735,7 +735,7 @@ class TestPairStrongWeakLines:
 
     def test_no_tokens_after_filtering_returns_empty(self) -> None:
         """If a line has only role words and stop words, pairing returns empty."""
-        from se3.engine.merge.guardrails import _pair_strong_weak_lines
+        from tianluo.engine.merge.guardrails import _pair_strong_weak_lines
 
         strong = ["SHALL"]
         weak = ["SHOULD"]
@@ -773,7 +773,7 @@ class TestPairStrongWeakLines:
         These cases exercise the threshold parameter directly so that
         changing the constant regresses the test suite.
         """
-        from se3.engine.merge.guardrails import (
+        from tianluo.engine.merge.guardrails import (
             _PAIR_SIMILARITY_THRESHOLD_MIXED,
             _pair_strong_weak_lines,
         )
@@ -794,7 +794,7 @@ class TestViolationSetHash:
 
     def test_same_violations_different_order_same_hash(self) -> None:
         """Order independence: same violations in different order → same hash."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         v1 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -812,7 +812,7 @@ class TestViolationSetHash:
 
     def test_different_messages_different_hash(self) -> None:
         """Different violation messages produce different hashes."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         v1 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -828,7 +828,7 @@ class TestViolationSetHash:
 
     def test_count_digits_preserved_in_hash(self) -> None:
         """Different counts produce different hashes (counts are preserved)."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         v3 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -844,7 +844,7 @@ class TestViolationSetHash:
 
     def test_line_numbers_normalized_away(self) -> None:
         """Line number differences are normalized away."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         v5 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -860,7 +860,7 @@ class TestViolationSetHash:
 
     def test_empty_violations_hash(self) -> None:
         """Empty violation list produces a deterministic hash."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         h1 = violation_set_hash([])
         h2 = violation_set_hash([])
@@ -868,31 +868,31 @@ class TestViolationSetHash:
         assert len(h1) == 40  # sha1 hex length
 
     def test_normalize_message_strips_whitespace(self) -> None:
-        from se3.engine.merge.guardrails import _normalize_message
+        from tianluo.engine.merge.guardrails import _normalize_message
 
         assert _normalize_message("  hello world  ") == "hello world"
 
     def test_normalize_message_removes_line_numbers(self) -> None:
-        from se3.engine.merge.guardrails import _normalize_message
+        from tianluo.engine.merge.guardrails import _normalize_message
 
         assert _normalize_message("Error at line 42") == "Error"
         assert _normalize_message("Error at Line 99 here") == "Error here"
 
     def test_normalize_message_preserves_counts(self) -> None:
-        from se3.engine.merge.guardrails import _normalize_message
+        from tianluo.engine.merge.guardrails import _normalize_message
 
         assert _normalize_message("3 WHEN clauses removed") == "3 WHEN clauses removed"
         assert _normalize_message("4 WHEN clauses removed") == "4 WHEN clauses removed"
 
     def test_normalize_message_strips_attempt_counters(self) -> None:
-        from se3.engine.merge.guardrails import _normalize_message
+        from tianluo.engine.merge.guardrails import _normalize_message
 
         assert _normalize_message("Error (attempt 3)") == "Error"
         assert _normalize_message("Error (Attempt 5)") == "Error"
         assert _normalize_message("Error (try 2)") == "Error"
 
     def test_normalize_message_strips_hex_shas(self) -> None:
-        from se3.engine.merge.guardrails import _normalize_message
+        from tianluo.engine.merge.guardrails import _normalize_message
 
         # Bare hex without a SHA context cue — preserved (relying on
         # evidence-derived stable keys for stable hashing; message
@@ -912,7 +912,7 @@ class TestViolationSetHash:
 
     def test_stable_key_from_evidence_overrides_message(self) -> None:
         """When evidence contains strong_line, hash is stable even if message drifts."""
-        from se3.engine.merge.guardrails import GuardrailViolation, violation_set_hash
+        from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -939,7 +939,7 @@ class TestViolationSetHash:
 
     def test_stable_key_fallback_to_message_when_no_evidence(self) -> None:
         """Without evidence, hash falls back to normalized message."""
-        from se3.engine.merge.guardrails import GuardrailViolation, violation_set_hash
+        from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -956,7 +956,7 @@ class TestViolationSetHash:
 
     def test_stable_key_from_deleted_line_evidence(self) -> None:
         """DELETE violations with deleted_line evidence use it as stable key."""
-        from se3.engine.merge.guardrails import GuardrailViolation, violation_set_hash
+        from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
             file_path="se3/specs/a/spec.md",
@@ -988,7 +988,7 @@ class TestViolationSetHash:
         documents that the hash function itself correctly distinguishes
         the two states.
         """
-        from se3.engine.merge.guardrails import GuardrailViolation, violation_set_hash
+        from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         # Round 1: violation on line A
         round1 = [
@@ -1520,7 +1520,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Mock LLM resolver to ACCEPT with resolved content that still has the weakening
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1539,7 +1539,7 @@ class TestOrchestratorGuardrailsIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -1605,7 +1605,7 @@ class TestOrchestratorGuardrailsIntegration:
             }
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
             mock_call_llm,
         )
 
@@ -1649,11 +1649,11 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Mock repairer to always fail without changing violations
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1701,11 +1701,11 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1719,7 +1719,7 @@ class TestOrchestratorGuardrailsIntegration:
         # detected as a stall within max iterations; instead it is exhausted.
         def mock_check(self, pre_sha: str, post_sha: str):
             check_call_count[0] += 1
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             # Alternate between two different strong lines to force hash change
             if check_call_count[0] % 2 == 1:
                 evidence = {
@@ -1746,7 +1746,7 @@ class TestOrchestratorGuardrailsIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1901,7 +1901,7 @@ class TestOrchestratorGuardrailsIntegration:
         # Mock LLM resolver: returns content that keeps SHALL but drops the New scenario.
         # Because both branches touched line 3, git will conflict; the LLM resolves it.
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1926,7 +1926,7 @@ class TestOrchestratorGuardrailsIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -1988,7 +1988,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Mock LLM resolver: returns content with SHOULD (weakening)
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2015,7 +2015,7 @@ class TestOrchestratorGuardrailsIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -2207,11 +2207,11 @@ class TestRunGuardrailsFastBranch:
                 "post_sha": post_sha,
                 "violation_count": len(violations),
             })
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -2265,11 +2265,11 @@ class TestRunGuardrailsFastBranch:
             )
             if fixup_result.returncode != 0:
                 raise RuntimeError(f"git fix-up commit failed: {fixup_result.stderr}")
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -2318,19 +2318,19 @@ class TestRunGuardrailsFastBranch:
         # Mock repairer to always fail without changing violations
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix the weakening",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        from se3.engine.merge.orchestrator import GuardrailRepairStalled
+        from tianluo.engine.merge.orchestrator import GuardrailRepairStalled
         with pytest.raises(GuardrailRepairStalled) as exc_info:
             orch._run_guardrails(
                 pre_head, post_head, "feature-stall", strategy=MergeStrategy.FAST,
@@ -2383,14 +2383,14 @@ class TestRunGuardrailsFastBranch:
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             call_count[0] += 1
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error=f"LLM fix attempt {call_count[0]} failed",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -2403,7 +2403,7 @@ class TestRunGuardrailsFastBranch:
 
         def mock_check(self, pre_sha: str, post_sha: str):
             check_call_count[0] += 1
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             if check_call_count[0] % 2 == 1:
                 evidence = {
                     "strong_line": "The system SHALL validate inputs.",
@@ -2429,12 +2429,12 @@ class TestRunGuardrailsFastBranch:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        from se3.engine.merge.orchestrator import GuardrailRepairStalled
+        from tianluo.engine.merge.orchestrator import GuardrailRepairStalled
         with pytest.raises(GuardrailRepairStalled) as exc_info:
             orch._run_guardrails(
                 pre_head, post_head, "feature-change", strategy=MergeStrategy.FAST,
@@ -2636,7 +2636,7 @@ class TestWhenClauseBounds:
 
     def test_when_clause_followed_by_blank_lines(self) -> None:
         """A WHEN clause followed by trailing blank lines does not crash."""
-        from se3.engine.merge.guardrails import _extract_when_clauses
+        from tianluo.engine.merge.guardrails import _extract_when_clauses
         lines = [
             "#### Scenario: A",
             "- WHEN something happens",
@@ -2651,7 +2651,7 @@ class TestWhenClauseBounds:
 
     def test_when_clause_continuation_with_blank_lines_between(self) -> None:
         """Blank lines between WHEN and indented continuations are skipped."""
-        from se3.engine.merge.guardrails import _extract_when_clauses
+        from tianluo.engine.merge.guardrails import _extract_when_clauses
         lines = [
             "- WHEN user does X",
             "",
@@ -2666,7 +2666,7 @@ class TestWhenClauseBounds:
 
     def test_only_blank_lines_after_when_no_crash(self) -> None:
         """File ending with only whitespace lines after a WHEN doesn't crash."""
-        from se3.engine.merge.guardrails import _extract_when_clauses
+        from tianluo.engine.merge.guardrails import _extract_when_clauses
         lines = [
             "- WHEN end of file",
             "   ",
@@ -2679,7 +2679,7 @@ class TestWhenClauseBounds:
 
     def test_empty_string_lines_handled(self) -> None:
         """Lines that are exactly empty strings don't crash."""
-        from se3.engine.merge.guardrails import _extract_when_clauses
+        from tianluo.engine.merge.guardrails import _extract_when_clauses
         lines = ["- WHEN x", "", "", "  cont"]
         clauses = _extract_when_clauses(lines)
         assert len(clauses) == 1
@@ -2690,7 +2690,7 @@ class TestEvidenceRecordTypoFailFast:
     """G8 task 40 (H4): EvidenceRecord rejects unknown fields at construction."""
 
     def test_known_field_construction_succeeds(self) -> None:
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         rec = EvidenceRecord(strong_line="x", weak_line="y", pairing_score=0.9)
         assert rec.strong_line == "x"
@@ -2699,14 +2699,14 @@ class TestEvidenceRecordTypoFailFast:
 
     def test_unknown_field_raises_typeerror(self) -> None:
         """Typo in field name → TypeError at construction (fail-fast)."""
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         with pytest.raises(TypeError):
             EvidenceRecord(strng_line="x")  # typo: strng_line vs strong_line
 
     def test_to_dict_omits_none_values(self) -> None:
         """to_dict() drops None-valued fields for compact serialization."""
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         rec = EvidenceRecord(strong_line="x", pairing_score=0.5)
         d = rec.to_dict()
@@ -2716,19 +2716,19 @@ class TestEvidenceRecordTypoFailFast:
 
     def test_from_dict_with_unknown_key_raises(self) -> None:
         """from_dict({}) with unknown key → TypeError."""
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         with pytest.raises(TypeError):
             EvidenceRecord.from_dict({"unknown_key": "x"})
 
     def test_from_dict_empty_returns_none(self) -> None:
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         assert EvidenceRecord.from_dict(None) is None
         assert EvidenceRecord.from_dict({}) is None
 
     def test_from_dict_round_trip(self) -> None:
-        from se3.commands.merge.result_model import EvidenceRecord
+        from tianluo.commands.merge.result_model import EvidenceRecord
 
         original = EvidenceRecord(
             strong_line="SHALL X",
@@ -2743,14 +2743,14 @@ class TestEvidenceRecordTypoFailFast:
 
     def test_evidence_dict_helper_validates_keys(self) -> None:
         """_evidence_dict() typos fail fast."""
-        from se3.engine.merge.guardrails import _evidence_dict
+        from tianluo.engine.merge.guardrails import _evidence_dict
 
         with pytest.raises(TypeError):
             _evidence_dict(strng_line="x")
 
     def test_topology_evidence_fields_recognized(self) -> None:
         """Topology check fields (pre_sha, post_sha, etc.) are valid."""
-        from se3.engine.merge.guardrails import _evidence_dict
+        from tianluo.engine.merge.guardrails import _evidence_dict
 
         d = _evidence_dict(
             pre_sha="abc",
@@ -2773,7 +2773,7 @@ class TestSpecIterationExceptionHandling:
 
     def test_file_read_error_returns_check_incomplete(self, tmp_path: Path, monkeypatch) -> None:
         """An OSError during file read → CHECK_INCOMPLETE, report.incomplete=True."""
-        from se3.engine.merge import guardrails as guardrails_mod
+        from tianluo.engine.merge import guardrails as guardrails_mod
 
         _init_repo(tmp_path)
         spec_dir = tmp_path / "se3" / "specs" / "base"
@@ -2817,20 +2817,20 @@ class TestMergeRespondSpecPath:
     """G8 task 43 (G2): merge_respond._is_spec_path uses pathlib."""
 
     def test_forward_slash_path_detected(self) -> None:
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3/specs/base/spec.md") is True
         assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
 
     def test_backslash_path_detected(self) -> None:
         """Windows-style backslash paths are normalized and detected."""
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3\\specs\\base\\spec.md") is True
         assert _is_spec_path("se3\\specs\\foo\\bar\\spec.md") is True
 
     def test_non_spec_path_rejected(self) -> None:
-        from se3.commands.merge_respond import _is_spec_path
+        from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("README.md") is False
         assert _is_spec_path("se3/state/foo.json") is False
@@ -2842,7 +2842,7 @@ class TestMergeRespondFirstParent:
     """G8 task 42 (G1): merge_respond._first_parent_sha handles octopus."""
 
     def test_first_parent_of_two_parent_merge(self, tmp_path: Path) -> None:
-        from se3.commands.merge_respond import _first_parent_sha
+        from tianluo.commands.merge_respond import _first_parent_sha
 
         _init_repo(tmp_path)
         (tmp_path / "a.py").write_text("a")
@@ -2861,7 +2861,7 @@ class TestMergeRespondFirstParent:
         assert first_parent == first_parent_expected
 
     def test_first_parent_of_octopus_merge(self, tmp_path: Path) -> None:
-        from se3.commands.merge_respond import _first_parent_sha
+        from tianluo.commands.merge_respond import _first_parent_sha
 
         _init_repo(tmp_path)
         (tmp_path / "a.py").write_text("a")
@@ -2884,7 +2884,7 @@ class TestMergeRespondFirstParent:
 
     def test_first_parent_root_commit_raises(self, tmp_path: Path) -> None:
         """A root commit (no parents) → RuntimeError."""
-        from se3.commands.merge_respond import _first_parent_sha
+        from tianluo.commands.merge_respond import _first_parent_sha
 
         _init_repo(tmp_path)
         (tmp_path / "a.py").write_text("a")
@@ -2898,7 +2898,7 @@ class TestGuardrailReportIncomplete:
     """The new ``incomplete`` field on GuardrailReport tracks unresolved checks."""
 
     def test_default_incomplete_is_false(self) -> None:
-        from se3.engine.merge.guardrails import GuardrailReport
+        from tianluo.engine.merge.guardrails import GuardrailReport
 
         report = GuardrailReport()
         assert report.incomplete is False
@@ -2907,7 +2907,7 @@ class TestGuardrailReportIncomplete:
     def test_incomplete_field_set_when_iteration_error(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        from se3.engine.merge import guardrails as guardrails_mod
+        from tianluo.engine.merge import guardrails as guardrails_mod
 
         _init_repo(tmp_path)
         spec_dir = tmp_path / "se3" / "specs" / "base"

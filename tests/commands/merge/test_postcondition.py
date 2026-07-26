@@ -13,8 +13,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge.failure_reason import FailureReason
-from se3.commands.merge.postcondition import (
+from tianluo.commands.merge.failure_reason import FailureReason
+from tianluo.commands.merge.postcondition import (
     CorruptCommitGraphError,
     PostConditionViolated,
     assert_branch_merged,
@@ -241,7 +241,7 @@ class TestAssertHeadIsMergeCommit:
             raise CorruptCommitGraphError(ref, 64)
 
         monkeypatch.setattr(
-            "se3.commands.merge.postcondition._count_parents",
+            "tianluo.commands.merge.postcondition._count_parents",
             fake_count_parents,
         )
         with pytest.raises(PostConditionViolated) as exc_info:

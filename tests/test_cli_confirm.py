@@ -19,12 +19,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.claude_runner import ClaudeCodeRunner, detect_confirmation_prompt
-from se3.engine.interaction_calls import (
+from tianluo.claude_runner import ClaudeCodeRunner, detect_confirmation_prompt
+from tianluo.engine.interaction_calls import (
     read_interaction_response,
     write_interaction_call,
 )
-from se3.commands.run import make_cli_confirm_handler
+from tianluo.commands.run import make_cli_confirm_handler
 
 
 # ---------------------------------------------------------------------------

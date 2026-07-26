@@ -23,8 +23,8 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.cli import app
-from se3.engine.merge.worktree_gc import WorktreeGCReport
+from tianluo.cli import app
+from tianluo.engine.merge.worktree_gc import WorktreeGCReport
 
 runner = CliRunner()
 
@@ -46,9 +46,9 @@ def _invoke(args, project_root, report):
     gc_mock = MagicMock(return_value=report)
     wide_console = Console(width=200)
     with patch(
-        "se3.commands.run.get_project_root", return_value=project_root
-    ), patch("se3.commands.worktree_cmd.gc_worktree_runs", gc_mock), patch(
-        "se3.commands.worktree_cmd.console", wide_console
+        "tianluo.commands.run.get_project_root", return_value=project_root
+    ), patch("tianluo.commands.worktree_cmd.gc_worktree_runs", gc_mock), patch(
+        "tianluo.commands.worktree_cmd.console", wide_console
     ):
         result = runner.invoke(app, ["worktree", "gc"] + args)
     return result, gc_mock

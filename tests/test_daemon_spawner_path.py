@@ -18,8 +18,8 @@ from pathlib import Path
 import pytest
 
 # -- import the module under test -------------------------------------------
-import se3.daemon.spawner as spawner_mod
-from se3.daemon.spawner import (
+import tianluo.daemon.spawner as spawner_mod
+from tianluo.daemon.spawner import (
     DaemonSpawner,
     merge_path_env,
     resolve_login_shell_path,
@@ -324,7 +324,7 @@ class TestSpawnerPathFailurePath:
     def test_constructor_warns_on_resolution_failure(self, tmp_path, monkeypatch, caplog):
         """When resolve_login_shell_path returns None, a warning is logged."""
         monkeypatch.setenv("SHELL", "/nonexistent/shell")
-        with caplog.at_level(logging.WARNING, logger="se3.daemon.spawner"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.daemon.spawner"):
             spawner = DaemonSpawner(login_shell_path=...)  # trigger resolution
         assert spawner._login_shell_path is None
         assert "Could not resolve login-shell PATH" in caplog.text

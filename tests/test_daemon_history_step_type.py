@@ -1,6 +1,6 @@
 """Tests for daemon-side step_type file-name parsing and envelope injection.
 
-Covers :func:`se3.daemon.history.parse_step_type_from_step_id` across all
+Covers :func:`tianluo.daemon.history.parse_step_type_from_step_id` across all
 file-name conventions (sequence prefix, underscore-bearing type names, ``_Gk``
 group suffixes, hexadecimal hashes, legacy non-conforming names) and verifies
 that :meth:`DaemonHistoryReader.read_flow` injects the authoritative
@@ -13,7 +13,7 @@ import json
 
 import pytest
 
-from se3.daemon.history import (
+from tianluo.daemon.history import (
     DaemonHistoryReader,
     parse_step_type_from_step_id,
 )

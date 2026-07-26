@@ -20,10 +20,10 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3.cli import app
-from se3.commands import code_index_cmd
-from se3.engine import code_index, code_index_render, file_enum
-from se3.engine.code_index import (
+from tianluo.cli import app
+from tianluo.commands import code_index_cmd
+from tianluo.engine import code_index, code_index_render, file_enum
+from tianluo.engine.code_index import (
     DEGRADED_MARKER,
     CodeIndex,
     build_index,
@@ -657,7 +657,7 @@ class TestListFp:
 
 class TestDegrade:
     def _cfg(self):
-        from se3.config import CodeIndexConfig
+        from tianluo.config import CodeIndexConfig
 
         return CodeIndexConfig(
             degrade_trigger_lines=5,
@@ -1027,7 +1027,7 @@ class TestCodeIndexCLI:
         monkeypatch.setattr(code_index_cmd, "get_project_root", lambda: project)
 
         # Force the rebuild summariser to a fake so --force does not call the LLM.
-        from se3.engine import code_index as ci
+        from tianluo.engine import code_index as ci
 
         recorder = RecordingSummarizer()
         monkeypatch.setattr(
@@ -1073,7 +1073,7 @@ class TestConcurrentRebuildSafety:
         # second must wait, then re-enumerate and produce a valid, current map.
         import threading
 
-        from se3.engine import code_index as ci
+        from tianluo.engine import code_index as ci
 
         order: list[str] = []
 
@@ -1102,7 +1102,7 @@ class TestConcurrentRebuildSafety:
     ):
         # When fcntl is unavailable the build still runs (best-effort), just
         # without the advisory lock.
-        from se3.engine import code_index as ci
+        from tianluo.engine import code_index as ci
 
         monkeypatch.setattr(ci, "_HAVE_FCNTL", False)
         idx = build_index(project, summarizer=RecordingSummarizer())

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.git_tags import (
+from tianluo.engine.git_tags import (
     VersionTagError,
     commit_subject,
     create_annotated_version_tag,

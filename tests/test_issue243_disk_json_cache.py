@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import disk_json_cache as djc
-from se3.daemon.aggregator import DaemonAggregator
+from tianluo.daemon import disk_json_cache as djc
+from tianluo.daemon.aggregator import DaemonAggregator
 
 
 @pytest.fixture(autouse=True)
@@ -172,8 +172,8 @@ def test_worktree_scan_no_full_parse_on_giant_files(tmp_path, monkeypatch):
 
 def test_snapshot_for_root_reads_new_format_header_only(tmp_path, monkeypatch):
     """A new-format engine.json yields flow_id/status without touching cold files."""
-    from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-    from se3.engine.persistence import PersistenceManager
+    from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+    from tianluo.engine.persistence import PersistenceManager
 
     root = tmp_path / "proj"
     pm = PersistenceManager(root)

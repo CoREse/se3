@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import authed_app, authed_hello, login, recv_daemon_frame  # noqa: E402
 
@@ -81,9 +81,9 @@ def test_end_flow_cross_owner_returns_404():
     """A flow owned by another owner reads as absent (404), never controllable."""
     from fastapi.testclient import TestClient
 
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     app = create_app(
         session_store=SessionStore(cookie_config=CookieConfig(secure=False))

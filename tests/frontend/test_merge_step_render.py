@@ -153,7 +153,7 @@ def test_style_css_has_no_merging_rules():
 def test_models_flow_instance_has_no_merging_field():
     """``FlowInstance`` must not carry a ``merging`` field, and its serialized
     dict must not emit the key — the bypass flag is gone."""
-    from se3.engine.models import FlowInstance
+    from tianluo.engine.models import FlowInstance
 
     flow = FlowInstance(flow_id="x")
     assert not hasattr(flow, "merging"), "FlowInstance.merging must be removed"
@@ -167,7 +167,7 @@ def test_models_flow_instance_has_no_merging_field():
 def test_chat_history_has_no_record_merging():
     """``chat_history`` must no longer expose ``record_merging`` — nothing writes
     the bypass anchor anymore."""
-    import se3.engine.chat_history as chat_history
+    import tianluo.engine.chat_history as chat_history
 
     assert not hasattr(chat_history, "record_merging"), (
         "record_merging must be removed"
@@ -176,7 +176,7 @@ def test_chat_history_has_no_record_merging():
 
 def test_engine_json_schema_has_no_merging_property():
     """The engine.json schema must not declare a ``merging`` property."""
-    from se3.engine.schema import ENGINE_JSON_SCHEMA
+    from tianluo.engine.schema import ENGINE_JSON_SCHEMA
 
     props = ENGINE_JSON_SCHEMA.get("properties", {})
     assert "merging" not in props, "engine.json schema must drop the merging key"
@@ -224,7 +224,7 @@ def test_merge_steps_have_frontend_step_titles():
 def test_merge_step_types_exist_in_engine():
     """The two merge step types must exist with the exact string values the
     frontend title maps key off."""
-    from se3.engine.models import STEP_POOL, StepType
+    from tianluo.engine.models import STEP_POOL, StepType
 
     assert StepType.MERGE_INTEGRATE.value == "merge_integrate"
     assert StepType.VERSION_RECONCILE.value == "version_reconcile"
@@ -237,8 +237,8 @@ def test_worktree_flow_appends_merge_steps(tmp_path):
     """A worktree flow's sequence ends with integrate → reconcile, so the merge
     is part of the flow's normal, renderable step sequence — the mechanism that
     replaces the bypass status. Idempotent (no duplication on a re-derive)."""
-    from se3.engine.models import StepType
-    from se3.engine.state_machine import StateMachine
+    from tianluo.engine.models import StepType
+    from tianluo.engine.state_machine import StateMachine
 
     sm = StateMachine(tmp_path)
     base = [StepType.IMPLEMENT, StepType.COMMIT]

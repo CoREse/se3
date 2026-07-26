@@ -12,7 +12,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -20,7 +20,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestBaselineCommitRecording:
@@ -340,12 +340,12 @@ class TestComposeEffectiveTaskDescription:
     """
 
     def test_no_discovery_no_interjections_returns_canonical(self, tmp_path):
-        from se3.engine.state_machine import _compose_effective_task_description
+        from tianluo.engine.state_machine import _compose_effective_task_description
         flow = FlowInstance(task_description="raw user input")
         assert _compose_effective_task_description(flow) == "raw user input"
 
     def test_picks_up_refined_description_from_discovery(self, tmp_path):
-        from se3.engine.state_machine import _compose_effective_task_description
+        from tianluo.engine.state_machine import _compose_effective_task_description
         flow = FlowInstance(task_description="raw user input")
         flow.state.add_step(Step(
             step_type=StepType.DISCOVERY,
@@ -357,7 +357,7 @@ class TestComposeEffectiveTaskDescription:
         assert "raw user input" not in result
 
     def test_appends_interjections(self, tmp_path):
-        from se3.engine.state_machine import _compose_effective_task_description
+        from tianluo.engine.state_machine import _compose_effective_task_description
         flow = FlowInstance(task_description="task")
         flow.state.context["user_interjections"] = [
             {"text": "redirect to Postgres", "step_type": "implement",
@@ -369,7 +369,7 @@ class TestComposeEffectiveTaskDescription:
         assert "redirect to Postgres" in result
 
     def test_combines_refined_plus_interjections(self, tmp_path):
-        from se3.engine.state_machine import _compose_effective_task_description
+        from tianluo.engine.state_machine import _compose_effective_task_description
         flow = FlowInstance(task_description="raw")
         flow.state.add_step(Step(
             step_type=StepType.DISCOVERY,

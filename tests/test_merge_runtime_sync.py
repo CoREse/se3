@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.runtime_sync import (
+from tianluo.engine.merge.runtime_sync import (
     RuntimeSyncCollision,
     SyncReport,
     sync_branch_runtime,
@@ -25,7 +25,7 @@ def _make_sync_call(source_dir: Path, target_dir: Path, *, strict: bool = False)
     The returned callable accepts ``branch`` and returns a ``SyncReport``.
     """
     def _call(branch: str) -> SyncReport:
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
         original = _rs._get_worktree_path_for_branch
         _rs._get_worktree_path_for_branch = lambda _pr, _br: source_dir
         try:
@@ -809,7 +809,7 @@ class TestLenientCollision:
         """When an OSError occurs mid-bypass (e.g. on the second collision),
         the file is skipped and the sync continues — already-copied tier-A
         files and earlier sidecars are preserved."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -927,7 +927,7 @@ class TestMissingWorktree:
     """When the source worktree is missing, sync is skipped."""
 
     def test_missing_worktree_returns_skipped(self, tmp_path: Path) -> None:
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         original = _rs._get_worktree_path_for_branch
         _rs._get_worktree_path_for_branch = lambda _pr, _br: None
@@ -941,7 +941,7 @@ class TestMissingWorktree:
 
     def test_worktree_directory_removed_externally_returns_skipped(self, tmp_path: Path) -> None:
         """When git metadata points to a worktree path that was force-removed externally."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         nonexistent_path = tmp_path / "ghost-worktree"
         original = _rs._get_worktree_path_for_branch
@@ -1014,7 +1014,7 @@ class TestEdgeCases:
     def test_source_same_as_target_skipped(self, tmp_path: Path) -> None:
         """When source worktree equals project root, sync is skipped to avoid
         spurious RuntimeSyncCollision on every tier A file."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         # Simulate _get_worktree_path_for_branch returning the same path
         original = _rs._get_worktree_path_for_branch
@@ -1132,7 +1132,7 @@ class TestOSErrorPropagation:
         """When _atomic_write_bytes raises ENOSPC in the copy phase,
         a WARNING is logged (symmetric with the bypass-phase handler)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1147,7 +1147,7 @@ class TestOSErrorPropagation:
 
         monkeypatch.setattr(_rs, "_atomic_write_bytes", _failing_atomic)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target)
             report = call("feature")
 
@@ -1166,7 +1166,7 @@ class TestTOCTOU:
         content, the lenient-mode TOCTOU re-check routes to the bypass loop
         so the source version is preserved as a sidecar (symmetric with the
         pre-validation phase)."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1208,7 +1208,7 @@ class TestTOCTOU:
     ) -> None:
         """If dest_file appears between validation and copy with identical
         content, the TOCTOU re-check treats it as idempotent and skips."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1245,7 +1245,7 @@ class TestTOCTOU:
     ) -> None:
         """If dest_file appears between validation and copy with different
         content, the strict-mode TOCTOU re-check raises RuntimeSyncCollision."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1282,7 +1282,7 @@ class TestTOCTOU:
         placeholder dest_hash so operators reading ``report.collisions``
         see a uniform row for every collided file.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1342,7 +1342,7 @@ class TestTOCTOU:
         _file_hash(dest_file) propagates to the copy-phase ``except OSError``
         rather than routing through the bypass loop.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1515,7 +1515,7 @@ class TestDirectoryCollision:
         # Sidecar path is a directory
         (target_se3 / "history" / "flow1.log.from-feature").mkdir(parents=True)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -1557,7 +1557,7 @@ class TestDirectoryCollision:
         short_hash = src_hash[:8]
         (target_se3 / "history" / f"flow1.log.from-feature.{short_hash}").mkdir(parents=True)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -1776,7 +1776,7 @@ class TestValidationPhaseOSError:
     ) -> None:
         """If _file_hash raises OSError on a source file during validation,
         the file is added to skipped_files and the sync continues."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1817,7 +1817,7 @@ class TestValidationPhaseOSError:
         """If _file_hash raises OSError on an existing destination file during
         collision check, the file is added to skipped_files and the sync
         continues."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1858,7 +1858,7 @@ class TestBypassOSError:
     def test_bypass_oserror_skipped_not_aborted(self, tmp_path: Path, monkeypatch) -> None:
         """When _atomic_write_bytes raises OSError during sidecar write,
         the file is skipped and the sync continues without full rollback."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1902,7 +1902,7 @@ class TestBypassOSError:
         BypassedCollision entry alongside the skipped_files entry, so
         operators reading ``report.collisions`` see a uniform row for every
         collided file rather than having to cross-reference logs."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1943,7 +1943,7 @@ class TestBypassOSError:
         the bypass loop's ``except OSError`` catches it and records the
         collision with ``dest_hash='unavailable'`` rather than rolling back
         already-copied tier-A files."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -1992,7 +1992,7 @@ class TestBypassOSError:
         catches it and records a clear ENAMETOOLONG warning rather than
         relying on the OS error at write time."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2021,7 +2021,7 @@ class TestBypassOSError:
 
         monkeypatch.setattr(_rs, "_write_sidecar", _preflight_failing_sidecar)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -2037,7 +2037,7 @@ class TestBypassOSError:
         """When _atomic_write_bytes raises ENOSPC during sidecar write,
         a WARNING is logged (symmetric with the copy-phase handler)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2059,7 +2059,7 @@ class TestBypassOSError:
 
         monkeypatch.setattr(_rs, "_atomic_write_bytes", _failing_atomic)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -2076,10 +2076,10 @@ class TestSafeBranchLabel:
         """When a branch name exceeds 64 chars after safe transformation,
         logger.debug records the truncation."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         long_branch = "feature/" + "a" * 80
-        with caplog.at_level(logging.DEBUG, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.DEBUG, logger="tianluo.engine.merge.runtime_sync"):
             result = _rs._safe_branch_label(long_branch)
 
         assert len(result) == 64
@@ -2095,7 +2095,7 @@ class TestSafeBranchLabel:
         the WARNING-level log surfaces the entropy-loss caveat through normal
         control flow (not just the isolated _safe_branch_label test)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2124,7 +2124,7 @@ class TestSafeBranchLabel:
         sidecar_path.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # The idempotent sidecar match should be recorded as an idempotent
@@ -2159,7 +2159,7 @@ class TestSafeBranchLabel:
         operators see it in normal-operation logs, not just on idempotent
         retries or debug logs."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2182,7 +2182,7 @@ class TestSafeBranchLabel:
 
         # NO pre-existing sidecar — the write path (not idempotent) must fire.
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.INFO, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.INFO, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # A sidecar was written
@@ -2205,7 +2205,7 @@ class TestSafeBranchLabel:
 
     def test_safe_branch_label_with_truncation_short_branch(self) -> None:
         """Short branch names are preserved unchanged and truncated is False."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         label, truncated = _rs._safe_branch_label_with_truncation("feature/foo")
         assert label == "feature__foo"
@@ -2214,7 +2214,7 @@ class TestSafeBranchLabel:
     def test_safe_branch_label_with_truncation_long_branch(self) -> None:
         """Long branch names (>64 chars after sanitization) are truncated and
         truncated flag is True."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         long_branch = "feature/" + "a" * 80
         label, truncated = _rs._safe_branch_label_with_truncation(long_branch)
@@ -2225,7 +2225,7 @@ class TestSafeBranchLabel:
     def test_safe_branch_label_with_truncation_exactly_64_chars(self) -> None:
         """A branch name that is exactly 64 characters after sanitization is
         NOT truncated — the boundary is strictly >64."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         # 64 alphanumeric chars — no replacement needed
         exact = "a" * 64
@@ -2236,7 +2236,7 @@ class TestSafeBranchLabel:
 
     def test_safe_branch_label_with_truncation_empty_branch(self) -> None:
         """Empty branch returns 'unnamed' with truncated=False."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         label, truncated = _rs._safe_branch_label_with_truncation("")
         assert label == "unnamed"
@@ -2258,7 +2258,7 @@ class TestWriteSidecarGuards:
         collapse onto the shared sidecar suffix ``.from-unnamed`` for every
         caller, silently merging audit identity across branches.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2295,7 +2295,7 @@ class TestTOCTOUDirectoryDest:
         """If dest_file becomes a directory between validation and copy,
         lenient mode skips the file and records an audit-only collision row
         (mirrors the pre-validation path's audit-trail uniformity)."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2343,7 +2343,7 @@ class TestTOCTOUDirectoryDest:
     ) -> None:
         """If dest_file becomes a directory between validation and copy,
         strict mode raises RuntimeSyncCollision."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2501,7 +2501,7 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         """
         import os
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         source_se3 = source / "se3"
@@ -2549,7 +2549,7 @@ class TestAtomicWriteBytesDestinationSymlinkSwap:
         import errno
         import os
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         target = tmp_path / "target"
         target_se3 = target / "se3" / "history"
@@ -2601,7 +2601,7 @@ class TestSafeBranchLabelTruncationPaths:
         """
         import logging
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2637,7 +2637,7 @@ class TestSafeBranchLabelTruncationPaths:
         hash_sidecar.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # Idempotent hash-suffix match recorded (no new collision row,
@@ -2670,7 +2670,7 @@ class TestSafeBranchLabelTruncationPaths:
         import hashlib
         import logging
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2708,7 +2708,7 @@ class TestSafeBranchLabelTruncationPaths:
         long_sidecar.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # Idempotent long-hash match recorded
@@ -2790,7 +2790,7 @@ class TestLenientModePreservesSyncedFilesOnUnexpectedException:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """RuntimeSyncCollision escaping the copy loop preserves prior copies."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
@@ -2838,7 +2838,7 @@ class TestLenientModePreservesSyncedFilesOnUnexpectedException:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """In strict mode, the same exception triggers rollback of all copies."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"

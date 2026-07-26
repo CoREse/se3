@@ -22,12 +22,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.commands.merge_cmd import run_merge
-from se3.engine.merge.reconcile import (
+from tianluo.commands.merge_cmd import run_merge
+from tianluo.engine.merge.reconcile import (
     VersionRegressionError,
     read_current_version,
 )
-from se3.engine.version_intent import VersionIntent, is_consumed, write_intent
+from tianluo.engine.version_intent import VersionIntent, is_consumed, write_intent
 
 
 PYPROJECT_TEMPLATE = """\
@@ -254,7 +254,7 @@ class TestCliReconcileScoping:
         gate. The reconcile must be scoped to the intents the merged branches
         carry, leaving the unrelated flow's intent outstanding for its own step.
         """
-        from se3.engine.version_intent import (
+        from tianluo.engine.version_intent import (
             is_consumed,
             reconcile_commit_exists,
         )
@@ -313,7 +313,7 @@ class TestCliReconcileScoping:
         pre-merge tip keeps A's inherited intent out of scope so A's decision
         stays with A's own ``version_reconcile`` step / confirmation gate.
         """
-        from se3.engine.version_intent import (
+        from tianluo.engine.version_intent import (
             is_consumed,
             reconcile_commit_exists,
         )
@@ -373,7 +373,7 @@ class TestCliReconcileScoping:
         """
         import sys
 
-        from se3.engine.version_intent import (
+        from tianluo.engine.version_intent import (
             is_consumed,
             reconcile_commit_exists,
         )
@@ -402,7 +402,7 @@ class TestCliReconcileScoping:
         # First run: integrate lands, but force the reconcile half to fault so
         # branch-B is left integrated (ancestor of master) with BOTH intents
         # still outstanding — the exact rerun-recovery state.
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
         real_reconcile = reconcile_mod.reconcile
 
         def _boom(*_args, **_kwargs):
@@ -461,7 +461,7 @@ class TestReconcileFailureExitCode:
         # attribute), so reach the real module object via sys.modules.
         import sys
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
         monkeypatch.setattr(reconcile_mod, "reconcile", _boom)
 
         exit_code = run_merge(
@@ -495,7 +495,7 @@ class TestReconcileFailureExitCode:
             root, "feature", "flowA", bump_type="minor", change="feat A"
         )
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
         real_reconcile = reconcile_mod.reconcile
 
         def _boom(*_args, **_kwargs):
@@ -551,7 +551,7 @@ class TestReconcileFailureExitCode:
             root, "feature", "flowA", bump_type="minor", change="feat A"
         )
 
-        vi_mod = sys.modules["se3.engine.version_intent"]
+        vi_mod = sys.modules["tianluo.engine.version_intent"]
         real_introduced = vi_mod.intent_flow_ids_introduced
 
         def _boom(*_args, **_kwargs):
@@ -598,16 +598,16 @@ class TestReconcileFailureExitCode:
         """
         import sys
 
-        from se3.engine.git_tags import VersionTagError
-        from se3.engine.git_tags import create_annotated_version_tag
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.git_tags import VersionTagError
+        from tianluo.engine.git_tags import create_annotated_version_tag
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "2.0.0")
         _make_feature_with_intent(
             root, "feature", "flowA", bump_type="minor", change="feat A"
         )
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
 
         tag_attempts = 0
 
@@ -665,7 +665,7 @@ class TestReconcileFailureExitCode:
             root, "feature", "flowA", bump_type="minor", change="feat A"
         )
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
         real_run_git = reconcile_mod._run_git
 
         def _fake_run_git(project_root, *args, **kwargs):
@@ -719,7 +719,7 @@ class TestNoConfirmationGate:
             captured["branches"] = branches
             return 0
 
-        monkeypatch.setattr("se3.commands.merge_cmd.run_merge", _capture)
+        monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", _capture)
 
         import os
 
@@ -728,7 +728,7 @@ class TestNoConfirmationGate:
         try:
             from typer.testing import CliRunner
 
-            from se3.cli import app
+            from tianluo.cli import app
 
             result = CliRunner().invoke(app, ["merge", "feature"])
         finally:
@@ -837,7 +837,7 @@ class TestReconcileLibraryRegressions:
         """
         import yaml
 
-        from se3.engine.merge.reconcile import historical_versions
+        from tianluo.engine.merge.reconcile import historical_versions
 
         root = tmp_path / "custom"
         root.mkdir()
@@ -864,7 +864,7 @@ class TestReconcileLibraryRegressions:
         """
         import yaml
 
-        from se3.engine.merge.reconcile import historical_versions
+        from tianluo.engine.merge.reconcile import historical_versions
 
         root = tmp_path / "single_hash"
         root.mkdir()
@@ -887,7 +887,7 @@ class TestReconcileLibraryRegressions:
         """A ``### {{version}}`` (triple-hash heading) changelog is still parsed."""
         import yaml
 
-        from se3.engine.merge.reconcile import historical_versions
+        from tianluo.engine.merge.reconcile import historical_versions
 
         root = tmp_path / "triple_hash"
         root.mkdir()
@@ -914,7 +914,7 @@ class TestReconcileLibraryRegressions:
         """
         import yaml
 
-        from se3.engine.merge.reconcile import historical_versions
+        from tianluo.engine.merge.reconcile import historical_versions
 
         root = tmp_path / "bracketed"
         root.mkdir()
@@ -943,7 +943,7 @@ class TestReconcileLibraryRegressions:
         index; the recovery must return the reconcile-owned files to HEAD (fix
         #1).
         """
-        from se3.engine.merge.reconcile import _restore_reconcile_paths
+        from tianluo.engine.merge.reconcile import _restore_reconcile_paths
 
         root = _make_project(tmp_path, "1.0.0")
         # Simulate a half-applied reconcile: bump the version file and stage it.
@@ -963,7 +963,7 @@ class TestReconcileLibraryRegressions:
         self, tmp_path: Path
     ) -> None:
         """``undo_last_reconcile`` resets a reconcile HEAD, refuses otherwise (fix #3)."""
-        from se3.engine.merge.reconcile import undo_last_reconcile
+        from tianluo.engine.merge.reconcile import undo_last_reconcile
 
         root = _make_project(tmp_path, "1.0.0")
         # A reconcile commit at HEAD carrying the durable trailer.
@@ -989,8 +989,8 @@ class TestReconcileLibraryRegressions:
         reconcile, so a raw transport exception would otherwise escape after the
         branch integration already committed.
         """
-        from se3.engine.merge.reconcile import ReconcileError, compute_via_rules
-        from se3.engine.version_intent import VersionIntent
+        from tianluo.engine.merge.reconcile import ReconcileError, compute_via_rules
+        from tianluo.engine.version_intent import VersionIntent
 
         def _boom(_prompt: str) -> str:
             raise TimeoutError("llm timed out")
@@ -1024,8 +1024,8 @@ class TestReconcileIdempotencyAndRollback:
         with NO ``Version-Reconcile-Session`` trailer. The bump must still fire —
         the git-durable reconcile commit is the sole "already reconciled" signal.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,
@@ -1072,13 +1072,13 @@ class TestReconcileIdempotencyAndRollback:
 
         import sys
 
-        from se3.engine.merge.reconcile import ReconcileError, reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import ReconcileError, reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
-        # ``se3.engine.merge`` re-exports the ``reconcile`` *function*, shadowing
+        # ``tianluo.engine.merge`` re-exports the ``reconcile`` *function*, shadowing
         # the submodule name — reach the module object via sys.modules so the
         # monkeypatch targets the real ``_merge_changelog`` reconcile() calls.
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1116,11 +1116,11 @@ class TestReconcileIdempotencyAndRollback:
 
         import importlib
 
-        from se3.engine.merge.reconcile import ReconcileError, _commit_reconcile
+        from tianluo.engine.merge.reconcile import ReconcileError, _commit_reconcile
 
-        # ``se3.engine.merge.reconcile`` the attribute is the re-exported function,
+        # ``tianluo.engine.merge.reconcile`` the attribute is the re-exported function,
         # not the submodule, so the module object must come from the import system.
-        reconcile_mod = importlib.import_module("se3.engine.merge.reconcile")
+        reconcile_mod = importlib.import_module("tianluo.engine.merge.reconcile")
 
         root = _make_project(tmp_path, "1.0.0")
         (root / "pyproject.toml").write_text(
@@ -1162,7 +1162,7 @@ class TestReconcileIdempotencyAndRollback:
         Only the tag named by the decision's own ``Version-Tag`` trailer belongs
         to it.
         """
-        from se3.engine.merge.reconcile import undo_last_reconcile
+        from tianluo.engine.merge.reconcile import undo_last_reconcile
 
         root = _make_project(tmp_path, "1.0.0")
         (root / "pyproject.toml").write_text(
@@ -1201,7 +1201,7 @@ class TestReconcileIdempotencyAndRollback:
         commit ``v1.0.1`` while the review gate is open, rejecting the version
         must not delete a tag the version flow never created.
         """
-        from se3.engine.merge.reconcile import undo_last_reconcile
+        from tianluo.engine.merge.reconcile import undo_last_reconcile
 
         root = _make_project(tmp_path, "1.0.0")
         (root / "pyproject.toml").write_text(
@@ -1229,7 +1229,7 @@ class TestReconcileIdempotencyAndRollback:
         them; the scoped undo must preserve them while still reverting the
         reconcile-owned version file.
         """
-        from se3.engine.merge.reconcile import undo_last_reconcile
+        from tianluo.engine.merge.reconcile import undo_last_reconcile
 
         root = _make_project(tmp_path, "1.0.0")
         # A reconcile commit at HEAD carrying the durable trailer.
@@ -1262,8 +1262,8 @@ class TestReconcileIdempotencyAndRollback:
         so a flow's reconcile never sweeps a sibling flow's intent that landed on
         master in the between-steps lock gap.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,
@@ -1311,8 +1311,8 @@ class TestReconcileIdempotencyAndRollback:
         """
         import pytest
 
-        from se3.engine.merge.reconcile import ReconcileError, reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import ReconcileError, reconcile
+        from tianluo.engine.version_intent import (
             VERSION_INTENT_DIR_RELPATH,
             reconcile_commit_exists,
         )
@@ -1345,8 +1345,8 @@ class TestReconcileIdempotencyAndRollback:
         residue, so the restore is skipped and the operator's uncommitted README
         edit in the main checkout survives (the worktree flow ran elsewhere).
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1385,8 +1385,8 @@ class TestReconcileIdempotencyAndRollback:
         while the operator's unrelated line survives uncommitted in the working
         tree — never swept into the release commit.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1430,10 +1430,10 @@ class TestReconcileIdempotencyAndRollback:
 
         import pytest
 
-        from se3.engine.merge.reconcile import ReconcileError, reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import ReconcileError, reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
-        reconcile_mod = sys.modules["se3.engine.merge.reconcile"]
+        reconcile_mod = sys.modules["tianluo.engine.merge.reconcile"]
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1475,8 +1475,8 @@ class TestReconcileIdempotencyAndRollback:
         to HEAD and never replayed it, silently destroying that edit. It must now
         be detached and 3-way merged back on top of the committed bump.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1526,8 +1526,8 @@ class TestReconcileIdempotencyAndRollback:
         commit could revert it). The operator diff must be 3-way merged on top of
         the committed entry instead.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1583,8 +1583,8 @@ class TestReconcileIdempotencyAndRollback:
         own changelog change from HEAD, then replay the deletion in the working
         tree (the operator's uncommitted intent) rather than resurrect the file.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1629,8 +1629,8 @@ class TestReconcileIdempotencyAndRollback:
         must instead be unlinked (so reconcile writes on the empty base) and the
         untracked content replayed afterward as uncommitted operator work.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         # Make README.md untracked: remove it from git while leaving the intent
@@ -1696,8 +1696,8 @@ class TestReconcileIdempotencyAndRollback:
         divergent VERSIONS.md up front, before README.md is touched, so the edit
         survives.
         """
-        from se3.engine.merge.reconcile import ReconcileError, reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import ReconcileError, reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1748,8 +1748,8 @@ class TestReconcileIdempotencyAndRollback:
         a whole-tree commit would sweep them into the version reconcile commit.
         The path-limited commit keeps them out (and staged for the operator).
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1784,7 +1784,7 @@ class TestVersionReconcileRevisionPath:
     """The version_reconcile step's human-review revision (rejection) path."""
 
     def _make_flow(self, root: Path, flow_id: str):
-        from se3.engine.models import FlowInstance, State
+        from tianluo.engine.models import FlowInstance, State
 
         return FlowInstance(
             flow_id=flow_id,
@@ -1795,7 +1795,7 @@ class TestVersionReconcileRevisionPath:
         )
 
     def _make_step(self, root: Path):
-        from se3.engine.models import Step, StepStatus, StepType
+        from tianluo.engine.models import Step, StepStatus, StepType
 
         step = Step(
             step_type=StepType.VERSION_RECONCILE,
@@ -1817,9 +1817,9 @@ class TestVersionReconcileRevisionPath:
         still-present git trailer, no-op, and COMPLETE — silently re-releasing the
         rejected version. The handler must FAIL instead.
         """
-        from se3.engine.models import StepStatus
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "1.0.0")
         # This flow's reconcile commit (carries the durable trailer).
@@ -1850,8 +1850,8 @@ class TestVersionReconcileRevisionPath:
 
     def test_revision_with_undoable_commit_recomputes(self, tmp_path: Path) -> None:
         """When the reconcile commit is still HEAD, the rejection recomputes it."""
-        from se3.engine.models import StepStatus
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -1866,7 +1866,7 @@ class TestVersionReconcileRevisionPath:
         _git(root, "add", "-A")
         _git(root, "commit", "-q", "-m", "land intent")
         # Reconcile once so a reconcile commit exists at HEAD.
-        from se3.engine.merge.reconcile import reconcile
+        from tianluo.engine.merge.reconcile import reconcile
 
         first = reconcile(root, flow_ids=["flowA"])
         assert first.final_version == "1.1.0"
@@ -1895,9 +1895,9 @@ class TestVersionReconcileRevisionPath:
         flow-scoped undo must instead refuse and FAIL for manual recovery, keeping
         B's release intact.
         """
-        from se3.engine.models import StepStatus
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "1.0.0")
         # Flow A's (to-be-rejected) reconcile commit.
@@ -1946,9 +1946,9 @@ class TestVersionReconcileRevisionPath:
         would land the merged work on master with no version bump or changelog for
         the flow. The handler must FAIL so the intent can be restored.
         """
-        from se3.engine.models import StepStatus
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "1.0.0")
         # No intent file for flowGone, and no reconcile commit for it either.
@@ -1981,9 +1981,9 @@ class TestVersionReconcileRevisionPath:
         the step, wedging every worktree flow on a version-disabled project. The
         disabled case must COMPLETE: no version bump, no changelog, no commit.
         """
-        from se3.engine.models import StepStatus
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.models import StepStatus
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "1.0.0")
         # Disable version bumping for the project.
@@ -2021,14 +2021,14 @@ class TestVersionReconcileRevisionPath:
         no-intent case must COMPLETE, exactly like the version-disabled case — the
         scoped hard-fault is only for a DROPPED intent a flow SHOULD have emitted.
         """
-        from se3.engine.models import (
+        from tianluo.engine.models import (
             FlowInstance,
             State,
             StepStatus,
             StepType,
         )
-        from se3.engine.steps.version_reconcile import version_reconcile_handler
-        from se3.engine.version_intent import reconcile_commit_exists
+        from tianluo.engine.steps.version_reconcile import version_reconcile_handler
+        from tianluo.engine.version_intent import reconcile_commit_exists
 
         root = _make_project(tmp_path, "1.0.0")
         assert not reconcile_commit_exists(root, "flowReview")
@@ -2080,8 +2080,8 @@ class TestResidueRecoveryPreservesOperatorEdits:
         code saw ``has_residue`` and reset README.md to HEAD before any snapshot,
         losing the edit. It must now be detached and replayed.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import (
             VersionIntent,
             mark_consumed,
             reconcile_commit_exists,
@@ -2137,12 +2137,12 @@ class TestResidueRecoveryPreservesOperatorEdits:
 
         import pytest
 
-        from se3.engine.merge.reconcile import (
+        from tianluo.engine.merge.reconcile import (
             ReconcileError,
             _recovery_snapshot_path,
             reconcile,
         )
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         root = _make_project(tmp_path, "1.0.0")
         write_intent(
@@ -2201,7 +2201,7 @@ class TestResidueRecoveryPreservesOperatorEdits:
         commit's version bump but must not blind-restore README.md over the
         operator's edit.
         """
-        from se3.engine.merge.reconcile import undo_last_reconcile
+        from tianluo.engine.merge.reconcile import undo_last_reconcile
 
         root = _make_project(tmp_path, "1.0.0")
         # A reconcile commit at HEAD carrying the durable trailer.
@@ -2253,11 +2253,11 @@ class TestCustomRulesEqualToCurrentIsRejected:
         """
         import pytest
 
-        from se3.engine.merge.reconcile import (
+        from tianluo.engine.merge.reconcile import (
             VersionRegressionError,
             reconcile,
         )
-        from se3.engine.version_intent import (
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,
@@ -2296,8 +2296,8 @@ class TestCustomRulesEqualToCurrentIsRejected:
         self, tmp_path: Path
     ) -> None:
         """A legitimate custom-rules advance is unaffected by the equal-guard."""
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,
@@ -2344,12 +2344,12 @@ class TestNonHeadingTemplateHistoricalCollision:
         """
         import pytest
 
-        from se3.engine.merge.reconcile import (
+        from tianluo.engine.merge.reconcile import (
             VersionRegressionError,
             historical_versions,
             reconcile,
         )
-        from se3.engine.version_intent import (
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,
@@ -2428,8 +2428,8 @@ class TestNoBumpCommittedConsumedStillCommits:
         outstanding while the run reported success. The reconcile commit is the sole
         durable idempotency signal, so an empty (trailer-only) commit must land.
         """
-        from se3.engine.merge.reconcile import reconcile
-        from se3.engine.version_intent import (
+        from tianluo.engine.merge.reconcile import reconcile
+        from tianluo.engine.version_intent import (
             VersionIntent,
             reconcile_commit_exists,
             write_intent,

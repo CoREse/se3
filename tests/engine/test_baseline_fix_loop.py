@@ -13,7 +13,7 @@ given-up and surfaced (not looped).
 
 These tests drive the real ``test_handler`` with ``_run_command`` /
 ``_record_test_history`` / ``_report_pre_existing_issues`` mocked, and control
-the budget by patching ``se3.config.WorkflowConfig``. The cross-flow given-up
+the budget by patching ``tianluo.config.WorkflowConfig``. The cross-flow given-up
 memory uses the real on-disk store under ``tmp_path``.
 """
 
@@ -23,12 +23,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine import baseline_fix_memory as bfm
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine import baseline_fix_memory as bfm
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 # Import the module (not the function) so pytest does not collect the
 # ``test_handler`` symbol as a test case just because its name starts with
 # ``test_``. Reference it as ``_test_mod.test_handler`` instead.
-from se3.engine.steps import test as _test_mod
+from tianluo.engine.steps import test as _test_mod
 
 
 # ---------------------------------------------------------------------------
@@ -84,12 +84,12 @@ def _primary_result(stdout, *, passed=False) -> dict:
 def _run(flow, step, *, budget, stdout, tmp_path):
     """Run ``test_handler`` with the budget set to *budget* and the test command
     returning *stdout*."""
-    with patch("se3.engine.steps.test._report_pre_existing_issues"), \
-         patch("se3.engine.steps.test._record_test_history"), \
-         patch("se3.engine.steps.test._run_command",
+    with patch("tianluo.engine.steps.test._report_pre_existing_issues"), \
+         patch("tianluo.engine.steps.test._record_test_history"), \
+         patch("tianluo.engine.steps.test._run_command",
                return_value=_primary_result(stdout)), \
-         patch("se3.config.TestConfig") as mock_tc, \
-         patch("se3.config.WorkflowConfig") as mock_wf:
+         patch("tianluo.config.TestConfig") as mock_tc, \
+         patch("tianluo.config.WorkflowConfig") as mock_wf:
         mock_tc.load.return_value = MagicMock(
             command="python -m pytest -v", timeout=60, critical_tests=[],
             get_phases_for_run=MagicMock(return_value=[]),

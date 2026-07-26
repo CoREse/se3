@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from se3.config import (
+from tianluo.config import (
     AuthConfig,
     LocalAuthConfig,
     OidcConfig,
@@ -238,7 +238,7 @@ class TestLoadServerConfig:
             tmp_path / "se3.yaml",
             {
                 "server": {
-                    "db_path": "/data/se3.db",
+                    "db_path": "/data/tianluo.db",
                     "auth": {
                         "providers": ["local", "proxy_header"],
                         "session": {"cookie_secure": False},
@@ -248,7 +248,7 @@ class TestLoadServerConfig:
             },
         )
         cfg = load_server_config(tmp_path)
-        assert cfg.db_path == "/data/se3.db"
+        assert cfg.db_path == "/data/tianluo.db"
         assert cfg.auth.providers == ["local", "proxy_header"]
         assert cfg.auth.session.cookie_secure is False
         assert cfg.auth.local.max_failed_attempts == 7
@@ -268,7 +268,7 @@ class TestLoadServerConfig:
     def test_existing_config_loading_not_broken(self, tmp_path):
         # A se3.yaml carrying both a server: section and unrelated sections
         # still loads other config without error.
-        from se3.config import load_version_config
+        from tianluo.config import load_version_config
 
         _write_yaml(
             tmp_path / "se3.yaml",

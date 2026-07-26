@@ -20,7 +20,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -70,10 +70,10 @@ class TestLLMReviewApproval:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_approval_returns_completed(self, MockLLMCaller):
         """When LLM approves, handler returns COMPLETED."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -86,10 +86,10 @@ class TestLLMReviewApproval:
 
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_approval_review_result_structure(self, MockLLMCaller):
         """Review result should have all required fields."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -107,10 +107,10 @@ class TestLLMReviewApproval:
         assert review_result["step_to_review_type"] == "plan"
         assert review_result["reviewer"] == "llm"
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_approval_sets_revision_feedback(self, MockLLMCaller):
         """Revision feedback output should be set even on approval."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -163,10 +163,10 @@ class TestLLMReviewRevision:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_revision_returns_revision_needed(self, MockLLMCaller):
         """When LLM does not approve, handler returns REVISION_NEEDED."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -179,10 +179,10 @@ class TestLLMReviewRevision:
 
         assert result == StepStatus.REVISION_NEEDED
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_revision_stores_feedback(self, MockLLMCaller):
         """Feedback from LLM should be stored in review_result and revision_feedback."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -227,7 +227,7 @@ class TestLLMReviewMaxIterations:
 
     def test_auto_approve_when_max_iterations_exceeded(self):
         """When the persisted review count >= max_iterations, auto-approve without calling LLM."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         confirm_step = Step(
             step_type=StepType.CONFIRM,
@@ -256,7 +256,7 @@ class TestLLMReviewMaxIterations:
 
     def test_auto_approve_at_exact_limit(self):
         """Edge case: iteration count exactly at max_iterations triggers auto-approve."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         confirm_step = Step(
             step_type=StepType.CONFIRM,
@@ -319,10 +319,10 @@ class TestLLMReviewErrorHandling:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_llm_call_failure_auto_approves(self, MockLLMCaller):
         """When LLM call raises an exception, auto-approve to avoid blocking."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.side_effect = RuntimeError("LLM service unavailable")
@@ -335,10 +335,10 @@ class TestLLMReviewErrorHandling:
         assert review_result["approved"] is True
         assert "LLM call failure" in review_result["feedback"]
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_malformed_json_response(self, MockLLMCaller):
         """When LLM returns invalid JSON, treat as not approved."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = "This is not JSON at all"
@@ -350,10 +350,10 @@ class TestLLMReviewErrorHandling:
         review_result = self.confirm_step.outputs["review_result"]
         assert review_result["approved"] is False
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_json_missing_approved_field(self, MockLLMCaller):
         """When LLM returns JSON without 'approved' key, default to not approved."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({"feedback": "some feedback"})
@@ -365,10 +365,10 @@ class TestLLMReviewErrorHandling:
         # requires 'approved' key, so returns None → not approved)
         assert result == StepStatus.REVISION_NEEDED
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_markdown_fenced_json_response(self, MockLLMCaller):
         """When LLM wraps JSON in ```json code fences, it should be parsed correctly."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = (
@@ -388,10 +388,10 @@ class TestLLMReviewErrorHandling:
         assert review_result["approved"] is True
         assert review_result["feedback"] == "Looks good"
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_json_with_surrounding_text(self, MockLLMCaller):
         """When LLM adds extra text before/after JSON, it should be extracted correctly."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = (
@@ -408,10 +408,10 @@ class TestLLMReviewErrorHandling:
         assert review_result["approved"] is True
         assert review_result["feedback"] == "Well structured proposal"
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_completely_unparseable_response(self, MockLLMCaller):
         """When LLM returns garbage with no JSON at all, treat as not approved."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = "I cannot provide a review in the requested format."
@@ -439,8 +439,8 @@ class TestLLMReviewerConfigPropagation:
     def test_config_propagation_with_llm_reviewer(self):
         """When reviewer points at a registered agent, agents+max_iterations
         propagate into step.inputs."""
-        from se3.engine.state_machine import StateMachine
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.persistence import PersistenceManager
 
         (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
         (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
@@ -487,8 +487,8 @@ class TestLLMReviewerConfigPropagation:
     def test_config_default_max_iterations(self):
         """Reviewer omitted → falls back to llm_caller.defaults chain;
         max_iterations defaults to 3."""
-        from se3.engine.state_machine import StateMachine
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.persistence import PersistenceManager
 
         (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
         (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
@@ -535,7 +535,7 @@ class TestLLMReviewPrompt:
 
     def test_prompt_includes_step_output(self):
         """Prompt should include the reviewed step's output."""
-        from se3.engine.context_builder import build_llm_review_prompt
+        from tianluo.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
             step_to_review_type="plan",
@@ -551,7 +551,7 @@ class TestLLMReviewPrompt:
 
     def test_prompt_includes_revision_feedback(self):
         """When revision feedback is provided, it should be in the prompt."""
-        from se3.engine.context_builder import build_llm_review_prompt
+        from tianluo.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
             step_to_review_type="implement",
@@ -565,7 +565,7 @@ class TestLLMReviewPrompt:
 
     def test_prompt_without_revision_feedback(self):
         """When no revision feedback, that section should not appear."""
-        from se3.engine.context_builder import build_llm_review_prompt
+        from tianluo.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
             step_to_review_type="plan",
@@ -577,7 +577,7 @@ class TestLLMReviewPrompt:
 
     def test_prompt_includes_evaluation_criteria(self):
         """Prompt should include evaluation criteria."""
-        from se3.engine.context_builder import build_llm_review_prompt
+        from tianluo.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
             step_to_review_type="plan",

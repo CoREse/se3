@@ -11,9 +11,9 @@ import pytest
 
 from pathlib import Path
 
-import se3
+import tianluo
 
-from se3.commands.merge.merge_lock import (
+from tianluo.commands.merge.merge_lock import (
     MergeLock,
     MergeLockBusy,
     MergeLockStale,
@@ -22,7 +22,7 @@ from se3.commands.merge.merge_lock import (
 
 # Dynamically resolve the src/ root so subprocess imports work regardless
 # of the current working directory or worktree layout.
-_SRC_ROOT = str(Path(se3.__file__).resolve().parent.parent)
+_SRC_ROOT = str(Path(tianluo.__file__).resolve().parent.parent)
 
 
 @pytest.fixture
@@ -259,7 +259,7 @@ class TestMergeLockBlocking:
         script = f"""
 import sys, time
 sys.path.insert(0, {_SRC_ROOT!r})
-from se3.commands.merge.merge_lock import MergeLock
+from tianluo.commands.merge.merge_lock import MergeLock
 lock = MergeLock({str(tmp_project)!r})
 lock.acquire()
 print("HOLDING", flush=True)
@@ -303,7 +303,7 @@ class TestMergeLockSubprocess:
             script = f"""
 import sys
 sys.path.insert(0, {_SRC_ROOT!r})
-from se3.commands.merge.merge_lock import MergeLock, MergeLockBusy
+from tianluo.commands.merge.merge_lock import MergeLock, MergeLockBusy
 lock = MergeLock({str(tmp_project)!r})
 try:
     lock.acquire()

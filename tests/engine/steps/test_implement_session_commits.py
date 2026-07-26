@@ -1,7 +1,7 @@
 """Tests for implement step session-commit collection helpers.
 
 Covers `_collect_session_commits` and `_read_pre_session_version` from
-`se3.engine.steps.implement`. These helpers feed `version_analyze` with
+`tianluo.engine.steps.implement`. These helpers feed `version_analyze` with
 the pre-implement project version and the list of commits implement
 introduced on the main branch (worktree path), letting `version_analyze`
 discount any inadvertent version-file bumps inside those commits.
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.steps.implement import (
+from tianluo.engine.steps.implement import (
     _collect_session_commits,
     _read_pre_session_version,
 )
@@ -164,7 +164,7 @@ class TestReadPreSessionVersion:
         project_root.mkdir()
         # Force VersionBumper to blow up; helper must swallow and return None.
         with patch(
-            "se3.engine.version_bumper.VersionBumper.detect_version_file",
+            "tianluo.engine.version_bumper.VersionBumper.detect_version_file",
             side_effect=RuntimeError("boom"),
         ):
             assert _read_pre_session_version(project_root) is None

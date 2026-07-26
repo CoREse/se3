@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge import worktree_gc
-from se3.engine.merge.worktree_gc import (
+from tianluo.engine.merge import worktree_gc
+from tianluo.engine.merge.worktree_gc import (
     WorktreeGCReport,
     find_stale_worktree_runs,
     gc_worktree_runs,

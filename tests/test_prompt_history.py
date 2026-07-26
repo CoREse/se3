@@ -1,4 +1,4 @@
-"""Tests for se3.engine.prompt_history module."""
+"""Tests for tianluo.engine.prompt_history module."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from pathlib import Path
 
 from prompt_toolkit.history import FileHistory
 
-from se3.engine.prompt_history import (
+from tianluo.engine.prompt_history import (
     HISTORY_DIR,
     HISTORY_FILENAME,
     MAX_ENTRIES,

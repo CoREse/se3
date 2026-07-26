@@ -175,7 +175,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
 
     procs = []
     try:
-        subprocess.run([PY, "-m", "se3.cli", "init", "-p", str(project)],
+        subprocess.run([PY, "-m", "tianluo.cli", "init", "-p", str(project)],
                        env=env(), cwd=str(project), capture_output=True, timeout=120)
         fa = tmp / "fake_agent.py"
         fa.write_text(FAKE_AGENT)
@@ -193,8 +193,8 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         else:
             print("[repro] CLEAN mode — temp project only")
 
-        import se3.server.crypto as crypto
-        from se3.server.persistence import Store
+        import tianluo.server.crypto as crypto
+        from tianluo.server.persistence import Store
         store = Store(str(db_path))
         owner = store.create_owner("admin", is_admin=True)
         store.link_identity(owner, "local", "admin")
@@ -203,8 +203,8 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         store.issue_daemon_key(owner, kh)
 
         sfh = open(tmp / "server.out", "wb")
-        launcher = ("import uvicorn;from se3.server.app import create_app;"
-                    "from se3.server.auth.session import SessionStore,CookieConfig;"
+        launcher = ("import uvicorn;from tianluo.server.app import create_app;"
+                    "from tianluo.server.auth.session import SessionStore,CookieConfig;"
                     f"app=create_app(db_path={str(db_path)!r},"
                     "session_store=SessionStore(cookie_config=CookieConfig(secure=False)));"
                     f"uvicorn.run(app,host='127.0.0.1',port={port},log_level='warning')")
@@ -216,7 +216,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
 
         roots_lit = ", ".join(repr(r) for r in roots)
         dfh = open(tmp / "daemon.out", "wb")
-        dl = ("from se3.daemon.daemon import Daemon,DaemonConfig;"
+        dl = ("from tianluo.daemon.daemon import Daemon,DaemonConfig;"
               f"d=Daemon(DaemonConfig(server_url='ws://127.0.0.1:{port}',pid_dir=r'{daemon_dir}',"
               f"project_roots=[{roots_lit}],machine_id='{machine_id}',daemon_key={kp!r},poll_interval=0.4));"
               "d.supervisor.discover_flows=lambda *a,**k: [];"
@@ -247,7 +247,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
                 # exceed the default limit and *close this stand-in client*
                 # (1009), so it would receive nothing thereafter — a harness
                 # artifact that masks the daemon-side fix as a false "freeze".
-                from se3.daemon import protocol as _protocol
+                from tianluo.daemon import protocol as _protocol
 
                 async with websockets.connect(
                     url,
@@ -280,7 +280,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         e = env()
         e["FAKE_AGENT_LOG"] = str(tmp / "agent.log")
         mfd, sfd = pty.openpty()
-        run_p = subprocess.Popen([PY, "-m", "se3.cli", "run", "--discover", "Add a health endpoint"],
+        run_p = subprocess.Popen([PY, "-m", "tianluo.cli", "run", "--discover", "Add a health endpoint"],
                                  env=e, cwd=str(project), stdin=sfd, stdout=sfd, stderr=sfd, close_fds=True)
         procs.append(run_p)
         os.close(sfd)

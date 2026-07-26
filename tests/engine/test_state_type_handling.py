@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -25,7 +25,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.context import Context, RUN_MODE_TYPES, effective_task_type
+from tianluo.engine.context import Context, RUN_MODE_TYPES, effective_task_type
 
 
 class TestStateInitialization:
@@ -268,7 +268,7 @@ class TestTypeConflictWarning:
 
     def test_no_warning_when_types_match(self, caplog):
         """No warning when explicit type matches analyzed type."""
-        from se3.engine.steps.analyze import _handle_type_conflict
+        from tianluo.engine.steps.analyze import _handle_type_conflict
 
         with caplog.at_level("WARNING"):
             # Both are "feature"
@@ -280,7 +280,7 @@ class TestTypeConflictWarning:
 
     def test_explicit_type_overrides_analyzed(self, caplog):
         """Explicit --type should override LLM analysis and log info."""
-        from se3.engine.steps.analyze import _handle_type_conflict
+        from tianluo.engine.steps.analyze import _handle_type_conflict
 
         with caplog.at_level("INFO"):
             # Explicit is "feature", analyzed is "bugfix"
@@ -294,7 +294,7 @@ class TestTypeConflictWarning:
 
     def test_override_returns_explicit_type(self, caplog):
         """Return value should be the explicit type, not the analyzed one."""
-        from se3.engine.steps.analyze import _handle_type_conflict
+        from tianluo.engine.steps.analyze import _handle_type_conflict
 
         with caplog.at_level("INFO"):
             result = _handle_type_conflict(self.flow, "small")
@@ -305,7 +305,7 @@ class TestTypeConflictWarning:
 
     def test_no_override_without_explicit_type(self, caplog):
         """Without explicit --type, analyzed type is used as-is."""
-        from se3.engine.steps.analyze import _handle_type_conflict
+        from tianluo.engine.steps.analyze import _handle_type_conflict
 
         # Create flow without explicit_type
         flow_no_explicit = FlowInstance(
@@ -582,8 +582,8 @@ class TestAnalyzePersistsAnalyzedType:
 
     def _run_analyze(self, project_root, explicit_type, llm_task_type):
         """Drive analyze_handler with a stubbed LLM and collector."""
-        from se3.engine.steps import analyze as analyze_mod
-        from se3.engine.models import Step, StepType
+        from tianluo.engine.steps import analyze as analyze_mod
+        from tianluo.engine.models import Step, StepType
 
         flow = FlowInstance(
             task_description="Add a new capability",
@@ -610,7 +610,7 @@ class TestAnalyzePersistsAnalyzedType:
             patch.object(analyze_mod, "parse_json_response", return_value=llm_result):
             # context_builder helpers are imported lazily inside the handler;
             # patch them on that module.
-            import se3.engine.context_builder as cb
+            import tianluo.engine.context_builder as cb
             with patch.object(cb, "get_issue_discovery_injection", return_value=""), \
                 patch.object(cb, "get_charter_injection", return_value=""), \
                 patch.object(cb, "get_code_index_injection", return_value=""), \
@@ -666,28 +666,28 @@ class TestAnalyzeStepTypeExtraction:
 
     def test_extract_valid_task_type(self):
         """Should extract valid task types."""
-        from se3.engine.steps.analyze import _extract_task_type
+        from tianluo.engine.steps.analyze import _extract_task_type
 
         result = _extract_task_type({"task_type": "bugfix"}, self._make_flow())
         assert result == "bugfix"
 
     def test_extract_defaults_to_feature(self):
         """Should default to feature when task_type missing."""
-        from se3.engine.steps.analyze import _extract_task_type
+        from tianluo.engine.steps.analyze import _extract_task_type
 
         result = _extract_task_type({}, self._make_flow())
         assert result == "feature"
 
     def test_extract_defaults_invalid_type(self):
         """Should default to feature for invalid task_type."""
-        from se3.engine.steps.analyze import _extract_task_type
+        from tianluo.engine.steps.analyze import _extract_task_type
 
         result = _extract_task_type({"task_type": "invalid_type"}, self._make_flow())
         assert result == "feature"
 
     def test_extract_all_valid_types(self):
         """Should accept all valid task types."""
-        from se3.engine.steps.analyze import _extract_task_type
+        from tianluo.engine.steps.analyze import _extract_task_type
 
         valid_types = ["feature", "bugfix", "review", "small", "directive"]
         flow = self._make_flow()

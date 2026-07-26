@@ -17,9 +17,9 @@ import json
 
 import pytest
 
-from se3.daemon.history import _extract_history_summary
-from se3.engine.persistence import PersistenceManager
-from se3.engine.prompt_markers import (
+from tianluo.daemon.history import _extract_history_summary
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.engine.prompt_markers import (
     SUMMARY_MAX_SCAN_LINES,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,

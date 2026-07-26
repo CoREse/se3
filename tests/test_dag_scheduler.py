@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.engine.dag_scheduler import (
+from tianluo.engine.dag_scheduler import (
     ConvergenceInfo,
     DAGScheduler,
     GroupResult,

@@ -15,8 +15,8 @@ import pytest
 
 from _authsrv import authed_app, login, recv_daemon_frame
 
-from se3.daemon import protocol
-from se3.server.auth.ratelimit import LoginRateLimiter, RateLimitConfig
+from tianluo.daemon import protocol
+from tianluo.server.auth.ratelimit import LoginRateLimiter, RateLimitConfig
 
 
 @pytest.fixture()
@@ -130,7 +130,7 @@ def test_login_rate_limit_locks_out():
 
 def _put_breakglass(app) -> str:
     """Issue a break-glass token directly via the store; return the plaintext."""
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     plaintext, token_hash = crypto.generate_token("bg")
     app.state.store.put_breakglass(token_hash)
@@ -185,7 +185,7 @@ def test_breakglass_empty_token_is_422(client_and_app):
 
 def test_fail_closed_when_no_provider_configured():
     """With local disabled and nothing else enabled, create_app refuses to build."""
-    from se3.server.auth.registry import AuthNotConfigured
+    from tianluo.server.auth.registry import AuthNotConfigured
 
     with pytest.raises(AuthNotConfigured):
         authed_app(auth_config={"providers": [{"type": "local", "enabled": False}]})
@@ -205,8 +205,8 @@ def test_default_session_cookie_is_secure():
     """A default (non-test) app issues a Secure session cookie."""
     from fastapi.testclient import TestClient
 
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
 
     app = create_app()  # default SessionStore -> Secure cookie
     store = app.state.store
@@ -231,7 +231,7 @@ def test_default_session_cookie_is_secure():
 
 def _seed_local_user(app, username, password, *, is_admin=False) -> str:
     """Directly seed a local user (owner + binding + password) in the store."""
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     store = app.state.store
     oid = store.create_owner(username, is_admin=is_admin)
@@ -255,7 +255,7 @@ def test_admin_creates_user_who_can_then_login(client_and_app):
     new_owner_id = body["owner_id"]
 
     # The owner + binding + password hash all landed: the new user can log in.
-    from se3.server import crypto
+    from tianluo.server import crypto
 
     store = app.state.store
     assert store.resolve_owner_by_identity("local", "bob") == new_owner_id
@@ -346,7 +346,7 @@ def test_credentials_never_logged(client_and_app, caplog):
     client, app = client_and_app
     secret_pw = "S3cr3t-PASSWORD-do-not-log"
     # Re-seed the admin password to a recognizable value.
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     app.state.store.set_password(
         app.state.test_owner_id, crypto.hash_password(secret_pw)
@@ -382,9 +382,9 @@ def test_credentials_never_logged(client_and_app, caplog):
 
 def _shared_app():
     """A multi-tenant app over a shared real Store (in-memory sqlite)."""
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
-    from se3.server.persistence import Store
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
+    from tianluo.server.persistence import Store
 
     store = Store(":memory:")
     app = create_app(
@@ -405,7 +405,7 @@ def _await_visible(client, machine_id, tries=200):
 def test_full_chain_bootstrap_owner_key_daemon_dispatch():
     from fastapi.testclient import TestClient
 
-    from se3.server import bootstrap
+    from tianluo.server import bootstrap
 
     app, store = _shared_app()
 
@@ -512,7 +512,7 @@ def test_full_chain_fail_closed_without_identity():
             assert welcome.type == protocol.MSG_WELCOME
             assert welcome.payload["accepted"] is False
         # The rejected daemon registered nothing the operator could later see.
-        from se3.server import bootstrap
+        from tianluo.server import bootstrap
 
         bg_plain, _ = bootstrap.issue_breakglass_token(_store)
         admin = anon  # reuse the client; log in via break-glass
@@ -531,14 +531,14 @@ def test_create_app_kwargs_from_server_config_translates_auth():
     ``ServerConfig`` onto the surfaces ``create_app`` consumes, so an operator's
     ``server.auth.*`` / ``server.db_path`` values actually drive the server
     instead of being silently dropped (regression for the medium self-check)."""
-    from se3.config import (
+    from tianluo.config import (
         AuthConfig,
         LocalAuthConfig,
         ProxyHeaderConfig,
         ServerConfig,
         SessionConfig,
     )
-    from se3.server.app import _create_app_kwargs_from_server_config
+    from tianluo.server.app import _create_app_kwargs_from_server_config
 
     cfg = ServerConfig(
         db_path="/tmp/custom-server.db",
@@ -591,8 +591,8 @@ def test_create_app_kwargs_from_server_config_translates_auth():
 def test_create_app_kwargs_default_config_builds_local_chain():
     """The default ServerConfig still yields a usable local-only chain when fed
     through the translation + create_app (no fail-closed regression)."""
-    from se3.config import ServerConfig
-    from se3.server.app import _create_app_kwargs_from_server_config, create_app
+    from tianluo.config import ServerConfig
+    from tianluo.server.app import _create_app_kwargs_from_server_config, create_app
 
     cfg = ServerConfig()  # defaults: providers=['local']
     kwargs = _create_app_kwargs_from_server_config(cfg)

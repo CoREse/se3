@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import (
+from tianluo.daemon import (
     Daemon,
     DaemonAggregator,
     DaemonConfig,
@@ -24,7 +24,7 @@ from se3.daemon import (
     start_daemon,
     stop_daemon,
 )
-from se3.daemon.daemon import (
+from tianluo.daemon.daemon import (
     DaemonAlreadyRunning,
     PROJECT_ROOTS_FILENAME,
     _append_project_root,
@@ -32,8 +32,8 @@ from se3.daemon.daemon import (
     _read_project_roots_raw,
     _sanitize_project_roots,
 )
-from se3.daemon import spawner as spawner_mod
-from se3.daemon.supervisor import _cmdline_is_se3_run
+from tianluo.daemon import spawner as spawner_mod
+from tianluo.daemon.supervisor import _cmdline_is_se3_run
 
 
 # --------------------------------------------------------------------------
@@ -368,22 +368,23 @@ class TestScanExternalDiscovery:
 
 
 class TestResolveSe3Command:
-    """Same-prefix-first resolution of the ``se3`` argv prefix.
+    """Same-prefix-first resolution of the CLI argv prefix.
 
     The daemon may be installed in a Python environment whose bin dir is
-    not first on ``PATH``; relying on ``shutil.which('se3')`` would then
-    spawn ``se3 run`` / ``se3 init`` children from an unrelated environment,
+    not first on ``PATH``; relying on ``shutil.which()`` would then spawn
+    ``luo run`` / ``luo init`` children from an unrelated environment,
     silently mismatching versions. ``_resolve_se3_command`` therefore
-    prefers the console script sitting next to ``sys.executable`` and falls
-    back to ``[sys.executable, '-m', 'se3']``.
+    prefers a console script (``luo`` / ``tianluo`` / legacy ``se3``)
+    sitting next to ``sys.executable`` and falls back to
+    ``[sys.executable, '-m', 'tianluo']``.
     """
 
     def test_prefers_sys_executable_prefix(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
         fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
-        fake_se3 = tmp_path / "se3"
-        fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
-        unrelated = tmp_path / "other" / "se3"
+        fake_luo = tmp_path / "luo"
+        fake_luo.write_text("#!/bin/sh\n", encoding="utf-8")
+        unrelated = tmp_path / "other" / "luo"
         unrelated.parent.mkdir()
         unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -392,13 +393,26 @@ class TestResolveSe3Command:
             spawner_mod.shutil, "which", lambda name: str(unrelated)
         )
 
+        assert spawner_mod._resolve_se3_command() == [str(fake_luo)]
+
+    def test_prefers_legacy_se3_script_over_module_form(self, tmp_path, monkeypatch):
+        # An old install that only ships the `se3` console script must still
+        # resolve to it (same-prefix rule beats the module-form fallback).
+        fake_python = tmp_path / "python"
+        fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake_se3 = tmp_path / "se3"
+        fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(spawner_mod.sys, "executable", str(fake_python))
+        monkeypatch.setattr(spawner_mod.shutil, "which", lambda name: None)
+
         assert spawner_mod._resolve_se3_command() == [str(fake_se3)]
 
     def test_falls_back_to_module_form(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
         fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
-        # No sibling `se3` placed under tmp_path on purpose.
-        unrelated = tmp_path / "other" / "se3"
+        # No sibling console script placed under tmp_path on purpose.
+        unrelated = tmp_path / "other" / "luo"
         unrelated.parent.mkdir()
         unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -410,7 +424,7 @@ class TestResolveSe3Command:
         assert spawner_mod._resolve_se3_command() == [
             str(fake_python),
             "-m",
-            "se3",
+            "tianluo",
         ]
 
 
@@ -1269,14 +1283,14 @@ class TestDaemonLogging:
         root.setLevel(saved_level)
 
     def test_log_format_includes_timestamp(self):
-        from se3.daemon.daemon import DAEMON_LOG_FORMAT
+        from tianluo.daemon.daemon import DAEMON_LOG_FORMAT
 
         assert "%(asctime)s" in DAEMON_LOG_FORMAT
 
     def test_configure_installs_timestamped_handler(self):
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         tagged = [
@@ -1290,7 +1304,7 @@ class TestDaemonLogging:
     def test_configure_is_idempotent(self):
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         _configure_daemon_logging()
@@ -1306,7 +1320,7 @@ class TestDaemonLogging:
         import io
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         handler = next(
@@ -1316,7 +1330,7 @@ class TestDaemonLogging:
         )
         stream = io.StringIO()
         handler.setStream(stream)
-        logging.getLogger("se3.daemon.daemon").info("hello daemon")
+        logging.getLogger("tianluo.daemon.daemon").info("hello daemon")
         output = stream.getvalue()
         assert "hello daemon" in output
         # A timestamp line begins with a 4-digit year.
@@ -1344,7 +1358,7 @@ class _FakeClock:
 class TestDaemonStartWarnings:
     def test_precheck_warns_when_websockets_missing(self, monkeypatch, capsys):
         """The CLI front-end shouts when 'websockets' is unavailable."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         # Force `import websockets` inside the precheck to fail.
         monkeypatch.setitem(sys.modules, "websockets", None)
@@ -1356,7 +1370,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
         """A fresh status file still showing a last_error at the deadline warns."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1375,7 +1389,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_warns_when_pending(self, monkeypatch, capsys):
         """When no verdict lands before the timeout, say so rather than lie."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1394,7 +1408,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_confirms_when_connected(self, monkeypatch, capsys):
         """A connected daemon gets a positive confirmation line."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1415,7 +1429,7 @@ class TestDaemonStartWarnings:
         self, monkeypatch, capsys
     ):
         """A first-dial error must not be reported if backoff reconnects."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1445,7 +1459,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_ignores_stale_status_file(self, monkeypatch, capsys):
         """A status file predating the current daemon must not be trusted."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1544,7 +1558,7 @@ class TestProjectRootsRegistryHelpers:
 
     def test_append_uses_atomic_write(self, tmp_path, monkeypatch):
         """The write goes through _atomic_write_json (temp file + rename)."""
-        from se3.daemon import daemon as daemon_mod
+        from tianluo.daemon import daemon as daemon_mod
 
         calls = []
         real_atomic = daemon_mod._atomic_write_json

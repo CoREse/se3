@@ -5,7 +5,7 @@ Background
 ----------
 Before the discovery tests marked their spawned ``se3 run`` stubs with
 ``SE3_EXTERNAL_SCAN_IGNORE`` (see ``tests/conftest.py`` /
-``se3.daemon.supervisor``), a real daemon running on the same dev machine would
+``tianluo.daemon.supervisor``), a real daemon running on the same dev machine would
 pick up those minutes-long fake ``se3 run`` processes during its ``psutil``
 external scan and persist their pytest-tempdir cwd into the real registry
 (``~/.se3/project_roots.json``), surfacing bogus ``/tmp/pytest-of-cre/...``

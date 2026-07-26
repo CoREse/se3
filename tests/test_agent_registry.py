@@ -22,8 +22,8 @@ from unittest.mock import patch
 import pytest
 import logging
 
-import se3.config as _cfg
-from se3.config import (
+import tianluo.config as _cfg
+from tianluo.config import (
     AgentDef,
     load_agent_registry,
     load_agents,
@@ -54,7 +54,7 @@ def _no_global(tmp_path):
     The caller typically uses ``with _no_global(tmp_path):`` to scope the
     patch tightly around the call under test.
     """
-    return patch("se3.config.Path.home", return_value=tmp_path)
+    return patch("tianluo.config.Path.home", return_value=tmp_path)
 
 
 class TestDictForm:
@@ -95,7 +95,7 @@ class TestDictForm:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert "bad" not in registry
@@ -110,7 +110,7 @@ class TestDictForm:
         # load_agents falls back to the probed built-in chain. Pin which()
         # so the result does not depend on the host's installed agents.
         which_claude_only = patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd, *a, **k: "/fake/bin/claude" if cmd == "claude" else None,
         )
         with _no_global(tmp_path), which_claude_only:
@@ -155,7 +155,7 @@ class TestListFormIgnored:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert registry == {}
@@ -166,7 +166,7 @@ class TestListFormIgnored:
     def test_scalar_agents_warned_and_ignored(self, tmp_path, caplog):
         (tmp_path / "se3.yaml").write_text("agents: claude\n")
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert registry == {}
@@ -188,7 +188,7 @@ class TestClaudeCommandsLegacyMigration:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert set(registry.keys()) == {"claude", "claude-dev"}
@@ -244,7 +244,7 @@ claude_commands:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert set(registry.keys()) == {"real"}

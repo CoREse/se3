@@ -19,12 +19,12 @@ import asyncio
 import json
 from pathlib import Path
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.client import DaemonClient
-from se3.server.ws import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.client import DaemonClient
+from tianluo.server.ws import (
     INTERJECTION_PHASE_CONSUMED,
     INTERJECTION_PHASE_PENDING,
     UI_EVENT_INTERJECTION,
@@ -489,7 +489,7 @@ def test_history_relay_preserves_step_id_and_ordinal_identity():
     per-physical-file ``step_id`` and per-file ``ordinal`` reach the frontend
     bundle verbatim, so a worktree discovery's distinct sidecar streams survive.
     """
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 
@@ -529,7 +529,7 @@ def test_history_append_does_not_dedupe_same_ordinal_records():
     """An append extends the bundle without deduping — a later round carrying an
     ordinal already present under a DISTINCT step id is not mistaken for a
     duplicate frame and dropped."""
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 
@@ -557,7 +557,7 @@ def test_reconcile_full_pull_respects_existing_throttle():
     """The self-heal reconcile is gated on the SAME full-pull throttle the
     cache-miss path uses, so an idle poll cannot fan out one daemon pull per
     tick: right after a full pull the flow reads as throttled."""
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 

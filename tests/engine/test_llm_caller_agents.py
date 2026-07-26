@@ -15,8 +15,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from se3.agent_runner import InfraErrorType
-from se3.engine.llm_caller import LLMCaller, LLMCallError
+from tianluo.agent_runner import InfraErrorType
+from tianluo.engine.llm_caller import LLMCaller, LLMCallError
 
 
 def _make_success_result(output="ok"):
@@ -115,7 +115,7 @@ class TestAgentInitialization:
 
     def test_default_loads_from_config(self, tmp_path):
         """Without agents param, should load from config."""
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(project_root=tmp_path)
         assert len(caller._agents) >= 1
         assert caller._agents[0]["type"] == "claude-code"
@@ -130,7 +130,7 @@ class TestCreateRunner:
             agents=TWO_AGENTS,
         )
         runner = caller._create_runner(TWO_AGENTS[0])
-        from se3.claude_runner import ClaudeCodeRunner
+        from tianluo.claude_runner import ClaudeCodeRunner
         assert isinstance(runner, ClaudeCodeRunner)
         assert runner.command["cmd"] == "claude-a"
 
@@ -187,7 +187,7 @@ class TestRotateAgent:
 class TestInfraErrorRotation:
     """Test that infrastructure errors trigger agent rotation."""
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_usage_limit_triggers_rotation(self, MockRunner):
         """Usage limit should rotate to next agent and retry."""
         # First agent fails with usage limit, second succeeds
@@ -214,7 +214,7 @@ class TestInfraErrorRotation:
         assert result == "ok"
         assert caller._current_agent_index == 1
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_timeout_triggers_rotation(self, MockRunner):
         """Timeout should rotate to next agent."""
         mock_runner_a = MagicMock()
@@ -241,7 +241,7 @@ class TestInfraErrorRotation:
 class TestOtherErrorRotation:
     """Test that OTHER (unclassified) errors also trigger agent rotation."""
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_other_error_rotates_to_next_agent(self, MockRunner):
         """Unclassified failure (detect_infra_error=NONE) should rotate."""
         mock_runner_a = MagicMock()
@@ -267,7 +267,7 @@ class TestOtherErrorRotation:
         assert result == "ok"
         assert caller._current_agent_index == 1
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_unknown_certificate_error_triggers_rotation(self, MockRunner):
         """UNKNOWN_CERTIFICATE_VERIFICATION_ERROR (classified as NONE) should rotate."""
         cert_output = (
@@ -302,7 +302,7 @@ class TestOtherErrorRotation:
 class TestAllAgentsExhausted:
     """Test behavior when all agents are exhausted."""
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_raises_after_exhaustion(self, MockRunner):
         """When all agents fail with infra errors, should raise LLMCallError."""
         mock_runner_a = MagicMock()
@@ -333,7 +333,7 @@ class TestAllAgentsExhausted:
         caller._runner = mock_runner_a
 
         # Import LLMCallError fresh in case module was reloaded by other tests
-        import se3.engine.llm_caller as _llm_mod
+        import tianluo.engine.llm_caller as _llm_mod
         with pytest.raises(_llm_mod.LLMCallError):
             caller.call(prompt="test", on_output=lambda x: None)
 
@@ -341,7 +341,7 @@ class TestAllAgentsExhausted:
 class TestSingleAgentScenario:
     """Test with only one agent (backward compat)."""
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_single_agent_success(self, MockRunner):
         mock_runner = MagicMock()
         mock_runner.run_with_monitor.return_value = _make_success_result()
@@ -355,7 +355,7 @@ class TestSingleAgentScenario:
         result = caller.call(prompt="test", on_output=lambda x: None)
         assert result == "ok"
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_single_agent_infra_error_no_rotation(self, MockRunner):
         """With single agent, infra error cannot rotate — falls through to retry."""
         mock_runner = MagicMock()
@@ -379,7 +379,7 @@ class TestSingleAgentScenario:
         assert result == "ok"
         assert caller._current_agent_index == 0
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_single_agent_other_error_falls_through(self, MockRunner):
         """With single agent, OTHER error cannot rotate — falls through to same-agent retry."""
         mock_runner = MagicMock()
@@ -420,7 +420,7 @@ class TestAgentAttributionInHistory:
             step_type="analyze",
         )
         caller._record_prompt("test prompt", 0, agent_name="agent-a")
-        from se3.engine.chat_history import get_step_history
+        from tianluo.engine.chat_history import get_step_history
         session = get_step_history(tmp_path, "flow1", "step1")
         assert session is not None
         assert session.messages[0].agent_name == "agent-a"
@@ -439,7 +439,7 @@ class TestAgentAttributionInHistory:
             "message": {"content": [{"type": "text", "text": "response"}]},
         })
         caller._record_response(ndjson, 0, agent_name="agent-a")
-        from se3.engine.chat_history import get_step_history
+        from tianluo.engine.chat_history import get_step_history
         session = get_step_history(tmp_path, "flow1", "step1")
         assert session is not None
         assert session.messages[0].agent_name == "agent-a"
@@ -461,7 +461,7 @@ class TestAgentAttributionInHistory:
         # Second attempt: agent-b
         caller._record_prompt("prompt 2", 1, agent_name="agent-b")
         caller._record_response("", 1, agent_name="agent-b")
-        from se3.engine.chat_history import get_step_history
+        from tianluo.engine.chat_history import get_step_history
         session = get_step_history(tmp_path, "flow1", "step1")
         assert session is not None
         # Check that the first attempt's prompt has agent-a
@@ -483,7 +483,7 @@ class TestAgentAttributionInHistory:
         caller._record_prompt("prompt", 0, agent_name="agent-a")
         # No assertion on the history content, just that the call didn't raise
 
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_call_with_retry_passes_agent_name(self, MockRunner, tmp_path):
         """_call_with_retry should snapshot agent name and pass it to
         _record_prompt and _record_response."""
@@ -508,7 +508,7 @@ class TestAgentAttributionInHistory:
         result = caller.call(prompt="test", on_output=lambda x: None)
 
         # Verify the history contains the agent name
-        from se3.engine.chat_history import get_step_history
+        from tianluo.engine.chat_history import get_step_history
         session = get_step_history(tmp_path, "flow1", "step1")
         assert session is not None
         # The prompt should carry the first agent's name
@@ -615,7 +615,7 @@ class TestTailOnLastWithinSequence:
             },
         )
 
-        import se3.engine.llm_caller as _llm_mod
+        import tianluo.engine.llm_caller as _llm_mod
         with pytest.raises(_llm_mod.LLMCallError, match="after 5 attempts"):
             caller.call(prompt="test", on_output=lambda x: None)
 

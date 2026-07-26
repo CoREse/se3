@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "se3"
-version = "11.24.2"
-description = "SE 3.0 framework - Pure CLI flow engine"
+name = "tianluo"
+version = "12.0.0"
+description = "tianluo (田螺) - autonomous SE 3.0 flow engine: prompt once, walk away, come back to a finished deliverable"
 requires-python = ">=3.8"
 dependencies = [
     "typer>=0.9.0",
@@ -28,8 +28,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Heavy web dependencies for the central server (`se3-server`). Kept out of
-# the core `[project].dependencies` so a core-only `pip install se3` stays
+# Heavy web dependencies for the central server (`tianluo-server`). Kept out of
+# the core `[project].dependencies` so a core-only `pip install tianluo` stays
 # dependency-clean. `websockets` is also what the daemon's outbound client
 # uses to dial the server.
 server = [
@@ -38,7 +38,7 @@ server = [
     "websockets>=12.0",
     # Slow password hashing (argon2id) for the multi-tenant local auth
     # provider. Kept in the [server] extra so a core-only install never
-    # imports it: `se3.cli` / `se3.daemon` must not depend on argon2. The
+    # imports it: `tianluo.cli` / `tianluo.daemon` must not depend on argon2. The
     # crypto layer prefers argon2-cffi and only falls back to bcrypt when
     # argon2 is unavailable. The embedded persistence layer uses stdlib
     # `sqlite3`, so no extra dependency is needed for storage.
@@ -47,34 +47,43 @@ server = [
 # Headless-browser dependency for the UI render acceptance test
 # (`tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser`).
 # Installing the Python package is not sufficient on its own: after
-# `pip install se3[browser]` you MUST also download the Chromium binary with
+# `pip install tianluo[browser]` you MUST also download the Chromium binary with
 # `playwright install chromium`. Without it the critical acceptance test fails
-# loudly (it is registered under `test.critical_tests` in se3.yaml) rather than
+# loudly (it is registered under `test.critical_tests` in tianluo.yaml) rather than
 # silently skipping.
 browser = [
     "playwright>=1.40.0",
 ]
 
 [project.scripts]
-se3 = "se3.cli:app"
-se3-server = "se3.server:main"
+# `luo` is the primary command ("call it by its short name"), `tianluo` the
+# full-name entry for docs and discoverability. `se3` / `se3-server` are
+# transitional aliases from the rename (12.0.0): they print a one-line
+# deprecation notice on first use and will be removed in 13.0.0.
+luo = "tianluo.cli:app"
+tianluo = "tianluo.cli:app"
+se3 = "tianluo.cli:legacy_app"
+tianluo-server = "tianluo.server:main"
+se3-server = "tianluo.server:legacy_main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/se3"]
+# `src/se3` is the 12.x compatibility shim (aliases `import se3` and
+# `python -m se3` onto the renamed `tianluo` package); dropped in 13.0.0.
+packages = ["src/tianluo", "src/se3"]
 # Non-Python resources that must survive packaging: the server's bundled static
-# frontend assets, and the CLI locale catalogs — se3.i18n loads the latter via
+# frontend assets, and the CLI locale catalogs — tianluo.i18n loads the latter via
 # importlib.resources, so a wheel without them degrades every t() call to raw
 # keys instead of localized text.
 artifacts = [
-    "src/se3/server/static/**",
-    "src/se3/i18n/locales/*.json",
+    "src/tianluo/server/static/**",
+    "src/tianluo/i18n/locales/*.json",
 ]
 
 [tool.pytest.ini_options]
-# Charter permits engine-colocated pytest modules under src/se3/engine/ (tightly
+# Charter permits engine-colocated pytest modules under src/tianluo/engine/ (tightly
 # coupled to private step internals); include that path so the default pytest run
 # discovers them alongside tests/ instead of silently skipping them.
-testpaths = ["tests", "src/se3/engine"]
+testpaths = ["tests", "src/tianluo/engine"]
 pythonpath = ["src"]
 # Deselect the Chromium e2e test — it requires libnspr4.so / playwright
 # which are not available in this environment. The node-stub sibling

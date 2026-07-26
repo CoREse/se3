@@ -14,15 +14,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestBugB_ConfirmRevisionNoInfiniteLoop:
@@ -390,7 +390,7 @@ class TestBoundedCrossRevisionReview:
     def test_unit_auto_approve_when_persisted_count_at_cap(self):
         """When flow.state.review_iterations reaches max_iterations, the
         confirm handler auto-approves without calling the LLM."""
-        from se3.engine.steps import confirm as confirm_mod
+        from tianluo.engine.steps import confirm as confirm_mod
 
         flow = self._make_flow()
         plan_step = Step(
@@ -432,8 +432,8 @@ class TestBoundedCrossRevisionReview:
         """End-to-end: with the LLM always rejecting, the review<->revise loop
         is bounded by max_iterations and then auto-approves, advancing the
         flow rather than looping forever."""
-        from se3.engine.steps import confirm as confirm_mod
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps import confirm as confirm_mod
+        from tianluo.engine.steps.confirm import confirm_handler
 
         max_iters = 2
         (self.project_root / "se3.yaml").write_text(
@@ -535,7 +535,7 @@ class TestWriteFlowMeta:
 
         self.sm._write_flow_meta(flow)
 
-        from se3.engine.chat_history import _history_dir
+        from tianluo.engine.chat_history import _history_dir
         meta_path = _history_dir(self.project_root, flow.flow_id) / "_meta.json"
 
         assert meta_path.exists()
@@ -568,7 +568,7 @@ class TestWriteFlowMeta:
         # First write
         self.sm._write_flow_meta(flow)
 
-        from se3.engine.chat_history import _history_dir
+        from tianluo.engine.chat_history import _history_dir
         meta_path = _history_dir(self.project_root, flow.flow_id) / "_meta.json"
 
         # Read original content
@@ -593,7 +593,7 @@ class TestWriteFlowMeta:
 
         self.sm.init_flow(flow)
 
-        from se3.engine.chat_history import _history_dir
+        from tianluo.engine.chat_history import _history_dir
         meta_path = _history_dir(self.project_root, flow.flow_id) / "_meta.json"
 
         assert meta_path.exists()

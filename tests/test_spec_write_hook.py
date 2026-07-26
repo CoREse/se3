@@ -20,15 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import spec_write_hook
-from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
-from se3.config import (
+from tianluo.engine import spec_write_hook
+from tianluo.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from tianluo.config import (
     ConfigError,
     SpecWriteProtectionConfig,
     load_spec_write_protection_config,
 )
-from se3.claude_runner import ClaudeCodeRunner
-from se3.engine.llm_caller import LLMCaller
+from tianluo.claude_runner import ClaudeCodeRunner
+from tianluo.engine.llm_caller import LLMCaller
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ class TestEnsureGuardPlugin:
         assert pre[0]["matcher"] == "Write|Edit|NotebookEdit"
         inner = pre[0]["hooks"][0]
         assert inner["type"] == "command"
-        assert inner["command"].endswith("-m se3.engine.spec_write_hook")
+        assert inner["command"].endswith("-m tianluo.engine.spec_write_hook")
         assert sys.executable in inner["command"]
         # Carries ONLY the hook — no permissions.deny re-introduced.
         assert "permissions" not in data
@@ -248,7 +248,7 @@ class TestEnsureGuardPlugin:
         # the original interpreter path.
         assert shlex.quote(spaced) in command
         assert shlex.split(command)[0] == spaced
-        assert command.endswith("-m se3.engine.spec_write_hook")
+        assert command.endswith("-m tianluo.engine.spec_write_hook")
 
 
 # ---------------------------------------------------------------------------

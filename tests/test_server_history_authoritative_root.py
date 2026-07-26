@@ -24,8 +24,8 @@ import threading
 import pytest
 
 from _authsrv import authed_hello, recv_daemon_frame
-from se3.daemon import protocol
-from se3.server.state import ServerState
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState
 
 
 # --------------------------------------------------------------------------
@@ -164,7 +164,7 @@ def test_project_root_owner_scoped_out_returns_none():
 def client_and_app(monkeypatch):
     from fastapi.testclient import TestClient
 
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     from _authsrv import authed_app, login
 
@@ -798,7 +798,7 @@ def test_running_worktree_selfheal_reconciles_missing_round(
     """A running worktree flow whose cache froze at round 1 self-heals: the
     ``not_modified`` poll reconciles against the daemon and the missing round 2
     lands in the response, identity fields intact."""
-    from se3.server.state import ServerState as _SS
+    from tianluo.server.state import ServerState as _SS
 
     client, app = client_and_app
     # Drop the reconcile throttle so the self-heal fires on the very next poll
@@ -891,7 +891,7 @@ def test_non_worktree_flow_never_reconciles(client_and_app, monkeypatch):
     """An ordinary (non-worktree) running flow is served straight from cache even
     with the throttle disabled — the self-heal reconcile is worktree-only, so
     normal sessions are unaffected."""
-    from se3.server.state import ServerState as _SS
+    from tianluo.server.state import ServerState as _SS
 
     client, app = client_and_app
     monkeypatch.setattr(_SS, "_HISTORY_FULL_PULL_MIN_INTERVAL", 0.0)

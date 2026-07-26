@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 
-from se3.daemon.wire_metrics import WireMetrics
+from tianluo.daemon.wire_metrics import WireMetrics
 
 
 def test_record_and_snapshot_accumulate_by_type():
@@ -65,11 +65,11 @@ def test_concurrent_record_is_thread_safe():
 
 
 def test_no_server_import():
-    """core/server isolation: the metrics module must not pull in se3.server."""
+    """core/server isolation: the metrics module must not pull in tianluo.server."""
     import ast
     import inspect
 
-    import se3.daemon.wire_metrics as wm
+    import tianluo.daemon.wire_metrics as wm
 
     tree = ast.parse(inspect.getsource(wm))
     imported = []
@@ -78,4 +78,4 @@ def test_no_server_import():
             imported += [a.name for a in node.names]
         elif isinstance(node, ast.ImportFrom):
             imported.append(node.module or "")
-    assert not any(name.startswith("se3.server") for name in imported)
+    assert not any(name.startswith("tianluo.server") for name in imported)

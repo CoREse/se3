@@ -1,4 +1,4 @@
-"""Tests for the se3.i18n resource layer and language-resolution chain.
+"""Tests for the tianluo.i18n resource layer and language-resolution chain.
 
 Covers: resource discovery/auto-registration, per-key fallback to en-US,
 unknown-language fallback, placeholder fault tolerance, language-code
@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-import se3.i18n as i18n
-from se3.i18n import loader
+import tianluo.i18n as i18n
+from tianluo.i18n import loader
 
 
 @pytest.fixture(autouse=True)
@@ -34,7 +34,7 @@ def _reset_i18n(monkeypatch, tmp_path_factory):
     i18n.reset_language()
     loader.clear_caches()
     home = tmp_path_factory.mktemp("home")
-    monkeypatch.setattr("se3.config.Path.home", lambda: home)
+    monkeypatch.setattr("tianluo.config.Path.home", lambda: home)
     for var in ("SE3_LANG", "LC_ALL", "LC_MESSAGES", "LANG"):
         monkeypatch.delenv(var, raising=False)
     yield
@@ -134,7 +134,7 @@ class TestTranslate:
         template rather than crash the flow engine mid-step."""
         i18n.set_language("en-US")
         monkeypatch.setattr(
-            "se3.i18n.load_catalog", lambda code: {"broken.key": template}
+            "tianluo.i18n.load_catalog", lambda code: {"broken.key": template}
         )
         assert i18n.t("broken.key", a=1) == template
 
@@ -269,7 +269,7 @@ class TestResolveLanguageChain:
 
 class TestLazySingleton:
     def test_import_does_not_read_config(self, tmp_path, monkeypatch):
-        """import se3.i18n is side-effect free: nothing resolved until first t()."""
+        """import tianluo.i18n is side-effect free: nothing resolved until first t()."""
         i18n.reset_language()
         # Access the private slot to confirm it's unresolved after reset.
         assert i18n._current_language is None
@@ -340,7 +340,7 @@ def test_cli_get_project_root_binds_language(tmp_path, monkeypatch):
     Commands invoked from a subdirectory of a project must render in the
     *project's* language, not the cwd's.
     """
-    from se3.commands.code_index_cmd import get_project_root
+    from tianluo.commands.code_index_cmd import get_project_root
 
     monkeypatch.delenv("SE3_LANG", raising=False)
     monkeypatch.setenv("LANG", "en_US.UTF-8")
@@ -400,7 +400,7 @@ def test_engine_run_chrome_keys_exist_in_both_catalogs():
     key present in only one catalog would leak the other language's wording into
     an otherwise localized run.
     """
-    from se3.i18n.loader import load_catalog
+    from tianluo.i18n.loader import load_catalog
 
     en = load_catalog("en-US")
     zh = load_catalog("zh-CN")
@@ -418,8 +418,8 @@ def test_engine_run_chrome_keys_exist_in_both_catalogs():
 )
 def test_round_usage_footer_follows_active_language(lang, expected):
     """The per-round usage footer's label chrome routes through i18n."""
-    import se3.i18n as i18n
-    from se3.engine.token_usage import UsageTotals, format_round_usage_footer
+    import tianluo.i18n as i18n
+    from tianluo.engine.token_usage import UsageTotals, format_round_usage_footer
 
     i18n.set_language(lang)
     try:
@@ -434,7 +434,7 @@ def test_round_usage_footer_follows_active_language(lang, expected):
 
 def test_test_step_progress_line_follows_active_language():
     """The ``Running tests:`` progress line (every run with a test step) is i18n."""
-    import se3.i18n as i18n
+    import tianluo.i18n as i18n
 
     i18n.set_language("zh-CN")
     try:
@@ -456,7 +456,7 @@ def test_usage_line_labels_follow_active_language(lang, expected):
     """The compact usage line is embedded in already-localized wrappers (e.g.
     the discovery cumulative footer), so its labels must localize too — a
     hardcoded 'in/out/cache(r/w)' would render a mixed-language line."""
-    from se3.engine.token_usage import UsageTotals, format_usage_line
+    from tianluo.engine.token_usage import UsageTotals, format_usage_line
 
     i18n.set_language(lang)
     try:
@@ -478,7 +478,7 @@ def test_discovery_confirm_metadata_follows_active_language():
     """The discovery programmatic-confirmation gate's prompt/option is framework
     UI copy: it renders in the active language (the refined description — LLM
     output — always passes through verbatim)."""
-    from se3.engine.steps.discovery import discovery_confirm_metadata
+    from tianluo.engine.steps.discovery import discovery_confirm_metadata
 
     i18n.set_language("en-US")
     try:
@@ -509,7 +509,7 @@ def test_state_machine_banners_have_no_hardcoded_english():
     zh-CN run shows English banners inside an otherwise Chinese UI."""
     from pathlib import Path as _Path
 
-    import se3.engine.state_machine as sm
+    import tianluo.engine.state_machine as sm
 
     source = _Path(sm.__file__).read_text(encoding="utf-8")
     for literal in (
@@ -556,7 +556,7 @@ def test_status_key_normalizes_status_tokens(value, expected_key):
 
 
 def test_status_key_accepts_enum():
-    from se3.engine.issue_manager import IssueStatus
+    from tianluo.engine.issue_manager import IssueStatus
 
     assert i18n.status_key(IssueStatus.IN_PROGRESS) == "status.in_progress"
 
@@ -578,8 +578,8 @@ def test_t_status_localizes_known_statuses(value, expected):
 
 
 def test_t_status_accepts_enum_members():
-    from se3.engine.issue_manager import IssueStatus
-    from se3.engine.models import StepStatus
+    from tianluo.engine.issue_manager import IssueStatus
+    from tianluo.engine.models import StepStatus
 
     i18n.set_language("zh-CN")
     assert i18n.t_status(IssueStatus.WONT_FIX) == "不修复"
@@ -610,7 +610,7 @@ class TestOutputWrapperChrome:
     English literals it used to hardcode."""
 
     def test_format_error_prefix_is_translated(self):
-        from se3.engine.output import format_error
+        from tianluo.engine.output import format_error
 
         i18n.set_language("zh-CN")
         rendered = format_error("boom", {"flow": "f1"})
@@ -620,13 +620,13 @@ class TestOutputWrapperChrome:
         assert "boom" in rendered and "flow: f1" in rendered
 
     def test_format_error_prefix_in_base_language(self):
-        from se3.engine.output import format_error
+        from tianluo.engine.output import format_error
 
         i18n.set_language("en-US")
         assert "Error:" in format_error("boom")
 
     def test_panel_titles_are_translated(self, monkeypatch):
-        from se3.engine import output
+        from tianluo.engine import output
 
         titles: list[str] = []
         monkeypatch.setattr(

@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from se3.config import ImplementConfig
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.config import ImplementConfig
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ _SEQ_PARSED = {
 }
 
 
-_IMP = "se3.engine.steps.implement"
+_IMP = "tianluo.engine.steps.implement"
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ class TestExecutionStrategyDispatch:
     @patch(f"{_IMP}.LLMCaller")
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -155,7 +155,7 @@ class TestExecutionStrategyDispatch:
         tmp_path,
     ):
         """use_worktree=False + fork DAG with total_loc > threshold: no DAG call."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
@@ -174,7 +174,7 @@ class TestExecutionStrategyDispatch:
     @patch(f"{_IMP}.LLMCaller")
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -192,7 +192,7 @@ class TestExecutionStrategyDispatch:
         tmp_path,
     ):
         """use_worktree=True + linear chain above LOC threshold: no DAG call."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
@@ -208,7 +208,7 @@ class TestExecutionStrategyDispatch:
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}._run_dag_parallel", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -224,7 +224,7 @@ class TestExecutionStrategyDispatch:
         tmp_path,
     ):
         """use_worktree=True + fork DAG above LOC threshold: DAG parallel runs."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, FORK_GROUPS)
         result = implement_handler(step, flow)
@@ -238,7 +238,7 @@ class TestExecutionStrategyDispatch:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -257,7 +257,7 @@ class TestExecutionStrategyDispatch:
         tmp_path,
     ):
         """use_worktree=True + total LOC <= threshold: LOC-merge single call, no DAG."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, SMALL_GROUPS)
         result = implement_handler(step, flow)

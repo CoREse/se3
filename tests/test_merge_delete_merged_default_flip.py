@@ -91,7 +91,7 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
     assert _archive_dirs(tmp_path) == []
 
     # Run the merge with default delete_merged (True).
-    from se3.commands.merge_cmd import run_merge
+    from tianluo.commands.merge_cmd import run_merge
 
     exit_code = run_merge(
         branches=["feature"],
@@ -131,7 +131,7 @@ def test_run_merge_no_delete_merged_preserves_branch_and_skips_archive(
 
     _git(tmp_path, "checkout", default)
 
-    from se3.commands.merge_cmd import run_merge
+    from tianluo.commands.merge_cmd import run_merge
 
     exit_code = run_merge(
         branches=["feature"],
@@ -165,14 +165,14 @@ def test_cli_no_delete_merged_flag_overrides_default(
         captured["strategy"] = strategy
         return 0
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", stub_run_merge)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", stub_run_merge)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(
@@ -201,14 +201,14 @@ def test_cli_default_delete_merged_is_on(
         captured["delete_merged"] = delete_merged
         return 0
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", stub_run_merge)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", stub_run_merge)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["merge", "feature"])

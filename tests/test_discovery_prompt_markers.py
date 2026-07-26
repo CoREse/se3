@@ -12,13 +12,13 @@ region.
 
 from __future__ import annotations
 
-from se3.engine.chat_history import get_step_history, record_prompt
-from se3.engine.prompt_markers import (
+from tianluo.engine.chat_history import get_step_history, record_prompt
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
 )
-from se3.engine.steps.discovery import (
+from tianluo.engine.steps.discovery import (
     CONTINUE_DISCOVERY_PROMPT,
     INITIAL_DISCOVERY_PROMPT,
 )

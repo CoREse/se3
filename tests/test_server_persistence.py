@@ -1,5 +1,5 @@
-"""Tests for se3.server.persistence (sqlite repository) and
-se3.server.identity (owner/key resolution + machine binding) — G2.
+"""Tests for tianluo.server.persistence (sqlite repository) and
+tianluo.server.identity (owner/key resolution + machine binding) — G2.
 
 Covers: five-table CRUD, owner_id decoupling from (provider, external_id),
 binding resolution, daemon-key issue/resolve/revoke, one-time break-glass
@@ -13,9 +13,9 @@ import threading
 
 import pytest
 
-from se3.server import crypto
-from se3.server.identity import IdentityService, UntrustedIdentityLink
-from se3.server.persistence import IdentityAlreadyBound, Store
+from tianluo.server import crypto
+from tianluo.server.identity import IdentityService, UntrustedIdentityLink
+from tianluo.server.persistence import IdentityAlreadyBound, Store
 
 
 @pytest.fixture

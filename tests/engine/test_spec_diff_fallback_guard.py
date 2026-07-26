@@ -16,15 +16,15 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
-from se3.engine.models import (
+from tianluo.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 def _make_project(tmp_path: Path, se3_yaml: str | None = None) -> Path:

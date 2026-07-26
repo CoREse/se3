@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the se3 test suite.
 
-Clears every ``_warned_*_for`` dedup set in ``se3.config`` between tests
+Clears every ``_warned_*_for`` dedup set in ``tianluo.config`` between tests
 so that warning-related caplog assertions are order-independent, regardless
 of which warnings a given test happens to trigger.
 """
@@ -45,7 +45,7 @@ _wire_browser_test_libs()
 # Pin the UI language to en-US at conftest *import* time, before any test module
 # is collected. Typer freezes each command/option ``help=`` string when the
 # module defining it is imported (the value is a plain ``t(...)`` result bound
-# into the Option/command at decoration). Test modules import ``se3.cli`` during
+# into the Option/command at decoration). Test modules import ``tianluo.cli`` during
 # collection — earlier than any autouse fixture can run — so under the repo's own
 # ``se3.yaml`` (``language: zh-CN``) the help text would freeze in Chinese and
 # every English help-text assertion would break. The per-test autouse fixtures
@@ -54,14 +54,14 @@ _wire_browser_test_libs()
 # their own ``monkeypatch.delenv`` and are unaffected.
 os.environ["SE3_LANG"] = "en-US"
 
-import se3.config as _cfg  # noqa: E402
+import tianluo.config as _cfg  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _force_en_us_ui_language(monkeypatch):
     """Pin the i18n UI language to en-US for every test.
 
-    ``se3.i18n`` resolves the active UI language lazily from ``Path.cwd()`` — and
+    ``tianluo.i18n`` resolves the active UI language lazily from ``Path.cwd()`` — and
     the suite runs from the repo root, whose ``se3.yaml`` sets ``language: zh-CN``.
     Without this, any test that exercises a ``t()``-rendered CLI/display string
     would see Chinese and its English assertion would break, making output
@@ -72,7 +72,7 @@ def _force_en_us_ui_language(monkeypatch):
     ``monkeypatch.setenv``/``set_language`` (applied after this fixture) and a
     reset — e.g. the i18n precedence-chain tests, which ``delenv`` it entirely.
     """
-    import se3.i18n as _i18n
+    import tianluo.i18n as _i18n
 
     monkeypatch.setenv("SE3_LANG", "en-US")
     _i18n.reset_language()
@@ -84,7 +84,7 @@ def _force_en_us_ui_language(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_config_warning_dedup_sets():
-    """Clear all ``_warned_*_for`` sets in se3.config around each test.
+    """Clear all ``_warned_*_for`` sets in tianluo.config around each test.
 
     Discovered dynamically so newly added dedup sets are covered without
     having to touch this fixture.
@@ -106,7 +106,7 @@ def _reset_config_warning_dedup_sets():
 def _pin_ui_language_en():
     """Pin CLI UI text to en-US so command-output assertions are deterministic.
 
-    ``se3.i18n.t()``'s active language is a process-wide singleton resolved from
+    ``tianluo.i18n.t()``'s active language is a process-wide singleton resolved from
     ``Path.cwd()``; the se3 repo's own ``se3.yaml`` sets ``language: zh-CN``, so
     without an explicit pin the language a test observes would depend on cwd and
     on which test happened to trigger the first render. Pinning to en-US keeps
@@ -117,7 +117,7 @@ def _pin_ui_language_en():
     never leaks. Intentionally does NOT touch ``SE3_LANG``/locale env vars so the
     dedicated resolution-chain tests in ``test_i18n.py`` remain unaffected.
     """
-    from se3 import i18n
+    from tianluo import i18n
 
     i18n.set_language("en-US")
     yield
@@ -145,7 +145,7 @@ def _no_real_code_index_refresh(monkeypatch):
     unaffected; a test that specifically wants the real hook can re-patch it.
     """
     monkeypatch.setattr(
-        "se3.engine.context_builder.ensure_code_index_fresh",
+        "tianluo.engine.context_builder.ensure_code_index_fresh",
         lambda *args, **kwargs: None,
     )
 
@@ -188,11 +188,11 @@ def _install_chat_history_guard(monkeypatch, real_roots: set, redirect_root: Pat
     and any tmp-scoped caller keep working, and production (no fixture
     installed) is untouched.
 
-    ``se3.engine.state_machine`` binds ``_history_dir`` at import time (a
+    ``tianluo.engine.state_machine`` binds ``_history_dir`` at import time (a
     module-level ``from ... import _history_dir``), so its reference bypasses the
     module-attribute patch above and is repatched directly.
     """
-    from se3.engine import chat_history
+    from tianluo.engine import chat_history
 
     original = chat_history._history_dir
 
@@ -207,7 +207,7 @@ def _install_chat_history_guard(monkeypatch, real_roots: set, redirect_root: Pat
 
     monkeypatch.setattr(chat_history, "_history_dir", _redirected)
     try:
-        from se3.engine import state_machine
+        from tianluo.engine import state_machine
 
         monkeypatch.setattr(
             state_machine, "_history_dir", _redirected, raising=False
@@ -264,7 +264,7 @@ def _isolate_se3_daemon_home(tmp_path, monkeypatch):
     ``scripts/cleanup_project_roots.py`` to prune any pytest-tempdir residue —
     not by anything this fixture can do.
     """
-    from se3.daemon.supervisor import EXTERNAL_SCAN_IGNORE_ENV
+    from tianluo.daemon.supervisor import EXTERNAL_SCAN_IGNORE_ENV
 
     monkeypatch.setenv("SE3_DAEMON_DIR", str(tmp_path / ".se3-daemon-home"))
     monkeypatch.setenv(EXTERNAL_SCAN_IGNORE_ENV, "1")

@@ -9,7 +9,7 @@ Covers group G6:
 * the owner-scoped ``/ws/ui`` push paths (``UiHub`` filtering, the ``_push_*``
   helpers, and the ``handle_ui_connection`` unauthenticated reject).
 
-These exercise ``se3.server`` directly with lightweight fake WebSockets, so no
+These exercise ``tianluo.server`` directly with lightweight fake WebSockets, so no
 FastAPI test client (and no live event loop wiring) is needed.
 """
 
@@ -21,12 +21,12 @@ import threading
 
 import pytest
 
-from se3.daemon import protocol
-from se3.server.crypto import generate_token
-from se3.server.identity import IdentityService
-from se3.server.persistence import Store
-from se3.server.state import MachineRecord, ServerState
-from se3.server.ws import (
+from tianluo.daemon import protocol
+from tianluo.server.crypto import generate_token
+from tianluo.server.identity import IdentityService
+from tianluo.server.persistence import Store
+from tianluo.server.state import MachineRecord, ServerState
+from tianluo.server.ws import (
     ConnectionManager,
     UiHub,
     _push_history_data,
@@ -529,9 +529,9 @@ from _authsrv import login  # noqa: E402  (kept beside the tests that use it)
 @pytest.fixture()
 def authz_app():
     """A server app seeded with two non-admin owners (A, B), each with a key."""
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     app = create_app(
         session_store=SessionStore(cookie_config=CookieConfig(secure=False))

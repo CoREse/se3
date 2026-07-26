@@ -4,7 +4,7 @@ import json
 import re
 import pytest
 
-from se3.engine.llm_caller import (
+from tianluo.engine.llm_caller import (
     truncate_preview,
     format_tool_use_preview,
     format_tool_result_preview,
@@ -912,7 +912,7 @@ class TestStreamJSONTrackerProgressBrackets:
         # The tracker imports record_stream_progress lazily inside
         # _emit_progress; patch on the chat_history module so the lazy
         # import picks up the fake.
-        from se3.engine import chat_history
+        from tianluo.engine import chat_history
         monkeypatch.setattr(
             chat_history, "record_stream_progress", fake_record_stream_progress
         )
@@ -1225,18 +1225,18 @@ class TestExtraPromptThreadSafety:
 
     def setup_method(self):
         """Clear extra prompt state before each test."""
-        from se3.engine.llm_caller import clear_extra_prompt
+        from tianluo.engine.llm_caller import clear_extra_prompt
         clear_extra_prompt()
 
     def teardown_method(self):
         """Clear extra prompt state after each test."""
-        from se3.engine.llm_caller import clear_extra_prompt
+        from tianluo.engine.llm_caller import clear_extra_prompt
         clear_extra_prompt()
 
     def test_concurrent_set_and_get(self):
         """Multiple threads setting/getting extra prompt should not corrupt state."""
         import threading
-        from se3.engine.llm_caller import set_extra_prompt, get_extra_prompt
+        from tianluo.engine.llm_caller import set_extra_prompt, get_extra_prompt
 
         errors = []
         barrier = threading.Barrier(4)
@@ -1275,7 +1275,7 @@ class TestExtraPromptThreadSafety:
     def test_concurrent_set_persistent_and_transient(self):
         """Concurrent persistent and transient writes should not interfere."""
         import threading
-        from se3.engine.llm_caller import set_extra_prompt, get_extra_prompt
+        from tianluo.engine.llm_caller import set_extra_prompt, get_extra_prompt
 
         errors = []
         barrier = threading.Barrier(2)
@@ -1313,7 +1313,7 @@ class TestExtraPromptThreadSafety:
     def test_concurrent_clear_and_set(self):
         """Concurrent clearing and setting should not raise exceptions."""
         import threading
-        from se3.engine.llm_caller import (
+        from tianluo.engine.llm_caller import (
             set_extra_prompt, clear_extra_prompt, clear_persistent_extra_prompt
         )
 
@@ -1365,7 +1365,7 @@ class TestCallWithRetryDedup:
         """Verify that _call_with_retry does NOT call deduplicate_prompt_lines
         on the first call (total_attempt == 0) since there is no internal repetition."""
         from unittest.mock import patch, MagicMock
-        from se3.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
+        from tianluo.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
 
         caller = LLMCaller(
             project_root=tmp_path,
@@ -1375,7 +1375,7 @@ class TestCallWithRetryDedup:
             agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
         )
 
-        with patch("se3.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
+        with patch("tianluo.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
              patch.object(caller, "_get_current_runner") as mock_get_runner:
             runner_inst = MagicMock()
             result_obj = MagicMock()
@@ -1719,7 +1719,7 @@ class TestCallWithRetryDedup:
         dedup still runs on the original prompt (as a no-op since there
         is no internal repetition). Verifies the code path is exercised."""
         from unittest.mock import patch, MagicMock
-        from se3.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
+        from tianluo.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
 
         caller = LLMCaller(
             project_root=tmp_path,
@@ -1731,7 +1731,7 @@ class TestCallWithRetryDedup:
         # Simulate a retry (external_attempt=1) so total_attempt > 0
         caller.external_attempt = 1
 
-        with patch("se3.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
+        with patch("tianluo.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
              patch.object(caller, "_get_current_runner") as mock_get_runner, \
              patch.object(caller, "_get_retry_context", return_value=None):
             runner_inst = MagicMock()
@@ -1772,11 +1772,11 @@ class TestCallExtractContract:
     """
 
     def _make_caller(self, tmp_path):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         return LLMCaller(project_root=tmp_path)
 
     def test_lenient_parse_extract_dict_required_keys_satisfied(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         # Narrative + JSON fence containing all required keys
         output = (
             "Here's my analysis:\n\n"
@@ -1793,13 +1793,13 @@ class TestCallExtractContract:
         assert parsed_again["diffs"][0]["type"] == "gap"
 
     def test_lenient_parse_extract_dict_missing_required_keys_returns_none(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = '{"other_key": "value"}'
         result = LLMCaller._lenient_parse_extract(output, ["diffs"])
         assert result is None
 
     def test_lenient_parse_extract_list_when_no_required_keys(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = (
             "I found these subsystems:\n\n"
             "```json\n"
@@ -1813,7 +1813,7 @@ class TestCallExtractContract:
         assert result[0]["name"] == "auth"
 
     def test_lenient_parse_extract_bare_list(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = '[{"name": "auth"}, {"name": "db"}]'
         result = LLMCaller._lenient_parse_extract(output, None)
         assert isinstance(result, list)
@@ -1824,7 +1824,7 @@ class TestCallExtractContract:
         no markdown fence. The trailing-dict heuristic in parse_json_response
         must NOT win here, otherwise sync_discovery's `isinstance(_, list)`
         check fails and discovery silently returns []."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = (
             "Here are the subsystems I discovered:\n\n"
             '[{"name": "auth"}, {"name": "db"}]'
@@ -1841,24 +1841,24 @@ class TestCallExtractContract:
     def test_lenient_parse_extract_list_with_required_keys_returns_none(self):
         """required_keys is dict-only; a list response with required_keys
         violates the contract and should fall through to phase 2."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = '[{"name": "auth"}]'
         result = LLMCaller._lenient_parse_extract(output, ["diffs"])
         assert result is None
 
     def test_lenient_parse_extract_garbage_returns_none(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         result = LLMCaller._lenient_parse_extract("not json at all", None)
         assert result is None
 
     def test_lenient_parse_extract_empty_returns_none(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         assert LLMCaller._lenient_parse_extract("", None) is None
         assert LLMCaller._lenient_parse_extract("", ["diffs"]) is None
 
     def test_lenient_parse_extract_narrative_prefix_then_dict(self):
         """The exact failure mode the fix targets: narrative + JSON fence."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         output = (
             "I analyzed the spec and code. Here are my findings:\n\n"
             "After reading several files I'm confident in this result.\n\n"
@@ -1881,7 +1881,7 @@ class TestCallExtractFullFlow:
     def test_fast_path_dict_returns_clean_json_dumps(self, tmp_path):
         """Fast-path with valid dict + required_keys should bypass phase 2."""
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(project_root=tmp_path)
         raw_output = (
@@ -1889,7 +1889,7 @@ class TestCallExtractFullFlow:
             '```json\n{"diffs": [{"type": "gap", "description": "x"}]}\n```'
         )
         with patch.object(caller, "_call_with_retry", return_value=raw_output), \
-             patch("se3.engine.json_extractor.JSONExtractor.extract") as mock_extract:
+             patch("tianluo.engine.json_extractor.JSONExtractor.extract") as mock_extract:
             result = caller._call_extract(
                 prompt="p",
                 timeout=None,
@@ -1906,14 +1906,14 @@ class TestCallExtractFullFlow:
 
     def test_fast_path_missing_required_keys_falls_back_to_phase_2(self, tmp_path):
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(project_root=tmp_path)
         # Valid dict but missing the required key "diffs"
         raw_output = '{"other_field": []}'
         extracted = {"diffs": [{"type": "extension", "description": "y"}]}
         with patch.object(caller, "_call_with_retry", return_value=raw_output), \
-             patch("se3.engine.json_extractor.JSONExtractor.extract", return_value=extracted) as mock_extract:
+             patch("tianluo.engine.json_extractor.JSONExtractor.extract", return_value=extracted) as mock_extract:
             result = caller._call_extract(
                 prompt="p",
                 timeout=None,
@@ -1931,7 +1931,7 @@ class TestCallExtractFullFlow:
     def test_fast_path_list_no_required_keys(self, tmp_path):
         """sync_discovery path: list response, required_keys=None."""
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(project_root=tmp_path)
         raw_output = (
@@ -1941,7 +1941,7 @@ class TestCallExtractFullFlow:
             "```"
         )
         with patch.object(caller, "_call_with_retry", return_value=raw_output), \
-             patch("se3.engine.json_extractor.JSONExtractor.extract") as mock_extract:
+             patch("tianluo.engine.json_extractor.JSONExtractor.extract") as mock_extract:
             result = caller._call_extract(
                 prompt="p",
                 timeout=None,
@@ -1957,11 +1957,11 @@ class TestCallExtractFullFlow:
 
     def test_unparseable_output_falls_back_then_raises_on_extractor_none(self, tmp_path):
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller, LLMCallError
+        from tianluo.engine.llm_caller import LLMCaller, LLMCallError
 
         caller = LLMCaller(project_root=tmp_path)
         with patch.object(caller, "_call_with_retry", return_value="garbage no json"), \
-             patch("se3.engine.json_extractor.JSONExtractor.extract", return_value=None) as mock_extract:
+             patch("tianluo.engine.json_extractor.JSONExtractor.extract", return_value=None) as mock_extract:
             with pytest.raises(LLMCallError):
                 caller._call_extract(
                     prompt="p",
@@ -1979,7 +1979,7 @@ class TestCallDispatchExtractRequiredKeys:
 
     def test_required_keys_forwarded_on_extract_mode(self, tmp_path):
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(project_root=tmp_path)
         with patch.object(caller, "_call_extract", return_value="{}") as mock_extract:
@@ -1993,7 +1993,7 @@ class TestCallDispatchExtractRequiredKeys:
 
     def test_required_keys_none_when_not_provided(self, tmp_path):
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(project_root=tmp_path)
         with patch.object(caller, "_call_extract", return_value="[]") as mock_extract:

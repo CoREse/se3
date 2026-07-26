@@ -30,10 +30,10 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.history import DaemonHistoryReader
-from se3.server.state import ServerState
-from se3.server.ws import (
+from tianluo.daemon import protocol
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.server.state import ServerState
+from tianluo.server.ws import (
     ConnectionManager,
     HistoryRequestRegistry,
     UiHub,

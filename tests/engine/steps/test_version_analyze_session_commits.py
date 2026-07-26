@@ -16,20 +16,20 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     State,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps.commit import commit_handler
-from se3.engine.steps.version_analyze import (
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps.commit import commit_handler
+from tianluo.engine.steps.version_analyze import (
     _format_session_commits,
     version_analyze_handler,
 )
-from se3.engine.version_bumper import VersionBumper
+from tianluo.engine.version_bumper import VersionBumper
 
 
 def _make_flow(**kwargs) -> FlowInstance:
@@ -126,9 +126,9 @@ class TestFormatSessionCommitsHelper:
 class TestPromptIncludesSessionCommitsAndPreSession:
     """version_analyze_handler renders new fields into the prompt."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.2.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.2.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_prompt_includes_pre_session_version_and_commit_list(
         self, mock_caller_cls, mock_ver, mock_inject
     ):
@@ -174,9 +174,9 @@ class TestPromptIncludesSessionCommitsAndPreSession:
         # Disk-version is still surfaced for cross-reference.
         assert "5.2.0" in prompt
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_prompt_handles_empty_session_commits(
         self, mock_caller_cls, mock_ver, mock_inject
     ):
@@ -205,9 +205,9 @@ class TestPromptIncludesSessionCommitsAndPreSession:
         assert "Pre-Session Version" in prompt
         assert "5.1.0" in prompt
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_pre_session_version_fallback_to_current_version(
         self, mock_caller_cls, mock_ver, mock_inject, caplog
     ):
@@ -253,9 +253,9 @@ class TestWorktreeIntentPersistenceIsMandatory:
     (resumable) step, not a best-effort warning.
     """
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_write_intent_oserror_fails_the_step(
         self, mock_caller_cls, mock_ver, mock_inject
     ):
@@ -274,7 +274,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
         # ``from ..version_intent import ... write_intent``; patch it at the
         # source module so the local import binds to the failing stub.
         with patch(
-            "se3.engine.version_intent.write_intent",
+            "tianluo.engine.version_intent.write_intent",
             side_effect=OSError("read-only filesystem"),
         ):
             result = version_analyze_handler(step, flow)
@@ -285,9 +285,9 @@ class TestWorktreeIntentPersistenceIsMandatory:
         # No authoritative version leaks into outputs on the worktree path.
         assert "suggested_version" not in step.outputs
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_successful_persist_still_completes(
         self, mock_caller_cls, mock_ver, mock_inject, tmp_path
     ):
@@ -315,10 +315,10 @@ class TestWorktreeIntentPersistenceIsMandatory:
         assert (tmp_path / "se3" / "version-intents" / "flow-persist-ok.json").exists()
         assert step.outputs["version_intent"]["bump_type"] == "minor"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._version_bumping_enabled", return_value=False)
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._version_bumping_enabled", return_value=False)
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.1.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_version_disabled_worktree_emits_no_intent(
         self, mock_caller_cls, mock_ver, mock_enabled, mock_inject, tmp_path
     ):
@@ -344,7 +344,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
 
         # write_intent must never be reached when bumping is disabled.
         with patch(
-            "se3.engine.version_intent.write_intent",
+            "tianluo.engine.version_intent.write_intent",
             side_effect=AssertionError("write_intent must not run when disabled"),
         ):
             result = version_analyze_handler(step, flow)
@@ -428,9 +428,9 @@ class TestEndToEndDoubleBumpReplay:
         flow.state.add_step(impl)
         return flow
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="5.2.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="5.2.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_e2e_replay_writes_pre_session_baseline_not_disk_baseline(
         self,
         mock_llm_caller_cls,
@@ -534,13 +534,13 @@ class TestEndToEndDoubleBumpReplay:
         # would hit the non-repo tmp_path. A minor bump makes version_analyze
         # emit is_tag=True, so commit does attempt the tag; stub it out because
         # tagging is not what this replay test is asserting.
-        with patch("se3.engine.steps.commit._has_changes", return_value=True), \
-             patch("se3.engine.steps.commit._load_version_config") as mock_load_cfg, \
-             patch("se3.engine.steps.commit._read_head_commit", return_value=("ffffffff", "")), \
-             patch("se3.engine.steps.commit._flow_wrote_version", return_value=True), \
-             patch("se3.engine.steps.commit.create_annotated_version_tag", return_value="v5.2.0"), \
-             patch("se3.engine.steps.commit.subprocess") as mock_subproc, \
-             patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit._has_changes", return_value=True), \
+             patch("tianluo.engine.steps.commit._load_version_config") as mock_load_cfg, \
+             patch("tianluo.engine.steps.commit._read_head_commit", return_value=("ffffffff", "")), \
+             patch("tianluo.engine.steps.commit._flow_wrote_version", return_value=True), \
+             patch("tianluo.engine.steps.commit.create_annotated_version_tag", return_value="v5.2.0"), \
+             patch("tianluo.engine.steps.commit.subprocess") as mock_subproc, \
+             patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             cfg = MagicMock()
             cfg.enabled = True
             cfg.include_in_commit_message = True
@@ -581,7 +581,7 @@ class TestGuardVersionRaceOwnReplay:
         return flow
 
     def test_own_prior_write_is_not_treated_as_drift(self, tmp_path):
-        from se3.engine.steps import commit as commit_mod
+        from tianluo.engine.steps import commit as commit_mod
 
         flow = self._guard_flow(tmp_path)
         step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
@@ -599,7 +599,7 @@ class TestGuardVersionRaceOwnReplay:
         m_re.assert_not_called()
 
     def test_true_concurrent_drift_still_reanalyses(self, tmp_path):
-        from se3.engine.steps import commit as commit_mod
+        from tianluo.engine.steps import commit as commit_mod
 
         flow = self._guard_flow(tmp_path)
         step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)
@@ -626,8 +626,8 @@ class TestGuardVersionRaceOwnReplay:
         analysis's tag decision — annotating a patch release, or silently
         skipping the tag for a minor one.
         """
-        from se3.engine.steps import commit as commit_mod
-        from se3.engine.steps import version_analyze as va_mod
+        from tianluo.engine.steps import commit as commit_mod
+        from tianluo.engine.steps import version_analyze as va_mod
 
         flow = self._guard_flow(tmp_path)
         va_step = Step(step_type=StepType.VERSION_ANALYZE, step_id="va-1")
@@ -656,8 +656,8 @@ class TestGuardVersionRaceOwnReplay:
 
     def test_reanalysis_forwards_is_tag_true(self, tmp_path):
         """Mirror case: patch → minor must start tagging."""
-        from se3.engine.steps import commit as commit_mod
-        from se3.engine.steps import version_analyze as va_mod
+        from tianluo.engine.steps import commit as commit_mod
+        from tianluo.engine.steps import version_analyze as va_mod
 
         flow = self._guard_flow(tmp_path)
         va_step = Step(step_type=StepType.VERSION_ANALYZE, step_id="va-1")
@@ -690,7 +690,7 @@ class TestGuardVersionRaceOwnReplay:
         concurrent flow just released — the 10.7.1-type shared-version accident
         the guard exists to block. The guard must raise, not log-and-write.
         """
-        from se3.engine.steps import commit as commit_mod
+        from tianluo.engine.steps import commit as commit_mod
 
         flow = self._guard_flow(tmp_path)
         step = Step(step_type=StepType.COMMIT, status=StepStatus.PENDING)

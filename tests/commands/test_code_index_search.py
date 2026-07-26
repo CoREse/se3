@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3.cli import app
-from se3.commands import code_index_cmd
-from se3.engine import code_index
+from tianluo.cli import app
+from tianluo.commands import code_index_cmd
+from tianluo.engine import code_index
 
 runner = CliRunner()
 

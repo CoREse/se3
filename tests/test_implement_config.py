@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.config import ImplementConfig, _coerce_bool
+from tianluo.config import ImplementConfig, _coerce_bool
 
 
 class TestImplementConfigDefaults:

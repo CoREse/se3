@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.commands.merge_cmd import _fast_stash_pop, run_merge
-from se3.engine.stash_utils import ARCHIVE_DIR, ArchivedEntry, StashPopOutcome
-from se3.engine.steps.implement import _merge_leaf_branch
+from tianluo.commands.merge_cmd import _fast_stash_pop, run_merge
+from tianluo.engine.stash_utils import ARCHIVE_DIR, ArchivedEntry, StashPopOutcome
+from tianluo.engine.steps.implement import _merge_leaf_branch
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -248,7 +248,7 @@ def test_fast_stash_pop_signals_incomplete_when_unresolved(tmp_path: Path) -> No
     # ``_fast_stash_pop`` imports ``resolve_stashpop_safely`` locally from
     # stash_utils, so the source module is the patch target.
     with patch(
-        "se3.engine.stash_utils.resolve_stashpop_safely",
+        "tianluo.engine.stash_utils.resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         incomplete = _fast_stash_pop(tmp_path, label, audit)
@@ -284,7 +284,7 @@ def test_run_merge_fast_reports_failure_on_incomplete_stashpop(
     (tmp_path / "app.py").write_text("CONCURRENT\n", encoding="utf-8")
 
     with patch(
-        "se3.engine.stash_utils.resolve_stashpop_safely",
+        "tianluo.engine.stash_utils.resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         exit_code = run_merge(
@@ -316,7 +316,7 @@ def test_leaf_merge_reports_failure_on_incomplete_stashpop(
     (tmp_path / "app.py").write_text("CONCURRENT\n", encoding="utf-8")
 
     with patch(
-        "se3.engine.steps.implement._resolve_stashpop_safely",
+        "tianluo.engine.steps.implement._resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         result = _merge_leaf_branch(

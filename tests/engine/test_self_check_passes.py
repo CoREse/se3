@@ -17,16 +17,16 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from se3.config import WorkflowConfig
-from se3.engine.models import (
+from tianluo.config import WorkflowConfig
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps.self_check import self_check_handler
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps.self_check import self_check_handler
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +36,7 @@ from se3.engine.steps.self_check import self_check_handler
 def _make_state_machine(tmp_path, workflow_cfg=None):
     """Create a StateMachine with optional WorkflowConfig override."""
     cfg = workflow_cfg or WorkflowConfig()
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     # Patch _get_workflow_config so the override survives across method calls
     sm._get_workflow_config = lambda **kwargs: cfg
@@ -542,7 +542,7 @@ class TestConvergenceGateDefaultOff:
     def test_convergence_disabled_same_issues_still_revision_needed(self, sm, tmp_path):
         """Even with identical issues across rounds, REVISION_NEEDED is returned
         when ``self_check_convergence_enabled`` is False."""
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
 
         valid_issue = {
             "severity": "high",
@@ -575,7 +575,7 @@ class TestConvergenceGateDefaultOff:
             },
         )
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_caller_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = json.dumps({
                 "issues": [valid_issue],
@@ -606,7 +606,7 @@ class TestConvergenceGateEnabled:
         )
 
     def test_convergence_enabled_same_issues_returns_completed(self, sm, tmp_path):
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
 
         # Non-critical/high severity: the convergence shortcut is allowed to
         # short-circuit only when no critical/high finding is present (a
@@ -642,7 +642,7 @@ class TestConvergenceGateEnabled:
             },
         )
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_caller_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = json.dumps({
                 "issues": [valid_issue],
@@ -660,7 +660,7 @@ class TestConvergenceGateEnabled:
         fix loop (REVISION_NEEDED) instead of taking the convergence shortcut,
         even when convergence is enabled and the signature matches the prior
         round."""
-        from se3.engine.steps.self_check import self_check_handler
+        from tianluo.engine.steps.self_check import self_check_handler
 
         critical_issue = {
             "severity": "high",
@@ -693,7 +693,7 @@ class TestConvergenceGateEnabled:
             },
         )
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_caller_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = json.dumps({
                 "issues": [critical_issue],
@@ -856,7 +856,7 @@ class TestPassIndexInOutputs:
     def test_pass_index_and_required_in_outputs_no_issues(self, flow):
         """When self_check passes cleanly, outputs must carry pass metadata."""
         step = self._make_step(pass_index=2, passes_required=3)
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = '{"issues": [], "summary": "OK"}'
             mock_cls.return_value = mock_caller
@@ -886,7 +886,7 @@ class TestPassIndexInOutputs:
             "missing_in": [],
             "out_of_scope": False,
         }
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = json.dumps({
                 "issues": [valid_issue],
@@ -913,7 +913,7 @@ class TestPassIndexInOutputs:
                 "spec_content": {},
             },
         )
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = '{"issues": [], "summary": "OK"}'
             mock_cls.return_value = mock_caller
@@ -1061,7 +1061,7 @@ class TestBackwardCompatibility:
     """Flows without workflow config should behave identically to before the feature."""
 
     def test_no_config_defaults_to_single_pass_no_convergence(self, tmp_path):
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
         flow = _make_flow(
             tmp_path,
@@ -1097,7 +1097,7 @@ class TestBackwardCompatibility:
         assert next_step.step_type == StepType.VERIFY_SPEC
 
     def test_inputs_default_flags(self, tmp_path):
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
         flow = _make_flow(tmp_path)
         _add_step(
@@ -1229,7 +1229,7 @@ def _real_state_machine(tmp_path):
     """A StateMachine reading real config from tmp_path (no _get_workflow_config
     override). Global ~/.se3/config.yaml is isolated via Path.home patching by
     the caller."""
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         return StateMachine(project_root=tmp_path)
 
 
@@ -1241,7 +1241,7 @@ class TestEffectivePassCountFromNestedChains:
       - [a]
       - [b, c]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             # Two declared chains, no explicit self_check_passes_required.
             assert sm._get_self_check_passes_required() == 2
@@ -1255,7 +1255,7 @@ llm_caller:
       - [a]
       - [b]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             assert sm._get_self_check_passes_required() == 4
 
@@ -1270,9 +1270,9 @@ llm_caller:
       - [b]
       - [c]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
-            with caplog.at_level(logging.WARNING, logger="se3.engine.state_machine"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.engine.state_machine"):
                 passes = sm._get_self_check_passes_required()
 
         assert passes == 1
@@ -1286,14 +1286,14 @@ llm_caller:
   steps:
     self_check: [a, b]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             # Flat list → not nested → default 1.
             assert sm._get_self_check_passes_required() == 1
 
     def test_no_self_check_override_uses_default(self, tmp_path):
         (tmp_path / "se3.yaml").write_text(_AGENTS_YAML)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             assert sm._get_self_check_passes_required() == 1
 
@@ -1304,7 +1304,7 @@ llm_caller:
       - [a]
       - [b]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             flow = _make_flow(tmp_path)
             _add_step(
@@ -1327,7 +1327,7 @@ llm_caller:
 
 class TestLLMCallerSelectsPassChain:
     def test_pass_index_selects_nested_chain(self, tmp_path):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
@@ -1335,7 +1335,7 @@ class TestLLMCallerSelectsPassChain:
       - [a]
       - [b, c]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller1 = LLMCaller(
                 project_root=tmp_path, step_type="self_check",
                 self_check_pass_index=1,
@@ -1349,7 +1349,7 @@ class TestLLMCallerSelectsPassChain:
         assert [a["name"] for a in caller2._agents] == ["b", "c"]
 
     def test_explicit_agents_argument_wins(self, tmp_path):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
@@ -1358,7 +1358,7 @@ class TestLLMCallerSelectsPassChain:
       - [b]
 """)
         explicit = [{"name": "x", "type": "claude-code", "cmd": "cx", "priority": 0}]
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path, step_type="self_check",
                 self_check_pass_index=2, agents=explicit,

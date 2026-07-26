@@ -26,24 +26,24 @@ from unittest.mock import MagicMock, patch
 import pytest
 import yaml
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import (
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import (
     DaemonAggregator,
     IssueSnapshot,
     MachineStatus,
 )
-from se3.daemon.client import DaemonClient
-from se3.daemon.protocol import (
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.protocol import (
     MSG_ISSUE_COMMAND,
     MSG_SPAWN_FLOW,
     make_issue_command,
     make_spawn_flow,
 )
-from se3.engine.issue_manager import Issue, IssueManager, IssueStatus
-from se3.server.crypto import generate_token
-from se3.server.identity import IdentityService
-from se3.server.persistence import Store
-from se3.server.state import MachineRecord, ServerState
+from tianluo.engine.issue_manager import Issue, IssueManager, IssueStatus
+from tianluo.server.crypto import generate_token
+from tianluo.server.identity import IdentityService
+from tianluo.server.persistence import Store
+from tianluo.server.state import MachineRecord, ServerState
 
 
 # =========================================================================
@@ -499,7 +499,7 @@ class TestResumeSpawnArgv:
 
     def test_resume_builds_correct_argv(self, tmp_path):
         """DaemonSpawner.resume() builds 'se3 run --resume --flow-id <id> --output-format json'."""
-        from se3.daemon.spawner import DaemonSpawner
+        from tianluo.daemon.spawner import DaemonSpawner
 
         spawner = DaemonSpawner.__new__(DaemonSpawner)
         spawner._processes = {}
@@ -617,7 +617,7 @@ class TestFromIssueSpawnArgv:
 
     def test_spawn_builds_from_issue_argv(self, tmp_path):
         """DaemonSpawner.spawn builds 'se3 run --from-issue <id> --output-format json'."""
-        from se3.daemon.spawner import DaemonSpawner
+        from tianluo.daemon.spawner import DaemonSpawner
 
         spawner = DaemonSpawner.__new__(DaemonSpawner)
         spawner._processes = {}
@@ -658,7 +658,7 @@ class TestFromIssueSpawnArgv:
         assert "--type" not in args
 
     def test_spawn_from_issue_omits_discover_when_false(self, tmp_path):
-        from se3.daemon.spawner import DaemonSpawner
+        from tianluo.daemon.spawner import DaemonSpawner
 
         spawner = DaemonSpawner.__new__(DaemonSpawner)
         spawner._processes = {}

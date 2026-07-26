@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.orchestrator import MergeOrchestrator, MergeReport
+from tianluo.engine.merge.orchestrator import MergeOrchestrator, MergeReport
 
 
 def _get_default_branch(path: Path) -> str:
@@ -155,7 +155,7 @@ class TestMergeOrchestrator:
         verbatim with no bump. Only an as-yet-unconsumed intent — this merge's own
         contribution — should stand the legacy path down.
         """
-        from se3.engine.version_intent import VersionIntent, mark_consumed, write_intent
+        from tianluo.engine.version_intent import VersionIntent, mark_consumed, write_intent
 
         _init_repo(tmp_path)
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -200,7 +200,7 @@ class TestMergeOrchestrator:
         leftover intent (present at the pre-merge tree) is not this merge's
         contribution, so it must not stand aggregation down.
         """
-        from se3.engine.version_intent import VersionIntent, write_intent
+        from tianluo.engine.version_intent import VersionIntent, write_intent
 
         _init_repo(tmp_path)
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -226,7 +226,7 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
         # Simulate execute() having snapshotted the pre-merge tree's intents.
-        from se3.engine.version_intent import intent_flow_ids_at_ref
+        from tianluo.engine.version_intent import intent_flow_ids_at_ref
 
         orch._pre_merge_intent_ids = intent_flow_ids_at_ref(tmp_path, "HEAD")
         assert orch._pre_merge_intent_ids == {"flowA_pending"}
@@ -298,9 +298,9 @@ class TestMergeOrchestrator:
         # (The new default is ``fast``, which does not write a human-call
         # file; this test pins ``safe`` explicitly to exercise the
         # escalation path.)
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
@@ -362,9 +362,9 @@ class TestMergeOrchestrator:
         ).stdout.strip()
 
         # Mock LLM resolver to fail — fast strategy should abort without human call
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
@@ -427,9 +427,9 @@ class TestMergeOrchestrator:
         # Mock LLM resolver to fail, triggering abort path on feature-b
         # under the ``safe`` strategy (the new default is ``fast`` which
         # does NOT escalate to human call on failure).
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
@@ -586,11 +586,11 @@ class TestMergeOrchestrator:
                         stderr = "mock rev-parse failure"
                     return FakeResult()
             # Fall through to real _run_git for everything else
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
 
         # Pin to ``safe`` so the fail-closed path writes a human-call file
@@ -641,11 +641,11 @@ class TestMergeOrchestrator:
                         stdout = ""
                         stderr = "mock rev-parse failure"
                     return FakeResult()
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
@@ -684,11 +684,11 @@ class TestMergeOrchestrator:
                 call_count += 1
                 if call_count == 3:
                     raise _sp.TimeoutExpired(cmd=["git", "rev-parse", "HEAD"], timeout=15)
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git,
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git,
         )
 
         # Pin to ``safe`` so the fail-closed path writes a human-call file
@@ -751,7 +751,7 @@ class TestMergeOrchestrator:
             raise RuntimeError("git reset --hard failed: mock failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback,
         )
 
@@ -798,7 +798,7 @@ class TestMergeOrchestrator:
             raise BrokenPipeError("mock broken pipe")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.print_instructions",
+            "tianluo.engine.merge.human_call.HumanCallWriter.print_instructions",
             mock_print_instructions,
         )
 
@@ -851,7 +851,7 @@ class TestMergeOrchestrator:
         # (Confidence rating is now informational under the LLM-as-editor
         # model; the safe decider gates on explicit flags only.)
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -870,7 +870,7 @@ class TestMergeOrchestrator:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Monkeypatch print_instructions to simulate broken pipe
@@ -878,7 +878,7 @@ class TestMergeOrchestrator:
             raise BrokenPipeError("mock broken pipe")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.print_instructions",
+            "tianluo.engine.merge.human_call.HumanCallWriter.print_instructions",
             mock_print_instructions,
         )
 
@@ -939,7 +939,7 @@ class TestMergeOrchestrator:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -981,15 +981,15 @@ class TestMergeOrchestrator:
             # Only match the initial merge (not merge --abort)
             if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
                 raise _sp.TimeoutExpired(cmd=["git", "merge"], timeout=30)
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
         # Mock _abort_merge to succeed — real git has no merge in progress
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: True,
         )
 
@@ -1030,15 +1030,15 @@ class TestMergeOrchestrator:
             # Only match the initial merge (not merge --abort)
             if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
                 raise _sp.TimeoutExpired(cmd=["git", "merge"], timeout=30)
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
         # Mock _abort_merge to succeed — real git has no merge in progress
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: True,
         )
 
@@ -1080,15 +1080,15 @@ class TestMergeOrchestrator:
                     stdout = ""
                     stderr = "fatal: refusing to merge unrelated histories"
                 return FakeResult()
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
         # Mock _abort_merge to succeed — real git has no merge in progress
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: True,
         )
 
@@ -1138,14 +1138,14 @@ class TestMergeOrchestrator:
                     stdout = ""
                     stderr = "fatal: refusing to merge unrelated histories"
                 return FakeResult()
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git,
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git,
         )
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: True,
         )
 
@@ -1202,7 +1202,7 @@ class TestMergeOrchestrator:
 
         # Mock the repairer to raise GuardrailRepairInconsistentState.
         def mock_repair(self, *args, **kwargs):
-            from se3.engine.merge.guardrail_repair import (
+            from tianluo.engine.merge.guardrail_repair import (
                 GuardrailRepairInconsistentState,
             )
             raise GuardrailRepairInconsistentState(
@@ -1210,7 +1210,7 @@ class TestMergeOrchestrator:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1249,12 +1249,12 @@ class TestMergeOrchestrator:
         # Mock aggregate_and_apply to report success but leave the version
         # file untouched. Then the post-condition check will fail.
         original_aggregate = (
-            "se3.engine.merge.orchestrator.aggregate_and_apply"
+            "tianluo.engine.merge.orchestrator.aggregate_and_apply"
         )
 
         def mock_aggregate(project_root, branch_bumps, pre_version, amend=True):
             from dataclasses import dataclass
-            from se3.engine.version_bumper import BumpType
+            from tianluo.engine.version_bumper import BumpType
 
             @dataclass
             class FakeAgg:
@@ -1272,8 +1272,8 @@ class TestMergeOrchestrator:
         # patch the source module and rely on the local import resolving
         # to the patched object at test time.
         def mock_assert_version_bumped(project_root, expected_version):
-            from se3.commands.merge.failure_reason import FailureReason
-            from se3.commands.merge.postcondition import PostConditionViolated
+            from tianluo.commands.merge.failure_reason import FailureReason
+            from tianluo.commands.merge.postcondition import PostConditionViolated
             raise PostConditionViolated(
                 FailureReason.POSTCOND_VERSION_NOT_BUMPED,
                 detail=f"expected {expected_version} but found 1.0.0",
@@ -1282,12 +1282,12 @@ class TestMergeOrchestrator:
         # G3 fix: patch the orchestrator's bound reference (top-level
         # import) rather than the postcondition module's symbol.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.assert_version_bumped",
+            "tianluo.engine.merge.orchestrator.assert_version_bumped",
             mock_assert_version_bumped,
         )
 
         # Ensure bump inference returns a value so aggregation runs.
-        from se3.engine.version_bumper import BumpType
+        from tianluo.engine.version_bumper import BumpType
 
         def mock_infer_branch_bump(project_root, branch, merge_base_sha):
             from dataclasses import dataclass
@@ -1300,7 +1300,7 @@ class TestMergeOrchestrator:
             return FakeInfer()
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.infer_branch_bump",
+            "tianluo.engine.merge.orchestrator.infer_branch_bump",
             mock_infer_branch_bump,
         )
 
@@ -1343,7 +1343,7 @@ class TestMergeOrchestrator:
             nonlocal aggregate_called
             aggregate_called = True
             from dataclasses import dataclass
-            from se3.engine.version_bumper import BumpType
+            from tianluo.engine.version_bumper import BumpType
 
             @dataclass
             class FakeAgg:
@@ -1355,7 +1355,7 @@ class TestMergeOrchestrator:
             return FakeAgg()
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            "tianluo.engine.merge.orchestrator.aggregate_and_apply",
             mock_aggregate,
         )
 
@@ -1365,12 +1365,12 @@ class TestMergeOrchestrator:
         # postcondition module's symbol (which the orchestrator captured
         # at module load time and no longer re-resolves on each call).
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.assert_version_bumped",
+            "tianluo.engine.merge.orchestrator.assert_version_bumped",
             lambda project_root, expected_version: None,
         )
 
         # Ensure bump inference returns a value so aggregation would run.
-        from se3.engine.version_bumper import BumpType
+        from tianluo.engine.version_bumper import BumpType
 
         def mock_infer_branch_bump(project_root, branch, merge_base_sha):
             from dataclasses import dataclass
@@ -1383,13 +1383,13 @@ class TestMergeOrchestrator:
             return FakeInfer()
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.infer_branch_bump",
+            "tianluo.engine.merge.orchestrator.infer_branch_bump",
             mock_infer_branch_bump,
         )
 
         # Mock _sync_runtime to return a collision after the git merge succeeds.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._sync_runtime",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._sync_runtime",
             lambda self, branch, report: "runtime_sync_collision",
         )
 
@@ -1548,7 +1548,7 @@ class TestMergeOrchestratorConflictResolution:
         def mock_resolve(self, context, strategy):
             nonlocal call_count
             call_count += 1
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1567,7 +1567,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -1606,7 +1606,7 @@ class TestMergeOrchestratorConflictResolution:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1625,7 +1625,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -1665,7 +1665,7 @@ class TestMergeOrchestratorConflictResolution:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1686,17 +1686,17 @@ class TestMergeOrchestratorConflictResolution:
         # Force REJECT via the new ``resolve_and_decide`` entry point
         # (the orchestrator no longer routes through ``decide``).
         def mock_resolve_and_decide(self, resolver, conflict_files, context, *, max_iterations):
-            from se3.engine.merge.strategy import DecisionAction, StrategyDecision
+            from tianluo.engine.merge.strategy import DecisionAction, StrategyDecision
             return StrategyDecision(
                 action=DecisionAction.REJECT,
                 reason="mock reject",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.StrategyDecider.resolve_and_decide",
+            "tianluo.engine.merge.orchestrator.StrategyDecider.resolve_and_decide",
             mock_resolve_and_decide,
         )
 
@@ -1732,7 +1732,7 @@ class TestMergeOrchestratorConflictResolution:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1751,7 +1751,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -1772,7 +1772,7 @@ class TestMergeOrchestratorConflictResolution:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1792,7 +1792,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -1853,7 +1853,7 @@ class TestMergeOrchestratorConflictResolution:
         def mock_resolve(self, context, strategy):
             nonlocal call_count
             call_count += 1
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1872,7 +1872,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -1943,7 +1943,7 @@ class TestMergeOrchestratorConflictResolution:
         (tmp_path / "deleteme.txt").write_text("resolved content without markers\n")
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -1962,7 +1962,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -2026,7 +2026,7 @@ class TestMergeOrchestratorConflictResolution:
 
         # Mock LLM resolver: only resolves a.txt, omits b.txt
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2046,7 +2046,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -2127,7 +2127,7 @@ class TestMergeOrchestratorConflictResolution:
 
         # Mock LLM resolver: returns empty resolved_content (triggers deletion path)
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2146,7 +2146,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -2204,7 +2204,7 @@ class TestMergeOrchestratorConflictResolution:
         )
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2233,7 +2233,7 @@ class TestMergeOrchestratorConflictResolution:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -2305,7 +2305,7 @@ class TestAbortMergeFailureHandling:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2324,16 +2324,16 @@ class TestAbortMergeFailureHandling:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock write_call to fail, and _abort_merge to also fail
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_call",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
         )
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: False,
         )
 
@@ -2358,7 +2358,7 @@ class TestAbortMergeFailureHandling:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2368,16 +2368,16 @@ class TestAbortMergeFailureHandling:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock write_call to fail, and _abort_merge to also fail
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_call",
             lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
         )
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: False,
         )
 
@@ -2422,14 +2422,14 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock aggregate_and_apply to fail (simulate amend failure)
         def mock_aggregate(project_root, bumps, pre_version, amend=True):
-            from se3.engine.merge.version_aggregator import AggregateResult
+            from tianluo.engine.merge.version_aggregator import AggregateResult
             return AggregateResult(
                 success=False,
                 error="git commit --amend failed: mock failure",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            "tianluo.engine.merge.orchestrator.aggregate_and_apply",
             mock_aggregate,
         )
 
@@ -2498,7 +2498,7 @@ class TestMergeOrchestratorCleanupInteraction:
         # disk = 5.0.0, computed target was 4.4.1, so the aggregator
         # resets new_version to current ("5.0.0") and flags it.
         def mock_aggregate(project_root, bumps, pre_version, amend=True):
-            from se3.engine.merge.version_aggregator import AggregateResult
+            from tianluo.engine.merge.version_aggregator import AggregateResult
             return AggregateResult(
                 success=False,
                 new_version="5.0.0",
@@ -2512,7 +2512,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            "tianluo.engine.merge.orchestrator.aggregate_and_apply",
             mock_aggregate,
         )
 
@@ -2562,7 +2562,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock check_merge_result to raise — simulates a bug in the checker
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post: (_ for _ in ()).throw(RuntimeError("mock diff parser blowup")),
         )
 
@@ -2686,7 +2686,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM resolver: returns NON-empty resolved_content for binary file
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2706,7 +2706,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -2799,7 +2799,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM resolver: returns empty resolved_content → deletion path
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2818,7 +2818,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Track whether abort was called
@@ -2830,7 +2830,7 @@ class TestMergeOrchestratorCleanupInteraction:
             return original_abort(self)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge", tracked_abort
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge", tracked_abort
         )
 
         # Monkeypatch _run_git to fail the "rm -f" call
@@ -2844,11 +2844,11 @@ class TestMergeOrchestratorCleanupInteraction:
                     stderr = "mock rm failure"
                 return FakeResult()
             # Fall through to real _run_git for everything else
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
 
         pre_head = subprocess.run(
@@ -2949,7 +2949,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM resolver: returns empty resolved_content -> deletion path
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -2968,7 +2968,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3030,7 +3030,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM resolver: low confidence -> strategy returns HUMAN_CALL
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3049,7 +3049,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock HumanCallWriter.write_call to raise
@@ -3057,7 +3057,7 @@ class TestMergeOrchestratorCleanupInteraction:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
@@ -3141,7 +3141,7 @@ class TestMergeOrchestratorCleanupInteraction:
         # LOW hunk confidence — the deletion gate should reject because not all
         # hunks have HIGH confidence for a file with content in ours/theirs.
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3160,7 +3160,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3239,7 +3239,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM: empty hunks list, HIGH overall confidence → should accept deletion
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3258,7 +3258,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -3323,7 +3323,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         # Mock LLM: empty hunks list, LOW overall confidence → should reject deletion
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3342,7 +3342,7 @@ class TestMergeOrchestratorCleanupInteraction:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3411,7 +3411,7 @@ class TestStrictShortCircuit:
         def mock_resolve(self, context, strategy):
             nonlocal llm_call_count
             llm_call_count += 1
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3430,7 +3430,7 @@ class TestStrictShortCircuit:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3507,7 +3507,7 @@ class TestStrictShortCircuit:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
@@ -3550,7 +3550,7 @@ class TestStrictShortCircuit:
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.build_conflict_context",
+            "tianluo.engine.merge.orchestrator.build_conflict_context",
             mock_build_context,
         )
 
@@ -3587,7 +3587,7 @@ class TestStrictShortCircuit:
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.build_conflict_context",
+            "tianluo.engine.merge.orchestrator.build_conflict_context",
             mock_build_context,
         )
 
@@ -3625,7 +3625,7 @@ class TestStrictShortCircuit:
             raise RuntimeError("mock context failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.build_conflict_context",
+            "tianluo.engine.merge.orchestrator.build_conflict_context",
             mock_build_context,
         )
 
@@ -3663,7 +3663,7 @@ class TestStrictShortCircuit:
             return ""
 
         monkeypatch.setattr(
-            "se3.engine.llm_caller.LLMCaller.call",
+            "tianluo.engine.llm_caller.LLMCaller.call",
             mock_llm_call,
         )
 
@@ -3734,7 +3734,7 @@ class TestFastAbortBehavior:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3753,7 +3753,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3792,7 +3792,7 @@ class TestFastAbortBehavior:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3811,7 +3811,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
@@ -3867,7 +3867,7 @@ class TestFastAbortBehavior:
 
         # Mock LLM: only resolves a.txt, omits b.txt
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3886,7 +3886,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -3919,7 +3919,7 @@ class TestFastAbortBehavior:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -3938,7 +3938,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Monkeypatch _run_git to make "commit" time out
@@ -3947,11 +3947,11 @@ class TestFastAbortBehavior:
         def patch_run_git(project_root, *args, check=True, timeout=30):
             if len(args) >= 1 and args[0] == "commit":
                 raise _sp.TimeoutExpired(cmd=["git", "commit"], timeout=30)
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_run_git
+            "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
 
         pre_head = subprocess.run(
@@ -3984,7 +3984,7 @@ class TestFastAbortBehavior:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -4004,7 +4004,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -4093,7 +4093,7 @@ class TestFastAbortBehavior:
 
         # Mock LLM resolver: returns non-empty resolved_content for binary file
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -4112,7 +4112,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -4176,7 +4176,7 @@ class TestFastAbortBehavior:
         )
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -4195,7 +4195,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -4243,7 +4243,7 @@ class TestFastAbortBehavior:
 
         # Mock LLM: only resolves a.txt, omits b.txt
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -4262,7 +4262,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -4347,7 +4347,7 @@ class TestFastAbortBehavior:
 
         # Mock LLM: returns LOW overall_confidence for the spec file
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -4366,7 +4366,7 @@ class TestFastAbortBehavior:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         pre_head = subprocess.run(
@@ -4477,21 +4477,21 @@ class TestGuardrailsStrategyAware:
 
         # Mock GuardrailRepairer to succeed
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
         # Mock check_merge_result to pass (since repairer is mocked)
         def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -4542,14 +4542,14 @@ class TestGuardrailsStrategyAware:
 
         # Mock GuardrailRepairer to always fail (no progress)
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix the weakening",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -4702,21 +4702,21 @@ class TestGuardrailsStrategyAware:
 
         # Mock repairer to succeed
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
         # Mock check_merge_result to pass (since repairer is mocked)
         def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -4751,11 +4751,11 @@ class TestGuardrailsStrategyAware:
                         stdout = ""
                         stderr = "mock failure"
                     return FakeResult()
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_rev_parse
+            "tianluo.engine.merge.orchestrator._run_git", patch_rev_parse
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -4795,11 +4795,11 @@ class TestGuardrailsStrategyAware:
                         stdout = ""
                         stderr = "mock failure"
                     return FakeResult()
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patch_rev_parse
+            "tianluo.engine.merge.orchestrator._run_git", patch_rev_parse
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -4845,7 +4845,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("Simulated guardrails check crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_crash,
         )
 
@@ -4854,7 +4854,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("Simulated rollback failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback_fails,
         )
 
@@ -4906,7 +4906,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("Simulated guardrails check crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_crash,
         )
 
@@ -4974,7 +4974,7 @@ class TestGuardrailsStrategyAware:
             }, ensure_ascii=False, indent=2)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
             mock_call_llm,
         )
 
@@ -5035,11 +5035,11 @@ class TestGuardrailsStrategyAware:
         # Mock repairer to always fail (no progress)
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -5117,11 +5117,11 @@ class TestGuardrailsStrategyAware:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -5135,7 +5135,7 @@ class TestGuardrailsStrategyAware:
         # is NOT detected as a stall (iter2 hash A != iter1 hash B).
         def mock_check(self, pre_sha: str, post_sha: str):
             check_call_count[0] += 1
-            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
             if check_call_count[0] % 2 == 1:
                 evidence = {
                     "strong_line": "The system SHALL validate inputs.",
@@ -5161,7 +5161,7 @@ class TestGuardrailsStrategyAware:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -5223,7 +5223,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("mock guardrails checker crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_crash,
         )
 
@@ -5232,7 +5232,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("mock call file write failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -5295,13 +5295,13 @@ class TestGuardrailsStrategyAware:
             }, ensure_ascii=False, indent=2)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
             mock_call_llm,
         )
 
         # Patch _run_git to timeout on the SHA refresh after guardrails check.
         # In the clean-merge path the refresh is at orchestrator.py:737-748.
-        import se3.engine.worktree as _wt
+        import tianluo.engine.worktree as _wt
         rev_parse_count = 0
         original_run_git = _wt._run_git
 
@@ -5319,7 +5319,7 @@ class TestGuardrailsStrategyAware:
             return original_run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patched_run_git,
+            "tianluo.engine.merge.orchestrator._run_git", patched_run_git,
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -5340,7 +5340,7 @@ class TestGuardrailsStrategyAware:
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -5359,7 +5359,7 @@ class TestGuardrailsStrategyAware:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock _run_guardrails to return None (simulate pass / repair success)
@@ -5367,13 +5367,13 @@ class TestGuardrailsStrategyAware:
             return None
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
             mock_run_guardrails,
         )
 
         # Patch _run_git to timeout on the SHA refresh in _apply_resolution.
         # In _apply_resolution the refresh is at orchestrator.py:1388-1408.
-        import se3.engine.worktree as _wt
+        import tianluo.engine.worktree as _wt
         rev_parse_count = 0
         original_run_git = _wt._run_git
 
@@ -5390,7 +5390,7 @@ class TestGuardrailsStrategyAware:
             return original_run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", patched_run_git,
+            "tianluo.engine.merge.orchestrator._run_git", patched_run_git,
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -5448,7 +5448,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("mock context build failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.build_conflict_context",
+            "tianluo.engine.merge.orchestrator.build_conflict_context",
             mock_build_context,
         )
 
@@ -5520,12 +5520,12 @@ class TestGuardrailsStrategyAware:
         )
 
         # Mock LLM resolver to raise
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         def mock_resolve(self, context, strategy):
             raise LLMCallError("mock LLM failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock HumanCallWriter.write_call to raise
@@ -5533,7 +5533,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
@@ -5599,7 +5599,7 @@ class TestGuardrailsStrategyAware:
         # Mock LLM resolver: low confidence -
         # strategy decider will return HUMAN_CALL
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -5618,7 +5618,7 @@ class TestGuardrailsStrategyAware:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock HumanCallWriter.write_call to raise
@@ -5626,7 +5626,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
@@ -5692,7 +5692,7 @@ class TestGuardrailsStrategyAware:
         # Mock LLM resolver: low confidence -
         # strategy decider will return HUMAN_CALL
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -5711,7 +5711,7 @@ class TestGuardrailsStrategyAware:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock HumanCallWriter.write_call to raise
@@ -5719,13 +5719,13 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
         # Mock _abort_merge to always return False
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: False,
         )
 
@@ -5775,12 +5775,12 @@ class TestGuardrailsStrategyAware:
         )
 
         # Mock LLM resolver to raise
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         def mock_resolve(self, context, strategy):
             raise LLMCallError("mock LLM failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock HumanCallWriter.write_call to raise
@@ -5788,13 +5788,13 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_call",
             mock_write_call,
         )
 
         # Mock _abort_merge to always return False
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
             lambda self: False,
         )
 
@@ -5847,7 +5847,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("mock context build failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.build_conflict_context",
+            "tianluo.engine.merge.orchestrator.build_conflict_context",
             mock_build_context,
         )
 
@@ -5856,7 +5856,7 @@ class TestGuardrailsStrategyAware:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -6266,7 +6266,7 @@ class TestRuntimeSyncIntegration:
 
     def test_runtime_sync_timeout_stops_merge(self, tmp_path: Path) -> None:
         """TimeoutExpired from _get_worktree_path_for_branch stops merge gracefully."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -6507,7 +6507,7 @@ class TestRuntimeSyncIntegration:
 
         # Mock conflict resolver to accept ours
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             files = []
@@ -6536,7 +6536,7 @@ class TestRuntimeSyncIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -6607,7 +6607,7 @@ class TestRuntimeSyncIntegration:
 
         # Mock conflict resolver to accept the pyproject resolution (keep ours)
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             files = []
@@ -6636,7 +6636,7 @@ class TestRuntimeSyncIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -6749,7 +6749,7 @@ class TestRuntimeSyncIntegration:
 
         # Mock conflict resolver to avoid real LLM call for pyproject conflict
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             files = []
@@ -6777,11 +6777,11 @@ class TestRuntimeSyncIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         # Mock _run_git so merge-base fails for branch-b but succeeds for branch-a
-        import se3.engine.merge.orchestrator as orch_mod
+        import tianluo.engine.merge.orchestrator as orch_mod
         orig_run_git = orch_mod._run_git
 
         def fake_run_git(project_root, *args, **kwargs):
@@ -7216,7 +7216,7 @@ class TestRuntimeSyncIntegration:
         # Track which branches `sync_branch_runtime` is called for so we can
         # assert directly that feature-c's worktree was never even attempted
         # (the loop must short-circuit after the strict-mode collision).
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
         original_sync = _orch.sync_branch_runtime
         sync_call_branches: list[str] = []
 
@@ -7352,7 +7352,7 @@ class TestRuntimeSyncIntegration:
 
         # Track which branches `sync_branch_runtime` is called for so we can
         # confirm neither feature-c nor feature-d is attempted.
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
         original_sync = _orch.sync_branch_runtime
         sync_call_branches: list[str] = []
 
@@ -7423,7 +7423,7 @@ class TestRuntimeSyncIntegration:
 
         # Mock sync_branch_runtime to raise OSError on feature-b
         # Must patch the name imported into the orchestrator module.
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
         original_sync = _orch.sync_branch_runtime
 
         def _raising_sync(project_root, branch, *, strict=False):
@@ -7474,7 +7474,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
         original_sync = _orch.sync_branch_runtime
 
         def _raising_sync(project_root, branch, *, strict=False):
@@ -7529,7 +7529,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
         original_sync = _orch.sync_branch_runtime
 
         def _raising_sync(project_root, branch, *, strict=False):
@@ -7563,7 +7563,7 @@ class TestRuntimeSyncIntegration:
         orchestrator module). Protects against future refactors that reorder
         the catch order in the orchestrator's runtime-sync error handling.
         """
-        import se3.engine.merge.orchestrator as _orch
+        import tianluo.engine.merge.orchestrator as _orch
 
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -7753,7 +7753,7 @@ class TestRuntimeSyncIntegration:
         )
 
         with caplog.at_level(
-            logging.WARNING, logger="se3.engine.merge.runtime_sync"
+            logging.WARNING, logger="tianluo.engine.merge.runtime_sync"
         ):
             orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
             report = orch.execute(["feature-b"])
@@ -7882,7 +7882,7 @@ class TestRuntimeSyncIntegration:
 
         # Force _verify_post_merge_conditions to return the timeout token
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._verify_post_merge_conditions",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._verify_post_merge_conditions",
             lambda self, branch, *, already_ancestor, report, allow_fixup_parent=False: "postcond_check_timeout",
         )
 
@@ -7906,8 +7906,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        from se3.commands.merge.failure_reason import FailureReason
-        from se3.engine.merge.orchestrator import GuardrailRepairFailed
+        from tianluo.commands.merge.failure_reason import FailureReason
+        from tianluo.engine.merge.orchestrator import GuardrailRepairFailed
 
         def mock_run_guardrails(self, pre_sha, post_sha, branch, strategy):
             raise GuardrailRepairFailed(
@@ -7916,7 +7916,7 @@ class TestRuntimeSyncIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
             mock_run_guardrails,
         )
 
@@ -7966,7 +7966,7 @@ class TestRuntimeSyncIntegration:
 
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="mock repair failure",
@@ -7974,18 +7974,18 @@ class TestRuntimeSyncIntegration:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
         check_call_count = 0
 
         def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from se3.engine.merge.guardrails import GuardrailReport
+            from tianluo.engine.merge.guardrails import GuardrailReport
             nonlocal check_call_count
             check_call_count += 1
             if check_call_count == 1:
-                from se3.engine.merge.guardrails import GuardrailViolation
+                from tianluo.engine.merge.guardrails import GuardrailViolation
                 return GuardrailReport(
                     passed=False,
                     violations=[GuardrailViolation(
@@ -7997,7 +7997,7 @@ class TestRuntimeSyncIntegration:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -8361,7 +8361,7 @@ class TestMergeOrchestratorBatchResolverIntegration:
             return "edited"
 
         monkeypatch.setattr(
-            "se3.engine.merge.conflict_resolver.ConflictResolver._call_llm",
+            "tianluo.engine.merge.conflict_resolver.ConflictResolver._call_llm",
             fake_call_llm,
         )
 
@@ -8443,7 +8443,7 @@ class TestMergeOrchestratorBatchResolverIntegration:
             return "I couldn't resolve"
 
         monkeypatch.setattr(
-            "se3.engine.merge.conflict_resolver.ConflictResolver._call_llm",
+            "tianluo.engine.merge.conflict_resolver.ConflictResolver._call_llm",
             fake_call_llm,
         )
 
@@ -8490,7 +8490,7 @@ class TestAbortMergeNoMergeInProgress:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", fake_run_git
+            "tianluo.engine.merge.orchestrator._run_git", fake_run_git
         )
         assert orch._abort_merge() is True
 
@@ -8508,7 +8508,7 @@ class TestAbortMergeNoMergeInProgress:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", fake_run_git
+            "tianluo.engine.merge.orchestrator._run_git", fake_run_git
         )
         assert orch._abort_merge() is False
 
@@ -8523,7 +8523,7 @@ class TestAbortMergeNoMergeInProgress:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", fake_run_git
+            "tianluo.engine.merge.orchestrator._run_git", fake_run_git
         )
         assert orch._abort_merge() is True
 
@@ -8534,6 +8534,6 @@ class TestAbortMergeNoMergeInProgress:
             raise subprocess.TimeoutExpired(cmd="git merge --abort", timeout=30)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._run_git", fake_run_git
+            "tianluo.engine.merge.orchestrator._run_git", fake_run_git
         )
         assert orch._abort_merge() is False

@@ -18,8 +18,8 @@ from __future__ import annotations
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
-from se3.server.app import MISSING_MAX_ORDINALS, parse_missing_param
+from tianluo.daemon import protocol
+from tianluo.server.app import MISSING_MAX_ORDINALS, parse_missing_param
 
 
 def _rec(step_id, ordinal, role, content):

@@ -1,4 +1,4 @@
-"""Tests for the daemon-side history reader (:mod:`se3.daemon.history`)."""
+"""Tests for the daemon-side history reader (:mod:`tianluo.daemon.history`)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import os
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-from se3.daemon import history as history_mod
-from se3.daemon.history import (
+import tianluo.daemon.disk_json_cache as disk_cache
+from tianluo.daemon import history as history_mod
+from tianluo.daemon.history import (
     DaemonHistoryReader,
     SessionMeta,
     enumerate_historical_project_roots,
 )
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------
@@ -996,7 +996,7 @@ def test_enumerate_tolerates_corrupt_json(tmp_path, caplog):
         json.dumps({"flow_id": "f1"}), encoding="utf-8"
     )
 
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         roots = enumerate_historical_project_roots([tmp_path])
 
     assert str(tmp_path.resolve()) in roots
@@ -1039,7 +1039,7 @@ def test_enumerate_warns_once_per_unreadable_file(tmp_path, caplog):
     meta = flow_dir / "_meta.json"
     meta.write_text("{not valid json", encoding="utf-8")
 
-    with caplog.at_level("DEBUG", logger="se3.daemon.history"):
+    with caplog.at_level("DEBUG", logger="tianluo.daemon.history"):
         enumerate_historical_project_roots([tmp_path])
         enumerate_historical_project_roots([tmp_path])
         enumerate_historical_project_roots([tmp_path])
@@ -1070,7 +1070,7 @@ def test_enumerate_warns_once_per_distinct_file(tmp_path, caplog):
         flow_dir.mkdir(parents=True)
         (flow_dir / "_meta.json").write_text("{broken", encoding="utf-8")
 
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         enumerate_historical_project_roots([tmp_path])
 
     warned_files = {
@@ -1234,7 +1234,7 @@ def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "open", tracking_open)
 
-    from se3.daemon.history import _extract_history_summary
+    from tianluo.daemon.history import _extract_history_summary
 
     _extract_history_summary(flow_dir)
 
@@ -1247,7 +1247,7 @@ def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
 
 def test_dir_signature_changes_on_file_modification(tmp_path):
     """_dir_signature changes when a file's content (size) changes."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1265,7 +1265,7 @@ def test_dir_signature_changes_on_file_modification(tmp_path):
 
 def test_dir_signature_changes_on_file_addition(tmp_path):
     """_dir_signature changes when a new file appears."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1281,7 +1281,7 @@ def test_dir_signature_changes_on_file_addition(tmp_path):
 
 def test_dir_signature_stable_when_unchanged(tmp_path):
     """Back-to-back _dir_signature calls on an unchanged directory are equal."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1302,7 +1302,7 @@ def test_meta_cache_skips_reparsing_unchanged_directories(tmp_path, monkeypatch)
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1334,7 +1334,7 @@ def test_meta_cache_reparse_on_directory_change(tmp_path, monkeypatch):
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1408,7 +1408,7 @@ def test_meta_cache_survives_invalidate_index_cache(tmp_path):
     reader = _make_reader(tmp_path)
     reader._build_index_fresh()  # populate both caches
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1439,7 +1439,7 @@ def test_meta_cache_after_invalidate_skips_reparsing(tmp_path, monkeypatch):
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1817,7 +1817,7 @@ def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
     ``BOUNDARY_SIGNATURE_BYTES``) fingerprint, which is what keeps the idle
     re-read off the full-file path while staying rewrite-safe."""
     import builtins
-    from se3.daemon import history as history_mod
+    from tianluo.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
@@ -1966,7 +1966,7 @@ def test_read_flow_incremental_large_file_small_delta(tmp_path, monkeypatch):
     the ``~new-bytes`` a bounded-window detector implied — that very implication
     is what let a middle-of-prefix retry rewrite slip through."""
     import builtins
-    from se3.daemon import history as history_mod
+    from tianluo.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
@@ -2105,7 +2105,7 @@ def test_history_reader_indexes_active_worktree_run(tmp_path):
     subdirs. The worktree flow must therefore appear in build_index and in the
     active-flow signature during its flow body, not only after the merge.
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
@@ -2372,7 +2372,7 @@ def test_active_worktree_run_root_admitted_at_init_engine_json(tmp_path):
     """
     import os
 
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
@@ -2395,7 +2395,7 @@ def test_worktree_first_reply_read_live_then_increments(tmp_path):
     complete-but-unterminated first record in full and keep appending — the
     end-to-end fix for "first body empty, then nothing further".
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
@@ -2440,7 +2440,7 @@ def test_dag_isolation_worktree_excluded_from_observable(tmp_path):
     """
     import os
 
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()

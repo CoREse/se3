@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     ChatMessage,
     ChatSession,
     _extract_model_from_ndjson,
@@ -2665,7 +2665,7 @@ class TestFoldSpecContentFallback:
         still be recognized as a real spec block via _SPEC_BLOCK_RE, so the
         strict_starts-based code-fence filtering engages even for unusually
         formatted specs."""
-        from se3.engine.chat_history import _SPEC_BLOCK_RE
+        from tianluo.engine.chat_history import _SPEC_BLOCK_RE
         content = (
             "### base\n"
             + ("\n" * 8)
@@ -2686,7 +2686,7 @@ class TestFoldSpecContentFallback:
         """### spec-name followed by 21+ blank lines before # H1 title must
         still be recognized as a real spec block after lifting the `{0,20}`
         upper bound to `*` (unbounded)."""
-        from se3.engine.chat_history import _SPEC_BLOCK_RE
+        from tianluo.engine.chat_history import _SPEC_BLOCK_RE
         content = (
             "### base\n"
             + ("\n" * 50)

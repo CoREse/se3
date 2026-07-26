@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from se3.engine.prompt_markers import (
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
@@ -11,21 +11,21 @@ from se3.engine.prompt_markers import (
     wrap_user_content,
     wrap_user_section,
 )
-from se3.engine.steps.analyze import ANALYZE_PROMPT
-from se3.engine.steps.discovery import (
+from tianluo.engine.steps.analyze import ANALYZE_PROMPT
+from tianluo.engine.steps.discovery import (
     CONTINUE_DISCOVERY_PROMPT,
     INITIAL_DISCOVERY_PROMPT,
 )
-from se3.engine.steps.implement import (
+from tianluo.engine.steps.implement import (
     FIX_PROMPT,
     IMPLEMENT_GROUP_PROMPT,
     IMPLEMENT_PROMPT,
 )
-from se3.engine.steps.plan import PLAN_PROMPT_HEADER
-from se3.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
-from se3.engine.steps.self_check import SELF_CHECK_PROMPT
-from se3.engine.steps.summarize import SUMMARIZE_PROMPT
-from se3.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
+from tianluo.engine.steps.plan import PLAN_PROMPT_HEADER
+from tianluo.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
+from tianluo.engine.steps.self_check import SELF_CHECK_PROMPT
+from tianluo.engine.steps.summarize import SUMMARIZE_PROMPT
+from tianluo.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
 
 
 def test_wrap_user_content_injects_marker_pair():

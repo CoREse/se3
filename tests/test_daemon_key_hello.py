@@ -17,11 +17,11 @@ import logging
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.daemon.client import DaemonClient
-from se3.daemon.daemon import Daemon, DaemonConfig, daemon_status
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.daemon import Daemon, DaemonConfig, daemon_status
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +159,7 @@ def test_session_hello_omits_key_when_unconfigured():
 def test_daemon_key_is_not_logged(caplog):
     client = _make_client(daemon_key="TOP-SECRET-KEY")
     ws = _SessionWS()
-    with caplog.at_level(logging.DEBUG, logger="se3.daemon.client"):
+    with caplog.at_level(logging.DEBUG, logger="tianluo.daemon.client"):
         _run_one_session(client, ws)
     for record in caplog.records:
         assert "TOP-SECRET-KEY" not in record.getMessage()
@@ -201,7 +201,7 @@ def test_dispatch_welcome_reject_does_not_leak_key(caplog):
             protocol.make_welcome("srv", accepted=False, reason="bad credential"),
         )
 
-    with caplog.at_level(logging.DEBUG, logger="se3.daemon.client"):
+    with caplog.at_level(logging.DEBUG, logger="tianluo.daemon.client"):
         asyncio.run(scenario())
     assert client._auth_rejected is True
     for record in caplog.records:
@@ -314,7 +314,7 @@ def test_daemon_status_does_not_echo_key(tmp_path):
 @pytest.fixture()
 def cli_capture(monkeypatch):
     """Patch start_daemon to capture the resolved DaemonConfig and not fork."""
-    from se3 import daemon as daemon_pkg
+    from tianluo import daemon as daemon_pkg
 
     captured = {}
 
@@ -329,7 +329,7 @@ def cli_capture(monkeypatch):
 def _invoke_daemon_start(args):
     from typer.testing import CliRunner
 
-    from se3 import cli
+    from tianluo import cli
 
     return CliRunner().invoke(cli.app, ["daemon", "start", *args])
 

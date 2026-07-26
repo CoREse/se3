@@ -10,11 +10,11 @@ stall the aggregator's ``HISTORICAL_ROOTS_TTL`` fixed for
 This file encodes the spin trigger condition as bounded / counting assertions:
 
 * ``build_index`` disk I/O must be collapsed to at most one execution per
-  :data:`~se3.daemon.history.BUILD_INDEX_TTL` window, regardless of how
+  :data:`~tianluo.daemon.history.BUILD_INDEX_TTL` window, regardless of how
   many times the caller invokes it.
 * ``all_project_roots`` disk I/O for historical-root enumeration must be
   collapsed to at most one execution per
-  :data:`~se3.daemon.aggregator.HISTORICAL_ROOTS_TTL` window.
+  :data:`~tianluo.daemon.aggregator.HISTORICAL_ROOTS_TTL` window.
 """
 
 from __future__ import annotations
@@ -23,10 +23,10 @@ import json
 import time
 from pathlib import Path
 
-import se3.daemon.aggregator as agg_mod
-import se3.daemon.history as history_mod
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
+import tianluo.daemon.aggregator as agg_mod
+import tianluo.daemon.history as history_mod
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
 
 
 # ---------------------------------------------------------------------------

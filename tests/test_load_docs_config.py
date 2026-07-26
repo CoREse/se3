@@ -13,8 +13,8 @@ from pathlib import Path
 
 import yaml
 
-from se3.config import DocsConfig, load_docs_config
-from se3.engine.docs_updater import DocumentationUpdater
+from tianluo.config import DocsConfig, load_docs_config
+from tianluo.engine.docs_updater import DocumentationUpdater
 
 
 def _write_yaml(path: Path, data: dict) -> None:

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as djc
+import tianluo.daemon.disk_json_cache as djc
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +114,7 @@ def test_extraction_failure_cached_and_warns_once(tmp_path, monkeypatch, caplog)
     path.write_text("y" * (djc.MAX_PARSE_BYTES + 1024 * 1024), encoding="utf-8")
     counter = _count_degraded_scans(monkeypatch)
 
-    with caplog.at_level("WARNING", logger="se3.daemon.disk_json_cache"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.disk_json_cache"):
         for _ in range(5):
             assert djc.read_engine_header(path) is None
 

@@ -32,9 +32,9 @@ import asyncio
 import json
 import logging
 
-from se3.daemon import protocol
-from se3.server.state import ServerState
-from se3.server.ws import (
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState
+from tianluo.server.ws import (
     ConnectionManager,
     HistoryRequestRegistry,
     UiHub,
@@ -338,7 +338,7 @@ def test_backfill_completion_logged_at_info(caplog):
         await _gap_append(state, 20, 22)
         # Incremental plan arms the recovery-inflight marker.
         await state.plan_recovery_pull(FLOW, MACHINE)
-        with caplog.at_level(logging.INFO, logger="se3.server.state"):
+        with caplog.at_level(logging.INFO, logger="tianluo.server.state"):
             await _append(
                 state, [_record(i) for i in range(5, 10)],
                 cursor=_cursor(10), cursor_base=_cursor(5),

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from se3.engine.steps.commit import _has_changes
+from tianluo.engine.steps.commit import _has_changes
 
 
 def _run_result(returncode: int = 0, stdout: str = "", stderr: str = ""):
@@ -21,7 +21,7 @@ def _run_result(returncode: int = 0, stdout: str = "", stderr: str = ""):
 class TestHasChangesBaseline:
     """Tests for _has_changes with baseline_commit parameter."""
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_no_baseline_uses_git_status(self, mock_run):
         """Without baseline_commit, falls back to git status --porcelain."""
         mock_run.return_value = _run_result(stdout="M file.py\n")
@@ -29,13 +29,13 @@ class TestHasChangesBaseline:
         args = mock_run.call_args[0][0]
         assert args == ["git", "status", "--porcelain"]
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_no_baseline_clean_working_tree(self, mock_run):
         """Without baseline, clean working tree returns False."""
         mock_run.return_value = _run_result(stdout="")
         assert _has_changes(Path("/tmp/proj")) is False
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_baseline_with_diff_detected(self, mock_run):
         """With baseline_commit, git diff exit code 1 means changes exist."""
         # git diff --quiet exits 1 when there are differences
@@ -44,7 +44,7 @@ class TestHasChangesBaseline:
         args = mock_run.call_args[0][0]
         assert args == ["git", "diff", "abc123", "HEAD", "--quiet"]
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_baseline_no_diff_clean_tree(self, mock_run):
         """baseline == HEAD and clean tree -> no changes."""
         # First call: git diff --quiet exits 0 (no diff)
@@ -56,7 +56,7 @@ class TestHasChangesBaseline:
         assert _has_changes(Path("/tmp/proj"), baseline_commit="abc123") is False
         assert mock_run.call_count == 2
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_baseline_no_diff_but_dirty_tree(self, mock_run):
         """baseline == HEAD but working tree has uncommitted changes."""
         mock_run.side_effect = [
@@ -65,7 +65,7 @@ class TestHasChangesBaseline:
         ]
         assert _has_changes(Path("/tmp/proj"), baseline_commit="abc123") is True
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_baseline_git_diff_error_falls_back(self, mock_run):
         """If git diff fails (returncode > 1), falls back to git status."""
         mock_run.side_effect = [
@@ -74,7 +74,7 @@ class TestHasChangesBaseline:
         ]
         assert _has_changes(Path("/tmp/proj"), baseline_commit="badref") is True
 
-    @patch("se3.engine.steps.commit.subprocess.run")
+    @patch("tianluo.engine.steps.commit.subprocess.run")
     def test_baseline_git_diff_exception_falls_back(self, mock_run):
         """If git diff raises an exception, falls back to git status."""
         mock_run.side_effect = [
@@ -87,10 +87,10 @@ class TestHasChangesBaseline:
 class TestCommitHandlerPassesBaseline:
     """commit_handler passes flow.baseline_commit to _has_changes."""
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=False)
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=False)
     def test_baseline_commit_forwarded(self, mock_has_changes):
         """commit_handler passes baseline_commit from flow to _has_changes."""
-        from se3.engine.models import FlowInstance, Step, StepType, StepStatus
+        from tianluo.engine.models import FlowInstance, Step, StepType, StepStatus
 
         flow = MagicMock(spec=FlowInstance)
         flow.baseline_commit = "deadbeef"
@@ -103,7 +103,7 @@ class TestCommitHandlerPassesBaseline:
         step.inputs = {}
         step.outputs = {}
 
-        from se3.engine.steps.commit import commit_handler
+        from tianluo.engine.steps.commit import commit_handler
         result = commit_handler(step, flow)
 
         mock_has_changes.assert_called_once_with(
@@ -113,10 +113,10 @@ class TestCommitHandlerPassesBaseline:
         assert result == StepStatus.COMPLETED
         assert step.outputs["committed"] is False
 
-    @patch("se3.engine.steps.commit._has_changes", return_value=False)
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=False)
     def test_no_baseline_commit_passes_none(self, mock_has_changes):
         """commit_handler passes None when flow has no baseline_commit."""
-        from se3.engine.models import FlowInstance, Step, StepType, StepStatus
+        from tianluo.engine.models import FlowInstance, Step, StepType, StepStatus
 
         flow = MagicMock(spec=FlowInstance)
         flow.baseline_commit = None
@@ -129,7 +129,7 @@ class TestCommitHandlerPassesBaseline:
         step.inputs = {}
         step.outputs = {}
 
-        from se3.engine.steps.commit import commit_handler
+        from tianluo.engine.steps.commit import commit_handler
         result = commit_handler(step, flow)
 
         mock_has_changes.assert_called_once_with(

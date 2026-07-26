@@ -25,8 +25,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from se3.daemon.history import DaemonHistoryReader
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------

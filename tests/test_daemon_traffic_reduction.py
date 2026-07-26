@@ -22,15 +22,15 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import (
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import (
     DaemonAggregator,
     FlowSnapshot,
     MachineStatus,
     PendingCall,
 )
-from se3.daemon.client import DaemonClient, _status_signature
-from se3.daemon.history import _DESC_CLIP
+from tianluo.daemon.client import DaemonClient, _status_signature
+from tianluo.daemon.history import _DESC_CLIP
 
 
 # --------------------------------------------------------------------------- #

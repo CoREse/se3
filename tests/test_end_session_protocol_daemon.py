@@ -2,13 +2,13 @@
 
 Covers group G2 of the end-session feature:
 
-* protocol: :data:`~se3.daemon.protocol.MSG_END_SESSION` registration and the
-  :func:`~se3.daemon.protocol.make_end_session` constructor (round-trip +
+* protocol: :data:`~tianluo.daemon.protocol.MSG_END_SESSION` registration and the
+  :func:`~tianluo.daemon.protocol.make_end_session` constructor (round-trip +
   optional-field omission).
-* spawner: :meth:`~se3.daemon.spawner.DaemonSpawner.end_session` argv assembly.
-* daemon: :meth:`~se3.daemon.daemon.Daemon.request_end_session` flow lookup and
+* spawner: :meth:`~tianluo.daemon.spawner.DaemonSpawner.end_session` argv assembly.
+* daemon: :meth:`~tianluo.daemon.daemon.Daemon.request_end_session` flow lookup and
   the ValueError on an unknown flow.
-* client: :meth:`~se3.daemon.client.DaemonClient._handle_end_session` routing,
+* client: :meth:`~tianluo.daemon.client.DaemonClient._handle_end_session` routing,
   empty-flow_id ignore, project_root reverse-resolution, and handler-exception
   containment.
 """
@@ -19,11 +19,11 @@ import asyncio
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon import spawner as spawner_mod
-from se3.daemon.client import DaemonClient
-from se3.daemon.daemon import Daemon, DaemonConfig
-from se3.daemon.spawner import DaemonSpawner
+from tianluo.daemon import protocol
+from tianluo.daemon import spawner as spawner_mod
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.daemon import Daemon, DaemonConfig
+from tianluo.daemon.spawner import DaemonSpawner
 
 
 # --------------------------------------------------------------------------

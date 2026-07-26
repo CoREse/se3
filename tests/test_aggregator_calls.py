@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from se3.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.aggregator import DaemonAggregator
 
 
 def _write(path: Path, payload: object) -> None:

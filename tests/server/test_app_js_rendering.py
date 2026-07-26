@@ -634,22 +634,22 @@ def test_every_step_prompt_template_carries_marker_pair():
     live in ``tests/engine/test_prompt_markers.py``; this test is a higher-
     level health check that no step prompt module silently drops the pair.
     """
-    from se3.engine.prompt_markers import TEMPLATE_PREFIX_END, USER_CONTENT_BEGIN
-    from se3.engine.steps.analyze import ANALYZE_PROMPT
-    from se3.engine.steps.discovery import (
+    from tianluo.engine.prompt_markers import TEMPLATE_PREFIX_END, USER_CONTENT_BEGIN
+    from tianluo.engine.steps.analyze import ANALYZE_PROMPT
+    from tianluo.engine.steps.discovery import (
         CONTINUE_DISCOVERY_PROMPT,
         INITIAL_DISCOVERY_PROMPT,
     )
-    from se3.engine.steps.implement import (
+    from tianluo.engine.steps.implement import (
         FIX_PROMPT,
         IMPLEMENT_GROUP_PROMPT,
         IMPLEMENT_PROMPT,
     )
-    from se3.engine.steps.plan import PLAN_PROMPT_HEADER
-    from se3.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
-    from se3.engine.steps.self_check import SELF_CHECK_PROMPT
-    from se3.engine.steps.summarize import SUMMARIZE_PROMPT
-    from se3.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
+    from tianluo.engine.steps.plan import PLAN_PROMPT_HEADER
+    from tianluo.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
+    from tianluo.engine.steps.self_check import SELF_CHECK_PROMPT
+    from tianluo.engine.steps.summarize import SUMMARIZE_PROMPT
+    from tianluo.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
 
     all_prompts = {
         "IMPLEMENT_PROMPT": IMPLEMENT_PROMPT,

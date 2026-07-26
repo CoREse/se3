@@ -22,10 +22,10 @@ import asyncio
 import time
 from pathlib import Path
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator, IssueSnapshot, PendingCall
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import _DESC_CLIP
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import DaemonAggregator, IssueSnapshot, PendingCall
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import _DESC_CLIP
 
 
 class _FakeWS:

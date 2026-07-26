@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from typer.testing import CliRunner
 
-from se3.commands import history_cmd
-from se3.commands.history_cmd import (
+from tianluo.commands import history_cmd
+from tianluo.commands.history_cmd import (
     app,
     get_flow_detail,
     _load_archived_flow,

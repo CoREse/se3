@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from se3.commands.salvage_cmd import (
+from tianluo.commands.salvage_cmd import (
     salvage,
     _load_session,
     _assess_git_diff,
@@ -20,7 +20,7 @@ from se3.commands.salvage_cmd import (
     _create_salvage_issues,
     _archive_session,
 )
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -97,7 +97,7 @@ class TestLoadSession:
 class TestAssessGitDiff:
     """Tests for git diff assessment."""
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_assess_with_changes(self, mock_run):
         mock_run.side_effect = [
             MagicMock(stdout=" M src/auth.py\n M src/models.py\n", returncode=0),
@@ -110,7 +110,7 @@ class TestAssessGitDiff:
         assert info["changed_file_count"] == 2
         assert len(info["changed_files"]) == 2
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_assess_no_changes(self, mock_run):
         mock_run.side_effect = [
             MagicMock(stdout="", returncode=0),
@@ -130,7 +130,7 @@ class TestCommitChanges:
         result = _commit_changes(Path("/fake"), None, {"changed_file_count": 0})
         assert result is None
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_commit_with_changes(self, mock_run, valid_flow):
         mock_run.side_effect = [
             MagicMock(returncode=0),  # git add
@@ -146,7 +146,7 @@ class TestCommitChanges:
 
         assert result == "abc1234"
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_commit_message_contains_task(self, mock_run, valid_flow):
         mock_run.side_effect = [
             MagicMock(returncode=0),
@@ -237,7 +237,7 @@ class TestArchiveSession:
         archived entry), and a Resume click would re-run the already
         dispositioned flow.
         """
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.persistence import PersistenceManager
 
         _write_flow_state(project_root, valid_flow)
         pm = PersistenceManager(project_root)
@@ -253,7 +253,7 @@ class TestArchiveSession:
 class TestSalvageFullPipeline:
     """Tests for the full salvage pipeline."""
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_valid_session(self, mock_run, project_root, valid_flow):
         _write_flow_state(project_root, valid_flow)
 
@@ -268,7 +268,7 @@ class TestSalvageFullPipeline:
 
         assert exit_code == 0
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_no_session(self, mock_run, project_root):
         # Mock git commands for no changes
         mock_run.side_effect = [
@@ -283,15 +283,15 @@ class TestSalvageFullPipeline:
 
     def test_each_step_independent(self, project_root):
         """Each step should be independently fault-tolerant."""
-        with patch("se3.commands.salvage_cmd._load_session", side_effect=Exception("boom")):
-            with patch("se3.commands.salvage_cmd._assess_git_diff", return_value={"changed_file_count": 0}):
-                with patch("se3.commands.salvage_cmd._create_salvage_issues", return_value=[]):
-                    with patch("se3.commands.salvage_cmd._archive_session", return_value=False):
+        with patch("tianluo.commands.salvage_cmd._load_session", side_effect=Exception("boom")):
+            with patch("tianluo.commands.salvage_cmd._assess_git_diff", return_value={"changed_file_count": 0}):
+                with patch("tianluo.commands.salvage_cmd._create_salvage_issues", return_value=[]):
+                    with patch("tianluo.commands.salvage_cmd._archive_session", return_value=False):
                         exit_code = salvage(project_root)
                         # Only step 1 fails, rest succeed
                         assert exit_code == 1  # has failure
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_corrupted_session(self, mock_run, project_root):
         """Corrupted session should still allow git-diff-based salvage."""
         state_file = project_root / "se3" / "state" / "engine.json"

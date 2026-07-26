@@ -12,7 +12,7 @@ off-load* half:
   class as #209).
 
 The G2 fix routes every aggregator engine.json / resumable-snapshot read through
-the unified ``(path, mtime, size)``-keyed :mod:`se3.daemon.disk_json_cache`
+the unified ``(path, mtime, size)``-keyed :mod:`tianluo.daemon.disk_json_cache`
 (parsed at most once per actual change) and offloads the client's per-tick
 signature checks to worker threads. These tests lock both properties in place,
 mirroring the #209 parse-counting regression pattern:
@@ -33,10 +33,10 @@ import json
 import threading
 from pathlib import Path
 
-import se3.daemon.disk_json_cache as djc
-import se3.daemon.history as history_mod
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.history import DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as djc
+import tianluo.daemon.history as history_mod
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 # --------------------------------------------------------------------------
@@ -201,7 +201,7 @@ def test_signature_checks_are_genuine_disk_parse_points(tmp_path, monkeypatch):
     refactor made these parse-free the (c) guard below would pass vacuously, so
     this test pins the premise.
     """
-    from se3.daemon.client import DaemonClient
+    from tianluo.daemon.client import DaemonClient
 
     djc.clear_cache()
     main = tmp_path / "proj"
@@ -241,7 +241,7 @@ def test_push_loop_never_parses_json_on_event_loop_thread(tmp_path, monkeypatch)
     synchronous ``_calls_changed`` / ``_history_changed`` calls parsed on the
     loop, the starvation that froze the WebUI.
     """
-    from se3.daemon.client import DaemonClient
+    from tianluo.daemon.client import DaemonClient
 
     djc.clear_cache()
     main = tmp_path / "proj"

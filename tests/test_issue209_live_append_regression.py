@@ -54,10 +54,10 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-import se3.daemon.history as history_mod
-from se3.daemon.history import DaemonHistoryReader
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+import tianluo.daemon.disk_json_cache as disk_cache
+import tianluo.daemon.history as history_mod
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 # --------------------------------------------------------------------------
 # real captured fixtures (see tests/frontend/fixtures/issue_209/README.md)

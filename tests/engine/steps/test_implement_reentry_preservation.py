@@ -27,13 +27,13 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.steps.implement import implement_handler
+from tianluo.engine.steps.implement import implement_handler
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -127,10 +127,10 @@ class TestReentryPreservesPreSessionVersion:
         # bookkeeping at the top of the handler to fire, so short-circuit
         # the real work by mocking out the inner machinery.
         with patch(
-            "se3.engine.steps.implement._run_single_llm_call",
+            "tianluo.engine.steps.implement._run_single_llm_call",
             return_value=StepStatus.COMPLETED,
         ), patch(
-            "se3.engine.steps.implement._resolve_files_changed",
+            "tianluo.engine.steps.implement._resolve_files_changed",
         ):
             # Treat the first call as a fix-iteration to keep it
             # short-circuited (no group execution required).
@@ -151,10 +151,10 @@ class TestReentryPreservesPreSessionVersion:
 
         # --- Re-entry as a fix iteration after the bump commit
         with patch(
-            "se3.engine.steps.implement._run_single_llm_call",
+            "tianluo.engine.steps.implement._run_single_llm_call",
             return_value=StepStatus.COMPLETED,
         ), patch(
-            "se3.engine.steps.implement._resolve_files_changed",
+            "tianluo.engine.steps.implement._resolve_files_changed",
         ):
             step.inputs["fix_iteration"] = 2
             step.inputs["fix_instructions"] = "second pass"
@@ -184,10 +184,10 @@ class TestReentryPreservesPreSessionVersion:
 
         # First entry – pre_session_version captured at 5.1.0.
         with patch(
-            "se3.engine.steps.implement._run_single_llm_call",
+            "tianluo.engine.steps.implement._run_single_llm_call",
             return_value=StepStatus.COMPLETED,
         ), patch(
-            "se3.engine.steps.implement._resolve_files_changed",
+            "tianluo.engine.steps.implement._resolve_files_changed",
         ):
             step.inputs["is_fix_iteration"] = True
             step.inputs["fix_instructions"] = "first pass"
@@ -204,10 +204,10 @@ class TestReentryPreservesPreSessionVersion:
         # Re-entry: the fix-iteration path must recompute session_commits
         # against flow.baseline_commit (the original pre-implement HEAD).
         with patch(
-            "se3.engine.steps.implement._run_single_llm_call",
+            "tianluo.engine.steps.implement._run_single_llm_call",
             return_value=StepStatus.COMPLETED,
         ), patch(
-            "se3.engine.steps.implement._resolve_files_changed",
+            "tianluo.engine.steps.implement._resolve_files_changed",
         ):
             step.inputs["fix_iteration"] = 2
             step.inputs["fix_instructions"] = "second pass"

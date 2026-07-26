@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.steps.implement import (
+from tianluo.engine.steps.implement import (
     _merge_leaf_branch,
     _parse_stashpop_already_exists,
 )
@@ -148,7 +148,7 @@ class TestStashPopConflict:
         (repo / "app.py").write_text("untracked-content\n", encoding="utf-8")
 
         with patch(
-            "se3.engine.steps.implement._record_stashpop_takeours_event"
+            "tianluo.engine.steps.implement._record_stashpop_takeours_event"
         ) as mock_audit:
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
@@ -207,10 +207,10 @@ class TestTakeTheirsFallback:
 
         # Step 4: merge leaf → main with LLM mocked to fail
         with patch(
-            "se3.engine.steps.implement.resolve_merge_conflicts_with_context",
+            "tianluo.engine.steps.implement.resolve_merge_conflicts_with_context",
             return_value=False,
         ), patch(
-            "se3.engine.steps.implement._record_take_theirs_event"
+            "tianluo.engine.steps.implement._record_take_theirs_event"
         ) as mock_audit:
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
@@ -262,10 +262,10 @@ class TestTakeTheirsCommitFailure:
         _git(repo, "commit", "-m", "main C")
 
         with patch(
-            "se3.engine.steps.implement.resolve_merge_conflicts_with_context",
+            "tianluo.engine.steps.implement.resolve_merge_conflicts_with_context",
             return_value=False,
         ), patch(
-            "se3.engine.steps.implement._take_theirs_fallback",
+            "tianluo.engine.steps.implement._take_theirs_fallback",
             return_value=False,
         ):
             result = _merge_leaf_branch(
@@ -305,7 +305,7 @@ class TestAuditIssueIntegration:
         _git(repo, "commit", "-m", "main C")
 
         with patch(
-            "se3.engine.steps.implement.resolve_merge_conflicts_with_context",
+            "tianluo.engine.steps.implement.resolve_merge_conflicts_with_context",
             return_value=False,
         ):
             result = _merge_leaf_branch(
@@ -342,10 +342,10 @@ class TestAuditIssueIntegration:
         _git(repo, "commit", "-m", "main C")
 
         with patch(
-            "se3.engine.steps.implement.resolve_merge_conflicts_with_context",
+            "tianluo.engine.steps.implement.resolve_merge_conflicts_with_context",
             return_value=False,
         ), patch(
-            "se3.engine.issue_manager.IssueManager.create",
+            "tianluo.engine.issue_manager.IssueManager.create",
             side_effect=RuntimeError("simulated IssueManager outage"),
         ):
             result = _merge_leaf_branch(
@@ -377,7 +377,7 @@ class TestExceptionDuringMerge:
         (repo / "scratch.py").write_text("user-local\n", encoding="utf-8")
 
         with patch(
-            "se3.engine.steps.implement._attempt_merge_with_resolution",
+            "tianluo.engine.steps.implement._attempt_merge_with_resolution",
             side_effect=RuntimeError("simulated merge crash"),
         ):
             with pytest.raises(RuntimeError, match="simulated merge crash"):

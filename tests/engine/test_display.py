@@ -8,8 +8,8 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 
-from se3.engine import display
-from se3.engine.display import (
+from tianluo.engine import display
+from tianluo.engine.display import (
     _BLOCK_FOOTER_WIDTH,
     _USAGE_BLOCK_COLOR,
     _reverse_footer,
@@ -24,7 +24,7 @@ from se3.engine.display import (
     render_usage_block,
     set_console,
 )
-from se3.engine.token_usage import UsageTotals
+from tianluo.engine.token_usage import UsageTotals
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +216,7 @@ class TestRenderFunctionsBlocks:
 class TestHeadingGroupFooter:
     def test_heading_group_last_element_is_blank_after_footer(self):
         from rich.console import Group
-        from se3.engine.formatters.task_formatter import _heading_group
+        from tianluo.engine.formatters.task_formatter import _heading_group
 
         group = _heading_group("Plan", "blue", Text("body"))
         assert isinstance(group, Group)

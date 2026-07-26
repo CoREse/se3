@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.protocol import (
+from tianluo.daemon import protocol
+from tianluo.daemon.protocol import (
     HISTORY_MODE_APPEND,
     HISTORY_MODE_FULL,
     MSG_HISTORY_DATA,
@@ -176,7 +176,7 @@ def test_make_spawn_flow_discover_true():
 
 
 def test_issue_command_type_registered():
-    from se3.daemon.protocol import MSG_ISSUE_COMMAND
+    from tianluo.daemon.protocol import MSG_ISSUE_COMMAND
 
     assert MSG_ISSUE_COMMAND in protocol.SERVER_TO_DAEMON
     assert MSG_ISSUE_COMMAND in protocol.ALL_MESSAGE_TYPES
@@ -193,7 +193,7 @@ def test_make_issue_command_create_round_trip():
         type="bug",
         tags=["auto"],
     )
-    from se3.daemon.protocol import MSG_ISSUE_COMMAND
+    from tianluo.daemon.protocol import MSG_ISSUE_COMMAND
 
     assert msg.type == MSG_ISSUE_COMMAND
     decoded = decode(msg.to_json())

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     get_step_history,
     record_group_status,
     record_prompt,
@@ -150,7 +150,7 @@ class TestRecordGroupStatus:
     def test_write_failure_does_not_raise(self, tmp_project, monkeypatch):
         # Force the open() inside record_group_status to raise OSError; the
         # function must swallow it (logger.warning) rather than propagate.
-        import se3.engine.chat_history as ch
+        import tianluo.engine.chat_history as ch
 
         def boom(*args, **kwargs):
             raise OSError("disk full")

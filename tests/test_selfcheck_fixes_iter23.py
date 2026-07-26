@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.persistence import PersistenceManager
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.persistence import PersistenceManager
 
 
 def _make_flow(n_steps: int = 2) -> FlowInstance:

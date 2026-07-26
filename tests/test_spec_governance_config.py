@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from se3.config import (
+from tianluo.config import (
     DEFAULT_BASE_MAX_BYTES,
     DEFAULT_GUARDRAILS_SIZE_TIER,
     DEFAULT_INDEX_RENDER_THRESHOLD,
@@ -148,21 +148,21 @@ class TestSpecGovernanceModule:
 
     def test_imports_with_no_side_effects(self):
         # Re-import from scratch to assert importing is side-effect-free.
-        sys.modules.pop("se3.engine.spec_governance", None)
-        mod = importlib.import_module("se3.engine.spec_governance")
+        sys.modules.pop("tianluo.engine.spec_governance", None)
+        mod = importlib.import_module("tianluo.engine.spec_governance")
         assert mod is not None
 
     def test_only_stdlib_dependencies(self):
         # The source must not import any third-party / intra-project module.
-        import se3.engine.spec_governance as mod
+        import tianluo.engine.spec_governance as mod
 
         src = open(mod.__file__, encoding="utf-8").read()
-        # No 'from se3' / 'import se3' and no obvious third-party imports.
-        assert "import se3" not in src
-        assert "from se3" not in src
+        # No 'from tianluo' / 'import tianluo' and no obvious third-party imports.
+        assert "import tianluo" not in src
+        assert "from tianluo" not in src
 
     def test_exports_required_constants(self):
-        from se3.engine import spec_governance as g
+        from tianluo.engine import spec_governance as g
 
         assert isinstance(g.BASE_ADMISSION_STANDARD, str) and g.BASE_ADMISSION_STANDARD
         assert isinstance(g.WRITING_DISCIPLINE, str) and g.WRITING_DISCIPLINE
@@ -171,14 +171,14 @@ class TestSpecGovernanceModule:
         assert g.UNCLASSIFIED_GROUP == "(未分类)"
 
     def test_admission_standard_mentions_base_and_modules(self):
-        from se3.engine.spec_governance import BASE_ADMISSION_STANDARD
+        from tianluo.engine.spec_governance import BASE_ADMISSION_STANDARD
 
         text = BASE_ADMISSION_STANDARD.lower()
         assert "base" in text
         assert "module" in text
 
     def test_writing_discipline_covers_all_four_rules(self):
-        from se3.engine.spec_governance import WRITING_DISCIPLINE
+        from tianluo.engine.spec_governance import WRITING_DISCIPLINE
 
         for marker in ("(a)", "(b)", "(c)", "(d)"):
             assert marker in WRITING_DISCIPLINE

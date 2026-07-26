@@ -7,7 +7,7 @@ orchestrator used to exclude from the terminal-event emission.
 
 Coverage:
 
-* :func:`se3.commands.run.run_flow` now emits ``step_completed`` /
+* :func:`tianluo.commands.run.run_flow` now emits ``step_completed`` /
   ``step_failed`` for CONFIRM / DISCOVERY / PLAN / SUMMARIZE, so
   ``HistorySink`` persists their outputs to the per-step jsonl (the data the
   frontend turns into a report card).
@@ -32,17 +32,17 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.run import run_flow
-from se3.daemon import protocol as daemon_protocol
-from se3.daemon.history import DaemonHistoryReader
-from se3.engine.models import (
+from tianluo.commands.run import run_flow
+from tianluo.daemon import protocol as daemon_protocol
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
+from tianluo.engine.persistence import PersistenceManager
 
 
 # ---------------------------------------------------------------------------
@@ -84,15 +84,15 @@ def _run_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
     """
     (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run.render_full"
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run.render_full"
     ), patch(
         # FAILED steps would otherwise hit the retry/abort decision path; force
         # a clean pause so the run returns without prompting. The terminal
         # STEP_FAILED event has already been emitted by then.
-        "se3.commands.run._resolve_step_failure_action",
+        "tianluo.commands.run._resolve_step_failure_action",
         return_value=("pause", str(project_root / "se3" / "calls" / "x.json")),
     ):
         mock_pm = MagicMock()
@@ -212,7 +212,7 @@ def test_paused_step_does_not_persist_terminal_event():
 def captured_console():
     from rich.console import Console
 
-    from se3.engine import display
+    from tianluo.engine import display
 
     prev = display.get_console()
     console = Console(record=True, force_terminal=False, width=100)
@@ -225,7 +225,7 @@ def captured_console():
     "step_type", [StepType.CONFIRM, StepType.DISCOVERY, StepType.PLAN]
 )
 def test_cli_sink_noop_for_interactive_and_plan(captured_console, step_type):
-    from se3.engine import CliSink, EventType, new_event
+    from tianluo.engine import CliSink, EventType, new_event
 
     step = Step(step_id=f"01_{step_type.value}_x", step_type=step_type)
     step.status = StepStatus.COMPLETED
@@ -245,7 +245,7 @@ def test_cli_sink_noop_for_interactive_and_plan(captured_console, step_type):
 
 
 def test_cli_sink_still_renders_summarize(captured_console):
-    from se3.engine import CliSink, EventType, new_event
+    from tianluo.engine import CliSink, EventType, new_event
 
     step = Step(step_id="12_summarize_x", step_type=StepType.SUMMARIZE)
     step.status = StepStatus.COMPLETED
@@ -267,7 +267,7 @@ def test_cli_sink_still_renders_summarize(captured_console):
 def test_cli_sink_derives_skip_type_from_step_when_event_type_missing(captured_console):
     """Even if the event carries no step_type string, the skip decision falls
     back to the step object's own step_type."""
-    from se3.engine import CliSink, EventType, new_event
+    from tianluo.engine import CliSink, EventType, new_event
 
     step = Step(step_id="01_plan_x", step_type=StepType.PLAN)
     step.status = StepStatus.COMPLETED
@@ -285,7 +285,7 @@ def test_cli_sink_derives_skip_type_from_step_when_event_type_missing(captured_c
 
 
 def test_record_step_event_shape_is_stable_and_serializable():
-    from se3.engine.chat_history import record_step_event
+    from tianluo.engine.chat_history import record_step_event
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -315,7 +315,7 @@ def test_record_step_event_shape_is_stable_and_serializable():
 
 
 def test_get_step_history_skips_step_event_records():
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         ChatMessage,
         get_step_history,
         record_step_event,
@@ -640,8 +640,8 @@ class _NullPersistence:
 def test_discovery_confirm_call_payload_kind_options_context():
     """The confirm call carries kind/options/context.flow_id and the textual
     confirm hint + refined description in its prompt."""
-    from se3.commands.run import _write_discovery_call
-    from se3.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
+    from tianluo.commands.run import _write_discovery_call
+    from tianluo.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -671,9 +671,9 @@ def test_discovery_confirm_call_payload_kind_options_context():
 def test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options():
     """The daemon aggregator parses the confirm call into a flow-scoped
     PendingCall that keeps the kind and the confirm option."""
-    from se3.commands.run import _write_discovery_call
-    from se3.daemon.aggregator import DaemonAggregator
-    from se3.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
+    from tianluo.commands.run import _write_discovery_call
+    from tianluo.daemon.aggregator import DaemonAggregator
+    from tianluo.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -724,7 +724,7 @@ def test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options():
 def test_discovery_confirm_submission_gates_on_one():
     """Submitting the confirm action ("1") drives the gate to continue
     (programmatic_confirmed + sentinel); any other reply keeps refining."""
-    from se3.commands.run import (
+    from tianluo.commands.run import (
         _PROGRAMMATIC_CONFIRM,
         _handle_discovery_pause_noninteractive,
     )
@@ -820,8 +820,8 @@ def _ndjson_assistant(text: str) -> str:
 def test_summarize_records_user_and_assistant_to_jsonl():
     """Task 1: summarize_handler lands BOTH the user prompt and the assistant
     markdown summary in the per-step jsonl through the real LLMCaller path."""
-    from se3.engine.steps.summarize import summarize_handler
-    from se3.engine.chat_history import get_step_history
+    from tianluo.engine.steps.summarize import summarize_handler
+    from tianluo.engine.chat_history import get_step_history
 
     summary_md = "## Work Summary\n\n- Did the thing\n- Tests pass"
     with tempfile.TemporaryDirectory() as td:
@@ -842,7 +842,7 @@ def test_summarize_records_user_and_assistant_to_jsonl():
             outputs={},
         )
 
-        with patch("se3.engine.llm_caller.ClaudeCodeRunner") as MockRunner:
+        with patch("tianluo.engine.llm_caller.ClaudeCodeRunner") as MockRunner:
             mock_runner = MagicMock()
             mock_runner.run_with_monitor.return_value = MagicMock(
                 success=True,
@@ -1021,7 +1021,7 @@ def _write_flow_call(
 def test_stale_chip_dropped_after_flow_walks_past_its_step():
     """A confirm call whose step is no longer current is dropped from the
     flow snapshot, even though no .response sibling was ever written."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -1057,7 +1057,7 @@ def test_stale_chip_dropped_after_flow_walks_past_its_step():
 def test_real_pending_chip_for_current_step_is_kept():
     """A call for the step the flow is genuinely waiting on survives the
     progress filter."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -1090,7 +1090,7 @@ def test_real_pending_chip_for_current_step_is_kept():
 def test_chip_dropped_when_current_step_already_processed():
     """Even while still ``current_step_id``, a call whose step reached a
     processed status (completed/partial/failed/revision_needed) is stale."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -1121,7 +1121,7 @@ def test_chip_dropped_when_current_step_already_processed():
 def test_unresolvable_step_call_is_kept():
     """A call whose step_id is absent from the flow's steps map is kept — the
     progress heuristic must never drop a call it cannot attribute."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
@@ -1150,7 +1150,7 @@ def test_unresolvable_step_call_is_kept():
 def test_machine_level_pending_calls_unaffected_by_progress_filter():
     """The stale-call progress filter is flow-scoped only — the machine-wide
     ``MachineStatus.pending_calls`` still enumerates the call unfiltered."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)

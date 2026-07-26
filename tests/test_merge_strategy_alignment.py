@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     FileResolution,
     HunkResolution,
     LLMResolution,
     MergeStrategy,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider
 
 
 def _make_resolution(

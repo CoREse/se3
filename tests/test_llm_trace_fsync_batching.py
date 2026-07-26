@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-import se3.commands.merge.llm_trace as trace_mod
-from se3.commands.merge.llm_trace import LLMTrace
+import tianluo.commands.merge.llm_trace as trace_mod
+from tianluo.commands.merge.llm_trace import LLMTrace
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +171,7 @@ class TestLeafMergeRefValidation:
         """A non-existent leaf branch ref returns False before any merge is
         attempted, with a diagnosable log — not the opaque
         'not something we can merge' error, and no in-progress merge state."""
-        from se3.engine.steps.implement import _attempt_merge_with_resolution
+        from tianluo.engine.steps.implement import _attempt_merge_with_resolution
 
         with caplog.at_level(logging.ERROR):
             ok = _attempt_merge_with_resolution(
@@ -192,7 +192,7 @@ class TestLeafMergeRefValidation:
 
     def test_existing_ref_proceeds_to_merge(self, repo: Path):
         """When the ref exists, the guard passes and a clean merge succeeds."""
-        from se3.engine.steps.implement import _attempt_merge_with_resolution
+        from tianluo.engine.steps.implement import _attempt_merge_with_resolution
 
         # Create a leaf branch with a non-conflicting new file.
         _git(repo, "checkout", "-b", "impl/real/G1", "main")

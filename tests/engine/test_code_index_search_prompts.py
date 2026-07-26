@@ -14,17 +14,17 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import context_builder
-from se3.engine.context_builder import (
+from tianluo.engine import context_builder
+from tianluo.engine.context_builder import (
     _reset_runtime_environment_cache,
     get_code_index_injection,
 )
-from se3.engine.steps.analyze import ANALYZE_PROMPT
-from se3.engine.steps.discovery import (
+from tianluo.engine.steps.analyze import ANALYZE_PROMPT
+from tianluo.engine.steps.discovery import (
     CONTINUE_DISCOVERY_PROMPT,
     INITIAL_DISCOVERY_PROMPT,
 )
-from se3.engine.steps.plan import PLAN_PROMPT_HEADER
+from tianluo.engine.steps.plan import PLAN_PROMPT_HEADER
 
 # The command every landing point must name.
 SEARCH_CMD = "se3 code-index search"

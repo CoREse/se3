@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.test import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.test import (
     _detect_critical_failures,
     _ensure_verbose_pytest,
     _parse_skipped_test_ids,
@@ -160,14 +160,14 @@ class TestDetectCriticalFailures:
 
 class TestCriticalTestsConfigLoading:
     def test_default_is_empty_list(self, tmp_path):
-        from se3.config import TestConfig
+        from tianluo.config import TestConfig
 
         # No se3.yaml present -> defaults, critical_tests empty.
         cfg = TestConfig.load(tmp_path)
         assert cfg.critical_tests == []
 
     def test_loads_string_list(self, tmp_path):
-        from se3.config import TestConfig
+        from tianluo.config import TestConfig
 
         (tmp_path / "se3.yaml").write_text(
             "test:\n"
@@ -182,7 +182,7 @@ class TestCriticalTestsConfigLoading:
         ]
 
     def test_non_list_falls_back_to_empty(self, tmp_path):
-        from se3.config import TestConfig
+        from tianluo.config import TestConfig
 
         (tmp_path / "se3.yaml").write_text(
             "test:\n  critical_tests: not-a-list\n"
@@ -191,7 +191,7 @@ class TestCriticalTestsConfigLoading:
         assert cfg.critical_tests == []
 
     def test_elements_coerced_to_str(self, tmp_path):
-        from se3.config import TestConfig
+        from tianluo.config import TestConfig
 
         (tmp_path / "se3.yaml").write_text(
             "test:\n  critical_tests:\n    - 123\n    - test_x\n"
@@ -209,7 +209,7 @@ class TestCriticalTestsConfigLoading:
 # subprocess.Popen is still mocked so no real test command runs.
 # ---------------------------------------------------------------------------
 
-from se3.config import TestConfig
+from tianluo.config import TestConfig
 
 
 def _make_flow_and_step(tmp_path):
@@ -228,7 +228,7 @@ def _mock_process(returncode: int, stdout: str, stderr: str = ""):
 
 
 class TestHandlerCriticalGate:
-    @patch("se3.config.TestConfig.load")
+    @patch("tianluo.config.TestConfig.load")
     @patch("subprocess.Popen")
     def test_critical_skip_triggers_revision(self, mock_popen, mock_load, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
@@ -252,7 +252,7 @@ class TestHandlerCriticalGate:
         assert "CRITICAL ACCEPTANCE TESTS NOT VERIFIED" in step.outputs["fix_instructions"]
         assert "SKIPPED" in step.outputs["fix_instructions"]
 
-    @patch("se3.config.TestConfig.load")
+    @patch("tianluo.config.TestConfig.load")
     @patch("subprocess.Popen")
     def test_critical_missing_triggers_revision(self, mock_popen, mock_load, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
@@ -274,7 +274,7 @@ class TestHandlerCriticalGate:
         assert tr["critical_skipped"] == []
         assert "MISSING" in step.outputs["fix_instructions"]
 
-    @patch("se3.config.TestConfig.load")
+    @patch("tianluo.config.TestConfig.load")
     @patch("subprocess.Popen")
     def test_non_verbose_unparseable_no_false_missing(self, mock_popen, mock_load, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
@@ -296,7 +296,7 @@ class TestHandlerCriticalGate:
         assert tr["critical_missing"] == []
         assert tr["critical_skipped"] == []
 
-    @patch("se3.config.TestConfig.load")
+    @patch("tianluo.config.TestConfig.load")
     @patch("subprocess.Popen")
     def test_ordinary_skip_stays_completed(self, mock_popen, mock_load, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
@@ -318,7 +318,7 @@ class TestHandlerCriticalGate:
         assert tr["critical_skipped"] == []
         assert tr["critical_missing"] == []
 
-    @patch("se3.config.TestConfig.load")
+    @patch("tianluo.config.TestConfig.load")
     @patch("subprocess.Popen")
     def test_no_critical_config_unaffected(self, mock_popen, mock_load, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
@@ -350,7 +350,7 @@ class TestHandlerCriticalGate:
 # issue-discovery.
 # ---------------------------------------------------------------------------
 
-from se3.engine.steps.summarize import (
+from tianluo.engine.steps.summarize import (
     summarize_handler,
     _build_completion_section,
     _create_basic_summary_text,
@@ -381,7 +381,7 @@ def _make_summarize_flow_and_step(tmp_path, verification_result):
 
 
 def _run_summarize(flow, step, llm_text="Session report."):
-    with patch("se3.engine.steps.summarize.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.summarize.LLMCaller") as mock_cls:
         mock_caller = MagicMock()
         mock_caller.call.return_value = llm_text
         mock_cls.return_value = mock_caller
@@ -500,6 +500,6 @@ class TestSummarizeNoIssueDiscovery:
         assert "discovered_issues" not in step.outputs
 
     def test_summarize_default_not_whitelisted(self, tmp_path):
-        from se3.engine.context_builder import get_issue_discovery_injection
+        from tianluo.engine.context_builder import get_issue_discovery_injection
 
         assert get_issue_discovery_injection("summarize", tmp_path) == ""

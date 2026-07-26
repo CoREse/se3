@@ -2,9 +2,9 @@
 
 This module proves the G5 claim of the per-group-status feature: appending a
 ``group_status`` NDJSON line (written by
-:func:`se3.engine.chat_history.record_group_status`) to the main repo's
+:func:`tianluo.engine.chat_history.record_group_status`) to the main repo's
 ``se3/history/<flow_id>/<step_id>.jsonl`` shifts the change-detection token
-returned by :meth:`se3.daemon.history.DaemonHistoryReader.active_flow_signature`.
+returned by :meth:`tianluo.daemon.history.DaemonHistoryReader.active_flow_signature`.
 
 That shift is exactly what drives the daemon client's incremental
 ``_push_history`` → ``MSG_HISTORY_DATA`` chain, so the web console receives each
@@ -13,10 +13,10 @@ blank for the whole parallel phase.
 
 Conclusion (no code change needed): ``active_flow_signature`` already
 fingerprints every history ``*.jsonl`` by ``(name, mtime, size)`` (see
-``_safe_stat`` in :mod:`se3.daemon.history`). Because each appended line grows
+``_safe_stat`` in :mod:`tianluo.daemon.history`). Because each appended line grows
 the file's byte size, the token changes on every append even when two writes
 land inside the filesystem's mtime resolution. The existing fingerprint covers
-this scenario, so :mod:`se3.daemon.history` needs no reinforcement; this test
+this scenario, so :mod:`tianluo.daemon.history` needs no reinforcement; this test
 locks the behavior in. The verification object is deliberately
 ``src/se3/daemon/history.py`` — the daemon-side reader the client polls — not
 ``aggregator.py``.
@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import json
 
-from se3.daemon.history import DaemonHistoryReader
-from se3.engine.chat_history import record_group_status
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.engine.chat_history import record_group_status
 
 
 # Verification target lives in src/se3/daemon/history.py (the daemon-side
 # reader polled by the client), not aggregator.py.
-assert DaemonHistoryReader.__module__ == "se3.daemon.history"
+assert DaemonHistoryReader.__module__ == "tianluo.daemon.history"
 
 
 FLOW_ID = "flow-grp-sig"

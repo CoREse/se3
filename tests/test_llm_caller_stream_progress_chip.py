@@ -15,8 +15,8 @@ import json
 
 import pytest
 
-from se3.engine import chat_history
-from se3.engine.llm_caller import StreamJSONTracker
+from tianluo.engine import chat_history
+from tianluo.engine.llm_caller import StreamJSONTracker
 
 
 def _make_tracker(monkeypatch, tmp_path):

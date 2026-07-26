@@ -25,8 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.run import _check_confirm_response, _interpret_confirm_answer
-from se3.engine.models import (
+from tianluo.commands.run import _check_confirm_response, _interpret_confirm_answer
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,

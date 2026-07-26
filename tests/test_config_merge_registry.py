@@ -13,8 +13,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.config as _cfg
-from se3.config import load_agent_registry, load_agents, load_step_agents
+import tianluo.config as _cfg
+from tianluo.config import load_agent_registry, load_agents, load_step_agents
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +54,7 @@ class TestRegistryEntryLevelMerge:
   primary: {cmd: project-primary, priority: 100}
   extra: {cmd: project-extra, priority: 3}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             registry = load_agent_registry(tmp_path)
 
         # Same-name entry fully overridden by project.
@@ -72,7 +72,7 @@ class TestRegistryEntryLevelMerge:
         _write_project(tmp_path, """agents:
   only_project: {cmd: extra}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             registry = load_agent_registry(tmp_path)
         assert set(registry) == {"shared", "only_project"}
 
@@ -92,7 +92,7 @@ llm_caller:
 llm_caller:
   defaults: [p1]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             chain = load_agents(tmp_path)
 
         # Only the project's chain, in the project's order — global
@@ -109,7 +109,7 @@ llm_caller:
         _write_project(tmp_path, """agents:
   extra: {cmd: extra-claude}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             chain = load_agents(tmp_path)
 
         # Global defaults resolved against merged registry, preserving the
@@ -133,7 +133,7 @@ llm_caller:
   steps:
     implement: [p1]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_step_agents(tmp_path, "implement")
 
         assert agents is not None
@@ -155,7 +155,7 @@ llm_caller:
   steps:
     implement: [p1]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             plan_agents = load_step_agents(tmp_path, "plan")
             impl_agents = load_step_agents(tmp_path, "implement")
 

@@ -14,7 +14,7 @@ filesystem or LLM is touched.
 
 from __future__ import annotations
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     ChatMessage,
     ChatSession,
     interleave_sessions_for_display,

@@ -23,8 +23,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
-from se3.daemon import protocol
-from se3.engine import interaction_calls
+from tianluo.daemon import protocol
+from tianluo.engine import interaction_calls
 
 
 def _stub_flow(flow_id: str = "flow-1") -> SimpleNamespace:
@@ -52,7 +52,7 @@ def test_interactive_with_existing_response_returns_decision_and_cleans_up(
     tmp_path: Path,
 ) -> None:
     """Interactive + webui-answered ⇒ adopt the decision; artifacts vanish."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-7")
@@ -87,8 +87,8 @@ def test_interactive_without_response_returns_race_and_writes_call(
 ) -> None:
     """Interactive + no webui answer ⇒ race the CLI prompt vs. the webui, and
     a retry_decision call file IS written so the web console shows a chip."""
-    from se3.commands import run
-    from se3.daemon import protocol
+    from tianluo.commands import run
+    from tianluo.daemon import protocol
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-3")
@@ -110,7 +110,7 @@ def test_interactive_without_response_returns_race_and_writes_call(
 
 def test_non_interactive_with_existing_response_unchanged(tmp_path: Path) -> None:
     """Non-interactive + answered ⇒ same behavior as before this change."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-9")
@@ -133,7 +133,7 @@ def test_non_interactive_with_existing_response_unchanged(tmp_path: Path) -> Non
 
 def test_non_interactive_without_response_pauses(tmp_path: Path) -> None:
     """Non-interactive + no answer ⇒ writes call file, returns pause."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-4")
@@ -151,7 +151,7 @@ def test_non_interactive_without_response_pauses(tmp_path: Path) -> None:
 
 def test_interactive_unrecognized_decision_defaults_to_abort(tmp_path: Path) -> None:
     """A garbled webui response is taken as abort but still consumed."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = _stub_flow()
     step = _stub_step(step_id="step-5")
@@ -182,7 +182,7 @@ def test_interactive_unrecognized_decision_defaults_to_abort(tmp_path: Path) -> 
 
 def test_cleanup_helper_removes_all_three_artifacts(tmp_path: Path) -> None:
     """After CLI prompt answers, the call file + both sibling responses go."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     step_id = "step-cleanup"
     call_path = interaction_calls.write_retry_decision_call(
@@ -214,7 +214,7 @@ def test_cleanup_helper_removes_all_three_artifacts(tmp_path: Path) -> None:
 
 def test_cleanup_helper_is_noop_when_nothing_exists(tmp_path: Path) -> None:
     """Cleanup never raises when there is nothing to remove."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     # No calls dir, no files — must be a quiet no-op.
     run._cleanup_retry_decision_artifacts(
@@ -234,7 +234,7 @@ def test_cleanup_targets_only_deterministic_retry_decision_file(
     Other kinds of call files in the same ``se3/calls/`` directory (a plain
     ``call`` from MCP, a ``cli_confirm``, ...) must survive the cleanup.
     """
-    from se3.commands import run
+    from tianluo.commands import run
 
     step_id = "step-iso"
     rd_path = interaction_calls.write_retry_decision_call(

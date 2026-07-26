@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     ConflictFile,
     ConflictHunk,
     build,
 )
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     ConflictResolver,
     FileResolution,
@@ -22,8 +22,8 @@ from se3.engine.merge.conflict_resolver import (
     LLMResolution,
     MergeStrategy,
 )
-from se3.engine.merge.human_call import HumanCallWriter
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider, StrategyDecision
+from tianluo.engine.merge.human_call import HumanCallWriter
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider, StrategyDecision
 
 
 # --------- helpers ---------

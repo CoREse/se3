@@ -32,12 +32,12 @@ from __future__ import annotations
 import asyncio
 import json
 
-import se3.daemon.disk_json_cache as disk_cache
-import se3.daemon.history as history_mod
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import DaemonHistoryReader, SessionMeta
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+import tianluo.daemon.disk_json_cache as disk_cache
+import tianluo.daemon.history as history_mod
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import DaemonHistoryReader, SessionMeta
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------

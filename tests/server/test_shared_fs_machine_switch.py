@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 
 FLOW_ID = "flow-shared-fs"
@@ -110,7 +110,7 @@ def _server(monkeypatch, *, offline_grace: Optional[float]):
     """
     from fastapi.testclient import TestClient
 
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     # ``GET /api/history`` broadcasts a forced index re-push and waits for the
     # replies; our stand-in daemons never answer, so every call would otherwise

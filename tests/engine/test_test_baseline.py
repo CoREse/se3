@@ -25,9 +25,9 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from se3.engine import test_baseline
-from se3.engine.steps import test as test_step
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine import test_baseline
+from tianluo.engine.steps import test as test_step
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 # A realistic mixed pytest -v output: two passes, two failures across two files.
@@ -86,10 +86,10 @@ class TestBaselineRoundTripExemptsInheritedFailures:
         flow.change_path = tmp_path / "se3.yaml"
         return flow
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.config.TestConfig")
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.config.TestConfig")
     def test_measured_baseline_exempts_same_failures_in_test_step(
         self, mock_config, mock_run, mock_record, mock_report, tmp_path,
     ):
@@ -118,7 +118,7 @@ class TestBaselineRoundTripExemptsInheritedFailures:
         # path, so disable mechanism B's baseline-fix budget (otherwise the
         # inherited failures would be looped within budget and return
         # REVISION_NEEDED). The looping path is covered in test_baseline_fix_loop.py.
-        with patch("se3.config.WorkflowConfig") as mock_wf:
+        with patch("tianluo.config.WorkflowConfig") as mock_wf:
             mock_wf.load.return_value = MagicMock(baseline_fix_max_attempts=0)
             status = test_step.test_handler(step, flow)
 
@@ -129,10 +129,10 @@ class TestBaselineRoundTripExemptsInheritedFailures:
         assert set(tr["introduced_failures"]) == set()
         assert set(tr["inherited_failures"]) == EXPECTED_FAILED
 
-    @patch("se3.engine.steps.test._report_pre_existing_issues")
-    @patch("se3.engine.steps.test._record_test_history")
-    @patch("se3.engine.steps.test._run_command")
-    @patch("se3.config.TestConfig")
+    @patch("tianluo.engine.steps.test._report_pre_existing_issues")
+    @patch("tianluo.engine.steps.test._record_test_history")
+    @patch("tianluo.engine.steps.test._run_command")
+    @patch("tianluo.config.TestConfig")
     def test_failure_absent_from_baseline_is_introduced(
         self, mock_config, mock_run, mock_record, mock_report, tmp_path,
     ):

@@ -1,4 +1,4 @@
-"""Tests for plan-confirm always-on wiring in ``se3.config``.
+"""Tests for plan-confirm always-on wiring in ``tianluo.config``.
 
 plan-confirm is a mechanical requirement-coverage guarantee that must run
 regardless of whether ``confirmation.steps`` contains a ``plan`` entry (or
@@ -25,12 +25,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.config import (  # noqa: E402
+from tianluo.config import (  # noqa: E402
     _CONFIRM_DEFAULT_MAX_ITERATIONS,
     insert_confirmation_steps,
     resolve_confirm_inputs,
 )
-from se3.engine.models import StepType  # noqa: E402
+from tianluo.engine.models import StepType  # noqa: E402
 
 
 @pytest.fixture
@@ -131,7 +131,7 @@ class TestResolvePlanInputs:
         # this the assertion would silently track whichever agents happen to be
         # installed on the host.
         with patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
         ):
             resolved = resolve_confirm_inputs(tmp_path, "plan")

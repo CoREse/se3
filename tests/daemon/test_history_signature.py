@@ -22,8 +22,8 @@ import os
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-from se3.daemon.history import DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as disk_cache
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 @pytest.fixture(autouse=True)

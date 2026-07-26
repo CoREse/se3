@@ -7,8 +7,8 @@ from unittest.mock import patch
 import pytest
 from pathlib import Path
 
-from se3.config import LanguageConfig, load_language_config, get_language_instruction
-from se3.engine.context_builder import (
+from tianluo.config import LanguageConfig, load_language_config, get_language_instruction
+from tianluo.engine.context_builder import (
     get_step_language_instruction,
     HUMAN_FACING_STEPS,
     SPEC_STEPS,
@@ -26,7 +26,7 @@ def _isolated_global_home(tmp_path_factory, monkeypatch):
     isolated home via the ``global_home`` fixture.
     """
     home = tmp_path_factory.mktemp("home")
-    monkeypatch.setattr("se3.config.Path.home", lambda: home)
+    monkeypatch.setattr("tianluo.config.Path.home", lambda: home)
     return home
 
 
@@ -340,7 +340,7 @@ class TestContextBuilderLanguageInjection:
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: null\n"
         )
-        from se3.engine.context_builder import get_step_language_instruction
+        from tianluo.engine.context_builder import get_step_language_instruction
         instruction = get_step_language_instruction("summarize", tmp_path)
         assert "zh-CN" in instruction
 
@@ -349,7 +349,7 @@ class TestContextBuilderLanguageInjection:
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
-        from se3.engine.context_builder import get_step_language_instruction
+        from tianluo.engine.context_builder import get_step_language_instruction
         instruction = get_step_language_instruction("implement", tmp_path)
         assert "MUST respond in" not in instruction
 
@@ -358,7 +358,7 @@ class TestContextBuilderLanguageInjection:
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
-        from se3.engine.context_builder import get_step_language_instruction
+        from tianluo.engine.context_builder import get_step_language_instruction
         instruction = get_step_language_instruction("update_spec", tmp_path)
         assert "en" in instruction
         # Should NOT contain zh-CN (that's for human-facing steps)
@@ -432,7 +432,7 @@ class TestSpecLanguageInstructionHelper:
     """Tests for get_spec_language_instruction (sync_* entry point)."""
 
     def test_returns_instruction_when_spec_language_set(self, tmp_path):
-        from se3.engine.context_builder import get_spec_language_instruction
+        from tianluo.engine.context_builder import get_spec_language_instruction
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
@@ -443,14 +443,14 @@ class TestSpecLanguageInstructionHelper:
         assert "zh-CN" not in result
 
     def test_empty_when_spec_language_unset(self, tmp_path):
-        from se3.engine.context_builder import get_spec_language_instruction
+        from tianluo.engine.context_builder import get_spec_language_instruction
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: null\n"
         )
         assert get_spec_language_instruction(tmp_path) == ""
 
     def test_empty_when_no_config(self, tmp_path):
-        from se3.engine.context_builder import get_spec_language_instruction
+        from tianluo.engine.context_builder import get_spec_language_instruction
         assert get_spec_language_instruction(tmp_path) == ""
 
 

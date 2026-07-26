@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 
-from se3.daemon.history import DaemonHistoryReader
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 # --------------------------------------------------------------------------

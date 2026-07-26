@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.client import (
+from tianluo.daemon import protocol
+from tianluo.daemon.client import (
     DaemonClient,
     _default_respond_handler,
     _format_exc,
     _normalize_ws_url,
 )
-from se3.daemon.daemon import Daemon, DaemonConfig
+from tianluo.daemon.daemon import Daemon, DaemonConfig
 
 
 # --------------------------------------------------------------------------
@@ -524,7 +524,7 @@ def test_dispatch_issue_command_edit(tmp_path):
     """ISSUE_COMMAND edit updates an existing issue."""
     import yaml
 
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="Old description", title="Old title")
@@ -549,7 +549,7 @@ def test_dispatch_issue_command_edit(tmp_path):
 
 def test_dispatch_issue_command_close(tmp_path):
     """ISSUE_COMMAND close closes an issue."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="To be closed")
@@ -574,7 +574,7 @@ def test_dispatch_issue_command_close(tmp_path):
 
 def test_dispatch_issue_command_reopen(tmp_path):
     """ISSUE_COMMAND reopen reopens a closed issue."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="To reopen")
@@ -599,7 +599,7 @@ def test_dispatch_issue_command_reopen(tmp_path):
 
 def test_dispatch_issue_command_rejects_unregistered_root(tmp_path):
     """ISSUE_COMMAND rejects project_root not in known roots."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     other = tmp_path / "other"
     other.mkdir()
@@ -948,7 +948,7 @@ def test_project_command_without_handler_replies_unsupported(tmp_path):
 
 def test_project_command_propagates_handler_error_code(tmp_path):
     """A ProjectCommandError's code reaches the wire verbatim."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     handler = _RecordingProjectHandler(
         raises=ProjectCommandError("live_flow", "has a running flow")
@@ -984,7 +984,7 @@ def test_project_command_codeless_exception_reports_no_code(tmp_path):
 
 def test_project_command_failure_does_not_fast_push(tmp_path):
     """A refused command changed nothing, so no snapshot push is warranted."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     handler = _RecordingProjectHandler(
         raises=ProjectCommandError("not_registered", "not registered")
@@ -1077,7 +1077,7 @@ def test_project_command_without_request_id_sends_no_ack(tmp_path):
 
 def test_daemon_project_request_adapter_dispatches(tmp_path, monkeypatch):
     """The daemon's adapter routes add/remove and rejects anything else."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "pids"))
     seen = []
@@ -1232,7 +1232,7 @@ def test_history_changed_without_provider_is_false():
 
 def test_push_history_prunes_drained_terminal_flow_cursor():
     """The cursor map keeps active/flushed flows and drops drained ones."""
-    from se3.daemon.history import FlowRead
+    from tianluo.daemon.history import FlowRead
 
     provider = _FakeHistoryProvider()
     client = _make_client(history_provider=provider)
@@ -1259,7 +1259,7 @@ def test_push_history_prunes_drained_terminal_flow_cursor():
 
 def test_push_history_keeps_empty_active_flow_cursor():
     """An active flow with an empty delta keeps its cursor (no re-snapshot)."""
-    from se3.daemon.history import FlowRead
+    from tianluo.daemon.history import FlowRead
 
     provider = _FakeHistoryProvider()
     client = _make_client(history_provider=provider)
@@ -1333,7 +1333,7 @@ def test_dispatch_history_index_request_invalidates_cache(tmp_path):
     TTL window would be invisible until the cache expires, contradicting the
     MSG_HISTORY_INDEX_REQUEST contract of "rebuild from disk immediately".
     """
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     root = tmp_path / "proj"
     state = root / "se3" / "state"
@@ -1409,7 +1409,7 @@ def _start_server(port: int, seed_key: str | None = None):
     """
     import uvicorn
 
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
     from _authsrv import authed_app
 
     app, daemon_key = authed_app()
@@ -1543,7 +1543,7 @@ class _BlockingHistoryProvider:
         return []
 
     def read_flow(self, flow_id, *, project_root=None, cursor=None):
-        from se3.daemon.history import FlowRead
+        from tianluo.daemon.history import FlowRead
 
         time.sleep(self.block_seconds)
         return FlowRead(flow_id, protocol.HISTORY_MODE_FULL, [], {})
@@ -1742,8 +1742,8 @@ def _invoke_daemon_status(monkeypatch, status_payload):
     """Run ``se3 daemon status`` with a stubbed ``daemon_status`` and return stdout."""
     from typer.testing import CliRunner
 
-    import se3.daemon as daemon_pkg
-    from se3.cli import app
+    import tianluo.daemon as daemon_pkg
+    from tianluo.cli import app
 
     monkeypatch.setattr(daemon_pkg, "daemon_status", lambda config: status_payload)
     result = CliRunner().invoke(app, ["daemon", "status"])
@@ -1758,7 +1758,7 @@ def test_status_shows_reason_when_last_error_present(monkeypatch):
             "running": True,
             "pid": 123,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": False,
             "last_error": "TimeoutError",
             "tracked_flows": [],
@@ -1774,7 +1774,7 @@ def test_status_no_empty_parens_when_last_error_blank(monkeypatch):
             "running": True,
             "pid": 123,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": False,
             "last_error": "",
             "tracked_flows": [],
@@ -1793,7 +1793,7 @@ def test_status_connected_branch_unchanged(monkeypatch):
             "running": True,
             "pid": 1,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": True,
             "tracked_flows": [],
         },
@@ -1893,7 +1893,7 @@ def test_resolve_flow_root_from_index_returns_attributed_root(tmp_path):
     ``read_active_flows`` to, so respond / interject writes line up with the
     history-read path for a ``--worktree`` / discovery session.
     """
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     _make_reader_root(tmp_path, "wt-flow")
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
@@ -1913,7 +1913,7 @@ def test_resolve_flow_root_from_index_without_provider_is_empty():
 def test_interject_falls_back_to_history_index_root(tmp_path):
     """An interjection with no payload root and a snapshot that omits the flow
     resolves the root from the history index and writes the call file there."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     _make_reader_root(tmp_path, "wt-flow")
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])

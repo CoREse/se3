@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.engine.llm_caller import LLMCaller
+from tianluo.engine.llm_caller import LLMCaller
 
 
 def _make_caller(**kwargs) -> LLMCaller:
@@ -146,7 +146,7 @@ class TestCreateRunnerForwardsProjectRoot:
             "claude_subprocess:\n  setting_sources: [user, project]\n",
             encoding="utf-8",
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path,
                 max_retries=1,
@@ -160,7 +160,7 @@ class TestCreateRunnerForwardsProjectRoot:
 
     def test_default_setting_sources_when_no_yaml(self, tmp_path):
         """When no project YAML is present, runner falls back to ['user']."""
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path,
                 max_retries=1,
@@ -291,7 +291,7 @@ class TestForceReadOnlyOverride:
     def test_baseline_charter_freshness_is_writable(self):
         """Sanity: with the read_only flip, charter_freshness alone (no force)
         gets NO tool-level lock — the handler is the writer."""
-        from se3.engine.context_builder import is_step_read_only
+        from tianluo.engine.context_builder import is_step_read_only
 
         assert is_step_read_only("charter_freshness") is False
         args = self._run_and_capture_args("charter_freshness", force_read_only=False)

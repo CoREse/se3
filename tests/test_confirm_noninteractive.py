@@ -24,20 +24,20 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.run import (
+from tianluo.commands.run import (
     _CONFIRM_AWAITING,
     _handle_confirm_pause,
     _handle_confirm_pause_noninteractive,
     _run_flow_impl,
 )
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
+from tianluo.engine.persistence import PersistenceManager
 
 
 def _make_step(step_id="confirm-001", outputs=None, inputs=None):
@@ -84,7 +84,7 @@ def test_helper_missing_call_file_still_pauses_failsafe(tmp_path):
     step = _make_step(outputs={})  # no call_file at all
     persistence = _RecordingPersistence()
 
-    with patch("se3.commands.run.logger") as mock_logger:
+    with patch("tianluo.commands.run.logger") as mock_logger:
         result = _handle_confirm_pause_noninteractive(flow, step, persistence, tmp_path)
         assert mock_logger.warning.called
 
@@ -99,7 +99,7 @@ def test_helper_call_file_path_but_not_on_disk_warns(tmp_path):
     step = _make_step(outputs={"call_file": str(tmp_path / "gone.json")})
     persistence = _RecordingPersistence()
 
-    with patch("se3.commands.run.logger") as mock_logger:
+    with patch("tianluo.commands.run.logger") as mock_logger:
         _handle_confirm_pause_noninteractive(flow, step, persistence, tmp_path)
         assert mock_logger.warning.called
 
@@ -180,8 +180,8 @@ def test_interactive_confirm_pause_user_exit_returns_none():
         persistence = PersistenceManager(project_root)
 
         # choice index 2 == "Exit (pause flow)"
-        with patch("se3.commands.run.prompt_user_choice", return_value=2), \
-                patch("se3.commands.run.render_full"):
+        with patch("tianluo.commands.run.prompt_user_choice", return_value=2), \
+                patch("tianluo.commands.run.render_full"):
             result = _handle_confirm_pause(
                 flow, confirm_step, persistence, project_root, None
             )
@@ -204,8 +204,8 @@ def test_interactive_confirm_pause_approve_writes_response():
         persistence = PersistenceManager(project_root)
 
         # choice index 0 == "Approve and continue"
-        with patch("se3.commands.run.prompt_user_choice", return_value=0), \
-                patch("se3.commands.run.render_full"):
+        with patch("tianluo.commands.run.prompt_user_choice", return_value=0), \
+                patch("tianluo.commands.run.render_full"):
             result = _handle_confirm_pause(
                 flow, confirm_step, persistence, project_root, None
             )
@@ -314,9 +314,9 @@ def test_run_loop_non_json_confirm_pause_user_exit_returns_130():
         # Interactive path returns None ("Exit (pause flow)") — the run loop must
         # NOT call the noninteractive helper here and must return 130.
         with patch(
-            "se3.commands.run._handle_confirm_pause", return_value=None
+            "tianluo.commands.run._handle_confirm_pause", return_value=None
         ) as mock_interactive, patch(
-            "se3.commands.run._handle_confirm_pause_noninteractive"
+            "tianluo.commands.run._handle_confirm_pause_noninteractive"
         ) as mock_helper:
             rc = _run_flow_impl(
                 project_root=project_root,

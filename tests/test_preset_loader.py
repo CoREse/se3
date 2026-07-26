@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3 import preset_loader
-from se3.preset_loader import (
+from tianluo import preset_loader
+from tianluo.preset_loader import (
     LAYER_BUILTIN,
     LAYER_PROJECT,
     PresetError,

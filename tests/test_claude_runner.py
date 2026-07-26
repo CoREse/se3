@@ -19,14 +19,14 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.config import load_claude_commands, load_claude_subprocess_config
-from se3.claude_runner import (
+from tianluo.config import load_claude_commands, load_claude_subprocess_config
+from tianluo.claude_runner import (
     ClaudeCodeRunner,
     ClaudeRunner,
     USAGE_LIMIT_KEYWORDS,
     _MAX_ARG_BYTES,
 )
-from se3.agent_runner import AgentRunner, InfraErrorType
+from tianluo.agent_runner import AgentRunner, InfraErrorType
 
 
 def _argv_after_skip_perms(argv):
@@ -52,12 +52,12 @@ class TestLoadClaudeCommands:
         # The built-in fallback chain is probed against PATH; pin which() to
         # claude only so the result does not vary with the host's agents.
         which_claude_only = patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd, *a, **k: (
                 "/fake/bin/claude" if cmd == "claude" else None
             ),
         )
-        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
+        with patch("tianluo.config.Path.home", return_value=tmp_path), which_claude_only:
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"
@@ -68,7 +68,7 @@ class TestLoadClaudeCommands:
         global_se3_dir.mkdir()
         (global_se3_dir / "config.yaml").write_text("claude_commands:\n  - cmd: global-claude\n    priority: 10\n")
         (tmp_path / "se3.yaml").write_text("claude_commands:\n  - cmd: project-claude\n    priority: 5\n")
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "project-claude"
@@ -77,7 +77,7 @@ class TestLoadClaudeCommands:
         global_se3_dir = tmp_path / ".se3"
         global_se3_dir.mkdir()
         (global_se3_dir / "config.yaml").write_text("claude_commands:\n  - cmd: global-claude\n    priority: 10\n")
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert commands[0]["cmd"] == "global-claude"
 
@@ -92,13 +92,13 @@ class TestLoadClaudeCommands:
   - cmd: mid
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert [c["cmd"] for c in commands] == ["low", "high", "mid"]
 
     def test_string_entries_normalized(self, tmp_path):
         (tmp_path / "se3.yaml").write_text("claude_commands:\n  - claude\n  - kclaude\n")
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 2
         assert all(isinstance(c, dict) for c in commands)
@@ -106,7 +106,7 @@ class TestLoadClaudeCommands:
 
     def test_missing_priority_defaults_to_zero(self, tmp_path):
         (tmp_path / "se3.yaml").write_text("claude_commands:\n  - cmd: claude\n")
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert commands[0]["priority"] == 0
 
@@ -114,7 +114,7 @@ class TestLoadClaudeCommands:
         global_se3_dir = tmp_path / ".se3"
         global_se3_dir.mkdir()
         (global_se3_dir / "config.yaml").write_text("claude_commands:\n  - cmd: global-only\n    priority: 1\n")
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(None)
         assert commands[0]["cmd"] == "global-only"
 
@@ -129,7 +129,7 @@ class TestLoadClaudeCommands:
             "    cmd: codex\n"
             "llm_caller:\n  defaults:\n    - my-codex\n"
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert commands == [{"cmd": "codex", "priority": 0}]
 
@@ -163,12 +163,12 @@ class TestClaudeCodeRunnerIdentity:
         # Pin which(): the built-in chain is PATH-probed, and on a host with
         # no built-in agent installed it fails loud rather than yielding claude.
         which_claude_only = patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd, *a, **k: (
                 "/fake/bin/claude" if cmd == "claude" else None
             ),
         )
-        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
+        with patch("tianluo.config.Path.home", return_value=tmp_path), which_claude_only:
             runner = ClaudeCodeRunner(project_root=tmp_path)
         assert runner.command["cmd"] == "claude"
 
@@ -520,7 +520,7 @@ class TestClaudeSubprocessSettingSources:
         """``run_with_monitor`` builds argv before delegating to the internal
         monitor loop.  Patch ``_run_single_with_monitor`` so we can capture
         the constructed ``full_cmd`` without spinning up a real subprocess."""
-        from se3.claude_runner import _SingleRunResult
+        from tianluo.claude_runner import _SingleRunResult
 
         runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
         captured = {}
@@ -573,7 +573,7 @@ class TestClaudeSubprocessSettingSources:
             encoding="utf-8",
         )
         # No se3.yaml present → defaults apply.
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             runner = ClaudeCodeRunner(
                 project_root=tmp_path,
                 command={"cmd": "claude-a", "priority": 10},
@@ -602,7 +602,7 @@ class TestClaudeSubprocessSettingSources:
             "claude_subprocess:\n  setting_sources: [user, project]\n",
             encoding="utf-8",
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             runner = ClaudeCodeRunner(
                 project_root=tmp_path,
                 command={"cmd": "claude-a", "priority": 10},
@@ -627,7 +627,7 @@ class TestClaudeSubprocessSettingSources:
             "claude_subprocess:\n  setting_sources: []\n",
             encoding="utf-8",
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             with pytest.raises(ValueError, match="setting_sources"):
                 load_claude_subprocess_config(tmp_path)
 
@@ -642,7 +642,7 @@ class TestStderrIsolation:
 
     def test_child_stderr_pipe_not_merged_to_stdout(self, tmp_path):
         """_run_single_with_monitor uses stderr=PIPE, not stderr=STDOUT."""
-        from se3.claude_runner import _SingleRunResult
+        from tianluo.claude_runner import _SingleRunResult
 
         runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
         captured_kwargs = {}
@@ -675,7 +675,7 @@ class TestStderrIsolation:
 
         with patch("subprocess.Popen", side_effect=mock_popen), \
              patch("shutil.which", return_value="/usr/bin/claude-a"), \
-             patch("se3.claude_runner._spawn_stderr_reader", return_value=MagicMock()):
+             patch("tianluo.claude_runner._spawn_stderr_reader", return_value=MagicMock()):
             try:
                 runner._run_single_with_monitor(
                     full_cmd=["claude-a", "-p", "hi"],
@@ -697,7 +697,7 @@ class TestStderrIsolation:
         """run_with_monitor wraps output with '=== Command: ... ===' prefix.
         The [claude-runner] status messages go to sys.stderr (parent), not
         into output."""
-        from se3.claude_runner import MonitoredResult
+        from tianluo.claude_runner import MonitoredResult
 
         runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
 
@@ -710,7 +710,7 @@ class TestStderrIsolation:
 
         with patch("subprocess.Popen", return_value=mock_proc), \
              patch("shutil.which", return_value="/usr/bin/claude-a"), \
-             patch("se3.claude_runner._spawn_stderr_reader", return_value=MagicMock()), \
+             patch("tianluo.claude_runner._spawn_stderr_reader", return_value=MagicMock()), \
              patch("sys.stderr"):
             result = runner.run_with_monitor(["-p", "hi"], cwd=tmp_path)
 

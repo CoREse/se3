@@ -7,8 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.implement import _format_spec_brief
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.implement import _format_spec_brief
 
 
 def _make_step_and_flow(tmp_path: Path, task_groups: list[dict]) -> tuple[Step, FlowInstance]:
@@ -93,11 +93,11 @@ class TestFormatSpecBrief:
 class TestImplementHandlerEmptyRepoFallback:
     """Verify implement_handler falls back to sequential when no commits exist."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.parse_json_response")
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.steps.implement.has_commits", return_value=False)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=False)
     def test_skips_dag_when_no_commits(
         self,
         mock_has_commits,
@@ -108,7 +108,7 @@ class TestImplementHandlerEmptyRepoFallback:
         tmp_path,
     ):
         """DAG parallel must be skipped when has_commits() returns False."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_parse_json.return_value = {
             "files_changed": ["a.py"],
@@ -136,9 +136,9 @@ class TestImplementHandlerEmptyRepoFallback:
         assert mock_llm_cls.call_count == 3
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._run_dag_parallel", return_value=StepStatus.COMPLETED)
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel", return_value=StepStatus.COMPLETED)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
     def test_uses_dag_when_commits_exist(
         self,
         mock_has_commits,
@@ -147,7 +147,7 @@ class TestImplementHandlerEmptyRepoFallback:
         tmp_path,
     ):
         """DAG parallel should be used when has_commits() returns True."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_and_flow(tmp_path, FORK_GROUPS)
         result = implement_handler(step, flow)

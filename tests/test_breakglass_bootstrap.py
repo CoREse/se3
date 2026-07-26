@@ -1,6 +1,6 @@
 """Tests for the break-glass bootstrap escape hatch (group G10 task 2).
 
-Covers ``se3.server.bootstrap`` and the ``se3-server bootstrap-token``
+Covers ``tianluo.server.bootstrap`` and the ``se3-server bootstrap-token``
 subcommand:
 
 * issuance mints a fresh token, persists only its hash, and returns/prints the
@@ -31,9 +31,9 @@ import pytest
 #: import the code under test rather than any globally installed ``se3``.
 _SRC = str(Path(__file__).resolve().parent.parent / "src")
 
-import se3.server.crypto as crypto
-from se3.server import bootstrap
-from se3.server.persistence import Store
+import tianluo.server.crypto as crypto
+from tianluo.server import bootstrap
+from tianluo.server.persistence import Store
 
 #: The minted plaintext always carries the break-glass token prefix.
 _TOKEN_RE = re.compile(r"bg_[A-Za-z0-9_\-]+")
@@ -128,7 +128,7 @@ def test_issuance_never_logs_the_plaintext(tmp_path, caplog):
 
 
 def test_cli_bootstrap_token_prints_token_and_exits_zero(tmp_path, capsys):
-    from se3 import server
+    from tianluo import server
 
     db = tmp_path / "server.db"
     with pytest.raises(SystemExit) as exc:
@@ -145,7 +145,7 @@ def test_cli_bootstrap_token_prints_token_and_exits_zero(tmp_path, capsys):
 
 
 def test_cli_bootstrap_token_is_reissuable(tmp_path, capsys):
-    from se3 import server
+    from tianluo import server
 
     db = tmp_path / "server.db"
     tokens = []
@@ -194,7 +194,7 @@ def test_bootstrap_token_works_without_server_extra(tmp_path):
             return _real_import(name, *args, **kwargs)
 
         builtins.__import__ = _blocked
-        from se3.server import main
+        from tianluo.server import main
         try:
             main(["bootstrap-token", "--db-path", {str(db)!r}])
         except SystemExit as exc:
@@ -211,7 +211,7 @@ def test_bootstrap_token_works_without_server_extra(tmp_path):
 
 def test_server_version_works_without_server_extra():
     """`se3-server --version` is honored before the extra import (core-only)."""
-    from se3 import __version__
+    from tianluo import __version__
 
     code = """
         import builtins, sys
@@ -223,7 +223,7 @@ def test_server_version_works_without_server_extra():
             return _real_import(name, *args, **kwargs)
 
         builtins.__import__ = _blocked
-        from se3.server import main
+        from tianluo.server import main
         try:
             main(["--version"])
         except SystemExit as exc:
@@ -235,9 +235,9 @@ def test_server_version_works_without_server_extra():
     assert f"se3-server version {__version__}" in proc.stdout
 
 
-@pytest.mark.parametrize("module", ["se3.cli", "se3.daemon", "se3.daemon.daemon"])
+@pytest.mark.parametrize("module", ["tianluo.cli", "tianluo.daemon", "tianluo.daemon.daemon"])
 def test_core_modules_import_clean(module):
-    """core-only install: importing se3.cli / se3.daemon never errors."""
+    """core-only install: importing tianluo.cli / tianluo.daemon never errors."""
     proc = _run_python(
         f"""
         import {module}  # must import with no server extra present
@@ -256,9 +256,9 @@ def test_core_modules_import_clean(module):
 def test_cli_token_is_consumable_by_a_server_on_the_same_db(tmp_path, capsys):
     from fastapi.testclient import TestClient
 
-    from se3 import server
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    from tianluo import server
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     db = tmp_path / "server.db"
     with pytest.raises(SystemExit):

@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.client import DaemonClient
-from se3.daemon.protocol import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
     CALL_KIND_CONFIRM,

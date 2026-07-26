@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from se3.engine.models import FlowInstance, State, Step, StepStatus, StepType
-from se3.engine.steps.commit import (
+from tianluo.engine.models import FlowInstance, State, Step, StepStatus, StepType
+from tianluo.engine.steps.commit import (
     commit_handler,
     _generate_commit_message,
     _generate_template_summary,
@@ -20,8 +20,8 @@ from se3.engine.steps.commit import (
     _strip_runtime_leaks,
     _index_has_staged_changes,
 )
-from se3.engine.git_tags import VersionTagError
-from se3.engine.version_bumper import BumpType, VersionBumper, VersionConfig
+from tianluo.engine.git_tags import VersionTagError
+from tianluo.engine.version_bumper import BumpType, VersionBumper, VersionConfig
 
 
 def _make_flow(**kwargs) -> FlowInstance:
@@ -77,11 +77,11 @@ def _default_version_config(**overrides) -> VersionConfig:
 class TestRuntimeErrorScriptModeAutoRepair:
     """read_version() raises RuntimeError in script mode -> auto-repair via generate_version_script()."""
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_runtime_error_script_mode_triggers_generate_version_script(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -104,9 +104,9 @@ class TestRuntimeErrorScriptModeAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             with patch(
-                "se3.engine.version_script_interface.generate_version_script"
+                "tianluo.engine.version_script_interface.generate_version_script"
             ) as mock_gen:
                 result = commit_handler(step, flow)
 
@@ -116,11 +116,11 @@ class TestRuntimeErrorScriptModeAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_runtime_error_script_mode_retry_fails_propagates(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -140,9 +140,9 @@ class TestRuntimeErrorScriptModeAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             with patch(
-                "se3.engine.version_script_interface.generate_version_script"
+                "tianluo.engine.version_script_interface.generate_version_script"
             ) as mock_gen:
                 result = commit_handler(step, flow)
 
@@ -156,11 +156,11 @@ class TestRuntimeErrorScriptModeAutoRepair:
 class TestRuntimeErrorFileModeAutoRepair:
     """read_version() raises RuntimeError in file mode -> auto-repair via initialize_version_system()."""
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_runtime_error_file_mode_triggers_initialize_version_system(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -185,7 +185,7 @@ class TestRuntimeErrorFileModeAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         # initialize_version_system was called for file mode repair
@@ -196,11 +196,11 @@ class TestRuntimeErrorFileModeAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_runtime_error_file_mode_retry_fails_propagates(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -221,7 +221,7 @@ class TestRuntimeErrorFileModeAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         mock_bumper.initialize_version_system.assert_called_once()
@@ -232,11 +232,11 @@ class TestRuntimeErrorFileModeAutoRepair:
 class TestRuntimeErrorNoVersionFileAutoRepair:
     """read_version() raises RuntimeError on the no-version-file path (initialize then read)."""
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_no_version_file_script_mode_runtime_error_triggers_repair(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -261,9 +261,9 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             with patch(
-                "se3.engine.version_script_interface.generate_version_script"
+                "tianluo.engine.version_script_interface.generate_version_script"
             ) as mock_gen:
                 result = commit_handler(step, flow)
 
@@ -271,11 +271,11 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
         assert mock_bumper.read_version.call_count == 2
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_no_version_file_file_mode_runtime_error_triggers_repair(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -300,7 +300,7 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         # initialize_version_system called twice: once to create, once for repair
@@ -311,11 +311,11 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
 class TestValueErrorKeyErrorRegression:
     """Existing ValueError/KeyError handling still works (regression tests)."""
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_value_error_triggers_auto_repair_file_mode(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -338,17 +338,17 @@ class TestValueErrorKeyErrorRegression:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         mock_bumper.initialize_version_system.assert_called_once()
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_key_error_triggers_auto_repair_script_mode(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -370,20 +370,20 @@ class TestValueErrorKeyErrorRegression:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             with patch(
-                "se3.engine.version_script_interface.generate_version_script"
+                "tianluo.engine.version_script_interface.generate_version_script"
             ) as mock_gen:
                 result = commit_handler(step, flow)
 
         mock_gen.assert_called_once()
         assert result == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix auth")
     def test_value_error_retry_fails_propagates(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -403,7 +403,7 @@ class TestValueErrorKeyErrorRegression:
         flow = _make_flow()
         step = _make_step({"task_description": "Fix auth"})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.FAILED
@@ -443,12 +443,12 @@ def _make_flow_with_state(**kwargs) -> FlowInstance:
 class TestTemplateSummaryGeneration:
     """Template summary is generated when SUMMARIZE step is absent."""
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feature: add X")
-    @patch("se3.engine.steps.commit._generate_template_summary")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="feature: add X")
+    @patch("tianluo.engine.steps.commit._generate_template_summary")
     def test_template_summary_called_when_no_summarize_step(
         self, mock_template, mock_commit_msg, mock_load_cfg, mock_has_changes,
         mock_subprocess, mock_hash
@@ -467,12 +467,12 @@ class TestTemplateSummaryGeneration:
         assert result == StepStatus.COMPLETED
         mock_template.assert_called_once_with(flow, step)
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feature: add X")
-    @patch("se3.engine.steps.commit._generate_template_summary")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="feature: add X")
+    @patch("tianluo.engine.steps.commit._generate_template_summary")
     def test_template_summary_not_called_when_summarize_step_present(
         self, mock_template, mock_commit_msg, mock_load_cfg, mock_has_changes,
         mock_subprocess, mock_hash
@@ -950,16 +950,16 @@ class TestCommitVersionTagIntegration:
             }
         )
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=VersionConfig(
                 enabled=True,
                 file_path="pyproject.toml",
                 include_in_commit_message=include_in_commit_message,
             ),
         ), patch(
-            "se3.engine.steps.commit._update_docs",
+            "tianluo.engine.steps.commit._update_docs",
         ), patch(
-            "se3.engine.context_builder.ensure_code_index_fresh",
+            "tianluo.engine.context_builder.ensure_code_index_fresh",
         ):
             return commit_handler(step, flow), step
 
@@ -1018,7 +1018,7 @@ class TestCommitVersionTagIntegration:
         _git(repo, "commit", "-q", "-m", "add version")
         (repo / "worktree.py").write_text("print('intent only')\n", encoding="utf-8")
 
-        with patch("se3.engine.steps.commit.create_annotated_version_tag") as mock_tag:
+        with patch("tianluo.engine.steps.commit.create_annotated_version_tag") as mock_tag:
             result, step = self._run_version_commit(
                 repo,
                 suggested_version="1.1.0",
@@ -1041,7 +1041,7 @@ class TestCommitVersionTagIntegration:
         (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
 
         with patch(
-            "se3.engine.steps.commit.create_annotated_version_tag",
+            "tianluo.engine.steps.commit.create_annotated_version_tag",
             side_effect=VersionTagError(
                 "v2.0.0",
                 "git command failed",
@@ -1085,7 +1085,7 @@ class TestCommitVersionTagIntegration:
             )
 
         with patch(
-            "se3.engine.steps.commit.create_annotated_version_tag",
+            "tianluo.engine.steps.commit.create_annotated_version_tag",
             side_effect=_boom,
         ):
             result, step = self._run_version_commit(
@@ -1113,10 +1113,10 @@ class TestCommitVersionTagIntegration:
         (repo / "feature.py").write_text("print('release')\n", encoding="utf-8")
 
         with patch(
-            "se3.engine.steps.commit._read_head_commit",
+            "tianluo.engine.steps.commit._read_head_commit",
             return_value=(None, "fatal: bad revision"),
         ), patch(
-            "se3.engine.steps.commit.create_annotated_version_tag",
+            "tianluo.engine.steps.commit.create_annotated_version_tag",
         ) as mock_tag:
             result, step = self._run_version_commit(
                 repo,
@@ -1159,7 +1159,7 @@ class TestCommitVersionTagIntegration:
 
         flow_context: dict = {}
         with patch(
-            "se3.engine.steps.commit.create_annotated_version_tag",
+            "tianluo.engine.steps.commit.create_annotated_version_tag",
             side_effect=VersionTagError(
                 "v2.0.0",
                 "git command failed",
@@ -1185,7 +1185,7 @@ class TestCommitVersionTagIntegration:
         (repo / "fix.py").write_text("print('fix')\n", encoding="utf-8")
 
         with patch(
-            "se3.engine.steps.commit.create_annotated_version_tag",
+            "tianluo.engine.steps.commit.create_annotated_version_tag",
         ) as mock_tag:
             result, step = self._run_version_commit(
                 repo,
@@ -1439,7 +1439,7 @@ class TestDetectRuntimeLeaks:
 
     def test_no_subprocess_or_io(self) -> None:
         """The detector must be a pure function — no subprocess use at all."""
-        with patch("se3.engine.steps.commit.subprocess") as mock_sub:
+        with patch("tianluo.engine.steps.commit.subprocess") as mock_sub:
             _detect_runtime_leaks([".se3/archive/x", "se3/state/y", "src/a.py"])
         mock_sub.run.assert_not_called()
 
@@ -1453,7 +1453,7 @@ class TestStripRuntimeLeaksFaultTolerance:
 
     def test_list_subprocess_exception_swallowed(self, tmp_path: Path) -> None:
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             side_effect=OSError("boom"),
         ):
             _strip_runtime_leaks(tmp_path)  # must not raise
@@ -1461,7 +1461,7 @@ class TestStripRuntimeLeaksFaultTolerance:
     def test_unstage_subprocess_exception_swallowed(self, tmp_path: Path) -> None:
         list_res = MagicMock(returncode=0, stdout=".se3/archive/x\0", stderr="")
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             side_effect=[list_res, OSError("restore boom")],
         ):
             _strip_runtime_leaks(tmp_path)  # must not raise
@@ -1479,10 +1479,10 @@ class TestRuntimeLeakGuardIntegration:
         )
         flow.baseline_commit = None
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=_default_version_config(enabled=False),
         ), patch(
-            "se3.engine.steps.commit._generate_commit_message",
+            "tianluo.engine.steps.commit._generate_commit_message",
             return_value="feature: change",
         ):
             return commit_handler(step, flow)
@@ -1541,15 +1541,15 @@ class TestRuntimeLeakGuardIntegration:
         )
         flow.baseline_commit = None
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=_default_version_config(enabled=False),
         ), patch(
-            "se3.engine.steps.commit._generate_commit_message",
+            "tianluo.engine.steps.commit._generate_commit_message",
             return_value="feature: change",
         ), patch(
             # Force the guard to target a path that is not actually staged so
             # ``git restore --staged`` errors — the guard must only warn.
-            "se3.engine.steps.commit._detect_runtime_leaks",
+            "tianluo.engine.steps.commit._detect_runtime_leaks",
             return_value=["does/not/exist/se3/state/x"],
         ):
             result = commit_handler(_make_step(), flow)
@@ -1605,7 +1605,7 @@ class TestIndexHasStagedChanges:
     def test_subprocess_error_assumes_changes(self, tmp_path: Path) -> None:
         # Fault-tolerant: a git error must not short-circuit a real commit.
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             side_effect=OSError("boom"),
         ):
             assert _index_has_staged_changes(tmp_path) is True
@@ -1625,11 +1625,11 @@ class TestCommitIdempotentVersionWrite:
     the commit step must accept that as a happy-path idempotent write.
     """
 
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
-    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix x")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc12345", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
+    @patch("tianluo.engine.steps.commit._generate_commit_message", return_value="bugfix: fix x")
     def test_commit_idempotent_when_suggested_equals_disk(
         self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
     ):
@@ -1655,7 +1655,7 @@ class TestCommitIdempotentVersionWrite:
             "task_description": "Fix x",
         })
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=mock_bumper):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED

@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from se3.engine.merge.conflict_context import ConflictFile, ConflictHunk
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_context import ConflictFile, ConflictHunk
+from tianluo.engine.merge.conflict_resolver import (
     BatchContext,
     ConflictResolver,
     MergeStrategy,
