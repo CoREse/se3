@@ -1,6 +1,6 @@
 """Per-LLM-call trace logging for merge operations.
 
-Records every LLM call issued during ``se3 merge`` as a single JSON
+Records every LLM call issued during ``luo merge`` as a single JSON
 Lines (jsonl) record.  Each record includes the prompt, response,
 duration, agent identifier, and outcome.  The trace file is
 append-only and safe for concurrent access within a single process
@@ -11,11 +11,12 @@ and forced at every ``stop()`` / file rotation / exit so the tail
 record is never lost.
 
 Files are named ``merge_<timestamp>_<seq>.jsonl`` under
-``se3/logs/llm/`` so that a long-running merge sequence does not
+``tianluo/logs/llm/`` so that a long-running merge sequence does not
 produce unbounded single files.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -30,7 +31,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 # Default directory for LLM trace files, relative to project root.
-_DEFAULT_TRACE_DIR = Path("se3/logs/llm")
+# Sentinel default: resolved root-aware at construction time.
+_DEFAULT_TRACE_DIR = Path("tianluo/logs/llm")
 
 # Rotate to a new file when the current one exceeds this size.
 _MAX_FILE_BYTES = 50 * 1024 * 1024  # 50 MiB
@@ -92,7 +94,7 @@ class LLMTrace:
 
     Thread-safe within a single process.  Not safe across processes
     (the merge lock in ``merge_lock.py`` already prevents concurrent
-    ``se3 merge`` invocations).
+    ``luo merge`` invocations).
 
     Usage:
 
@@ -113,7 +115,10 @@ class LLMTrace:
         fsync_interval_sec: float = _DEFAULT_FSYNC_INTERVAL_SEC,
     ) -> None:
         self.project_root = project_root
-        self.trace_dir = trace_dir or _DEFAULT_TRACE_DIR
+        if trace_dir is None:
+            self.trace_dir = runtime_dir(project_root) / "logs" / "llm"
+        else:
+            self.trace_dir = trace_dir
         if not self.trace_dir.is_absolute():
             self.trace_dir = self.project_root / self.trace_dir
         self.max_file_bytes = max_file_bytes

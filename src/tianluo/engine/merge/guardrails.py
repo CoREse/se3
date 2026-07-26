@@ -1,6 +1,6 @@
 """MergeGuardrailsCheck — Check spec file integrity after a merge.
 
-Runs guardrails on any spec files (se3/specs/**/spec.md) that changed
+Runs guardrails on any spec files (tianluo/specs/**/spec.md) that changed
 during the merge. Detects deleted requirements, weakened language,
 and weakened quantifiers.
 
@@ -11,11 +11,11 @@ contract *for that flow*, so they cannot be silently weakened or deleted
 mid-flow. This is the ``spec → code`` half of se3's asymmetric, code-first
 governance — it protects existing requirements from in-flight drift, it does
 not make the spec authoritative over the code. Genuine intent changes go
-through issues or an explicit spec update / ``se3 sync`` (code → spec), not by
+through issues or an explicit spec update / ``luo sync`` (code → spec), not by
 quietly editing requirements during a merge.
 
 Also exposes ``check_spec_diff()`` as a reusable pure function so the
-CLI ``se3 guardrails`` command can share the same logic.
+CLI ``luo guardrails`` command can share the same logic.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ def _evidence_dict(**kwargs: Any) -> dict:
     """
     return EvidenceRecord(**kwargs).to_dict()
 
-_SPEC_PATH_RE = re.compile(r"^se3/specs/.+/spec\.md$")
+_SPEC_PATH_RE = re.compile(r"^(?:tianluo|se3)/specs/.+/spec\.md$")
 
 _WEAKEN_PATTERNS = [
     (r'\bMUST\b', r'\b(SHOULD|MAY)\b', "MUST weakened to SHOULD/MAY"),
@@ -879,7 +879,7 @@ def check_spec_sizes(
 ) -> list[GuardrailViolation]:
     """Check spec volume-governance size limits over a whole project.
 
-    A pure, LLM-free check that walks every ``se3/specs/<name>/spec.md`` under
+    A pure, LLM-free check that walks every ``tianluo/specs/<name>/spec.md`` under
     *project_root* and reports a :class:`GuardrailViolation` for each of three
     independent size budgets defined by *config* (a
     :class:`tianluo.config.SpecGovernanceConfig`):
@@ -891,7 +891,7 @@ def check_spec_sizes(
     * ``SIZE_SPEC_FILE`` — any non-base spec file exceeds
       ``config.spec_file_warn_bytes`` (a refactor-evaluation signal).
     * ``SIZE_REQUIREMENT`` — any single Requirement (heading + body, the unit
-      injected in items mode and emitted by ``se3 spec show``) exceeds
+      injected in items mode and emitted by ``luo spec show``) exceeds
       ``config.requirement_warn_bytes`` (a split-the-Requirement signal).
 
     Byte sizes are measured as UTF-8 byte lengths. Each violation carries
@@ -904,7 +904,7 @@ def check_spec_sizes(
     (specs in sorted path order; Requirements in document order).
 
     Args:
-        project_root: Project root containing ``se3/specs/``.
+        project_root: Project root containing ``tianluo/specs/``.
         config: A ``SpecGovernanceConfig`` carrying the byte thresholds.
 
     Returns:
@@ -931,7 +931,7 @@ def check_spec_sizes(
         except OSError as exc:
             # Unreadable file: its size budgets cannot be verified. Do NOT
             # silently skip — that would let an oversized but unreadable spec
-            # pass `se3 guardrails --sizes` under enforce mode. Emit a
+            # pass `luo guardrails --sizes` under enforce mode. Emit a
             # CHECK_INCOMPLETE violation so the check is reported as not fully
             # verified and enforce mode blocks on it.
             logger.warning(
@@ -1143,11 +1143,11 @@ def _normalize_when_clause(line: str) -> str:
 
 
 def _is_spec_path(path: str) -> bool:
-    """Return True when path matches ``se3/specs/**/spec.md``.
+    """Return True when path matches ``tianluo/specs/**/spec.md``.
 
     Canonical implementation shared by the merge subsystem (orchestrator,
     human_call, merge_respond).  Rejects empty intermediate path
-    segments such as ``se3/specs//spec.md`` so that malformed inputs
+    segments such as ``tianluo/specs//spec.md`` so that malformed inputs
     cannot bypass guardrail enforcement.
     """
     if not path:
@@ -1532,7 +1532,7 @@ class MergeGuardrailsCheck:
     ) -> GuardrailReport:
         """Check spec files changed between two commits for violations.
 
-        Lists the merge commit's touched ``se3/specs/**/spec.md`` files,
+        Lists the merge commit's touched ``tianluo/specs/**/spec.md`` files,
         fetches the pre-merge HEAD version and the merge-commit version,
         and runs :func:`check_spec_diff` on each.
 

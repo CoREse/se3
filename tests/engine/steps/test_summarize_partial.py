@@ -19,7 +19,7 @@ def _make_flow(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-001",
         "task_description": "Fix authentication bug",
         "task_type": "bugfix",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
     }
     defaults.update(kwargs)
     flow = MagicMock(spec=FlowInstance)

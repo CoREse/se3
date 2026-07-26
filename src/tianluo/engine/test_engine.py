@@ -459,7 +459,7 @@ class TestRecovery:
 
             # PersistenceManager only tracks one flow per state file
             # For multi-flow, we'd scan the state directory
-            state_dir = Path(tmpdir) / "se3" / "state"
+            state_dir = Path(tmpdir) / "tianluo" / "state"
             all_flows = list(state_dir.glob("*.json"))
             assert len(all_flows) >= 1  # At least one flow saved
 
@@ -803,7 +803,7 @@ class TestKnowledgeGuardIntegration:
     # --- helpers -------------------------------------------------------
 
     def _write_charter(self, root, text):
-        se3_dir = root / "se3"
+        se3_dir = root / "tianluo"
         se3_dir.mkdir(parents=True, exist_ok=True)
         (se3_dir / "charter.md").write_text(text, encoding="utf-8")
 
@@ -875,7 +875,7 @@ class TestKnowledgeGuardIntegration:
     def _make_flow(self, sm, tmp_path, task_type):
         flow = sm.create_flow(f"touch the architecture ({task_type})", task_type=task_type)
         # project_root = change_path.parent; keep it == tmp_path so the handler
-        # reads/writes the same se3/charter.md the anchors were frozen from.
+        # reads/writes the same tianluo/charter.md the anchors were frozen from.
         flow.change_path = tmp_path / "change"
         # Skip the pre-implement baseline subprocess (no git / no tests here).
         flow.state.baseline_failures = []
@@ -916,7 +916,7 @@ class TestKnowledgeGuardIntegration:
         # propose + gate only.
         assert state["calls"] == 2
         # The charter was actually rewritten on disk (closed loop applied).
-        on_disk = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+        on_disk = (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8")
         assert "beta subsystem" in on_disk
         assert "alpha subsystem" not in on_disk
 
@@ -972,7 +972,7 @@ class TestKnowledgeGuardIntegration:
         # Only the propose call fired; the gate never ran.
         assert state["calls"] == 1
         # Prefer-stale-over-degraded: disk unchanged.
-        assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
+        assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
 
         cf_step = self._charter_step(flow)
         assert cf_step.outputs["charter_auto_updated"] is False
@@ -1031,7 +1031,7 @@ class TestKnowledgeGuardIntegration:
         assert order.count(StepType.IMPLEMENT) >= 2, "implement fix loop did not re-run"
 
         # Both guards succeeded in the same flow: the charter was auto-updated.
-        on_disk = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+        on_disk = (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8")
         assert "beta subsystem" in on_disk
         cf_step = self._charter_step(flow)
         assert cf_step.outputs["charter_auto_updated"] is True
@@ -1076,7 +1076,7 @@ class TestKnowledgeGuardIntegration:
         # the closed loop never made an LLM call and never touched the charter.
         assert state["calls"] == 0
         assert StepType.CHARTER_FRESHNESS not in order
-        assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
+        assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == self._DISK_CHARTER
 
 
 class TestStreamProgressHistory:
@@ -1099,7 +1099,7 @@ class TestStreamProgressHistory:
                 root, "flow1", step_id, "discovery", "🔧 Read: foo.py",
                 raw_obj, attempt=0,
             )
-            path = root / "se3" / "history" / "flow1" / f"{step_id}.jsonl"
+            path = root / "tianluo" / "history" / "flow1" / f"{step_id}.jsonl"
             lines = path.read_text(encoding="utf-8").strip().split("\n")
             assert len(lines) == 1
             rec = json.loads(lines[0])
@@ -1166,7 +1166,7 @@ class TestStreamProgressHistory:
                 root, "flow1", step_id, "discovery", "P1", None, attempt=0,
             )
             # Simulate a half-written final line (e.g. process killed mid-write).
-            path = root / "se3" / "history" / "flow1" / f"{step_id}.jsonl"
+            path = root / "tianluo" / "history" / "flow1" / f"{step_id}.jsonl"
             with path.open("a", encoding="utf-8") as f:
                 f.write('{"type": "stream_progress", "content": "broke')  # no newline, no close
             # Earlier valid lines still parse; the malformed tail is skipped.

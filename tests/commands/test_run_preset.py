@@ -42,14 +42,14 @@ def _invoke(args, project_root, run_flow_mock=None):
 
 
 def _write_project_doc_sync(root: Path, body: str):
-    prompts_dir = root / "se3" / "prompts"
+    prompts_dir = root / "tianluo" / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     (prompts_dir / "doc-sync.md").write_text(body, encoding="utf-8")
-    (root / "se3.yaml").write_text(
+    (root / "tianluo.yaml").write_text(
         "presets:\n"
         "  doc-sync:\n"
         "    type: feature\n"
-        "    prompt_file: se3/prompts/doc-sync.md\n",
+        "    prompt_file: tianluo/prompts/doc-sync.md\n",
         encoding="utf-8",
     )
 
@@ -84,12 +84,12 @@ def test_preset_type_and_prompt_reach_run_flow(project_root):
 
 
 def test_missing_prompt_file_errors(project_root):
-    # Declared in se3.yaml, but the file does not exist on disk.
-    (project_root / "se3.yaml").write_text(
+    # Declared in tianluo.yaml, but the file does not exist on disk.
+    (project_root / "tianluo.yaml").write_text(
         "presets:\n"
         "  ghost:\n"
         "    type: feature\n"
-        "    prompt_file: se3/prompts/ghost.md\n",
+        "    prompt_file: tianluo/prompts/ghost.md\n",
         encoding="utf-8",
     )
     result, rf = _invoke(["--preset", "ghost"], project_root)
@@ -100,7 +100,7 @@ def test_missing_prompt_file_errors(project_root):
 
 def test_preset_list_shows_both_layers(project_root):
     # Add a project-only preset so both layers are represented.
-    prompts_dir = project_root / "se3" / "prompts"
+    prompts_dir = project_root / "tianluo" / "prompts"
     prompts_dir.mkdir(parents=True)
     (prompts_dir / "proj-only.md").write_text("project body", encoding="utf-8")
 

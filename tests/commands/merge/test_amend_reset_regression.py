@@ -6,7 +6,7 @@ These tests verify:
 - HEAD^2 assertion before amend
 - Post-condition ancestry check after repair success
 - last_hash stall detection works from iteration 1
-- max_iterations is configurable via se3.yaml
+- max_iterations is configurable via tianluo.yaml
 - Shared LLMCaller injection
 """
 
@@ -83,7 +83,7 @@ def _create_branch(path: Path, branch: str, content: str) -> str:
 def _make_violations() -> list[GuardrailViolation]:
     return [
         GuardrailViolation(
-            file_path="se3/specs/base/spec.md",
+            file_path="tianluo/specs/base/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         ),
@@ -92,7 +92,7 @@ def _make_violations() -> list[GuardrailViolation]:
 
 def _make_original_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHALL validate all user inputs.\n"
         ),
@@ -101,7 +101,7 @@ def _make_original_specs() -> dict[str, str]:
 
 def _make_merged_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
         ),
@@ -109,7 +109,7 @@ def _make_merged_specs() -> dict[str, str]:
 
 
 def _setup_spec_files(tmp_path: Path) -> None:
-    spec_dir = tmp_path / "se3" / "specs" / "base"
+    spec_dir = tmp_path / "tianluo" / "specs" / "base"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.md").write_text(
         "## Requirement: Auth\n\n"
@@ -149,7 +149,7 @@ class TestPreAmendShaRollback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -233,7 +233,7 @@ class TestPreAmendShaRollback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -337,7 +337,7 @@ class TestHeadIsMergeCommitAssertion:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -382,8 +382,8 @@ class TestRestoreMergedContent:
         try:
             with pytest.raises(OSError, match="simulated disk full"):
                 repairer._restore_merged_content(
-                    ["se3/specs/base/spec.md"],
-                    {"se3/specs/base/spec.md": "original content"},
+                    ["tianluo/specs/base/spec.md"],
+                    {"tianluo/specs/base/spec.md": "original content"},
                 )
         finally:
             Path.write_text = original_write_text
@@ -463,7 +463,7 @@ class TestAllowedPathsRefresh:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                     {
@@ -487,7 +487,7 @@ class TestAllowedPathsRefresh:
         assert result.success is False
         assert "outside spec dir" in result.error
         # The first file should have been restored
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         content = spec_path.read_text()
         assert "SHOULD" in content  # restored merged content
 
@@ -524,7 +524,7 @@ class TestPostConditionAfterRepair:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -611,20 +611,20 @@ class TestSharedLLMCaller:
 
 
 class TestConfigurableMaxIterations:
-    """Verify max_iterations is read from se3.yaml (Task 10 / A10)."""
+    """Verify max_iterations is read from tianluo.yaml (Task 10 / A10)."""
 
     def test_default_max_iterations(self, tmp_path: Path) -> None:
-        """Default max iterations is 2 when se3.yaml is absent."""
+        """Default max iterations is 2 when tianluo.yaml is absent."""
         from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
         val = _load_max_repair_iterations(tmp_path)
         assert val == 2
 
     def test_configurable_max_iterations(self, tmp_path: Path) -> None:
-        """max_iterations can be set via se3.yaml."""
+        """max_iterations can be set via tianluo.yaml."""
         from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -637,7 +637,7 @@ class TestConfigurableMaxIterations:
         """Invalid max_iterations falls back to default."""
         from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -650,7 +650,7 @@ class TestConfigurableMaxIterations:
         """Zero max_iterations falls back to default."""
         from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -673,7 +673,7 @@ class TestConfigurableMaxIterations:
             ["git", "-C", str(tmp_path), "init"],
             check=True, capture_output=True,
         )
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -694,7 +694,7 @@ class TestStallDetection:
         from tianluo.engine.merge.guardrails import violation_set_hash
 
         v = GuardrailViolation(
-            file_path="se3/specs/base/spec.md",
+            file_path="tianluo/specs/base/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         )
@@ -822,7 +822,7 @@ class TestAsymmetricAllowFixupParent:
         def mock_repair(*args, **kwargs):
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
                 used_amend=True,
             )
 
@@ -960,7 +960,7 @@ class TestEmptyPostShaFallback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1067,7 +1067,7 @@ class TestEmptyPostShaFallback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1157,7 +1157,7 @@ class TestRollbackRefusesMissingPreRepairSha:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1229,7 +1229,7 @@ class TestRollbackRefusesMissingPreRepairSha:
 
         # The working tree must have been restored (the refuse path
         # runs `_restore_merged_content` before returning).
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         restored = spec_path.read_text()
         assert "SHOULD" in restored, (
             "Working tree should be restored to merged (SHOULD) content"

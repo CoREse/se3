@@ -16,7 +16,7 @@ Key properties inherited from the library core (nothing re-implemented here):
     mode is "version computed wrong", recovered by re-running ONLY the version
     decision) never double-bumps.
   * **Two channels.** Deterministic SemVer (no LLM) by default; the custom
-    ``se3/version-rules.md`` LLM channel otherwise. This handler passes
+    ``tianluo/version-rules.md`` LLM channel otherwise. This handler passes
     ``llm_call=None`` so the library builds a real LLMCaller when needed.
 
 Per-step confirmation gate: because this is an ordinary step in the sequence,
@@ -201,7 +201,7 @@ def version_reconcile_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # point (its own reconcile) must bump only for its own intent; the other
         # flow's reconcile then bumps independently. Idempotency (reconcile-commit
         # trailer) still makes a resume safe. The unrestricted sweep is reserved
-        # for the CLI ``se3 merge`` path, which holds the lock across both halves.
+        # for the CLI ``luo merge`` path, which holds the lock across both halves.
         result = reconcile(
             project_root,
             flow_ids=[flow.flow_id],
@@ -246,7 +246,7 @@ def version_reconcile_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "version_reconcile: no version intent found for flow "
             f"{flow.flow_id} and no reconcile commit exists — the merged work "
             "would be published with no version bump or changelog entry. The "
-            f"intent file (se3/version-intents/{flow.flow_id}.json) was not "
+            f"intent file (tianluo/version-intents/{flow.flow_id}.json) was not "
             "committed, was dropped by a bad merge, or was removed. Restore it "
             "and re-run this step."
         )

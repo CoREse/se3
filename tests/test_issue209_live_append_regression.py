@@ -106,7 +106,7 @@ def _write_active_engine(root: Path, flow_id: str, *, blob_steps: int = 0) -> No
     the per-tick CPU sink #209 traced. ``blob_steps`` mimics it so the
     parse-count guard measures the operation the fix collapses.
     """
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload: dict = {"flow_id": flow_id, "status": "RUNNING"}
     if blob_steps:
@@ -170,7 +170,7 @@ def test_real_frame_sequence_matches_captured_daemon_frames(tmp_path):
     _write_active_engine(root, flow_id, blob_steps=40)
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
 
-    produced = _replay_real_frames(reader, root / "se3" / "history" / flow_id, flow_id)
+    produced = _replay_real_frames(reader, root / "tianluo" / "history" / flow_id, flow_id)
     captured = _load_captured_frames()
     assert len(produced) == len(captured)
 
@@ -214,7 +214,7 @@ def test_real_frame_replay_no_loss_no_dup_no_truncation(tmp_path):
     _write_active_engine(root, flow_id, blob_steps=40)
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
 
-    produced = _replay_real_frames(reader, root / "se3" / "history" / flow_id, flow_id)
+    produced = _replay_real_frames(reader, root / "tianluo" / "history" / flow_id, flow_id)
     delivered = [rec["message"] for reads in produced for r in reads for rec in r.records]
 
     expected = _ondisk_messages()
@@ -239,7 +239,7 @@ def test_retry_after_error_same_jsonl_append_surfaces(tmp_path):
     flow_id = "20260618-125615_issue209"
     _write_active_engine(root, flow_id, blob_steps=40)
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
-    hist_dir = root / "se3" / "history" / flow_id
+    hist_dir = root / "tianluo" / "history" / flow_id
 
     # Run the real flow to its captured end (plan has just failed).
     produced = _replay_real_frames(reader, hist_dir, flow_id)
@@ -323,7 +323,7 @@ def test_real_frame_replay_parses_active_engine_json_once_per_change(tmp_path, m
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
     lines = _load_fixture_lines()
     frames = _load_captured_frames()
-    hist_dir = root / "se3" / "history" / flow_id
+    hist_dir = root / "tianluo" / "history" / flow_id
     hist_dir.mkdir(parents=True, exist_ok=True)
     written = {name: 0 for name in _JSONL_NAMES}
     cursors: dict = {}

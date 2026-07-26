@@ -1235,7 +1235,7 @@ def _real_state_machine(tmp_path):
 
 class TestEffectivePassCountFromNestedChains:
     def test_nested_without_explicit_passes_uses_chain_count(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
     self_check:
       - [a]
@@ -1247,7 +1247,7 @@ class TestEffectivePassCountFromNestedChains:
             assert sm._get_self_check_passes_required() == 2
 
     def test_explicit_greater_than_chains_keeps_explicit(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """workflow:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """workflow:
   self_check_passes_required: 4
 llm_caller:
   steps:
@@ -1261,7 +1261,7 @@ llm_caller:
 
     def test_explicit_less_than_chains_warns_and_uses_explicit(self, tmp_path, caplog):
         import logging
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """workflow:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """workflow:
   self_check_passes_required: 1
 llm_caller:
   steps:
@@ -1282,7 +1282,7 @@ llm_caller:
         )
 
     def test_flat_self_check_uses_explicit_or_default(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
     self_check: [a, b]
 """)
@@ -1292,13 +1292,13 @@ llm_caller:
             assert sm._get_self_check_passes_required() == 1
 
     def test_no_self_check_override_uses_default(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML)
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML)
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             sm = _real_state_machine(tmp_path)
             assert sm._get_self_check_passes_required() == 1
 
     def test_build_inputs_reports_derived_passes_required(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
     self_check:
       - [a]
@@ -1329,7 +1329,7 @@ class TestLLMCallerSelectsPassChain:
     def test_pass_index_selects_nested_chain(self, tmp_path):
         from tianluo.engine.llm_caller import LLMCaller
 
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
     self_check:
       - [a]
@@ -1351,7 +1351,7 @@ class TestLLMCallerSelectsPassChain:
     def test_explicit_agents_argument_wins(self, tmp_path):
         from tianluo.engine.llm_caller import LLMCaller
 
-        (tmp_path / "se3.yaml").write_text(_AGENTS_YAML + """llm_caller:
+        (tmp_path / "tianluo.yaml").write_text(_AGENTS_YAML + """llm_caller:
   steps:
     self_check:
       - [a]

@@ -45,7 +45,7 @@ def repo(tmp_path: Path) -> Path:
     _git(r, "init", "--initial-branch=main")
     _git(r, "config", "user.email", "test@example.com")
     _git(r, "config", "user.name", "Test")
-    (r / ".gitignore").write_text("se3/\n", encoding="utf-8")
+    (r / ".gitignore").write_text("tianluo/\n", encoding="utf-8")
     _git(r, "add", ".gitignore")
     _git(r, "commit", "-m", "init")
     return r
@@ -290,7 +290,7 @@ class TestAuditIssueIntegration:
     """take-theirs / stashpop events file real YAML issues."""
 
     def test_take_theirs_writes_audit_issue_to_se3_issues(self, repo: Path):
-        """Real IssueManager call writes to se3/issues/open/."""
+        """Real IssueManager call writes to tianluo/issues/open/."""
         # 3-way conflict setup
         (repo / "shared.py").write_text("A\n", encoding="utf-8")
         _git(repo, "add", "shared.py")
@@ -316,7 +316,7 @@ class TestAuditIssueIntegration:
 
         assert result is True
 
-        issues_dir = repo / "se3" / "issues" / "open"
+        issues_dir = repo / "tianluo" / "issues" / "open"
         assert issues_dir.exists()
         yaml_files = list(issues_dir.glob("*.yaml"))
         assert len(yaml_files) == 1

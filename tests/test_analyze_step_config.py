@@ -1,7 +1,7 @@
 """Tests for analyze._update_flow_steps preserving steps.append config.
 
 Regression test for Bug 1: analyze's _update_flow_steps rebuilt the step
-sequence from the default and dropped steps appended via se3.yaml's
+sequence from the default and dropped steps appended via tianluo.yaml's
 ``steps.append`` (e.g. summarize). The fix re-applies apply_step_config
 after the rebuild, mirroring state_machine.create_flow's ordering.
 """
@@ -28,7 +28,7 @@ def _make_flow(project_root) -> FlowInstance:
 
 def test_update_flow_steps_keeps_appended_summarize(tmp_path):
     """summarize configured via steps.append survives the analyze rebuild."""
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         yaml.dump({"steps": {"append": ["summarize"]}})
     )
 
@@ -42,7 +42,7 @@ def test_update_flow_steps_keeps_appended_summarize(tmp_path):
 
 def test_update_flow_steps_no_duplicate_append(tmp_path):
     """The appended step is added exactly once, not duplicated."""
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         yaml.dump({"steps": {"append": ["summarize"]}})
     )
 
@@ -68,7 +68,7 @@ def test_update_flow_steps_summarize_present_without_config(tmp_path):
 def test_update_flow_steps_append_summarize_noop(tmp_path):
     """With summarize now a default step, configuring steps.append: [summarize]
     is a no-op: it stays a single entry at the end after the analyze rebuild."""
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         yaml.dump({"steps": {"append": ["summarize"]}})
     )
 

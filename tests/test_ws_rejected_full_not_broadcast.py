@@ -87,7 +87,7 @@ async def _paused_worktree_flow(state, flow_id="f1"):
     await _register_flow(
         state,
         status="paused",
-        project_root="/repo/se3/worktrees/wt-a",
+        project_root="/repo/tianluo/worktrees/wt-a",
         flow_id=flow_id,
     )
 

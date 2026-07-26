@@ -38,8 +38,8 @@ class TestConfirmStepHandler:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/calls directory
-        calls_dir = self.project_root / "se3" / "calls"
+        # Create tianluo/calls directory
+        calls_dir = self.project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a CONFIRM step
@@ -104,7 +104,7 @@ class TestConfirmStepHandler:
         from tianluo.engine.steps.confirm import confirm_handler
 
         # First create a call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{self.confirm_step.step_id}_12345.json"
         call_data = {
             "step": self.confirm_step.step_id,
@@ -135,7 +135,7 @@ class TestConfirmStepHandler:
         from tianluo.engine.steps.confirm import confirm_handler
 
         # First create a call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{self.confirm_step.step_id}_12345.json"
         call_data = {
             "step": self.confirm_step.step_id,
@@ -333,8 +333,8 @@ class TestRunCommandConfirmHandling:
         self.project_root = Path(self.tmpdir)
 
         # Create se3 directory structure
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a CONFIRM step
         self.flow = FlowInstance(
@@ -381,7 +381,7 @@ class TestRunCommandConfirmHandling:
         from tianluo.commands.run import _check_confirm_response
 
         # Create call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -405,7 +405,7 @@ class TestRunCommandConfirmHandling:
         from tianluo.commands.run import _check_confirm_response
 
         # Create call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -429,7 +429,7 @@ class TestRunCommandConfirmHandling:
         from tianluo.commands.run import _check_confirm_response
 
         # Create call file but no response
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -448,8 +448,8 @@ class TestConfirmationStepInsertion:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3.yaml using the per-step confirmation schema.
-        se3_yaml = self.project_root / "se3.yaml"
+        # Create tianluo.yaml using the per-step confirmation schema.
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps:
@@ -492,7 +492,7 @@ confirmation:
         """Empty confirmation.steps confirms only plan (always-on), nothing else."""
         # Empty confirmation.steps means no NON-plan step gets confirmed;
         # plan-confirm is always-on and is therefore unaffected.
-        se3_yaml = self.project_root / "se3.yaml"
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps: {}
@@ -519,11 +519,11 @@ class TestEndToEndConfirmationFlow:
         self.project_root = Path(self.tmpdir)
 
         # Create directory structure
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
-        # Create se3.yaml using the per-step confirmation schema.
-        se3_yaml = self.project_root / "se3.yaml"
+        # Create tianluo.yaml using the per-step confirmation schema.
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps:
@@ -574,7 +574,7 @@ confirmation:
         flow.state.current_step_id = "confirm-001"
 
         # Simulate human response file already exists (approval)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{confirm_step.step_id}_12345.json"
         call_file.write_text(json.dumps({
             "step": confirm_step.step_id,
@@ -638,7 +638,7 @@ confirmation:
         flow.state.current_step_id = "confirm-001"
 
         # Simulate human response file (changes requested)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{confirm_step.step_id}_12345.json"
         call_file.write_text(json.dumps({
             "step": confirm_step.step_id,
@@ -669,7 +669,7 @@ class TestLLMReviewerNoCallFile:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
@@ -717,7 +717,7 @@ class TestLLMReviewerNoCallFile:
 
         confirm_handler(self.confirm_step, self.flow)
 
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_files = list(calls_dir.glob("confirm_*.json"))
         assert len(call_files) == 0, f"Expected no call files but found: {call_files}"
 

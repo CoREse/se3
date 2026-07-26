@@ -1,6 +1,6 @@
 """Display rendering of the code-index — adaptive root view vs literal drill-in.
 
-Two display views over the authoritative ``se3/code-index.md``:
+Two display views over the authoritative ``tianluo/code-index.md``:
 
 - :func:`render_adaptive` — the **root view**: a zoomable directory tree expanded
   to a byte budget. The whole top level is shown collapsed (one line per
@@ -11,7 +11,7 @@ Two display views over the authoritative ``se3/code-index.md``:
   project — a 100k-file tree and a 10-file tree both fit the same budget. The
   budget naturally stops expansion at directory granularity (file-level for one
   big tree already dwarfs a small budget), which is the right altitude for an
-  always-injected map; function/method detail is one ``se3 code-index show`` away.
+  always-injected map; function/method detail is one ``luo code-index show`` away.
 - :func:`render_path` — the **literal drill-in view**: exactly one level at the
   given path — a directory's immediate children (subdirs collapsed + files), or a
   file's full function/method tree. Deterministic and predictable: it never
@@ -33,7 +33,7 @@ from .code_index import CodeIndex, DEGRADED_MARKER, FileEntry, ROOT_DIR, md_path
 def load_for_display(project_root: Path) -> Optional[CodeIndex]:
     """Reconstruct a render-only index from the authoritative md on disk.
 
-    Returns ``None`` when ``se3/code-index.md`` does not exist yet (no build has
+    Returns ``None`` when ``tianluo/code-index.md`` does not exist yet (no build has
     run). Reads only the md.
     """
     path = md_path(project_root)
@@ -275,7 +275,7 @@ def iter_search_lines(index: CodeIndex) -> List[str]:
     - symbol     ``- `relpath::local_id` (kind) — summary``
 
     A symbol's line carries its owning file's full path (``relpath::local_id``),
-    which is exactly the context a raw ``grep se3/code-index.md`` cannot give: a
+    which is exactly the context a raw ``grep tianluo/code-index.md`` cannot give: a
     bare symbol bullet in the md is indented under a file heading many lines
     away. Lines are built from the structured index, never passed through from
     the md text, so they never carry the ``<!--#...-->`` fingerprint comments.

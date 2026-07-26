@@ -181,7 +181,7 @@ class TestNormalization:
 class TestResolveLanguageChain:
     def _write_project(self, root: Path, language):
         val = language if language else "null"
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             f"language:\n  language: {val}\n  spec_language: null\n"
         )
 
@@ -253,7 +253,7 @@ class TestResolveLanguageChain:
         # `language: NO` (intended Norwegian) is YAML-typed as the boolean False.
         # It is still an *explicit* config value, so it resolves to en-US instead
         # of silently letting the system locale pick the UI language.
-        (tmp_path / "se3.yaml").write_text("language:\n  language: NO\n")
+        (tmp_path / "tianluo.yaml").write_text("language:\n  language: NO\n")
         monkeypatch.setenv("LANG", "zh_CN.UTF-8")
         assert i18n.resolve_language(tmp_path) == "en-US"
 
@@ -275,7 +275,7 @@ class TestLazySingleton:
         assert i18n._current_language is None
 
     def test_get_language_resolves_from_cwd(self, tmp_path, monkeypatch):
-        (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        (tmp_path / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
         monkeypatch.chdir(tmp_path)
         i18n.reset_language()
         assert i18n.get_language() == "zh-CN"
@@ -316,7 +316,7 @@ class TestBindProjectRoot:
 
         project = tmp_path / "zh-project"
         project.mkdir()
-        (project / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        (project / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
 
         assert i18n.bind_project_root(project) == "zh-CN"
         assert i18n.get_language() == "zh-CN"
@@ -324,12 +324,12 @@ class TestBindProjectRoot:
     def test_env_still_outranks_bound_project(self, tmp_path, monkeypatch):
         # bind re-runs the full chain, so SE3_LANG keeps its top precedence.
         monkeypatch.setenv("SE3_LANG", "en-US")
-        (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        (tmp_path / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
         assert i18n.bind_project_root(tmp_path) == "en-US"
 
     def test_none_root_binds_cwd(self, tmp_path, monkeypatch):
         monkeypatch.delenv("SE3_LANG", raising=False)
-        (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        (tmp_path / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
         monkeypatch.chdir(tmp_path)
         assert i18n.bind_project_root(None) == "zh-CN"
 
@@ -344,7 +344,7 @@ def test_cli_get_project_root_binds_language(tmp_path, monkeypatch):
 
     monkeypatch.delenv("SE3_LANG", raising=False)
     monkeypatch.setenv("LANG", "en_US.UTF-8")
-    (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+    (tmp_path / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
     sub = tmp_path / "src" / "deep"
     sub.mkdir(parents=True)
     monkeypatch.chdir(sub)
@@ -383,8 +383,8 @@ def test_wheel_includes_locales(tmp_path, monkeypatch):
 
     with zipfile.ZipFile(out_dir / wheel_name) as zf:
         names = zf.namelist()
-    assert any(n.endswith("se3/i18n/locales/en-US.json") for n in names), names
-    assert any(n.endswith("se3/i18n/locales/zh-CN.json") for n in names), names
+    assert any(n.endswith("tianluo/i18n/locales/en-US.json") for n in names), names
+    assert any(n.endswith("tianluo/i18n/locales/zh-CN.json") for n in names), names
 
 
 # ---------------------------------------------------------------------------

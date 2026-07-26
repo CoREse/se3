@@ -1,6 +1,6 @@
 """Process discovery and supervision for the SE3 daemon.
 
-:class:`DaemonSupervisor` tracks the local machine's running ``se3 run``
+:class:`DaemonSupervisor` tracks the local machine's running ``luo run``
 processes. It maintains a ``PID -> FlowRecord`` mapping, detects process exit
 by polling (so it works uniformly across platforms without relying on
 ``SIGCHLD``), and prunes records for dead processes.
@@ -8,8 +8,8 @@ by polling (so it works uniformly across platforms without relying on
 Two sources feed the mapping:
 
 * **Spawned** flows — registered by :class:`~tianluo.daemon.spawner.DaemonSpawner`
-  when the daemon starts a ``se3 run`` child on behalf of a remote request.
-* **Discovered** flows — externally-started ``se3 run`` processes found by
+  when the daemon starts a ``luo run`` child on behalf of a remote request.
+* **Discovered** flows — externally-started ``luo run`` processes found by
   scanning process command lines (best-effort, via ``psutil`` when available).
 
 The supervisor is thread-safe: all mutation of the internal map is guarded by
@@ -17,6 +17,7 @@ a re-entrant lock, so several flows starting/exiting concurrently never race.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 import os
@@ -40,13 +41,13 @@ except Exception:  # pragma: no cover - psutil absent
 ExitCallback = Callable[["FlowRecord"], None]
 
 # A process carrying this env var (value "1") opts itself out of a daemon's
-# external ``se3 run`` discovery. The test suite sets it on every subprocess it
+# external ``luo run`` discovery. The test suite sets it on every subprocess it
 # spawns (see ``tests/conftest.py``) so that a real daemon running on the same
-# dev machine never picks up a test's throwaway ``se3 run`` stub — which lives
+# dev machine never picks up a test's throwaway ``luo run`` stub — which lives
 # in a pytest tempdir — and persists that cwd into ``~/.se3/project_roots.json``.
 # The existence-based registry self-heal cannot undo that leak while pytest
 # still retains the tempdir, so the process must be invisible to the scan in the
-# first place. Purely opt-in: a genuine ``se3 run`` never sets it.
+# first place. Purely opt-in: a genuine ``luo run`` never sets it.
 EXTERNAL_SCAN_IGNORE_ENV = "SE3_EXTERNAL_SCAN_IGNORE"
 
 
@@ -56,7 +57,7 @@ def _proc_opted_out_of_scan(proc) -> bool:
     Best-effort and deliberately broad in its exception handling: ``environ()``
     may be denied (a foreign-user process), unavailable (a fake psutil in tests),
     or raise for a vanished/zombie process. Any failure to read the environment
-    is treated as "not opted out" so a real ``se3 run`` is never hidden from
+    is treated as "not opted out" so a real ``luo run`` is never hidden from
     discovery just because its environment could not be read.
     """
     try:
@@ -71,7 +72,7 @@ def _proc_opted_out_of_scan(proc) -> bool:
 
 @dataclass
 class FlowRecord:
-    """A single supervised ``se3 run`` process.
+    """A single supervised ``luo run`` process.
 
     Attributes:
         pid: Operating-system process id.
@@ -125,16 +126,16 @@ def _is_alive(pid: int) -> bool:
 def resolve_worktree_main_root(path: object) -> Optional[str]:
     """Return the main project root for an se3 *worktree isolation* directory.
 
-    A ``se3 run --worktree`` flow body executes inside
-    ``<main_root>/se3/worktrees/<name>/``. That directory is a transient
+    A ``luo run --worktree`` flow body executes inside
+    ``<main_root>/tianluo/worktrees/<name>/``. That directory is a transient
     execution sandbox created and managed by the worktree-management flows — it
     is gitignored and never a standalone project — so a process discovered
     running there MUST be attributed back to ``<main_root>`` rather than
     registered as its own project root (otherwise the worktree copy pollutes the
     WebUI project list / registry).
 
-    The attribution strips exactly **one** ``/se3/worktrees/<name>`` suffix
-    level, so a *nested* worktree (``…/wt1/se3/worktrees/wt2``) resolves to its
+    The attribution strips exactly **one** ``/tianluo/worktrees/<name>`` suffix
+    level, so a *nested* worktree (``…/wt1/tianluo/worktrees/wt2``) resolves to its
     immediate parent project (``…/wt1``) rather than over-collapsing to the
     outermost root — this is what keeps a main project that itself lives under a
     parent worktree from being mis-attributed.
@@ -149,15 +150,15 @@ def resolve_worktree_main_root(path: object) -> Optional[str]:
     except OSError:  # pragma: no cover - defensive
         return None
     parent = resolved.parent
-    # The worktree directory is a direct child of ``<main_root>/se3/worktrees``.
-    if parent.name != "worktrees" or parent.parent.name != "se3":
+    # The worktree directory is a direct child of ``<main_root>/tianluo/worktrees``.
+    if parent.name != "worktrees" or parent.parent.name not in ("tianluo", "se3"):
         return None
     main_root = parent.parent.parent
     # Only attribute back when the resolved main root is itself a plausible se3
     # project (carries an ``se3`` directory). Guards against an unrelated tree
-    # that merely happens to nest a ``se3/worktrees`` path component.
+    # that merely happens to nest a ``tianluo/worktrees`` path component.
     try:
-        if not (main_root / "se3").is_dir():
+        if not (runtime_dir(main_root)).is_dir():
             return None
     except OSError:  # pragma: no cover - defensive
         return None
@@ -165,10 +166,10 @@ def resolve_worktree_main_root(path: object) -> Optional[str]:
 
 
 def is_worktree_copy_root(path: object) -> bool:
-    """Return whether *path* is an se3 worktree isolation copy directory.
+    """Return whether *path* is an luo worktree isolation copy directory.
 
     True exactly when :func:`resolve_worktree_main_root` can attribute *path*
-    back to a main project root — i.e. *path* is a ``<main>/se3/worktrees/<name>``
+    back to a main project root — i.e. *path* is a ``<main>/tianluo/worktrees/<name>``
     isolation sandbox rather than a standalone project root.
     """
     return resolve_worktree_main_root(path) is not None
@@ -185,13 +186,13 @@ def _read_flow_id(project_root: str) -> Optional[str]:
     Read with ``active=True`` like every other live-engine.json reader in the
     daemon: this is the single mutable engine.json, and a completed→new-flow swap
     can preserve byte size and land in the same mtime tick. A stat-only cache hit
-    would then attribute a just-spawned ``se3 run`` to the previous flow's
+    would then attribute a just-spawned ``luo run`` to the previous flow's
     flow_id, so registration must go through the same-stat window verification
     rather than trusting the stat key alone.
     """
     from .disk_json_cache import read_engine_header
 
-    engine_json = Path(project_root) / "se3" / "state" / "engine.json"
+    engine_json = runtime_dir(Path(project_root)) / "state" / "engine.json"
     header = read_engine_header(engine_json, active=True)
     if not isinstance(header, dict):
         return None
@@ -200,7 +201,7 @@ def _read_flow_id(project_root: str) -> Optional[str]:
 
 
 class DaemonSupervisor:
-    """Discovers and tracks local ``se3 run`` processes."""
+    """Discovers and tracks local ``luo run`` processes."""
 
     def __init__(self, *, include_scan_ignored: bool = False) -> None:
         self._flows: Dict[int, FlowRecord] = {}
@@ -291,7 +292,7 @@ class DaemonSupervisor:
         """Return all currently-running supervised flows.
 
         Dead processes are reaped first. When *scan_external* is true and
-        ``psutil`` is installed, externally-started ``se3 run`` processes are
+        ``psutil`` is installed, externally-started ``luo run`` processes are
         discovered and added to the mapping.
         """
         self.reap()
@@ -301,7 +302,7 @@ class DaemonSupervisor:
             return sorted(self._flows.values(), key=lambda r: r.started_at)
 
     def _scan_external(self) -> None:
-        """Discover ``se3 run`` processes not started by this daemon.
+        """Discover ``luo run`` processes not started by this daemon.
 
         Best-effort: requires ``psutil``. A no-op when psutil is unavailable.
         """
@@ -331,8 +332,8 @@ class DaemonSupervisor:
                         if pid in self._flows:
                             continue
                     cwd = info.get("cwd") or os.getcwd()
-                    # A ``se3 run --worktree`` flow body found running with its
-                    # cwd inside ``<main>/se3/worktrees/<name>`` is a transient
+                    # A ``luo run --worktree`` flow body found running with its
+                    # cwd inside ``<main>/tianluo/worktrees/<name>`` is a transient
                     # isolation sandbox, not a standalone project. Attribute it
                     # back to its main project root so the worktree copy never
                     # gets registered (and surfaced in the WebUI) as its own
@@ -379,35 +380,35 @@ def _cmdline_is_se3_run(cmdline: List[str]) -> bool:
     ``psutil`` actually observes via ``/proc/<pid>/cmdline``:
 
     * console-script form — ``se3`` (basename) is the executed program. That is
-      ``argv[0]`` for a direct ``se3 run`` / ``/path/se3 run``, but ``argv[1]``
+      ``argv[0]`` for a direct ``luo run`` / ``/path/luo run``, but ``argv[1]``
       once the shebang is rewritten and psutil reports
       ``["python3", "/path/se3", "run", ...]``; both positions are checked.
-    * module form — ``python [...] -m se3 run`` (``-m`` immediately followed by
+    * module form — ``python [...] -m luo run`` (``-m`` immediately followed by
       ``se3``).
 
     In both shapes ``run`` must be the *immediate* subcommand token — i.e. the
     one directly after the ``se3`` program / module token. A later standalone
-    ``run`` is NOT sufficient: it would accept other se3 commands whose own
+    ``run`` is NOT sufficient: it would accept other luo commands whose own
     subcommand or argument happens to be named ``run`` (e.g.
-    ``se3 migrate run`` / ``python -m se3 migrate run``), re-introducing the
+    ``luo migrate run`` / ``python -m luo migrate run``), re-introducing the
     false-positive WebUI aggregation this predicate exists to prevent. The
     callback exposes only the eager-exit ``--version``/``-v`` global option, so
-    a genuine ``se3 run`` never carries another token between ``se3`` and
+    a genuine ``luo run`` never carries another token between ``se3`` and
     ``run``.
 
     The Python inline-code form is excluded structurally: ``-c`` is an
     *interpreter* option, so it precedes any program/module token, and
     everything after the inline ``<code>`` is that script's own argv (e.g. a
     test stub ``["python3", "-c", "<code>", "se3", "run"]``) — never a real
-    se3 run. Crucially this excludes only the interpreter ``-c``; the CLI's own
-    ``se3 run -c/--change`` option (which appears *after* the ``run`` token) is
+    luo run. Crucially this excludes only the interpreter ``-c``; the CLI's own
+    ``luo run -c/--change`` option (which appears *after* the ``run`` token) is
     still recognised.
     """
     if not cmdline:
         return False
     # Console-script form: ``se3`` is the executed program at argv[0] (direct
-    # execution) or argv[1] (shebang rewritten to ``python3 /path/se3 run``),
-    # with ``run`` as the very next token. Here argv[0] is se3 itself, so any
+    # execution) or argv[1] (shebang rewritten to ``python3 /path/luo run``),
+    # with ``run`` as the very next token. Here argv[0] is luo itself, so any
     # later ``-c`` is the CLI's --change option, never interpreter inline code.
     for i in (0, 1):
         if (
@@ -416,7 +417,7 @@ def _cmdline_is_se3_run(cmdline: List[str]) -> bool:
             and cmdline[i + 1] == "run"
         ):
             return True
-    # Module form: ``python [...] -m se3 run``. ``-m`` must be a real
+    # Module form: ``python [...] -m luo run``. ``-m`` must be a real
     # interpreter option, not a token sitting inside an inline ``-c <code>``
     # argv — so a ``-c`` appearing *before* ``-m`` marks inline-code mode and
     # disqualifies the match. ``run`` must immediately follow ``se3``.

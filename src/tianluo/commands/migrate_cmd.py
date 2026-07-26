@@ -1,13 +1,13 @@
 """SE3 Migrate — first-class, registry-based version/format migration channel.
 
-``se3 migrate`` is the reusable entry point for one-shot schema / format
+``luo migrate`` is the reusable entry point for one-shot schema / format
 upgrades. It is deliberately a **registry** (``MIGRATORS``) so that future
-schema bumps reuse the same skeleton (``se3 migrate list`` / ``se3 migrate run
+schema bumps reuse the same skeleton (``luo migrate list`` / ``luo migrate run
 <id>``) instead of growing a fresh ad-hoc command each time.
 
 The shipped first migrator — :data:`SPEC_TO_NEW_SYSTEM` (id
 ``spec-to-new-system``) — performs the one-shot cutover from the retired
-``se3/specs/`` spec corpus to the new **code-index + charter + why-comment**
+``tianluo/specs/`` spec corpus to the new **code-index + charter + why-comment**
 triad. It runs as an ordered, each-step-independently-fault-tolerant pipeline
 (mirroring :mod:`tianluo.commands.salvage_cmd`), with **salvage first**: the
 why/intent worth keeping is extracted from the spec corpus *before* anything is
@@ -18,21 +18,22 @@ Pipeline (see :func:`run_spec_to_new_system`):
 
 1. **assemble charter** — combine the shrunk, altitude-gated ``base`` spec with
    the cross-file / no-single-owner why/intent scanned out of the non-base
-   specs, and write ``se3/charter.md`` exactly **once** (no overwrite window —
+   specs, and write ``tianluo/charter.md`` exactly **once** (no overwrite window —
    the body is assembled fully in memory, then a single write lands it).
 2. **colocate why-comments** — the code-location-bound why/intent extracted from
    the non-base specs is inserted as ``WHY``-comments into the corresponding
    source files.
 3. **code-index first build** — a full ``code_index.build_index`` over the whole
-   tree, producing the authoritative ``se3/code-index.md``.
-4. **delete specs** — the entire ``se3/specs/`` tree is removed, but **only
+   tree, producing the authoritative ``tianluo/code-index.md``.
+4. **delete specs** — the entire ``tianluo/specs/`` tree is removed, but **only
    after** the charter assembly and colocation both succeeded (so nothing is
    deleted until the salvage is confirmed). Recoverability rides on git.
-5. **rewrite .gitignore** — whitelist ``!/se3/code-index.md`` and
-   ``!/se3/charter.md``, drop any ``!/se3/specs/`` whitelist (idempotent).
+5. **rewrite .gitignore** — whitelist ``!/tianluo/code-index.md`` and
+   ``!/tianluo/charter.md``, drop any ``!/tianluo/specs/`` whitelist (idempotent).
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir, runtime_dir_name
 
 import json
 import logging
@@ -90,7 +91,7 @@ class SalvageInput:
 class SalvageResult:
     """The salvaged product: the assembled charter body + colocations.
 
-    ``charter_body`` is the **full** ``se3/charter.md`` content (written once);
+    ``charter_body`` is the **full** ``tianluo/charter.md`` content (written once);
     ``colocations`` are the code-bound why/intent fragments to insert as
     comments; ``notes`` carry advisory messages for the human reviewer.
     """
@@ -127,7 +128,7 @@ class Migrator:
 
 
 #: The registry of available migrations, keyed by id. Future schema/format
-#: upgrades register here and are immediately reachable via ``se3 migrate``.
+#: upgrades register here and are immediately reachable via ``luo migrate``.
 MIGRATORS: Dict[str, Migrator] = {}
 
 
@@ -257,7 +258,7 @@ def _make_llm_salvager(project_root: Path) -> SpecSalvager:
         charter_prompt = (
             "You are migrating a project from a spec corpus to a single "
             "high-altitude `charter`. Assemble the FULL content of "
-            "`se3/charter.md`.\n\n"
+            "`tianluo/charter.md`.\n\n"
             "Rules:\n"
             "- Shrink the base spec to only charter-admissible content, per the "
             "admission standard below.\n"
@@ -440,15 +441,20 @@ def _write_charter_once(project_root: Path, charter_body: str) -> Path:
 # .gitignore rewrite (idempotent)
 # ---------------------------------------------------------------------------
 
-_GITIGNORE_WHITELISTS = [
-    "!/se3/code-index.md",
-    "!/se3/charter.md",
-    # Version-reconcile intent metadata: committed on the flow branch so the
-    # merge-side reconcile step can read every merged-in branch's intent from
-    # master. Must be tracked, unlike the rest of se3/ runtime content.
-    "!/se3/version-intents/",
-]
-_GITIGNORE_REMOVE = "!/se3/specs/"
+def _gitignore_whitelists(runtime_name: str) -> list:
+    return [
+        f"!/{runtime_name}/code-index.md",
+        f"!/{runtime_name}/charter.md",
+        # Version-reconcile intent metadata: committed on the flow branch so
+        # the merge-side reconcile step can read every merged-in branch's
+        # intent from master. Must be tracked, unlike the rest of the runtime
+        # content.
+        f"!/{runtime_name}/version-intents/",
+    ]
+
+
+def _gitignore_remove(runtime_name: str) -> str:
+    return f"!/{runtime_name}/specs/"
 
 _GITIGNORE_ROOT_DENY_HEADER = [
     "# Repository root: ignore everything by default; whitelist tracked entries.",
@@ -511,7 +517,7 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
     top-level whitelists.
 
     Idempotent: re-running makes no further change. Returns a human-readable
-    list of the changes made (empty when already migrated). When ``/se3/*`` is
+    list of the changes made (empty when already migrated). When ``/tianluo/*`` is
     present the whitelists are inserted right after it so the negations take
     effect; otherwise they are appended.
 
@@ -531,16 +537,22 @@ def _rewrite_gitignore(project_root: Path) -> List[str]:
     stripped = {ln.strip() for ln in lines}
     changes: List[str] = []
 
-    # Remove the retired specs whitelist.
-    if _GITIGNORE_REMOVE in stripped:
-        lines = [ln for ln in lines if ln.strip() != _GITIGNORE_REMOVE]
-        changes.append(t("migrate.gitignore.removed", pattern=_GITIGNORE_REMOVE))
-        stripped.discard(_GITIGNORE_REMOVE)
+    runtime_name = runtime_dir_name(project_root)
+    gitignore_remove = _gitignore_remove(runtime_name)
 
-    # Find the `/se3/*` anchor to insert new whitelists right after it.
-    missing = [w for w in _GITIGNORE_WHITELISTS if w not in stripped]
+    # Remove the retired specs whitelist.
+    if gitignore_remove in stripped:
+        lines = [ln for ln in lines if ln.strip() != gitignore_remove]
+        changes.append(t("migrate.gitignore.removed", pattern=gitignore_remove))
+        stripped.discard(gitignore_remove)
+
+    # Find the `/<runtime>/*` anchor to insert new whitelists right after it.
+    missing = [w for w in _gitignore_whitelists(runtime_name) if w not in stripped]
     if missing:
-        anchor = next((i for i, ln in enumerate(lines) if ln.strip() == "/se3/*"), None)
+        anchor = next(
+            (i for i, ln in enumerate(lines) if ln.strip() == f"/{runtime_name}/*"),
+            None,
+        )
         if anchor is not None:
             for offset, w in enumerate(missing):
                 lines.insert(anchor + 1 + offset, w)
@@ -581,7 +593,7 @@ def run_spec_to_new_system(
 ) -> MigrationReport:
     """Execute the one-shot spec -> new-system migration (each step tolerant).
 
-    Ordered pipeline; deletion of ``se3/specs/`` happens ONLY after the charter
+    Ordered pipeline; deletion of ``tianluo/specs/`` happens ONLY after the charter
     assembly and colocation have both succeeded (salvage confirmed). The command
     never commits — all changes land in the working tree as one reviewable,
     ``git revert``-able change.
@@ -596,7 +608,7 @@ def run_spec_to_new_system(
 
     project_root = Path(project_root)
     report = MigrationReport()
-    specs_dir = project_root / "se3" / "specs"
+    specs_dir = runtime_dir(project_root) / "specs"
 
     base_text, non_base = _load_spec_corpus(specs_dir)
 

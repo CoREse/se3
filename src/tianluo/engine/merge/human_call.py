@@ -1,11 +1,12 @@
 """HumanCallWriter — Create MCP human call files for merge conflicts.
 
-Writes structured call files to ``se3/calls/`` when LLM conflict resolution
+Writes structured call files to ``tianluo/calls/`` when LLM conflict resolution
 triggers a HUMAN_CALL decision. The call file contains conflict context,
 LLM resolution proposals, and decision options for human review.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import hashlib
 import itertools
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 #
 # FORK CAVEAT: ``itertools.count`` is fork-unsafe — a child process inherits
 # the same counter state as the parent and would emit duplicate seq numbers.
-# se3 merge does not currently fork, but any future change that introduces
+# luo merge does not currently fork, but any future change that introduces
 # ``multiprocessing`` or ``os.fork`` after this counter has been advanced
 # would otherwise re-emit the same pid+seq pair from the child.  The pid+sha8
 # components of the filename make the practical collision probability low
@@ -126,7 +127,7 @@ def _atomic_write_json(call_file: Path, call_data: dict) -> None:
 
     Symlink protection: if a symlink exists at the destination path,
     refuse to write rather than letting ``os.replace`` follow / replace
-    it.  ``se3/calls/`` is normally controlled, but since we already
+    it.  ``tianluo/calls/`` is normally controlled, but since we already
     take pains with mkstemp prefix and fsync, the destination check
     closes the symmetry gap so a malicious or accidentally-placed
     symlink cannot redirect the write to an unrelated path.
@@ -142,7 +143,7 @@ def _atomic_write_json(call_file: Path, call_data: dict) -> None:
     files that other tools (CI runners, MCP clients running as different
     users) need to read remain readable.  When creating a new file the
     mkstemp default of 0o600 is widened to 0o644 — a call-file
-    convention consistent with the rest of ``se3/calls/`` — so the
+    convention consistent with the rest of ``tianluo/calls/`` — so the
     common case (no pre-existing file) is not silently restricted.
     """
     call_file.parent.mkdir(parents=True, exist_ok=True)
@@ -258,7 +259,7 @@ def _read_original_for_orphan(
 
 
 def _is_spec_path(path: str) -> bool:
-    """Return True when ``path`` matches ``se3/specs/**/spec.md``.
+    """Return True when ``path`` matches ``tianluo/specs/**/spec.md``.
 
     Delegates to :func:`tianluo.engine.merge.guardrails._is_spec_path` so
     every module shares the same canonical implementation (defect from
@@ -292,7 +293,7 @@ def _scan_orphan_content_for_evidence(
       - ``oversize``: True when content exceeds 256 KB (1 MiB triggers
         ``critical_oversize``). Surfaces unbounded LLM responses.
       - ``looks_like_spec_path``: True when the path contains "spec"
-        but does not match the strict ``se3/specs/**/spec.md`` pattern,
+        but does not match the strict ``tianluo/specs/**/spec.md`` pattern,
         indicating possible path-name evasion.
     """
     evidence: dict = {
@@ -380,7 +381,7 @@ class HumanCallWriter:
         Returns:
             Path to the written call file.
         """
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = runtime_dir(self.project_root) / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         if call_file_name:
@@ -639,7 +640,7 @@ class HumanCallWriter:
                 This is a hard failure — downstream consumers must never
                 receive ``<unknown>`` placeholders (fixes defect F4).
         """
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = runtime_dir(self.project_root) / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         call_file = calls_dir / _generate_call_filename(
@@ -668,9 +669,9 @@ class HumanCallWriter:
                 f"To respond, create a file named '{call_file.name}.response' "
                 f"in the same directory with JSON: {{\"choice\": \"accept|abort|manual\", "
                 f"\"feedback\": \"optional notes\"}}. "
-                f"For 'accept': fix the spec files manually, then re-run `se3 merge`. "
+                f"For 'accept': fix the spec files manually, then re-run `luo merge`. "
                 f"For 'abort': no further action needed, the rollback is complete. "
-                f"For 'manual': inspect and fix the spec files, then re-run `se3 merge`."
+                f"For 'manual': inspect and fix the spec files, then re-run `luo merge`."
             )
         else:
             instructions = (
@@ -680,9 +681,9 @@ class HumanCallWriter:
                 f"To respond, create a file named '{call_file.name}.response' "
                 f"in the same directory with JSON: {{\"choice\": \"accept|abort|manual\", "
                 f"\"feedback\": \"optional notes\"}}. "
-                f"For 'accept': fix the spec files manually, then re-run `se3 merge`. "
+                f"For 'accept': fix the spec files manually, then re-run `luo merge`. "
                 f"For 'abort': no further action needed, the rollback is complete. "
-                f"For 'manual': inspect and fix the spec files, then re-run `se3 merge`."
+                f"For 'manual': inspect and fix the spec files, then re-run `luo merge`."
             )
 
         # Defensive: validate required keys in violation dicts so the call
@@ -759,7 +760,7 @@ class HumanCallWriter:
             print("\nNext steps:")
             print("  - Review the guardrail violations below")
             print("  - Fix the spec files manually")
-            print("  - Re-run: se3 merge <branch>")
+            print("  - Re-run: luo merge <branch>")
             violations = call_data.get("violations", [])
             for v in violations[:2]:
                 print(f"\n  [{v.get('violation_type', 'UNKNOWN')}] {v.get('file_path', '')}")

@@ -1,7 +1,7 @@
 """Tests for the no-data-loss archive foundation in ``stash_utils``.
 
 G1 builds the primitive that extracts a live (failed-to-pop) stash's full
-content and persists it under ``se3/worktrees/.archive/`` *before* anything
+content and persists it under ``tianluo/worktrees/.archive/`` *before* anything
 is dropped. These tests drive ``_resolve_stash_ref`` and
 ``archive_stash_payload`` against real temporary git repos.
 """
@@ -79,7 +79,7 @@ def test_resolve_stash_ref_matches_label_not_position(tmp_path: Path) -> None:
 
 def test_archive_stash_payload_untracked_and_tracked(tmp_path: Path) -> None:
     """Both untracked (``.next_id``, ``NNN_*.yaml``) and tracked working-tree
-    changes are persisted under ``se3/worktrees/.archive/<ts>_<label>/`` with
+    changes are persisted under ``tianluo/worktrees/.archive/<ts>_<label>/`` with
     their original relative paths, complete content, and a verifiable blob
     sha."""
     _init_repo(tmp_path)
@@ -87,15 +87,15 @@ def test_archive_stash_payload_untracked_and_tracked(tmp_path: Path) -> None:
     # Tracked change: modify README. Untracked: simulate concurrent
     # discovery artefacts in a nested issues dir.
     (tmp_path / "README.md").write_text("modified base\n")
-    issues = tmp_path / "se3" / "issues" / "open"
+    issues = tmp_path / "tianluo" / "issues" / "open"
     issues.mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / ".next_id").write_text("232\n")
+    (tmp_path / "tianluo" / "issues" / ".next_id").write_text("232\n")
     (issues / "229_concurrent.yaml").write_text("title: concurrent issue 229\n")
 
     # Capture expected blob shas while the files are still on disk.
     sha_readme = _hash_object(tmp_path, "README.md")
-    sha_next_id = _hash_object(tmp_path, "se3/issues/.next_id")
-    sha_issue = _hash_object(tmp_path, "se3/issues/open/229_concurrent.yaml")
+    sha_next_id = _hash_object(tmp_path, "tianluo/issues/.next_id")
+    sha_issue = _hash_object(tmp_path, "tianluo/issues/open/229_concurrent.yaml")
 
     label = "se3-pre-fast-merge-test"
     _git(tmp_path, "stash", "push", "--include-untracked", "-m", label)
@@ -107,8 +107,8 @@ def test_archive_stash_payload_untracked_and_tracked(tmp_path: Path) -> None:
     by_rel = {e.rel_path: e for e in entries}
     assert set(by_rel) == {
         "README.md",
-        "se3/issues/.next_id",
-        "se3/issues/open/229_concurrent.yaml",
+        "tianluo/issues/.next_id",
+        "tianluo/issues/open/229_concurrent.yaml",
     }
 
     archive_root = tmp_path / ARCHIVE_DIR / f"20260630T120000_{label}"
@@ -120,16 +120,16 @@ def test_archive_stash_payload_untracked_and_tracked(tmp_path: Path) -> None:
     assert (tmp_path / readme_entry.archive_path).read_text() == "modified base\n"
 
     # Untracked concurrent files -> case "b", content recoverable verbatim.
-    next_id_entry = by_rel["se3/issues/.next_id"]
+    next_id_entry = by_rel["tianluo/issues/.next_id"]
     assert next_id_entry.case == "b"
     assert next_id_entry.blob_sha == sha_next_id
-    assert (archive_root / "se3" / "issues" / ".next_id").read_text() == "232\n"
+    assert (archive_root / "tianluo" / "issues" / ".next_id").read_text() == "232\n"
 
-    issue_entry = by_rel["se3/issues/open/229_concurrent.yaml"]
+    issue_entry = by_rel["tianluo/issues/open/229_concurrent.yaml"]
     assert issue_entry.case == "b"
     assert issue_entry.blob_sha == sha_issue
     assert (
-        (archive_root / "se3" / "issues" / "open" / "229_concurrent.yaml").read_text()
+        (archive_root / "tianluo" / "issues" / "open" / "229_concurrent.yaml").read_text()
         == "title: concurrent issue 229\n"
     )
 
@@ -203,7 +203,7 @@ def test_resolve_stashpop_drops_despite_stash_deleted_tracked_file(
     _git(tmp_path, "add", "obsolete.txt")
     _git(tmp_path, "commit", "-m", "add obsolete")
 
-    issues = tmp_path / "se3" / "issues"
+    issues = tmp_path / "tianluo" / "issues"
     issues.mkdir(parents=True)
     # Uncommitted deletion of a tracked file alongside an untracked collision.
     (tmp_path / "obsolete.txt").unlink()
@@ -227,7 +227,7 @@ def test_resolve_stashpop_drops_despite_stash_deleted_tracked_file(
     assert _resolve_stash_ref(tmp_path, label) is None
     # The untracked collision content is recoverable; the deletion is skipped.
     by_rel = {e.rel_path: e for e in outcome.archived}
-    assert "se3/issues/.next_id" in by_rel
+    assert "tianluo/issues/.next_id" in by_rel
     assert "obsolete.txt" not in by_rel
 
 
@@ -333,7 +333,7 @@ def test_resolve_stashpop_case_b_untracked_collision(tmp_path: Path) -> None:
     content must be archived (recoverable), the merged working-tree version
     left untouched, NO take-ours, and the stash dropped only after archival."""
     _init_repo(tmp_path)
-    issues = tmp_path / "se3" / "issues"
+    issues = tmp_path / "tianluo" / "issues"
     (issues / "open").mkdir(parents=True)
     # ``.next_id`` is the path the merge will repopulate -> guaranteed collision.
     (issues / ".next_id").write_text("STASHED next_id\n")
@@ -359,17 +359,17 @@ def test_resolve_stashpop_case_b_untracked_collision(tmp_path: Path) -> None:
 
     by_rel = {e.rel_path: e for e in outcome.archived}
     # Both stashed untracked files are recoverable from the archive.
-    assert by_rel["se3/issues/.next_id"].case == "b"
-    assert by_rel["se3/issues/open/229_concurrent.yaml"].case == "b"
+    assert by_rel["tianluo/issues/.next_id"].case == "b"
+    assert by_rel["tianluo/issues/open/229_concurrent.yaml"].case == "b"
     archive_root = tmp_path / ARCHIVE_DIR / f"20260630T140000_{label}"
-    assert (archive_root / "se3" / "issues" / ".next_id").read_text() == "STASHED next_id\n"
+    assert (archive_root / "tianluo" / "issues" / ".next_id").read_text() == "STASHED next_id\n"
     assert (
-        (archive_root / "se3" / "issues" / "open" / "229_concurrent.yaml").read_text()
+        (archive_root / "tianluo" / "issues" / "open" / "229_concurrent.yaml").read_text()
         == "stashed 229\n"
     )
 
     # Classified as case b, no 3-way conflict, dropped after recovery proven.
-    assert "se3/issues/.next_id" in outcome.case_b_files
+    assert "tianluo/issues/.next_id" in outcome.case_b_files
     assert outcome.case_a_files == []
     assert outcome.dropped is True
     assert _resolve_stash_ref(tmp_path, label) is None  # stash gone post-drop

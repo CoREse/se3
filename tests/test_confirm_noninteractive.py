@@ -135,9 +135,9 @@ def test_helper_persists_engine_json_top_level_status_paused():
     """The daemon keys resume off engine.json top-level status — assert it lands PAUSED."""
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
-        calls_dir = project_root / "se3" / "calls"
+        calls_dir = project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
-        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         flow, confirm_step = _make_real_flow(project_root)
         # Mimic the confirm handler having written the call file.
@@ -154,7 +154,7 @@ def test_helper_persists_engine_json_top_level_status_paused():
         assert result is _CONFIRM_AWAITING
         assert flow.status is FlowStatus.PAUSED
 
-        engine_json = project_root / "se3" / "state" / "engine.json"
+        engine_json = project_root / "tianluo" / "state" / "engine.json"
         assert engine_json.exists()
         data = json.loads(engine_json.read_text())
         # find_existing_flows / the daemon read the top-level "status" — it must
@@ -173,8 +173,8 @@ def test_interactive_confirm_pause_user_exit_returns_none():
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
-        (project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
-        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         flow, confirm_step = _make_real_flow(project_root)
         persistence = PersistenceManager(project_root)
@@ -193,9 +193,9 @@ def test_interactive_confirm_pause_approve_writes_response():
     """Guardrail: interactive approve still writes a plain .response sibling."""
     with tempfile.TemporaryDirectory() as tmpdir:
         project_root = Path(tmpdir)
-        calls_dir = project_root / "se3" / "calls"
+        calls_dir = project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
-        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         flow, confirm_step = _make_real_flow(project_root)
         call_file = calls_dir / "confirm_confirm-001_x.json"
@@ -255,9 +255,9 @@ class _FakeStateMachine:
 
 def _prepare_persisted_confirm_flow(project_root):
     """Persist a flow parked at a PAUSED CONFIRM step, call file on disk."""
-    calls_dir = project_root / "se3" / "calls"
+    calls_dir = project_root / "tianluo" / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
     flow, confirm_step = _make_real_flow(project_root)
     call_file = calls_dir / "confirm_confirm-001_x.json"
@@ -298,7 +298,7 @@ def test_run_loop_json_confirm_pause_returns_0_and_emits_flow_paused(capsys):
         assert '"flow_paused"' in out
 
         # engine.json top-level status must land PAUSED so the daemon re-spawns.
-        engine_json = project_root / "se3" / "state" / "engine.json"
+        engine_json = project_root / "tianluo" / "state" / "engine.json"
         data = json.loads(engine_json.read_text())
         assert str(data.get("status")).upper() == "PAUSED"
 

@@ -46,7 +46,7 @@ from tianluo.daemon.history import DaemonHistoryReader
 
 def _write_engine(root: Path, flow_id: str, status: str, *, worktree: bool = False) -> None:
     """Write a small active ``engine.json`` under *root*."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -62,8 +62,8 @@ def _write_engine(root: Path, flow_id: str, status: str, *, worktree: bool = Fal
 
 
 def _write_resumable(root: Path, flow_id: str, status: str) -> None:
-    """Write a per-flow resumable snapshot under ``se3/state/resumable/``."""
-    rdir = root / "se3" / "state" / "resumable"
+    """Write a per-flow resumable snapshot under ``tianluo/state/resumable/``."""
+    rdir = root / "tianluo" / "state" / "resumable"
     rdir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -113,8 +113,8 @@ def test_unchanged_engine_json_parsed_once_across_push_ticks(tmp_path, monkeypat
     main = tmp_path / "proj"
     _write_engine(main, "f_active", "RUNNING")
     _write_resumable(main, "f_paused", "PAUSED")
-    # An active ``--worktree`` run under se3/worktrees/<name>/.
-    wt = main / "se3" / "worktrees" / "wt1"
+    # An active ``--worktree`` run under tianluo/worktrees/<name>/.
+    wt = main / "tianluo" / "worktrees" / "wt1"
     _write_engine(wt, "f_wt", "RUNNING", worktree=True)
 
     parses = _count_djc_parses(monkeypatch)
@@ -206,7 +206,7 @@ def test_signature_checks_are_genuine_disk_parse_points(tmp_path, monkeypatch):
     djc.clear_cache()
     main = tmp_path / "proj"
     _write_engine(main, "f_active", "RUNNING")
-    wt = main / "se3" / "worktrees" / "wt1"
+    wt = main / "tianluo" / "worktrees" / "wt1"
     _write_engine(wt, "f_wt", "RUNNING", worktree=True)
 
     agg = DaemonAggregator()
@@ -247,7 +247,7 @@ def test_push_loop_never_parses_json_on_event_loop_thread(tmp_path, monkeypatch)
     main = tmp_path / "proj"
     _write_engine(main, "f_active", "RUNNING")
     _write_resumable(main, "f_paused", "PAUSED")
-    wt = main / "se3" / "worktrees" / "wt1"
+    wt = main / "tianluo" / "worktrees" / "wt1"
     _write_engine(wt, "f_wt", "RUNNING", worktree=True)
 
     agg = DaemonAggregator()
@@ -332,7 +332,7 @@ def test_oversized_engine_json_uses_degraded_scan_no_full_parse(tmp_path, monkey
     dict), and must NOT invoke ``_json_loads`` on the whole file — nor cache it.
     """
     djc.clear_cache()
-    engine = tmp_path / "se3" / "state" / "engine.json"
+    engine = tmp_path / "tianluo" / "state" / "engine.json"
     size = _write_oversized_engine(engine, "f_big", "RUNNING", worktree=True)
     assert size > djc.MAX_PARSE_BYTES
 
@@ -360,7 +360,7 @@ def test_oversized_worktree_run_stays_visible_via_degraded_scan(tmp_path):
     djc.clear_cache()
     main = tmp_path / "proj"
     _write_engine(main, "f_active", "RUNNING")  # small main engine
-    wt_engine = main / "se3" / "worktrees" / "wt1" / "se3" / "state" / "engine.json"
+    wt_engine = main / "tianluo" / "worktrees" / "wt1" / "tianluo" / "state" / "engine.json"
     _write_oversized_engine(wt_engine, "f_wt_big", "RUNNING", worktree=True)
 
     agg = DaemonAggregator()

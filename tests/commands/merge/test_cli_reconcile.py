@@ -13,7 +13,7 @@ observable contract:
   * a reconcile fault (regression / collision / write failure) is surfaced as a
     non-zero exit code, never a silent success;
   * no confirmation gate — the CLI wrapper drives the library in
-    ``suppress_human_call`` mode (no ``se3/calls/`` files) and expresses failure
+    ``suppress_human_call`` mode (no ``tianluo/calls/`` files) and expresses failure
     only through the exit code.
 """
 
@@ -82,7 +82,7 @@ def _make_feature_with_intent(
     """Create *branch* off HEAD carrying a committed version-intent.
 
     Mirrors what a de-versioned worktree session's commit produces: a code
-    change plus a ``se3/version-intents/<flow>.json`` intent file (a changelog
+    change plus a ``tianluo/version-intents/<flow>.json`` intent file (a changelog
     bullet + a bump hint), committed on the flow branch so the merge side reads
     it from master after the merge.
     """
@@ -308,7 +308,7 @@ class TestCliReconcileScoping:
         every intent present in the branch, including ones the branch merely
         inherited. If Flow A finished ``merge_integrate`` and left its intent
         outstanding on master, a branch B *cut from that master* carries a
-        verbatim copy of ``se3/version-intents/flowA.json``. Merging B must
+        verbatim copy of ``tianluo/version-intents/flowA.json``. Merging B must
         reconcile ONLY B's own introduced intent — subtracting master's
         pre-merge tip keeps A's inherited intent out of scope so A's decision
         stays with A's own ``version_reconcile`` step / confirmation gate.
@@ -701,7 +701,7 @@ class TestNoConfirmationGate:
         """``se3 merge`` invokes run_merge with suppress_human_call=True.
 
         In that mode the orchestrator records escalations on the result instead
-        of writing ``se3/calls/`` files or printing terminal instructions — the
+        of writing ``tianluo/calls/`` files or printing terminal instructions — the
         CLI has no confirmation gate and expresses everything via the exit code.
         """
         root = _make_project(tmp_path, "1.0.0")
@@ -738,7 +738,7 @@ class TestNoConfirmationGate:
         assert captured.get("suppress_human_call") is True
 
     def test_no_calls_file_written_on_clean_merge(self, tmp_path: Path) -> None:
-        """The CLI path writes no ``se3/calls/`` escalation on a clean merge."""
+        """The CLI path writes no ``tianluo/calls/`` escalation on a clean merge."""
         root = _make_project(tmp_path, "1.0.0")
         _make_feature_with_intent(
             root, "feature", "flowA", bump_type="patch", change="fix A"
@@ -753,7 +753,7 @@ class TestNoConfirmationGate:
         )
 
         assert exit_code == 0
-        calls_dir = root / "se3" / "calls"
+        calls_dir = root / "tianluo" / "calls"
         # Either the dir is absent or holds no call files — nothing was written.
         if calls_dir.exists():
             assert not list(calls_dir.glob("*.json"))
@@ -841,7 +841,7 @@ class TestReconcileLibraryRegressions:
 
         root = tmp_path / "custom"
         root.mkdir()
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             yaml.safe_dump(
                 {"documentation": {"versions_entry_template": "## {{version}}\n\n{{changes}}\n"}}
             ),
@@ -868,7 +868,7 @@ class TestReconcileLibraryRegressions:
 
         root = tmp_path / "single_hash"
         root.mkdir()
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             yaml.safe_dump(
                 {"documentation": {"versions_entry_template": "# {{version}}\n\n{{changes}}\n"}}
             ),
@@ -891,7 +891,7 @@ class TestReconcileLibraryRegressions:
 
         root = tmp_path / "triple_hash"
         root.mkdir()
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             yaml.safe_dump(
                 {"documentation": {"versions_entry_template": "### {{version}}\n\n{{changes}}\n"}}
             ),
@@ -918,7 +918,7 @@ class TestReconcileLibraryRegressions:
 
         root = tmp_path / "bracketed"
         root.mkdir()
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             yaml.safe_dump(
                 {
                     "documentation": {
@@ -1319,7 +1319,7 @@ class TestReconcileIdempotencyAndRollback:
 
         root = _make_project(tmp_path, "1.0.0")
         # A committed-but-corrupt intent file for the requested flow — exactly what
-        # a branch carrying se3/version-intents/flowBad.json but invalid content
+        # a branch carrying tianluo/version-intents/flowBad.json but invalid content
         # looks like once merged into master.
         intents_dir = root / VERSION_INTENT_DIR_RELPATH
         intents_dir.mkdir(parents=True, exist_ok=True)
@@ -1791,7 +1791,7 @@ class TestVersionReconcileRevisionPath:
             task_description="t",
             task_type="feature",
             state=State(),
-            change_path=root / "se3.yaml",
+            change_path=root / "tianluo.yaml",
         )
 
     def _make_step(self, root: Path):
@@ -1940,7 +1940,7 @@ class TestVersionReconcileRevisionPath:
         """An in-flow step whose intent is gone must FAIL, not no-op to success.
 
         Divergence (fix #high): a worktree flow reaches version_reconcile but its
-        ``se3/version-intents/<flow_id>.json`` was never committed / was dropped by
+        ``tianluo/version-intents/<flow_id>.json`` was never committed / was dropped by
         a bad merge / manually removed. reconcile(flow_ids=[flow]) collects no
         matching intent and returns an already_reconciled no-op. Completing here
         would land the merged work on master with no version bump or changelog for
@@ -1987,7 +1987,7 @@ class TestVersionReconcileRevisionPath:
 
         root = _make_project(tmp_path, "1.0.0")
         # Disable version bumping for the project.
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             "version:\n  enabled: false\n", encoding="utf-8"
         )
         _git(root, "add", "-A")
@@ -2047,7 +2047,7 @@ class TestVersionReconcileRevisionPath:
             task_description="review the merge module",
             task_type="review",
             state=state,
-            change_path=root / "se3.yaml",
+            change_path=root / "tianluo.yaml",
         )
         step = self._make_step(root)
 
@@ -2232,8 +2232,8 @@ class TestCustomRulesEqualToCurrentIsRejected:
     """The custom-rules channel has no legitimate no-op (self-check high fix)."""
 
     def _write_rules(self, root: Path) -> None:
-        (root / "se3").mkdir(parents=True, exist_ok=True)
-        (root / "se3" / "version-rules.md").write_text(
+        (root / "tianluo").mkdir(parents=True, exist_ok=True)
+        (root / "tianluo" / "version-rules.md").write_text(
             "# Version Rules\n\nBump the minor for any feature.\n", encoding="utf-8"
         )
         _git(root, "add", "-A")
@@ -2244,7 +2244,7 @@ class TestCustomRulesEqualToCurrentIsRejected:
     ) -> None:
         """An LLM ``final_version`` equal to current must NOT consume + commit.
 
-        Divergence guarded: with ``se3/version-rules.md`` present and an
+        Divergence guarded: with ``tianluo/version-rules.md`` present and an
         outstanding intent, an LLM that returns the current version string used to
         set ``publish_release`` false, skip validation, then consume the intent and
         create a no-op reconcile commit — permanently swallowing the release
@@ -2366,13 +2366,13 @@ class TestNonHeadingTemplateHistoricalCollision:
             "# History\n\nENTRY 2026.07.07 | - previous\n", encoding="utf-8"
         )
         (root / "README.md").write_text("# Demo\n", encoding="utf-8")
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             "documentation:\n"
             '  versions_entry_template: "ENTRY {{version}} | {{changes}}\\n"\n',
             encoding="utf-8",
         )
-        (root / "se3").mkdir()
-        (root / "se3" / "version-rules.md").write_text(
+        (root / "tianluo").mkdir()
+        (root / "tianluo" / "version-rules.md").write_text(
             "# Version Rules\n\nUse the current date as the version.\n",
             encoding="utf-8",
         )
@@ -2421,7 +2421,7 @@ class TestNoBumpCommittedConsumedStillCommits:
         complete without a reconcile commit.
 
         Divergence guarded: a prior bad/manual commit swept
-        ``se3/version-intents/flowNone.json`` (consumed=true) into HEAD with NO
+        ``tianluo/version-intents/flowNone.json`` (consumed=true) into HEAD with NO
         reconcile trailer, and the intent declares ``bump_type: "none"``. The
         no-bump path writes no version/doc change and ``mark_consumed`` is a no-op,
         so a diff-gated commit produced NOTHING — the session stayed permanently

@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .worktree import _run_git
+from ..runtime_paths import runtime_dir_name
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,15 @@ logger = logging.getLogger(__name__)
 # Directory (relative to project root) holding one JSON intent file per flow.
 # Whitelisted in .gitignore so it is committed with the flow branch — the
 # whole point is that the merge side reads it from master after the merge.
-VERSION_INTENT_DIR_RELPATH = "se3/version-intents"
+# This is the CANONICAL (post-rename) relpath; use :func:`intent_dir_relpath`
+# for anything root-facing, which honours a legacy ``tianluo/`` layout.
+VERSION_INTENT_DIR_RELPATH = "tianluo/version-intents"
+LEGACY_VERSION_INTENT_DIR_RELPATH = "se3/version-intents"
+
+
+def intent_dir_relpath(project_root) -> str:
+    """Root-aware relative path of the version-intents directory."""
+    return f"{runtime_dir_name(project_root)}/version-intents"
 
 # Commit-message trailer the reconcile step stamps onto its commit. Consulted
 # by :func:`reconcile_commit_exists` as a git-durable idempotency signal that
@@ -194,7 +203,7 @@ def intent_path(project_root: Path, flow_id: str) -> Path:
     The flow_id is the file stem so multiple merged-in branches (each a
     distinct flow) contribute distinct files that coexist in the merged tree.
     """
-    return Path(project_root) / VERSION_INTENT_DIR_RELPATH / f"{flow_id}.json"
+    return Path(project_root) / intent_dir_relpath(project_root) / f"{flow_id}.json"
 
 
 def write_intent(project_root: Path, intent: VersionIntent) -> Path:
@@ -209,7 +218,7 @@ def write_intent(project_root: Path, intent: VersionIntent) -> Path:
     # step's ``git add -A`` would then silently skip it, and the flow would only
     # fail much later at the merge-side version_reconcile with a misleading
     # "restore the intent file" message. On an EXISTING project whose committed
-    # .gitignore predates the ``!/se3/version-intents/`` whitelist (init/migrate
+    # .gitignore predates the ``!/tianluo/version-intents/`` whitelist (init/migrate
     # not re-run), every worktree flow would loop through that dead end. Surface
     # the real cause — the ignore rule — with the actionable fix instead.
     _assert_intent_path_not_ignored(project_root, path)
@@ -220,19 +229,28 @@ def write_intent(project_root: Path, intent: VersionIntent) -> Path:
     return path
 
 
-# The whitelist line that makes ``se3/version-intents/`` tracked again, plus the
-# structural rules a self-heal appends when ``se3/`` is ignored as a whole dir.
-# git cannot re-include a path under a fully-excluded parent, so a lone negative
-# rule is void: the dir must first be re-included (``!/se3/``), its contents
-# re-excluded (``/se3/*``), and only then the intents whitelisted.
-_INTENT_WHITELIST_LINE = f"!/{VERSION_INTENT_DIR_RELPATH}/"
-_SE3_CONTENTS_ANCHOR = "/se3/*"
-_SE3_WHOLE_DIR_REINCLUDE = "!/se3/"
-# Ways a legacy .gitignore may exclude the whole ``se3/`` directory. When any of
-# these coexists with a ``/se3/*`` anchor, the anchor+whitelist alone are void —
-# git won't recurse into a fully-excluded parent — so the ``!/se3/`` re-include
-# is also required (see :func:`_heal_gitignore_for_intents`).
-_SE3_WHOLE_DIR_RULES = frozenset({"/se3/", "se3/", "/se3", "se3"})
+# The .gitignore lines involved in making ``<runtime>/version-intents/``
+# tracked again are all derived from the project's actual runtime directory
+# name (``tianluo`` canonically, ``se3`` on a legacy layout), so they are
+# built per root by :func:`_gitignore_heal_rules`. git cannot re-include a
+# path under a fully-excluded parent, so a lone negative rule is void: the
+# dir must first be re-included (``!/<runtime>/``), its contents re-excluded
+# (``/<runtime>/*``), and only then the intents whitelisted.
+
+
+def _gitignore_heal_rules(project_root):
+    """Return the root-aware rule strings the gitignore self-heal works with.
+
+    ``(whitelist_line, contents_anchor, whole_dir_reinclude, whole_dir_rules)``
+    for the project's actual runtime directory name.
+    """
+    name = runtime_dir_name(project_root)
+    return (
+        f"!/{name}/version-intents/",
+        f"/{name}/*",
+        f"!/{name}/",
+        frozenset({f"/{name}/", f"{name}/", f"/{name}", name}),
+    )
 
 # Sentinel distinguishing "pre-heal .gitignore was unreadable" from "no
 # .gitignore existed". Rollback must skip the former (unlinking on None would
@@ -288,27 +306,27 @@ def _probe_not_ignored_definitive(project_root: Path, rel: str) -> bool:
 def _heal_gitignore_for_intents(project_root: Path) -> bool:
     """Idempotently patch ``project_root/.gitignore`` so intents are tracked.
 
-    Ensures the ``!/se3/version-intents/`` whitelist genuinely takes effect on an
+    Ensures the ``!/tianluo/version-intents/`` whitelist genuinely takes effect on an
     existing project whose committed ``.gitignore`` predates it. Two legacy
     shapes are covered:
 
-      * a ``/se3/*`` anchor already exposes ``se3/``'s contents — the whitelist
+      * a ``/tianluo/*`` anchor already exposes ``tianluo/``'s contents — the whitelist
         is inserted right after that anchor (mirroring
         :func:`migrate_cmd._rewrite_gitignore`'s insertion), so the negation
-        takes effect. If a whole-dir rule (``/se3/`` etc.) coexists with the
-        anchor, the ``!/se3/`` re-include is additionally inserted before the
+        takes effect. If a whole-dir rule (``/tianluo/`` etc.) coexists with the
+        anchor, the ``!/tianluo/`` re-include is additionally inserted before the
         anchor, since the anchor alone is void under a fully-excluded parent;
-      * ``se3/`` (or ``/se3/``) is ignored as a WHOLE directory — a lone
+      * ``tianluo/`` (or ``/tianluo/``) is ignored as a WHOLE directory — a lone
         negation is void under a fully-excluded parent, so the re-include /
-        re-exclude / whitelist trio (``!/se3/`` + ``/se3/*`` + the whitelist) is
-        appended to reconstruct a tracked ``se3/version-intents/``.
+        re-exclude / whitelist trio (``!/tianluo/`` + ``/tianluo/*`` + the whitelist) is
+        appended to reconstruct a tracked ``tianluo/version-intents/``.
 
-    In both shapes the whitelist is placed AFTER the ``/se3/*`` re-exclude,
+    In both shapes the whitelist is placed AFTER the ``/tianluo/*`` re-exclude,
     because it is effective only as the last matching rule. A legacy file may
     already carry a VOID whitelist positioned before the anchor (the exact state
     a user reaches by following the OLD error text under a still-excluded
     parent); such an occurrence is repositioned after the anchor rather than
-    left stranded, else ``/se3/*`` would remain the last match and the heal would
+    left stranded, else ``/tianluo/*`` would remain the last match and the heal would
     fail its own re-probe.
 
     Idempotent: an already-effective whitelist (present and after the anchor) is
@@ -326,62 +344,69 @@ def _heal_gitignore_for_intents(project_root: Path) -> bool:
     path = Path(project_root) / ".gitignore"
     original = path.read_text(encoding="utf-8") if path.exists() else ""
 
+    (
+        whitelist_line,
+        contents_anchor,
+        whole_dir_reinclude,
+        whole_dir_rules,
+    ) = _gitignore_heal_rules(project_root)
+
     lines = original.splitlines()
     stripped = {ln.strip() for ln in lines}
     changed = False
 
-    # se3/ excluded as a WHOLE directory: a lone whitelist is void under a fully
-    # excluded parent, so the dir must first be re-included (``!/se3/``) before its
-    # contents are re-excluded (``/se3/*``) and only then the intents whitelisted.
-    whole_dir_ignored = bool(stripped & _SE3_WHOLE_DIR_RULES)
+    # tianluo/ excluded as a WHOLE directory: a lone whitelist is void under a fully
+    # excluded parent, so the dir must first be re-included (``!/tianluo/``) before its
+    # contents are re-excluded (``/tianluo/*``) and only then the intents whitelisted.
+    whole_dir_ignored = bool(stripped & whole_dir_rules)
 
-    # Establish the ``/se3/*`` re-exclude anchor. The intents whitelist takes
+    # Establish the ``/tianluo/*`` re-exclude anchor. The intents whitelist takes
     # effect ONLY as the last matching rule, so it must ultimately sit AFTER this
     # anchor; everything below positions relative to it.
     anchor_idx = next(
-        (i for i, ln in enumerate(lines) if ln.strip() == _SE3_CONTENTS_ANCHOR),
+        (i for i, ln in enumerate(lines) if ln.strip() == contents_anchor),
         None,
     )
     if anchor_idx is None:
-        # Shape (b): no ``/se3/*`` anchor yet. Re-include se3/ first when it is
+        # Shape (b): no ``/tianluo/*`` anchor yet. Re-include tianluo/ first when it is
         # whole-dir excluded, then append the contents re-exclude to anchor onto.
-        if whole_dir_ignored and _SE3_WHOLE_DIR_REINCLUDE not in stripped:
-            lines.append(_SE3_WHOLE_DIR_REINCLUDE)
-            stripped.add(_SE3_WHOLE_DIR_REINCLUDE)
+        if whole_dir_ignored and whole_dir_reinclude not in stripped:
+            lines.append(whole_dir_reinclude)
+            stripped.add(whole_dir_reinclude)
             changed = True
-        lines.append(_SE3_CONTENTS_ANCHOR)
-        stripped.add(_SE3_CONTENTS_ANCHOR)
+        lines.append(contents_anchor)
+        stripped.add(contents_anchor)
         anchor_idx = len(lines) - 1
         changed = True
-    elif whole_dir_ignored and _SE3_WHOLE_DIR_REINCLUDE not in stripped:
+    elif whole_dir_ignored and whole_dir_reinclude not in stripped:
         # Shape (a) COEXISTING with a whole-dir ignore (a hand-edited legacy file
-        # carrying both ``/se3/`` and ``/se3/*``): the anchor+whitelist are void
-        # until se3/ is re-included. Insert ``!/se3/`` just before the anchor
-        # (after the whole-dir rule, before ``/se3/*`` re-excludes the contents) so
+        # carrying both ``/tianluo/`` and ``/tianluo/*``): the anchor+whitelist are void
+        # until tianluo/ is re-included. Insert ``!/tianluo/`` just before the anchor
+        # (after the whole-dir rule, before ``/tianluo/*`` re-excludes the contents) so
         # the directory is re-included first.
-        lines.insert(anchor_idx, _SE3_WHOLE_DIR_REINCLUDE)
-        stripped.add(_SE3_WHOLE_DIR_REINCLUDE)
+        lines.insert(anchor_idx, whole_dir_reinclude)
+        stripped.add(whole_dir_reinclude)
         anchor_idx += 1
         changed = True
 
     # Position the whitelist AFTER the anchor. A legacy file may already carry a
-    # VOID whitelist before the anchor — e.g. ``/se3/`` + ``!/se3/version-intents/``,
+    # VOID whitelist before the anchor — e.g. ``/tianluo/`` + ``!/tianluo/version-intents/``,
     # the exact state a user reaches by following the OLD error text and appending
     # the negation under a still-excluded parent. Set-membership dedup alone would
-    # leave that occurrence stranded before the ``/se3/*`` re-exclude we add, so
-    # ``/se3/*`` would remain the last match and the path stay ignored. Reposition
+    # leave that occurrence stranded before the ``/tianluo/*`` re-exclude we add, so
+    # ``/tianluo/*`` would remain the last match and the path stay ignored. Reposition
     # any occurrence that is not already after the anchor so the negation genuinely
     # wins; the post-heal re-probe is the final arbiter for unusual orderings.
     whitelist_positions = [
-        i for i, ln in enumerate(lines) if ln.strip() == _INTENT_WHITELIST_LINE
+        i for i, ln in enumerate(lines) if ln.strip() == whitelist_line
     ]
     if not (whitelist_positions and all(i > anchor_idx for i in whitelist_positions)):
         for i in reversed(whitelist_positions):
             del lines[i]
             if i < anchor_idx:
                 anchor_idx -= 1
-        lines.insert(anchor_idx + 1, _INTENT_WHITELIST_LINE)
-        stripped.add(_INTENT_WHITELIST_LINE)
+        lines.insert(anchor_idx + 1, whitelist_line)
+        stripped.add(whitelist_line)
         changed = True
 
     if changed:
@@ -400,7 +425,7 @@ def _restore_gitignore(path: Path, original_bytes: Optional[bytes]) -> None:
     ``original_bytes is None`` means no ``.gitignore`` existed before the heal, so
     any file the heal created is removed; otherwise the exact original bytes are
     rewritten. Failures are swallowed — rollback is a courtesy that keeps a failed
-    heal from leaving a stray ``/se3/*`` re-exclude behind, and if it cannot run
+    heal from leaving a stray ``/tianluo/*`` re-exclude behind, and if it cannot run
     the fail-loud raise still stops the flow before the intent is written.
     """
     try:
@@ -421,7 +446,7 @@ def _assert_intent_path_not_ignored(project_root: Path, path: Path) -> None:
     ignored" (``git check-ignore`` exit 0) engages the heal. On that signal the
     worktree's OWN ``.gitignore`` (``check-ignore`` runs with *project_root* — the
     worktree dir — as cwd) is minimally, idempotently patched to make the
-    ``!/se3/version-intents/`` whitelist take effect, then re-probed. Only a
+    ``!/tianluo/version-intents/`` whitelist take effect, then re-probed. Only a
     re-probe that DEFINITIVELY confirms the path is no longer ignored
     (``git check-ignore`` exit 1) lets the write proceed, with a warning logged
     (the ``.gitignore`` change rides the flow's later ``git add -A`` into the
@@ -478,13 +503,13 @@ def _assert_intent_path_not_ignored(project_root: Path, path: Path) -> None:
                 "bump/changelog can be committed and reach the merge-side "
                 "version_reconcile.",
                 rel,
-                _INTENT_WHITELIST_LINE,
+                f"!/{intent_dir_relpath(project_root)}/",
                 project_root,
             )
             return
     # Heal could not run, or its mutation did not prove the ignore cleared. Undo
     # any mutation so an unrelated ignore rule (e.g. ``*.json``) is not left with a
-    # stray se3/ re-exclude that would newly untrack other se3/ files after the
+    # stray tianluo/ re-exclude that would newly untrack other tianluo/ files after the
     # user fixes the real rule and resumes, then fail loud. Skip rollback when the
     # pre-state was unreadable: a heal that never wrote anything (its own read_text
     # would have failed too) leaves nothing to undo, and unlinking here would
@@ -496,10 +521,11 @@ def _assert_intent_path_not_ignored(project_root: Path, path: Path) -> None:
         f"'git add -A' cannot stage it and this worktree session's version "
         f"bump/changelog would never reach the merge-side version_reconcile. "
         f"An automatic .gitignore fix was attempted but did not clear the ignore "
-        f"rule. Enter this flow's worktree directory (under 'se3/worktrees/', or "
-        f"locate it with 'git worktree list'), add a whitelist line "
-        f"'!/{VERSION_INTENT_DIR_RELPATH}/' to that worktree's .gitignore (or run "
-        f"'se3 migrate' there), then resume."
+        f"rule. Enter this flow's worktree directory (under "
+        f"'{runtime_dir_name(project_root)}/worktrees/', or locate it with "
+        f"'git worktree list'), add a whitelist line "
+        f"'!/{intent_dir_relpath(project_root)}/' to that worktree's .gitignore "
+        f"(or run 'luo migrate' there), then resume."
     )
 
 
@@ -541,7 +567,7 @@ def collect_intents(
 ) -> list[VersionIntent]:
     """Collect every merged-in branch's intent from the merged master tree.
 
-    Scans ``se3/version-intents/*.json`` in *project_root*'s working tree.
+    Scans ``<runtime>/version-intents/*.json`` in *project_root*'s working tree.
     After the merge step has landed all branches into master, each merged-in
     session's intent file coexists here, so a single directory scan yields all
     of them. Results are sorted by ``flow_id`` for deterministic ordering.
@@ -556,7 +582,7 @@ def collect_intents(
         A list of :class:`VersionIntent`; empty when the directory is absent
         or holds no readable intents.
     """
-    directory = Path(project_root) / VERSION_INTENT_DIR_RELPATH
+    directory = Path(project_root) / intent_dir_relpath(project_root)
     if not directory.is_dir():
         return []
 
@@ -599,12 +625,17 @@ def intent_flow_ids_at_ref(project_root: Path, ref: str) -> set[str]:
             this and fall back themselves.
     """
     try:
+        # Query BOTH the canonical and the legacy relpath: across the rename
+        # boundary a pre-rename branch's committed tree still holds
+        # ``tianluo/version-intents/`` while a post-rename ref holds
+        # ``tianluo/version-intents/``.
         result = _run_git(
             project_root,
             "ls-tree",
             "--name-only",
             ref,
             f"{VERSION_INTENT_DIR_RELPATH}/",
+            f"{LEGACY_VERSION_INTENT_DIR_RELPATH}/",
             check=False,
             timeout=15,
         )

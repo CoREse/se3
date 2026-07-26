@@ -60,12 +60,12 @@ class TestSpecGovernanceConfigOverride:
         assert cfg == SpecGovernanceConfig()
 
     def test_load_defaults_when_no_section(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         cfg = SpecGovernanceConfig.load(tmp_path)
         assert cfg == SpecGovernanceConfig()
 
     def test_yaml_override_takes_effect(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_governance:\n"
             "  base_max_bytes: 65536\n"
             "  index_render_threshold: 8192\n"
@@ -81,7 +81,7 @@ class TestSpecGovernanceConfigOverride:
         assert cfg.guardrails_size_tier == "enforce"
 
     def test_partial_override_keeps_other_defaults(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_governance:\n  base_max_bytes: 16384\n"
         )
         cfg = SpecGovernanceConfig.load(tmp_path)
@@ -90,14 +90,14 @@ class TestSpecGovernanceConfigOverride:
         assert cfg.guardrails_size_tier == DEFAULT_GUARDRAILS_SIZE_TIER
 
     def test_tier_case_insensitive(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_governance:\n  guardrails_size_tier: ENFORCE\n"
         )
         cfg = SpecGovernanceConfig.load(tmp_path)
         assert cfg.guardrails_size_tier == "enforce"
 
     def test_load_spec_governance_config_helper(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_governance:\n  base_max_bytes: 1234\n"
         )
         cfg = load_spec_governance_config(tmp_path)
@@ -133,12 +133,12 @@ class TestSpecGovernanceConfigFaultTolerance:
         assert cfg.guardrails_size_tier == DEFAULT_GUARDRAILS_SIZE_TIER
 
     def test_invalid_yaml_falls_back_to_defaults(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("{{invalid yaml")
+        (tmp_path / "tianluo.yaml").write_text("{{invalid yaml")
         cfg = SpecGovernanceConfig.load(tmp_path)
         assert cfg == SpecGovernanceConfig()
 
     def test_non_dict_section_falls_back(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("spec_governance: true\n")
+        (tmp_path / "tianluo.yaml").write_text("spec_governance: true\n")
         cfg = SpecGovernanceConfig.load(tmp_path)
         assert cfg == SpecGovernanceConfig()
 

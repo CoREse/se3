@@ -4,9 +4,9 @@ The code-index is a *logical structure map* of the project: the structure is
 enumerated **deterministically** (a gitignore-respecting file walk via
 ``file_enum`` + AST / natural-structure extraction), and a one-sentence summary
 for every node is produced by an **LLM** and rendered into the authoritative
-``se3/code-index.md`` (committed to git, human-reviewable / human-correctable).
+``tianluo/code-index.md`` (committed to git, human-reviewable / human-correctable).
 
-**One physical file is authoritative and self-sufficient.** ``se3/code-index.md``
+**One physical file is authoritative and self-sufficient.** ``tianluo/code-index.md``
 is the map itself — a zoomable tree ``dir → subdir → … → file → class →
 function`` — and every node line carries an embedded content fingerprint as a
 terse trailing HTML comment ``<!--#<16-hex>-->``. Because the fingerprint lives
@@ -46,6 +46,7 @@ Granularity floor (defaults; tunable via ``code_index`` config):
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import ast
 import contextlib
@@ -77,8 +78,8 @@ except ImportError:  # pragma: no cover - platform dependent
 
 logger = logging.getLogger(__name__)
 
-_MD_REL_PATH = Path("se3") / "code-index.md"
-_LOCK_REL_PATH = Path("se3") / "cache" / "code-index.lock"
+_MD_SUBPATH = Path("code-index.md")
+_LOCK_SUBPATH = Path("cache") / "code-index.lock"
 
 # Marker rendered on a degraded chunk line so it is unmistakable that the chunk
 # boundary is a mechanical line/byte cut with no semantic meaning.
@@ -91,7 +92,7 @@ _SUMMARY_CONTENT_CAP = 6000
 # Embedded fingerprint width: 16 hex chars = 64 bits. A collision is per-node
 # (a node's new content hashing to its own old value), not a birthday problem, so
 # 2^-64 per edit is decisive; widening costs ~8 chars on a ~200-char line, so we
-# pay it once and never reason about collisions again. ``se3 code-index rebuild
+# pay it once and never reason about collisions again. ``luo code-index rebuild
 # --force`` is the manual backstop for the (vanishingly rare) bad fingerprint.
 _FP_LEN = 16
 
@@ -180,7 +181,7 @@ class CodeIndex:
     project_root: Path
     files: Dict[str, FileEntry] = field(default_factory=dict)
     # One-line summary per directory at EVERY level (every ancestor of every
-    # file, plus ``(root)``), keyed by the directory key (e.g. ``"src/se3/"`` or
+    # file, plus ``(root)``), keyed by the directory key (e.g. ``"src/tianluo/"`` or
     # ``"(root)"``). Every level of the map carries its own summary so the
     # orientation map is zoomable at the directory level, not just file/symbol.
     dir_summaries: Dict[str, str] = field(default_factory=dict)
@@ -695,15 +696,15 @@ def _index_file(path: Path, relpath: str, cfg: CodeIndexConfig) -> FileEntry:
 # ---------------------------------------------------------------------------
 
 def md_path(project_root: Path) -> Path:
-    return Path(project_root) / _MD_REL_PATH
+    return runtime_dir(project_root) / _MD_SUBPATH
 
 
 def lock_path(project_root: Path) -> Path:
     """Path of the advisory lock file serializing concurrent (re)builds.
 
-    Lives under the gitignored ``se3/cache/`` directory so it is never committed.
+    Lives under the gitignored ``tianluo/cache/`` directory so it is never committed.
     """
-    return Path(project_root) / _LOCK_REL_PATH
+    return runtime_dir(project_root) / _LOCK_SUBPATH
 
 
 @contextlib.contextmanager
@@ -804,7 +805,7 @@ def _parent_dir(dirkey: str) -> Optional[str]:
 
 
 def _depth(dirkey: str) -> int:
-    """Nesting depth of a directory key (root = 0, ``src/`` = 1, ``src/se3/`` = 2)."""
+    """Nesting depth of a directory key (root = 0, ``src/`` = 1, ``src/tianluo/`` = 2)."""
     if dirkey == ROOT_DIR:
         return 0
     return dirkey.count("/")

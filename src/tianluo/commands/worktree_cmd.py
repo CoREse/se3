@@ -6,8 +6,8 @@ lives in the engine layer so both trigger surfaces — this CLI command and the
 daemon's periodic task — drive the exact same reclamation logic; this module is
 only the thin render/exit-code shell around it.
 
-``se3 worktree gc`` reclaims leaked ``se3 run --worktree`` runs (terminal +
-idle worktrees stranded under ``se3/worktrees/`` when a paused-then-resumed or
+``luo worktree gc`` reclaims leaked ``luo run --worktree`` runs (terminal +
+idle worktrees stranded under ``tianluo/worktrees/`` when a paused-then-resumed or
 hand-merged flow never runs the finalize/merge cleanup). The rendered report is
 deliberately three-part so an operator can see, at a glance: what was archived
 and how much space it freed, which unmerged branches were KEPT (the core safety
@@ -71,12 +71,12 @@ def gc_command(
         help=t("cli.help.worktree.gc.project_root"),
     ),
 ) -> None:
-    """Garbage-collect leaked terminal ``se3 run --worktree`` runs.
+    """Garbage-collect leaked terminal ``luo run --worktree`` runs.
 
-    Enumerates worktree runs under ``se3/worktrees/`` whose engine.json is in a
+    Enumerates worktree runs under ``tianluo/worktrees/`` whose engine.json is in a
     terminal state (COMPLETED / FAILED) and has been idle at least
     ``--max-age-hours``, then per run: archives it into
-    ``se3/worktrees/.archive/``, promotes its terminal state into the main
+    ``tianluo/worktrees/.archive/``, promotes its terminal state into the main
     archive, removes the worktree, and — ONLY when the branch is provably
     merged — deletes the branch. An unmerged branch's ref is ALWAYS kept and
     surfaced with a loud warning so no unmerged work is silently lost.
@@ -85,8 +85,8 @@ def gc_command(
     partial sweep); a clean or empty sweep exits 0.
 
     Examples:
-        se3 worktree gc --dry-run
-        se3 worktree gc --max-age-hours 48
+        luo worktree gc --dry-run
+        luo worktree gc --max-age-hours 48
     """
     if project_root:
         from ..i18n import bind_project_root

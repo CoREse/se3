@@ -1,14 +1,14 @@
 """Charter subsystem: load, render, and altitude-gate the project charter.
 
-The **charter** (`se3/charter.md`) is the shrunk rename of the retired base
+The **charter** (`tianluo/charter.md`) is the shrunk rename of the retired base
 spec. It plays exactly one runtime role: it is injected **in full, into every
-`se3 run` step, unconditionally**, and so doubles as the conventions channel
+`luo run` step, unconditionally**, and so doubles as the conventions channel
 for sandboxed LLM sub-processes (which cannot read CLAUDE.md and obtain
-project-level conventions only through what se3 injects).
+project-level conventions only through what luo injects).
 
 Three capabilities live here:
 
-- :func:`load_charter` — read ``se3/charter.md`` for whole-text injection.
+- :func:`load_charter` — read ``tianluo/charter.md`` for whole-text injection.
 - :func:`render_charter_template` — render the packaged ``charter.md`` template
   with project-init placeholder substitution (used by init / migrate).
 - :func:`check_admission` — the **altitude gate**. The normative admission
@@ -28,6 +28,7 @@ it freely without pulling in the heavier config / engine stack.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,9 +38,10 @@ from typing import Optional, Union
 # physical location
 # ---------------------------------------------------------------------------
 #: Path of the charter file relative to the project root. The charter lives at
-#: the top of the runtime directory (sibling of ``se3/code-index.md``), pulled
-#: out of ``se3/specs/`` because the spec corpus is retired by this refactor.
-CHARTER_RELATIVE_PATH = Path("se3") / "charter.md"
+#: the top of the runtime directory (sibling of ``tianluo/code-index.md``), pulled
+#: out of ``tianluo/specs/`` because the spec corpus is retired by this refactor.
+CHARTER_RELATIVE_PATH = Path("tianluo") / "charter.md"
+LEGACY_CHARTER_RELATIVE_PATH = Path("se3") / "charter.md"
 
 #: Filename of the packaged charter template (mirrors templates.CHARTER_TEMPLATE).
 CHARTER_TEMPLATE_NAME = "charter.md"
@@ -63,11 +65,11 @@ DEFAULT_CHARTER_MAX_BYTES = 32768
 # the charter-flavoured adaptation of spec_governance.BASE_ADMISSION_STANDARD:
 # charter IS the renamed base, so the admission altitude is identical, but the
 # wording references code-index (the new home of per-module locators) rather
-# than the retired `se3 spec` surface.
+# than the retired `luo spec` surface.
 CHARTER_ADMISSION_STANDARD = """\
 ## Charter Admission Standard
 
-The `charter` (`se3/charter.md`) is injected — in full — into every step of
+The `charter` (`tianluo/charter.md`) is injected — in full — into every step of
 every session, and is the conventions channel for sandboxed sub-processes. Its
 size is therefore a fixed cost paid on every single LLM call. Keep it small and
 high-altitude.
@@ -88,7 +90,7 @@ The charter MUST NOT carry low-level content:
 
 - Per-module / per-file / per-symbol locators — *where a thing lives, what it
   does, what its key symbols are* — belong to **code-index**
-  (`se3 code-index` for the top map, `se3 code-index show <path>` to drill in),
+  (`luo code-index` for the top map, `luo code-index show <path>` to drill in),
   NOT to the charter. Copying them in only yields a size-bloating mirror that
   is less accurate than the code itself.
 - Implementation detail of any single module — its mechanics, its internal
@@ -130,11 +132,11 @@ class AdmissionResult:
 
 def charter_path(project_root: Union[str, Path]) -> Path:
     """Return the absolute charter path for *project_root*."""
-    return Path(project_root) / CHARTER_RELATIVE_PATH
+    return runtime_dir(project_root) / "charter.md"
 
 
 def load_charter(project_root: Union[str, Path]) -> str:
-    """Read ``se3/charter.md`` for whole-text injection into every step.
+    """Read ``tianluo/charter.md`` for whole-text injection into every step.
 
     Returns the full charter text, or an empty string when the file is absent
     or unreadable (the loader never raises — a missing charter degrades to "no
@@ -169,20 +171,24 @@ def render_charter_template(**values: str) -> str:
 
 
 def _changed_paths_touch_charter(changed_files: Optional[list]) -> bool:
-    """Return True iff ``se3/charter.md`` appears in *changed_files*.
+    """Return True iff the project charter appears in *changed_files*.
 
     The match is on the path tail so it works whether callers pass
-    project-relative (``se3/charter.md``) or absolute paths, and tolerates
-    Windows-style separators. Non-string / malformed entries are skipped.
+    project-relative (``tianluo/charter.md`` / legacy ``se3/charter.md``) or
+    absolute paths, and tolerates Windows-style separators. Non-string /
+    malformed entries are skipped.
     """
     if not changed_files:
         return False
-    target = CHARTER_RELATIVE_PATH.as_posix()  # "se3/charter.md"
+    targets = (
+        CHARTER_RELATIVE_PATH.as_posix(),
+        LEGACY_CHARTER_RELATIVE_PATH.as_posix(),
+    )
     for entry in changed_files:
         if not isinstance(entry, str) or not entry:
             continue
         norm = entry.replace("\\", "/")
-        if norm == target or norm.endswith("/" + target):
+        if norm in targets or norm.endswith(tuple("/" + t for t in targets)):
             return True
     return False
 
@@ -196,7 +202,7 @@ def admission_check_for_changes(
 
     This is the trigger point wired into the flow: the admission gate
     (low-level-content-leakage monitoring) should fire *when the charter
-    changes*, not on every flow. When ``se3/charter.md`` is not among
+    changes*, not on every flow. When ``tianluo/charter.md`` is not among
     *changed_files* the function returns ``None`` (nothing to check); otherwise
     it loads the current charter and returns the :class:`AdmissionResult` from
     :func:`check_admission`, whose ``warning`` is a monitoring light — it never
@@ -212,7 +218,7 @@ def admission_check_for_changes(
 # admission gate — LLM prompt for the charter_freshness auto-update closed loop
 # ---------------------------------------------------------------------------
 # The charter_freshness step runs a propose -> gate -> apply closed loop that may
-# auto-write se3/charter.md. Its gate has two halves: the mechanical anchored-
+# auto-write tianluo/charter.md. Its gate has two halves: the mechanical anchored-
 # replace check (a program), and this LLM admission gate (b). On THIS path the
 # admission verdict is **gating**, not the monitoring-light role check_admission
 # plays elsewhere — the candidate text is only written to disk if this gate (and
@@ -243,7 +249,7 @@ def build_admission_gate_prompt(
     This is gate half (b) of the ``charter_freshness`` propose -> gate -> apply
     closed loop. Unlike :func:`check_admission` (whose byte check is a
     *monitoring light*), the verdict this prompt elicits is **gating**: the
-    candidate charter text is written to ``se3/charter.md`` only if the LLM
+    candidate charter text is written to ``tianluo/charter.md`` only if the LLM
     admits it (and the mechanical anchored-replace check also passes).
 
     The prompt injects, in order:
@@ -298,7 +304,7 @@ def build_admission_gate_prompt(
 
     return f"""\
 You are the admission GATE for a proposed descriptive update to the project
-charter (`se3/charter.md`). On this path your verdict is BINDING: the candidate
+charter (`tianluo/charter.md`). On this path your verdict is BINDING: the candidate
 charter below is written to disk only if you admit it. Judge whether the
 candidate stays within the charter admission standard AND whether any removed
 text weakens an unrelated existing convention.

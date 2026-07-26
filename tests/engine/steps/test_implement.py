@@ -1418,7 +1418,7 @@ class TestStreamPrefixConstruction:
             task_description="test",
             task_type="feature",
         )
-        flow.change_path = Path("/tmp/test/se3.yaml")
+        flow.change_path = Path("/tmp/test/tianluo.yaml")
 
         from tianluo.engine.steps.implement import implement_handler
         with patch("tianluo.config.ImplementConfig.load") as mock_config:

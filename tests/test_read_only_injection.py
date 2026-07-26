@@ -112,7 +112,7 @@ class TestGetReadOnlyInjection:
 
 class TestSyncStepReadOnly:
     """sync_scan/sync_analyze are read-only sync pseudo-steps; sync_resolve
-    is writable (its Way-A path edits se3/specs in place)."""
+    is writable (its Way-A path edits tianluo/specs in place)."""
 
     def test_is_step_read_only_sync_scan_and_analyze(self):
         assert is_step_read_only("sync_scan") is True

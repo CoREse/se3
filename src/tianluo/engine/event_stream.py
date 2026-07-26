@@ -1,6 +1,6 @@
 """Unified structured event stream for the SE3 flow engine.
 
-This module defines a single, caller-agnostic event stream that ``se3 run``
+This module defines a single, caller-agnostic event stream that ``luo run``
 emits over its lifetime. The stream is the convergence point that previously
 scattered structured artifacts (``state/engine.json``, ``state/summary-*.json``,
 NDJSON chat history) now feed into a single in-memory pub/sub channel.
@@ -11,7 +11,7 @@ Rendering degrades to a pluggable *sink* at the tail of this stream:
 * daemon mode hangs a structured forwarding sink (``JsonSink``).
 
 The emitter is a process-local, in-memory pub/sub object — it introduces no
-IPC and no resident process model. ``se3 run`` stays a one-shot foreground
+IPC and no resident process model. ``luo run`` stays a one-shot foreground
 command; the event stream lives only for the duration of that process.
 """
 

@@ -609,12 +609,12 @@ class TestSentinelEndToEndConfigLoad:
         return flow, implement_step, test_step
 
     def test_test_trigger_sentinel_zero_via_real_config(self, tmp_path):
-        """``workflow.max_fix_iterations: 0`` in se3.yaml must propagate
+        """``workflow.max_fix_iterations: 0`` in tianluo.yaml must propagate
         through the real ``WorkflowConfig.load`` path so the TEST trigger
         bypasses exhaustion at iteration 200. No mock of
         ``_get_max_fix_iterations``.
         """
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 0\n"
         )
         state_machine = StateMachine(project_root=tmp_path)
@@ -627,7 +627,7 @@ class TestSentinelEndToEndConfigLoad:
             next_step = state_machine.transition_to_next(flow)
 
         assert next_step is not None, (
-            "TEST trigger under sentinel 0 (loaded from real se3.yaml) must "
+            "TEST trigger under sentinel 0 (loaded from real tianluo.yaml) must "
             "grant a fix attempt even at iteration 200"
         )
         assert next_step.step_id == implement_step.step_id
@@ -636,11 +636,11 @@ class TestSentinelEndToEndConfigLoad:
 
     def test_test_trigger_finite_cap_via_real_config(self, tmp_path):
         """Companion to the sentinel test: with ``max_fix_iterations: 3``
-        loaded from real se3.yaml and the flow already at iteration 3, the
+        loaded from real tianluo.yaml and the flow already at iteration 3, the
         TEST trigger must FAIL — proving the config value is honored, not
         silently overridden.
         """
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 3\n"
         )
         state_machine = StateMachine(project_root=tmp_path)
@@ -779,7 +779,7 @@ class TestBuildStepInputsSelfCheck:
     def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
         assert "max_fix_iterations" in inputs
-        # Pin to exact configured default (no se3.yaml override in fixture).
+        # Pin to exact configured default (no tianluo.yaml override in fixture).
         assert inputs["max_fix_iterations"] == DEFAULT_MAX_FIX_ITERATIONS
 
     def test_propagates_prev_self_check_issues_on_fix_iteration_pass_one(self, state_machine, flow_in_fix_loop):
@@ -1016,12 +1016,12 @@ class TestMaxFixIterations:
 
     def test_get_max_fix_iterations_from_config(self, tmp_path):
         """Test that max fix iterations can be loaded from config."""
-        # Create se3.yaml with custom max_fix_iterations
+        # Create tianluo.yaml with custom max_fix_iterations
         config_content = """
 workflow:
   max_fix_iterations: 5
 """
-        (tmp_path / "se3.yaml").write_text(config_content)
+        (tmp_path / "tianluo.yaml").write_text(config_content)
 
         state_machine = StateMachine(project_root=tmp_path)
 
@@ -1035,7 +1035,7 @@ workflow:
 workflow:
   max_fix_iterations: 0
 """
-        (tmp_path / "se3.yaml").write_text(config_content)
+        (tmp_path / "tianluo.yaml").write_text(config_content)
 
         state_machine = StateMachine(project_root=tmp_path)
 
@@ -1047,7 +1047,7 @@ workflow:
 workflow:
   max_fix_iterations: null
 """
-        (tmp_path / "se3.yaml").write_text(config_content)
+        (tmp_path / "tianluo.yaml").write_text(config_content)
 
         state_machine = StateMachine(project_root=tmp_path)
 
@@ -1056,7 +1056,7 @@ workflow:
 
 class TestUnlimitedSentinelEndToEnd:
     """End-to-end coverage for the integration path that injects
-    `max_fix_iterations=0` from se3.yaml through `_build_step_inputs` into
+    `max_fix_iterations=0` from tianluo.yaml through `_build_step_inputs` into
     each step's inputs and finally into the LLM prompt.
 
     Existing tests mock `_get_max_fix_iterations` directly or set inputs
@@ -1067,7 +1067,7 @@ class TestUnlimitedSentinelEndToEnd:
     """
 
     def _write_unlimited_yaml(self, project_root: Path) -> None:
-        (project_root / "se3.yaml").write_text(
+        (project_root / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 0\n"
         )
 
@@ -1105,7 +1105,7 @@ class TestUnlimitedSentinelEndToEnd:
     def test_self_check_prompt_says_unlimited_across_iterations(
         self, tmp_path, fix_iteration
     ):
-        """Same end-to-end check for SELF_CHECK: se3.yaml(0) → inputs(0) →
+        """Same end-to-end check for SELF_CHECK: tianluo.yaml(0) → inputs(0) →
         prompt('unlimited').
         """
         from tianluo.engine.steps.self_check import self_check_handler
@@ -1188,7 +1188,7 @@ class TestUnlimitedAndConvergenceInteraction:
         # the convergence shortcut (see self_check.py ``convergence_blocked_by_defer``).
         # To exercise convergence-as-loop-break in isolation, deferral must be
         # turned off (threshold 0), so this safety-contract test sets it explicitly.
-        (project_root / "se3.yaml").write_text(
+        (project_root / "tianluo.yaml").write_text(
             "workflow:\n"
             "  max_fix_iterations: 0\n"
             "  self_check_convergence_enabled: true\n"
@@ -1313,7 +1313,7 @@ class TestUnlimitedAndConvergenceInteraction:
         ]
 
         # convergence_enabled defaults to False — only set unlimited
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 0\n"
         )
         sm = StateMachine(project_root=tmp_path)
@@ -1485,13 +1485,13 @@ class TestCreateFlowConfigValidation:
     """End-to-end fail-fast validation through ``create_flow``.
 
     Locks the contract that an invalid ``workflow.max_fix_iterations`` in
-    se3.yaml fails the flow creation, not just ``WorkflowConfig.from_dict``
+    tianluo.yaml fails the flow creation, not just ``WorkflowConfig.from_dict``
     in isolation.
     """
 
     def test_create_flow_negative_max_fix_iterations_fails_fast(self, tmp_path):
         """create_flow MUST raise ConfigError when yaml has a negative cap."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: -1\n"
         )
         sm = StateMachine(project_root=tmp_path)
@@ -1500,7 +1500,7 @@ class TestCreateFlowConfigValidation:
 
     def test_create_flow_zero_max_fix_iterations_is_unlimited(self, tmp_path):
         """create_flow accepts 0 (sentinel for unlimited) without error."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 0\n"
         )
         sm = StateMachine(project_root=tmp_path)
@@ -1557,7 +1557,7 @@ class TestHotEditMaxFixIterations:
     def test_unlimited_to_finite_triggers_failed_when_already_over_cap(self, tmp_path):
         """Flipping yaml from 0 (unlimited) to a finite cap below current
         iteration MUST cause the next transition to set FAILED."""
-        yaml_path = tmp_path / "se3.yaml"
+        yaml_path = tmp_path / "tianluo.yaml"
         yaml_path.write_text("workflow:\n  max_fix_iterations: 0\n")
         sm = StateMachine(project_root=tmp_path)
         # Warm the cache as if we'd already transitioned under unlimited
@@ -1576,7 +1576,7 @@ class TestHotEditMaxFixIterations:
     def test_finite_to_unlimited_stops_failed_transitions(self, tmp_path):
         """Flipping yaml from a finite cap to 0 (unlimited) MUST stop the
         next transition from going FAILED even if iteration > old cap."""
-        yaml_path = tmp_path / "se3.yaml"
+        yaml_path = tmp_path / "tianluo.yaml"
         yaml_path.write_text("workflow:\n  max_fix_iterations: 5\n")
         sm = StateMachine(project_root=tmp_path)
         # Warm the cache under the finite cap
@@ -1693,7 +1693,7 @@ class TestWorkflowConfigFallbackContract:
     """Locks the fail-fast invariant for ``_get_workflow_config``.
 
     Documented contract: a startup ``ConfigError`` (no prior successful
-    load) must propagate so the user is forced to fix se3.yaml before the
+    load) must propagate so the user is forced to fix tianluo.yaml before the
     flow runs. Only mid-flow ConfigErrors after a successful load are
     swallowed in favor of last-known-good config.
 

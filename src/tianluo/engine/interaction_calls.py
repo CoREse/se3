@@ -1,10 +1,10 @@
-"""Unified interaction-call file channel (``se3/calls/``).
+"""Unified interaction-call file channel (``tianluo/calls/``).
 
 Every point in a running flow that needs a human in the loop — a pending MCP
 call, a Ctrl-C mid-flow interjection, a retry/failure decision, a CLI
 subprocess confirmation prompt, or a non-interactive discovery confirmation
 gate — is represented by the *same* artifact: a JSON file under
-``<project_root>/se3/calls/``. The file carries a ``kind`` field
+``<project_root>/tianluo/calls/``. The file carries a ``kind`` field
 (one of the ``CALL_KIND_*`` constants defined in :mod:`tianluo.daemon.protocol`)
 plus display metadata (``prompt``, ``context``, ``options``) so the daemon
 aggregator and the web console can render and route the interaction without
@@ -19,7 +19,7 @@ This module is the single producer/consumer helper for those files:
   file (``<stem>.response`` or ``<stem>.response.json``).
 * :func:`write_interjection_request` is the daemon-side producer for a
   mid-flow interjection; :func:`drain_interjection_requests` is the
-  ``se3 run`` step-boundary consumer.
+  ``luo run`` step-boundary consumer.
 * :func:`write_retry_decision_call` writes the no-TTY failure-decision call.
 
 The format is deliberately backward compatible: a call file produced by an
@@ -28,6 +28,7 @@ and is classified as a plain ``call``.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -73,8 +74,8 @@ __all__ = [
 
 
 def calls_dir_for(project_root: Any) -> Path:
-    """Return the ``se3/calls/`` directory for *project_root*."""
-    return Path(project_root) / "se3" / "calls"
+    """Return the ``tianluo/calls/`` directory for *project_root*."""
+    return runtime_dir(Path(project_root)) / "calls"
 
 
 def classify_kind(data: Optional[Dict[str, Any]]) -> str:
@@ -196,7 +197,7 @@ def write_interjection_request(
     """Daemon-side producer: queue a mid-flow interjection as a call file.
 
     Called when the daemon receives a :data:`~tianluo.daemon.protocol.MSG_INTERJECT_FLOW`
-    instruction. The running ``se3 run`` process consumes it via
+    instruction. The running ``luo run`` process consumes it via
     :func:`drain_interjection_requests` at the next step boundary.
     """
     return write_call(
@@ -210,10 +211,10 @@ def write_interjection_request(
 
 
 def drain_interjection_requests(project_root: Any) -> List[Dict[str, Any]]:
-    """``se3 run`` consumer for queued interjections (any-time, not only at
+    """``luo run`` consumer for queued interjections (any-time, not only at
     step boundaries).
 
-    Scans ``se3/calls/`` for unanswered :data:`CALL_KIND_INTERJECTION` call
+    Scans ``tianluo/calls/`` for unanswered :data:`CALL_KIND_INTERJECTION` call
     files and returns one dict per drained item (oldest first) carrying
     ``text`` / ``call_id`` / ``step_id`` / ``step_type`` / ``created_at``.
     ``step_id`` / ``step_type`` come from the call file's ``context`` (or
@@ -312,7 +313,7 @@ def write_retry_decision_call(
 ) -> Path:
     """Write a :data:`CALL_KIND_RETRY_DECISION` call file for a FAILED step.
 
-    Used on the no-TTY failure path of ``se3 run``: with no interactive
+    Used on the no-TTY failure path of ``luo run``: with no interactive
     terminal to host the Retry/Skip/Abort prompt, the decision is externalised
     as a call file that the web console (or any responder) can answer. The
     ``call_id`` is derived from *step_id* so a resume reuses the same file
@@ -353,7 +354,7 @@ def write_interaction_call(
     context: Optional[Dict[str, Any]] = None,
     **extra: Any,
 ) -> Path:
-    """Write an interaction call file under ``<project_root>/se3/calls/``.
+    """Write an interaction call file under ``<project_root>/tianluo/calls/``.
 
     A project-root-addressed convenience wrapper around :func:`write_call`;
     any extra keyword arguments (e.g. ``flow_id`` / ``step_id``) are folded

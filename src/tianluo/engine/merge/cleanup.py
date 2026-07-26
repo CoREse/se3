@@ -1,4 +1,4 @@
-"""Cleanup manager for `--delete-merged` flag in `se3 merge`.
+"""Cleanup manager for `--delete-merged` flag in `luo merge`.
 
 Safely deletes merged branches and their bound worktrees. Uses `git branch -d`
 (lowercase) so deletion only succeeds when the branch is fully merged. Skips
@@ -30,6 +30,7 @@ Defects fixed in this module:
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -83,7 +84,7 @@ def _load_protected_branches(project_root: Path) -> frozenset[str]:
       * ``init.defaultBranch`` from git config (auto-detected so a repo
         that uses ``develop`` or ``trunk`` as its integration branch is
         protected without extra configuration).
-      * ``merge.protected_branches`` from ``se3.yaml`` (a list of
+      * ``merge.protected_branches`` from ``tianluo.yaml`` (a list of
         additional branch names operators want to protect).
 
     Loader failures fall back to the hardcoded baseline rather than
@@ -172,13 +173,13 @@ class CleanupReport:
     skipped_unknown_state: list[tuple[str, str]] = field(default_factory=list)
     # Archive metadata: for each branch successfully archived before
     # deletion, the path of the resulting archive directory under
-    # ``<project_root>/se3/worktrees/.archive/``. The archive happens BEFORE the
+    # ``<project_root>/tianluo/worktrees/.archive/``. The archive happens BEFORE the
     # destructive worktree-remove / branch-delete steps so a failure
     # there preserves the branch + worktree (see ``skipped_archive_failed``).
     archived: list[tuple[str, Path]] = field(default_factory=list)
     # For each branch whose worktree carried a COMPLETED ``engine.json``,
     # the path of the promoted terminal-state snapshot written into the
-    # *main* project's ``se3/state/archive/engine_<flow_id>.json`` BEFORE
+    # *main* project's ``tianluo/state/archive/engine_<flow_id>.json`` BEFORE
     # the worktree was deleted. This lets the daemon aggregator / history
     # reader report the worktree flow as ``status=completed`` like a normal
     # run, so the webui shows the unified active→completed→history lifecycle
@@ -366,14 +367,14 @@ def _archive_worktree(
     *,
     archive_name: Optional[str] = None,
 ) -> Path:
-    """Copy a worktree directory to ``se3/worktrees/.archive/<slug>-<ts>/``
+    """Copy a worktree directory to ``tianluo/worktrees/.archive/<slug>-<ts>/``
     before it is removed by ``delete_merged_branches``.
 
     The archive lands inside the project's sole ignored runtime root,
-    ``se3/`` (no leading dot, covered by the ``/se3/*`` gitignore rule),
+    ``tianluo/`` (no leading dot, covered by the ``/tianluo/*`` gitignore rule),
     as a hidden ``.archive`` subdirectory of the existing
-    ``se3/worktrees/`` workspace — so a worktree archive can never leak
-    into git (the prior ``.se3/archive``落点 had no ignore rule covering
+    ``tianluo/worktrees/`` workspace — so a worktree archive can never leak
+    into git (the prior ``.tianluo/archive``落点 had no ignore rule covering
     it and is the root cause this落点 change fixes).
 
     ``.git`` is intentionally excluded: in linked worktrees it is a
@@ -385,7 +386,7 @@ def _archive_worktree(
 
     Args:
         project_root: The merge command's project root (parent of
-            ``se3/worktrees/.archive/``).
+            ``tianluo/worktrees/.archive/``).
         branch: The branch whose worktree is being archived (always
             recorded in ``.se3-archive-meta.json`` as the authoritative
             recovery pointer; also the slug source when ``archive_name``
@@ -407,7 +408,7 @@ def _archive_worktree(
             MUST treat this as a hard archive failure and refuse to
             run the destructive worktree-remove / branch-delete step.
     """
-    archive_root = project_root / "se3" / "worktrees" / ".archive"
+    archive_root = runtime_dir(project_root) / "worktrees" / ".archive"
     archive_root.mkdir(parents=True, exist_ok=True)
 
     slug = re.sub(r"[^A-Za-z0-9._-]", "_", archive_name or branch)
@@ -478,9 +479,9 @@ def _promote_completed_engine_state(
 ) -> Optional[Path]:
     """Promote a worktree's COMPLETED ``engine.json`` into the main archive.
 
-    A ``se3 run --worktree`` flow persists its terminal ``COMPLETED`` state
+    A ``luo run --worktree`` flow persists its terminal ``COMPLETED`` state
     only inside the isolation worktree at
-    ``<wt_path>/se3/state/engine.json``. Once ``--delete-merged`` removes the
+    ``<wt_path>/tianluo/state/engine.json``. Once ``--delete-merged`` removes the
     worktree, that file is gone and the main project never recorded the flow's
     completion — so the daemon aggregator / history reader would only ever see
     the flow as a history-only directory (after Tier A history sync), never as
@@ -490,7 +491,7 @@ def _promote_completed_engine_state(
     To restore the unified ``active → completed → history`` lifecycle this
     copies the worktree's engine.json — only when it describes a genuinely
     ``COMPLETED`` flow — into the *main* project's
-    ``se3/state/archive/engine_<flow_id>.json`` (atomic write), stamping the
+    ``tianluo/state/archive/engine_<flow_id>.json`` (atomic write), stamping the
     main ``project_root`` so the history enumeration attributes it correctly.
     The daemon then reports it exactly like an archived normal run.
 
@@ -502,16 +503,16 @@ def _promote_completed_engine_state(
 
     ``force``: when True, the worktree engine.json is promoted to the main
     archive regardless of its ``status`` (RUNNING / PAUSED / FAILED / …). This
-    is used by ``se3 end-session`` to archive a *terminated* worktree flow the
+    is used by ``luo end-session`` to archive a *terminated* worktree flow the
     same way a normally completed one is archived. When False (the default,
-    used by ``se3 merge --delete-merged``) the original COMPLETED-only behavior
+    used by ``luo merge --delete-merged``) the original COMPLETED-only behavior
     is preserved byte-for-byte.
 
     Failures are non-fatal: the caller treats a ``None`` / raised error as
     "nothing promoted" and proceeds with cleanup — losing the brief Completed
     chip is far less bad than blocking a merge-back cleanup.
     """
-    engine_json = wt_path / "se3" / "state" / "engine.json"
+    engine_json = runtime_dir(wt_path) / "state" / "engine.json"
     try:
         raw = engine_json.read_text(encoding="utf-8")
     except OSError:
@@ -530,9 +531,9 @@ def _promote_completed_engine_state(
     status = str(data.get("status") or "").strip().lower()
     if not force and status != "completed":
         # Only a genuinely COMPLETED flow is promoted on the default
-        # ``se3 merge --delete-merged`` path. A FAILED / PAUSED worktree run
+        # ``luo merge --delete-merged`` path. A FAILED / PAUSED worktree run
         # keeps its worktree (cleanup never reaches a non-merged branch), so
-        # there is nothing to promote here. ``force=True`` (``se3 end-session``)
+        # there is nothing to promote here. ``force=True`` (``luo end-session``)
         # bypasses this gate to archive a terminated flow regardless of status.
         return None
 
@@ -553,21 +554,21 @@ def _promote_completed_engine_state(
     except OSError:  # pragma: no cover - defensive
         data["project_root"] = str(project_root)
 
-    archive_dir = project_root / "se3" / "state" / "archive"
+    archive_dir = runtime_dir(project_root) / "state" / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^A-Za-z0-9._-]", "_", flow_id_str)
     dest = archive_dir / f"engine_{slug}.json"
 
     # New-format (hot/cold split, issue #244) worktree flows keep each step's
     # inputs/outputs and the shared context in a per-flow cold partition at
-    # ``<wt>/se3/state/steps/<flow_id>/`` — the promoted engine.json is only the
+    # ``<wt>/tianluo/state/steps/<flow_id>/`` — the promoted engine.json is only the
     # KB-scale header carrying ``cold_ref`` entries that point into that dir. The
     # worktree (and its state/, which is gitignored and never runtime-synced) is
     # destroyed right after this promotion, so unless the cold partition is moved
     # into the *main* archive alongside its header, every step's payload and the
-    # context are lost and ``se3 history show`` / context export degrade to empty.
+    # context are lost and ``luo history show`` / context export degrade to empty.
     # Mirror ``PersistenceManager.clear_state``'s archival: copy the cold dir into
-    # ``<main>/se3/state/archive/steps/<flow_id>/`` so the archived flow stays
+    # ``<main>/tianluo/state/archive/steps/<flow_id>/`` so the archived flow stays
     # whole (issue #244 B5). Legacy inline worktree engine.json has no cold dir,
     # so this is a no-op and the byte-for-byte legacy behavior is preserved.
     if _is_hotcold_header(data) and not _promote_cold_partition(
@@ -575,10 +576,10 @@ def _promote_completed_engine_state(
     ):
         # Fail closed: the cold partition could not be copied into the main
         # archive, so writing the header would publish a promoted archive whose
-        # cold_ref entries point at missing files — ``se3 history show`` /
+        # cold_ref entries point at missing files — ``luo history show`` /
         # context export would then silently degrade every step to empty. Skip
         # the promotion entirely; the flow's full-fidelity data still lives in
-        # the worktree archive (``se3/worktrees/.archive/``, written just before
+        # the worktree archive (``tianluo/worktrees/.archive/``, written just before
         # this promotion), so nothing is lost — only the brief "Completed" chip
         # is (non-fatal, as documented).
         return None
@@ -633,7 +634,7 @@ def _promote_cold_partition(
     """Copy a new-format flow's cold partition into the main archive.
 
     The worktree keeps per-step inputs/outputs and the shared context under
-    ``<wt>/se3/state/steps/<flow_id>/``; this copies that dir to
+    ``<wt>/tianluo/state/steps/<flow_id>/``; this copies that dir to
     ``<archive>/steps/<flow_id>/`` so ``load_archived_flow_by_id`` (which resolves
     each ``cold_ref`` against ``archive/steps/<partition>/``) still finds every
     payload after the worktree is deleted. If a prior archive already owns
@@ -650,7 +651,7 @@ def _promote_cold_partition(
     full-fidelity data still lives in the worktree archive, so this only costs
     the brief "Completed" chip, never the data (self-check fix).
     """
-    cold_src = wt_path / "se3" / "state" / _STEPS_DIRNAME / flow_id
+    cold_src = runtime_dir(wt_path) / "state" / _STEPS_DIRNAME / flow_id
     if not cold_src.is_dir():
         return True
 
@@ -862,7 +863,7 @@ class CleanupManager:
         # G3 fix (low): widen the protected-branch set beyond the
         # hardcoded ('main', 'master') tuple. Includes git's
         # ``init.defaultBranch`` plus any names the operator listed in
-        # ``merge.protected_branches`` in se3.yaml. Repositories using
+        # ``merge.protected_branches`` in tianluo.yaml. Repositories using
         # ``develop`` / ``trunk`` / a custom default branch are now
         # protected from accidental deletion without needing extra
         # configuration when the default is set in git config.
@@ -932,7 +933,7 @@ class CleanupManager:
             # here preserves the worktree + branch (the destructive ops
             # are skipped), so an operator can fix the underlying issue
             # (e.g. disk full) and re-run cleanup. The archive lives at
-            # ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` and includes
+            # ``<project_root>/tianluo/worktrees/.archive/<slug>-<ts>/`` and includes
             # tracked + untracked + ignored files (but not ``.git`` —
             # see ``_archive_worktree``).
             if has_wt and wt_path is not None and wt_path.exists():
@@ -943,7 +944,7 @@ class CleanupManager:
                     report.archived.append((branch, archive_path))
                 except (OSError, shutil.Error) as exc:
                     reason = (
-                        f"archive to se3/worktrees/.archive/ failed: "
+                        f"archive to tianluo/worktrees/.archive/ failed: "
                         f"{type(exc).__name__}: {exc}"
                     )
                     logger.warning(

@@ -36,7 +36,7 @@ class TestRenderAnalyze:
         step = _make_step(StepType.ANALYZE, {
             "task_type": "feature",
             "complexity": "medium",
-            "scope": "src/se3/engine/step_renderers.py",
+            "scope": "src/tianluo/engine/step_renderers.py",
             "reasoning": "This task modifies rendering logic.",
             "selected_items": [
                 {"spec": "flow-engine", "requirement_name": "FE-3"},
@@ -55,7 +55,7 @@ class TestRenderAnalyze:
         # Status bar shows task_type, complexity, scope
         assert "feature" in content
         assert "medium" in content
-        assert "src/se3/engine/step_renderers.py" in content
+        assert "src/tianluo/engine/step_renderers.py" in content
 
         # Reasoning displayed
         assert "This task modifies rendering logic." in content
@@ -823,7 +823,7 @@ class TestRenderImplement:
         # Semicolons split the summary into numbered parts — keep one clause so
         # the assertion below can match it contiguously.
         "summary": "Add i18n loader and wire the CLI",
-        "files_changed": ["src/se3/cli.py", "src/se3/i18n/loader.py"],
+        "files_changed": ["src/tianluo/cli.py", "src/tianluo/i18n/loader.py"],
         "tests_added": ["tests/test_i18n.py"],
         "implemented_groups": ["G1"],
     }
@@ -839,7 +839,7 @@ class TestRenderImplement:
         content = mock_render_full.call_args[0][0]
 
         assert "Add i18n loader and wire the CLI" in content
-        assert "src/se3/cli.py" in content
+        assert "src/tianluo/cli.py" in content
         # The tests-added loop must render its entries, not shadow t().
         assert "tests/test_i18n.py" in content
         # t() resolved, so no raw dotted key leaked into the output.

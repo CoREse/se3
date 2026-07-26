@@ -4,7 +4,7 @@
 //   Run:  node tests/frontend/interaction_view.test.mjs
 //
 // This file imports the *real* pure helpers exported by the web frontend
-// (src/se3/server/static/app.js) rather than reimplementing them. app.js has
+// (src/tianluo/server/static/app.js) rather than reimplementing them. app.js has
 // no build step and no module system in the browser, but it appends a
 // `module.exports` block guarded by `typeof module !== "undefined"` so Node
 // can `require()` the same source the browser ships. Testing the shipped
@@ -25,7 +25,7 @@ import path from "node:path";
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
 const app = require(
-  path.join(here, "..", "..", "src", "se3", "server", "static", "app.js"),
+  path.join(here, "..", "..", "src", "tianluo", "server", "static", "app.js"),
 );
 
 // ---------------------------------------------------------------------------

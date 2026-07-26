@@ -208,7 +208,7 @@ class TestWriteIntentGitignoreGuard:
     """write_intent self-heals a stale .gitignore, and fails loud only if it can't.
 
     On an existing project whose committed .gitignore predates the
-    ``!/se3/version-intents/`` whitelist, the intent JSON would be silently
+    ``!/tianluo/version-intents/`` whitelist, the intent JSON would be silently
     skipped by the commit step's ``git add -A`` and the flow would only fail
     much later at version_reconcile with a misleading "restore the intent file".
     The guard now first minimally, idempotently patches the (worktree's own)
@@ -223,12 +223,12 @@ class TestWriteIntentGitignoreGuard:
         assert issubclass(VersionIntentIgnoredError, OSError)
 
     def test_whitelisted_path_writes_normally(self, git_repo: Path):
-        # The current template shape: ``/se3/*`` ignores se3 CONTENTS one level
+        # The current template shape: ``/tianluo/*`` ignores se3 CONTENTS one level
         # down (not the directory itself, so the whitelist below can re-include —
         # git cannot re-include under a fully-excluded parent dir), and
-        # ``!/se3/version-intents/`` tracks the intents.
+        # ``!/tianluo/version-intents/`` tracks the intents.
         (git_repo / ".gitignore").write_text(
-            f"/se3/*\n!/{VERSION_INTENT_DIR_RELPATH}/\n", encoding="utf-8"
+            f"/tianluo/*\n!/{VERSION_INTENT_DIR_RELPATH}/\n", encoding="utf-8"
         )
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "whitelist intents")
@@ -237,7 +237,7 @@ class TestWriteIntentGitignoreGuard:
         assert path.is_file()
         # An already-whitelisted .gitignore is left untouched (no self-heal churn).
         assert (git_repo / ".gitignore").read_text(encoding="utf-8") == (
-            f"/se3/*\n!/{VERSION_INTENT_DIR_RELPATH}/\n"
+            f"/tianluo/*\n!/{VERSION_INTENT_DIR_RELPATH}/\n"
         )
 
     def test_non_repo_does_not_block_write(self, tmp_path: Path):
@@ -246,11 +246,11 @@ class TestWriteIntentGitignoreGuard:
         assert path.is_file()
 
     def test_heals_gitignore_with_se3_contents_anchor(self, git_repo: Path):
-        # Shape (a): ``/se3/*`` present but no version-intents whitelist. The
-        # whitelist must be inserted right AFTER the ``/se3/*`` anchor so the
+        # Shape (a): ``/tianluo/*`` present but no version-intents whitelist. The
+        # whitelist must be inserted right AFTER the ``/tianluo/*`` anchor so the
         # negation takes effect, and the intent must then write without error.
         (git_repo / ".gitignore").write_text(
-            "*.log\n/se3/*\n!/se3/charter.md\n", encoding="utf-8"
+            "*.log\n/tianluo/*\n!/tianluo/charter.md\n", encoding="utf-8"
         )
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "ignore se3 contents, no intents whitelist")
@@ -262,14 +262,14 @@ class TestWriteIntentGitignoreGuard:
         assert not _check_ignored(git_repo, rel)
 
         new_lines = (git_repo / ".gitignore").read_text(encoding="utf-8").splitlines()
-        anchor_idx = new_lines.index("/se3/*")
+        anchor_idx = new_lines.index("/tianluo/*")
         assert new_lines[anchor_idx + 1] == f"!/{VERSION_INTENT_DIR_RELPATH}/"
 
     def test_heals_gitignore_with_whole_se3_dir_ignored(self, git_repo: Path):
-        # Shape (b): the entire ``se3/`` tree ignored (the exact pre-migration
+        # Shape (b): the entire ``tianluo/`` tree ignored (the exact pre-migration
         # shape). A lone whitelist is void under a fully-excluded parent, so the
         # heal must append the re-include / re-exclude / whitelist trio.
-        (git_repo / ".gitignore").write_text("/se3/\n", encoding="utf-8")
+        (git_repo / ".gitignore").write_text("/tianluo/\n", encoding="utf-8")
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "ignore whole se3 tree")
 
@@ -286,7 +286,7 @@ class TestWriteIntentGitignoreGuard:
     def test_self_heal_is_idempotent(self, git_repo: Path):
         # Two flows writing intents into the same stale repo must not accumulate
         # duplicate whitelist lines.
-        (git_repo / ".gitignore").write_text("/se3/\n", encoding="utf-8")
+        (git_repo / ".gitignore").write_text("/tianluo/\n", encoding="utf-8")
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "ignore whole se3 tree")
 
@@ -299,19 +299,19 @@ class TestWriteIntentGitignoreGuard:
         assert after_first == after_second
         lines = after_second.splitlines()
         assert lines.count(f"!/{VERSION_INTENT_DIR_RELPATH}/") == 1
-        assert lines.count("!/se3/") == 1
-        assert lines.count("/se3/*") == 1
+        assert lines.count("!/tianluo/") == 1
+        assert lines.count("/tianluo/*") == 1
 
     def test_heals_whole_dir_with_preexisting_void_whitelist(self, git_repo: Path):
-        # The exact state a user reaches by following the OLD error text: se3/ is
-        # ignored as a whole dir AND a bare ``!/se3/version-intents/`` was appended
+        # The exact state a user reaches by following the OLD error text: tianluo/ is
+        # ignored as a whole dir AND a bare ``!/tianluo/version-intents/`` was appended
         # under that still-excluded parent (so it is void). A set-membership dedup
-        # would leave that stale whitelist stranded BEFORE the ``/se3/*`` re-exclude
-        # the heal appends, keeping ``/se3/*`` the last match and the path ignored —
+        # would leave that stale whitelist stranded BEFORE the ``/tianluo/*`` re-exclude
+        # the heal appends, keeping ``/tianluo/*`` the last match and the path ignored —
         # hard-failing exactly the users who tried the previous guidance. The heal
         # must reposition the whitelist AFTER the re-exclude so the negation wins.
         (git_repo / ".gitignore").write_text(
-            f"/se3/\n!/{VERSION_INTENT_DIR_RELPATH}/\n", encoding="utf-8"
+            f"/tianluo/\n!/{VERSION_INTENT_DIR_RELPATH}/\n", encoding="utf-8"
         )
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "whole-dir ignore plus void whitelist")
@@ -324,11 +324,11 @@ class TestWriteIntentGitignoreGuard:
         assert path.is_file()
         assert not _check_ignored(git_repo, rel)
         lines = (git_repo / ".gitignore").read_text(encoding="utf-8").splitlines()
-        # Exactly one whitelist line, and it sits AFTER the ``/se3/*`` re-exclude,
-        # which in turn follows the ``!/se3/`` re-include.
+        # Exactly one whitelist line, and it sits AFTER the ``/tianluo/*`` re-exclude,
+        # which in turn follows the ``!/tianluo/`` re-include.
         assert lines.count(f"!/{VERSION_INTENT_DIR_RELPATH}/") == 1
-        assert lines.index("!/se3/") < lines.index("/se3/*")
-        assert lines.index("/se3/*") < lines.index(f"!/{VERSION_INTENT_DIR_RELPATH}/")
+        assert lines.index("!/tianluo/") < lines.index("/tianluo/*")
+        assert lines.index("/tianluo/*") < lines.index(f"!/{VERSION_INTENT_DIR_RELPATH}/")
         # read_intent round-trips the healed write.
         loaded = read_intent(git_repo, "20260707-void_0001")
         assert loaded is not None and loaded.flow_id == "20260707-void_0001"
@@ -339,7 +339,7 @@ class TestWriteIntentGitignoreGuard:
         # Self-heal cannot proceed (read-only .gitignore) → fail loud with the
         # updated, truthful guidance and no intent file written.
         gi = git_repo / ".gitignore"
-        gi.write_text("/se3/\n", encoding="utf-8")
+        gi.write_text("/tianluo/\n", encoding="utf-8")
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "ignore whole se3 tree")
         gi.chmod(0o444)
@@ -361,13 +361,13 @@ class TestWriteIntentGitignoreGuard:
 
     def test_non_utf8_gitignore_raises_not_crashes(self, git_repo: Path):
         # A legacy .gitignore with non-UTF-8 bytes (e.g. a latin-1/GBK comment)
-        # that ALSO ignores se3/: check-ignore matches on raw bytes so the probe
+        # that ALSO ignores tianluo/: check-ignore matches on raw bytes so the probe
         # reports ignored, but the heal's UTF-8 read raises UnicodeDecodeError.
         # That is an "unrepairable" case and must degrade to the fail-loud
         # VersionIntentIgnoredError (an OSError subclass the version_analyze step
         # rides), NOT escape as a raw UnicodeDecodeError traceback.
         gi = git_repo / ".gitignore"
-        gi.write_bytes(b"# comment \xe9\xe8\n/se3/\n")
+        gi.write_bytes(b"# comment \xe9\xe8\n/tianluo/\n")
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "non-utf8 gitignore ignoring se3")
 
@@ -377,13 +377,13 @@ class TestWriteIntentGitignoreGuard:
         assert "se3 init" not in str(exc_info.value)
         assert not intent_path(git_repo, "20260707-utf8_0001").exists()
         # The undecodable file must be left byte-for-byte intact.
-        assert gi.read_bytes() == b"# comment \xe9\xe8\n/se3/\n"
+        assert gi.read_bytes() == b"# comment \xe9\xe8\n/tianluo/\n"
 
     def test_unrelated_ignore_rule_rolls_back_mutation(self, git_repo: Path):
         # The intent JSON is ignored by an UNRELATED rule (``*.json``), while
-        # se3/ itself is tracked. The heal's appended trio cannot clear the ignore
+        # tianluo/ itself is tracked. The heal's appended trio cannot clear the ignore
         # (``*.json`` re-matches), so it must fail loud AND roll back — leaving no
-        # stray ``/se3/*`` line that would newly untrack other se3/ files once the
+        # stray ``/tianluo/*`` line that would newly untrack other tianluo/ files once the
         # user fixes the real rule and resumes.
         gi = git_repo / ".gitignore"
         original = "*.json\n"
@@ -397,7 +397,7 @@ class TestWriteIntentGitignoreGuard:
         with pytest.raises(VersionIntentIgnoredError):
             write_intent(git_repo, _make_intent("20260707-unrel_0001"))
 
-        # Mutation rolled back: no leftover se3/ re-exclude lines.
+        # Mutation rolled back: no leftover tianluo/ re-exclude lines.
         assert gi.read_text(encoding="utf-8") == original
         assert not intent_path(git_repo, "20260707-unrel_0001").exists()
 
@@ -405,12 +405,12 @@ class TestWriteIntentGitignoreGuard:
         self, git_repo: Path
     ):
         # A hand-edited legacy .gitignore carrying BOTH a whole-dir ignore
-        # (``/se3/``) AND a ``/se3/*`` anchor. Inserting only the whitelist after
-        # the anchor is void — ``/se3/`` still excludes the parent so git won't
-        # recurse. The heal must ALSO add the ``!/se3/`` re-include so the
+        # (``/tianluo/``) AND a ``/tianluo/*`` anchor. Inserting only the whitelist after
+        # the anchor is void — ``/tianluo/`` still excludes the parent so git won't
+        # recurse. The heal must ALSO add the ``!/tianluo/`` re-include so the
         # whitelist genuinely takes effect and the worktree flow is not
         # hard-stopped at version_analyze.
-        (git_repo / ".gitignore").write_text("/se3/\n/se3/*\n", encoding="utf-8")
+        (git_repo / ".gitignore").write_text("/tianluo/\n/tianluo/*\n", encoding="utf-8")
         _git(git_repo, "add", ".gitignore")
         _git(git_repo, "commit", "-m", "whole-dir plus anchor, no whitelist")
 
@@ -423,14 +423,14 @@ class TestWriteIntentGitignoreGuard:
         assert not _check_ignored(git_repo, rel)
         lines = (git_repo / ".gitignore").read_text(encoding="utf-8").splitlines()
         # Both the re-include and the whitelist are present; the re-include sits
-        # before the ``/se3/*`` anchor so the directory is re-included first.
-        assert "!/se3/" in lines
+        # before the ``/tianluo/*`` anchor so the directory is re-included first.
+        assert "!/tianluo/" in lines
         assert f"!/{VERSION_INTENT_DIR_RELPATH}/" in lines
-        assert lines.index("!/se3/") < lines.index("/se3/*")
+        assert lines.index("!/tianluo/") < lines.index("/tianluo/*")
         # Idempotent: a second flow's write adds no duplicate re-include line.
         write_intent(git_repo, _make_intent("20260707-both_0002"))
         lines2 = (git_repo / ".gitignore").read_text(encoding="utf-8").splitlines()
-        assert lines2.count("!/se3/") == 1
+        assert lines2.count("!/tianluo/") == 1
 
     def test_unreadable_gitignore_is_not_deleted_on_fail_loud(self, git_repo: Path):
         # A pre-existing .gitignore EXISTS but is unreadable (mode 000), while the
@@ -439,7 +439,7 @@ class TestWriteIntentGitignoreGuard:
         # destroy a file the heal did not create. The user's .gitignore must
         # survive the raise intact.
         (git_repo / ".git" / "info" / "exclude").write_text(
-            "/se3/\n", encoding="utf-8"
+            "/tianluo/\n", encoding="utf-8"
         )
         gi = git_repo / ".gitignore"
         gi.write_text("# user rules\n*.tmp\n", encoding="utf-8")

@@ -139,8 +139,8 @@ def test_degraded_extraction_failure_warns_once(tmp_path, monkeypatch):
 
 
 def _make_worktree_run(base: Path, name: str, flow_id: str, *, giant: bool) -> Path:
-    wt = base / "se3" / "worktrees" / name
-    eng = wt / "se3" / "state" / "engine.json"
+    wt = base / "tianluo" / "worktrees" / name
+    eng = wt / "tianluo" / "state" / "engine.json"
     _write_engine(
         eng,
         flow_id=flow_id,

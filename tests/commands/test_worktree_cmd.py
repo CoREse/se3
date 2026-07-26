@@ -96,7 +96,7 @@ def test_report_three_sections_and_unmerged_warning(project_root):
     """The rendered report shows archived, retained-unmerged (with a loud
     warning), and skipped sections — all three."""
     report = WorktreeGCReport(
-        archived=[("wt-merged", Path("/p/se3/worktrees/.archive/wt-merged-1"), 1024)],
+        archived=[("wt-merged", Path("/p/tianluo/worktrees/.archive/wt-merged-1"), 1024)],
         retained_unmerged=[
             ("feat-x", "master", "branch has commits not in HEAD (unmerged)")
         ],
@@ -122,7 +122,7 @@ def test_report_three_sections_and_unmerged_warning(project_root):
 def test_errors_map_to_nonzero_exit(project_root):
     """Any errored run makes the command exit non-zero."""
     report = WorktreeGCReport(
-        errors=[("wt-bad", "archive to se3/worktrees/.archive/ failed: OSError")],
+        errors=[("wt-bad", "archive to tianluo/worktrees/.archive/ failed: OSError")],
     )
     result, _ = _invoke([], project_root, report)
 

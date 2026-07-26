@@ -340,7 +340,7 @@ class TestWorktreeMergeSteps:
         )
 
     def _make_worktree_flow(self, project_root):
-        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
         # The merge-side steps resolve their cwd via ``probe_main_repo_root``,
         # which is deliberately strict: a non-git project_root is a genuine fault
         # (a silent fallback to a linked worktree would land the merge outside the
@@ -417,7 +417,7 @@ class TestWorktreeMergeSteps:
             root = Path(tmpdir)
             sm, flow = self._make_worktree_flow(root)
             # change_path.parent is the project root _update_flow_steps loads
-            # config from; point it at the isolated tmpdir (no se3.yaml → defaults).
+            # config from; point it at the isolated tmpdir (no tianluo.yaml → defaults).
             flow.change_path = root / "change"
             assert StepType.MERGE_INTEGRATE in flow.state.selected_steps
 
@@ -478,14 +478,14 @@ class TestWorktreeMergeSteps:
         """A committed git project + a feature branch carrying a version intent.
 
         Mirrors a de-versioned worktree session: a feature branch with a code
-        change plus a committed ``se3/version-intents/<flow>.json`` (changelog
+        change plus a committed ``tianluo/version-intents/<flow>.json`` (changelog
         bullet + minor bump hint, NO version number). Returns the default branch
         name. HEAD is left on the default branch, so the merge steps merge the
         feature branch into it.
         """
         from tianluo.engine.version_intent import VersionIntent, write_intent
 
-        (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
         (root / "pyproject.toml").write_text(
             '[project]\nname = "demo"\nversion = "11.12.0"\n', encoding="utf-8"
         )
@@ -663,9 +663,9 @@ class TestWorktreeMergeSteps:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             project_root = Path(tmpdir)
-            (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+            (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
             # Gate ONLY the version decision behind a human confirmation.
-            (project_root / "se3.yaml").write_text(
+            (project_root / "tianluo.yaml").write_text(
                 yaml.safe_dump(
                     {
                         "confirmation": {

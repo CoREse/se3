@@ -248,7 +248,7 @@ class TestFastStrategyAcceptOrRejectOnly:
             is_spec=False,
         )
         file_spec = FileResolution(
-            path="se3/specs/test/spec.md",
+            path="tianluo/specs/test/spec.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.HIGH, "high")],
             overall_confidence=Confidence.HIGH,
@@ -277,7 +277,7 @@ class TestFastStrategyAcceptOrRejectOnly:
             is_spec=False,
         )
         file_spec = FileResolution(
-            path="se3/specs/test/spec.md",
+            path="tianluo/specs/test/spec.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.LOW, "low")],
             overall_confidence=Confidence.LOW,

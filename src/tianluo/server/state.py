@@ -58,12 +58,12 @@ def _display_step_id(filename: str) -> str:
 def _is_worktree_session_path(project_root: object) -> bool:
     """Return whether *project_root* is an se3 ``--worktree`` isolation dir.
 
-    A ``se3 run --worktree`` flow body executes inside, and persists its
-    ``engine.json`` under, ``<main_root>/se3/worktrees/<name>/``. The daemon
+    A ``luo run --worktree`` flow body executes inside, and persists its
+    ``engine.json`` under, ``<main_root>/tianluo/worktrees/<name>/``. The daemon
     reports such a live (possibly dangling) run with that path as its
     ``project_root``. This is the **structural** half of the daemon's
     :func:`tianluo.daemon.supervisor.resolve_worktree_main_root` check — the last
-    two path segments being ``se3/worktrees`` — without the filesystem
+    two path segments being ``tianluo/worktrees`` — without the filesystem
     ``<main>/se3`` directory probe, because the server runs on a different host
     than the worktree and cannot stat it. Used by :meth:`ServerState.is_flow_endable`
     so a *completed* worktree session whose follow-up cleanup failed is still
@@ -72,11 +72,11 @@ def _is_worktree_session_path(project_root: object) -> bool:
     if not project_root:
         return False
     # Split on both separators and drop empties so trailing slashes don't shift
-    # the segment positions; a worktree dir is ``…/se3/worktrees/<name>``.
+    # the segment positions; a worktree dir is ``…/tianluo/worktrees/<name>``.
     parts = [seg for seg in str(project_root).replace("\\", "/").split("/") if seg]
     if len(parts) < 3:
         return False
-    return parts[-2] == "worktrees" and parts[-3] == "se3"
+    return parts[-2] == "worktrees" and parts[-3] in ("tianluo", "se3")
 
 
 # -- history progress token --------------------------------------------------
@@ -456,7 +456,7 @@ class ServerState:
         # History relay caches. The server is a pure in-memory relay for
         # history data — neither of these is ever written to disk.
         #: machine_id -> list of history session-meta dicts (the daemon's
-        #: ``se3 history`` index).
+        #: ``luo history`` index).
         self._history_index: Dict[str, List[Dict[str, Any]]] = {}
         #: flow_id -> cached history bundle (records + cursor + owner + the
         #: ``generation`` lifecycle id backing the incremental progress token).
@@ -896,7 +896,7 @@ class ServerState:
         Machine resolution is reachable-first with an unreachable fallback, like
         every other flow→machine lookup (see
         :meth:`_iter_owned_machines_online_first`). WHY: pulling a call's full
-        prompt reads ``se3/calls/<id>`` off the flow's project_root, so any
+        prompt reads ``tianluo/calls/<id>`` off the flow's project_root, so any
         daemon mounting that (here shared) filesystem serves the identical bytes.
         Without this, a shared-filesystem call resolved to the long-gone machine
         that happened to register first and the detail endpoint answered 503
@@ -954,7 +954,7 @@ class ServerState:
     # -- resume helpers ----------------------------------------------------
 
     #: Flow statuses that the daemon can directly resume via
-    #: ``se3 run --resume --flow-id <id>``.  RUNNING flows already have a
+    #: ``luo run --resume --flow-id <id>``.  RUNNING flows already have a
     #: live process; COMPLETED flows are done; INIT/RECOVERING are transient.
     RESUMABLE_STATUSES: set = {"failed", "paused"}
 
@@ -1010,9 +1010,9 @@ class ServerState:
           behind by a RUNNING / PAUSED / FAILED / RECOVERING / INIT session, so
           all of those are endable; or
         * it *is* ``completed`` **but** is still a live worktree session whose
-          ``project_root`` points inside ``<main>/se3/worktrees/<name>``. This
+          ``project_root`` points inside ``<main>/tianluo/worktrees/<name>``. This
           is the dangling-worktree case this feature exists for: when a
-          ``se3 run --worktree`` flow reaches COMPLETED but the follow-up
+          ``luo run --worktree`` flow reaches COMPLETED but the follow-up
           merge/cleanup fails or is interrupted, the worktree stays on disk with
           a completed ``engine.json`` and the daemon keeps reporting it live
           under its worktree root. Such an orphan must still be endable so the
@@ -2618,10 +2618,10 @@ class ServerState:
         This is the single source of truth the on-demand history pull uses to
         tell the daemon *which* root to read, instead of letting the daemon
         guess by scanning its whole project-root registry and taking the first
-        root that happens to contain ``se3/history/<flow_id>/``. A worktree-mode
+        root that happens to contain ``tianluo/history/<flow_id>/``. A worktree-mode
         flow runs its discovery step in the main repo root (writing one
         ``01_discovery`` file there) and every later step under the worktree
-        root, so two distinct roots can each contain a ``se3/history/<flow_id>``
+        root, so two distinct roots can each contain a ``tianluo/history/<flow_id>``
         directory; without the authoritative root the daemon's first-match
         heuristic returns the main repo's discovery-only directory and the web
         view freezes after the first step.
@@ -2695,7 +2695,7 @@ class ServerState:
 
         Returns ``True`` when an owner-visible flow with this id is still active
         (``running`` OR ``paused``) AND its ``project_root`` points inside
-        ``…/se3/worktrees/<name>`` (:func:`_is_worktree_session_path`). The
+        ``…/tianluo/worktrees/<name>`` (:func:`_is_worktree_session_path`). The
         ``paused`` state matters precisely for the failing case: a discovery
         round writes its chat records and then blocks on a human reply/decision
         call, flipping the flow to ``paused`` while the round-2 records are still
@@ -2750,7 +2750,7 @@ class ServerState:
         the reachable segment for callers resolving in two whole passes.
 
         WHY the issue mirror needs the same ordering as flow resolution: issues
-        live in ``se3/issues/*.yaml`` under the project root, so on a shared
+        live in ``tianluo/issues/*.yaml`` under the project root, so on a shared
         filesystem every daemon that ever saw that root mirrors the SAME issue
         id, and ``mark_offline`` keeps a disconnected machine's mirror. Resolving
         an issue to the first machine in insertion order therefore hands the

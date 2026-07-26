@@ -46,7 +46,7 @@ def _make_reader(*roots):
 
 def test_records_carry_zero_based_ordinal(tmp_path):
     """Each record's ordinal equals its 0-based physical line index."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist / "01_discovery_975607bb.jsonl",
         [
@@ -63,7 +63,7 @@ def test_records_carry_zero_based_ordinal(tmp_path):
 
 def test_ordinal_is_per_step_not_global(tmp_path):
     """Ordinal restarts at 0 for each step file (per-step line position)."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist / "01_discovery_975607bb.jsonl",
         [{"role": "assistant", "content": "d0"}, {"role": "assistant", "content": "d1"}],
@@ -90,7 +90,7 @@ def test_marker_records_with_empty_content_get_distinct_ordinals(tmp_path):
     several markers into one and drop the batch. Distinct ordinals keep them
     individually addressable.
     """
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist / "01_discovery_975607bb.jsonl",
         [
@@ -112,7 +112,7 @@ def test_marker_records_with_empty_content_get_distinct_ordinals(tmp_path):
 
 def test_same_logical_line_same_ordinal_across_full_and_append(tmp_path):
     """An append delta assigns new lines the same ordinal a full read would."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     step = hist / "01_discovery_975607bb.jsonl"
     _write_jsonl(
         step,
@@ -158,7 +158,7 @@ def test_same_logical_line_same_ordinal_across_full_and_append(tmp_path):
 
 def test_retry_equal_length_rewrite_maps_ordinal_to_new_content(tmp_path):
     """An equal-length in-place rewrite re-maps each ordinal to new content."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     step = hist / "01_discovery_975607bb.jsonl"
     _write_jsonl(
         step,
@@ -188,7 +188,7 @@ def test_retry_equal_length_rewrite_maps_ordinal_to_new_content(tmp_path):
 
 def test_retry_grown_rewrite_maps_ordinal_to_new_content(tmp_path):
     """A rewrite that grows the file still re-maps every consumed ordinal."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     step = hist / "01_discovery_975607bb.jsonl"
     _write_jsonl(
         step,
@@ -216,7 +216,7 @@ def test_retry_grown_rewrite_maps_ordinal_to_new_content(tmp_path):
 
 def test_retry_shrunk_rewrite_maps_ordinal_to_new_content(tmp_path):
     """A rewrite that shrinks the file re-maps the surviving ordinals."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     step = hist / "01_discovery_975607bb.jsonl"
     _write_jsonl(
         step,
@@ -249,7 +249,7 @@ def test_ordinal_stable_across_repeated_discovery_rewrites(tmp_path):
     the step file. Every round the reader must deliver the current line N at
     ordinal N, never a stale one.
     """
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     step = hist / "01_discovery_975607bb.jsonl"
 
     reader = _make_reader(tmp_path)

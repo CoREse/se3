@@ -35,7 +35,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const I18N_DIR = path.join(here, "..", "..", "src", "se3", "server", "static", "i18n");
+const I18N_DIR = path.join(here, "..", "..", "src", "tianluo", "server", "static", "i18n");
 
 const DOM_TOKEN_RE = /^[a-z0-9_-]+$/;
 

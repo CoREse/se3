@@ -83,7 +83,7 @@ class TestBaselineRoundTripExemptsInheritedFailures:
 
     def _make_flow(self, tmp_path: Path) -> FlowInstance:
         flow = FlowInstance(task_description="scoped task")
-        flow.change_path = tmp_path / "se3.yaml"
+        flow.change_path = tmp_path / "tianluo.yaml"
         return flow
 
     @patch("tianluo.engine.steps.test._report_pre_existing_issues")

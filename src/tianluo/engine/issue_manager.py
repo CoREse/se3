@@ -1,10 +1,11 @@
 """SE3 Issue Manager — Manage project issues with YAML-based storage.
 
 Provides IssueManager for creating, loading, listing, and updating issues
-stored as YAML files in se3/issues/open/ and se3/issues/closed/ directories.
+stored as YAML files in tianluo/issues/open/ and tianluo/issues/closed/ directories.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 import re
@@ -199,7 +200,7 @@ class IssueManager:
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
-        self.issues_dir = project_root / "se3" / "issues"
+        self.issues_dir = runtime_dir(project_root) / "issues"
         self.open_dir = self.issues_dir / "open"
         self.closed_dir = self.issues_dir / "closed"
 
@@ -211,7 +212,7 @@ class IssueManager:
     def _next_id(self) -> str:
         """Return the next sequential issue ID (zero-padded 3 digits).
 
-        Uses a counter file (se3/issues/.next_id) for monotonic IDs, but
+        Uses a counter file (tianluo/issues/.next_id) for monotonic IDs, but
         never trusts it blindly: every allocation re-scans the issue store
         and hands out ``max(counter, max existing ID + 1)``, so a stale or
         lagging counter can never re-mint a number a live issue already
@@ -315,12 +316,12 @@ class IssueManager:
         Unlike :meth:`create`, this preserves every field of *issue* except the
         ``id`` — status, timestamps, source, tags, priority, type — and writes
         the YAML file into ``open/`` or ``closed/`` according to the issue's
-        status. It is used by ``se3 merge`` runtime-sync to fold a worktree-
+        status. It is used by ``luo merge`` runtime-sync to fold a worktree-
         created issue back into the main project without colliding with the
         main project's existing IDs.
 
         The new ID is allocated via :meth:`_next_id`, whose read-modify-write on
-        ``se3/issues/.next_id`` is serialized by ``fcntl.flock`` so concurrent
+        ``tianluo/issues/.next_id`` is serialized by ``fcntl.flock`` so concurrent
         allocators never collide — and which reconciles the counter against the
         on-disk store before choosing, so even a stale/lagging ``.next_id``
         cannot hand out a number an existing issue file already owns. The
@@ -328,7 +329,7 @@ class IssueManager:
 
         Args:
             issue: The source issue (e.g. loaded from a worktree's
-                ``se3/issues/``). Its ``description`` must be non-empty.
+                ``tianluo/issues/``). Its ``description`` must be non-empty.
             defer_renumber_finalize: When True, skip the per-file ``#<old>``
                 reference rewrite and the renumber-trace append, leaving them
                 to the caller. A batch adopter MUST defer: rewriting each

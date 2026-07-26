@@ -32,10 +32,10 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STATIC_DIR = REPO_ROOT / "src" / "se3" / "server" / "static"
+STATIC_DIR = REPO_ROOT / "src" / "tianluo" / "server" / "static"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "style.css"
-SRC = REPO_ROOT / "src" / "se3"
+SRC = REPO_ROOT / "src" / "tianluo"
 
 
 def _read(path: Path) -> str:
@@ -112,7 +112,7 @@ def test_step_status_display_has_no_merging_entry():
 
 def test_normalize_record_recognizes_legacy_merging_event():
     """No NEW ``merging`` anchor is ever written, but pre-change archived worktree
-    flows (real old flows in se3/history) still carry a bare ``{"type":"merging"}``
+    flows (real old flows in tianluo/history) still carry a bare ``{"type":"merging"}``
     row. ``normalizeRecord`` (the daemon→webui raw-record path) must recognize it
     as a lifecycle anchor — folded into the same step-event family as
     ``waiting_for_lock`` — so it does NOT fall through to the generic role path and

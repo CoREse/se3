@@ -33,9 +33,9 @@ from tianluo.engine.models import (
 def project_root(tmp_path):
     """Create a minimal project directory."""
     (tmp_path / ".git").mkdir()
-    (tmp_path / "se3" / "state").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "open").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "closed").mkdir(parents=True)
     return tmp_path
 
 
@@ -61,7 +61,7 @@ def valid_flow():
 
 def _write_flow_state(project_root: Path, flow: FlowInstance) -> None:
     """Write flow state to engine.json."""
-    state_file = project_root / "se3" / "state" / "engine.json"
+    state_file = project_root / "tianluo" / "state" / "engine.json"
     data = flow.to_dict()
     state_file.write_text(json.dumps(data, default=str), encoding="utf-8")
 
@@ -79,7 +79,7 @@ class TestLoadSession:
         assert len(warnings) == 0
 
     def test_load_corrupted_session(self, project_root):
-        state_file = project_root / "se3" / "state" / "engine.json"
+        state_file = project_root / "tianluo" / "state" / "engine.json"
         state_file.write_text('{"flow_id": "test", "task_description": "task", "status": "running", "state": {', encoding="utf-8")
 
         flow, warnings = _load_session(project_root)
@@ -218,8 +218,8 @@ class TestArchiveSession:
         result = _archive_session(project_root)
 
         assert result is True
-        assert not (project_root / "se3" / "state" / "engine.json").exists()
-        archive_dir = project_root / "se3" / "state" / "archive"
+        assert not (project_root / "tianluo" / "state" / "engine.json").exists()
+        archive_dir = project_root / "tianluo" / "state" / "archive"
         assert archive_dir.exists()
         assert len(list(archive_dir.glob("*.json"))) == 1
 
@@ -230,7 +230,7 @@ class TestArchiveSession:
     def test_clears_resumable_snapshot(self, project_root, valid_flow):
         """A salvaged/archived flow must not leave a resumable snapshot behind.
 
-        The per-flow se3/state/resumable/<flow_id>.json written while the flow
+        The per-flow tianluo/state/resumable/<flow_id>.json written while the flow
         ran would otherwise be advertised as resumable by the daemon
         STATUS_UPDATE channel (whose dedup seeds only from active engine.json
         flow_ids) while hidden in the history index (which dedups against the
@@ -294,7 +294,7 @@ class TestSalvageFullPipeline:
     @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_corrupted_session(self, mock_run, project_root):
         """Corrupted session should still allow git-diff-based salvage."""
-        state_file = project_root / "se3" / "state" / "engine.json"
+        state_file = project_root / "tianluo" / "state" / "engine.json"
         state_file.write_text("{corrupted json data", encoding="utf-8")
 
         mock_run.side_effect = [

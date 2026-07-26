@@ -38,7 +38,7 @@ from tianluo.engine.steps.discovery import discovery_handler
 # reference, so we know unusual characters survive the marker boundary intact.
 _INITIAL_DESCRIPTION = (
     "请帮我把 web running-flow console 的聊天渲染修好，"
-    "参考 se3/history/20260520-142159_30166ecb 这个 session。"
+    "参考 tianluo/history/20260520-142159_30166ecb 这个 session。"
 )
 
 
@@ -100,7 +100,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
         flow_id=flow_id,
         task_description=_INITIAL_DESCRIPTION,
         task_type="discovery",
-        change_path=project_root / "se3",
+        change_path=project_root / "tianluo",
     )
     step = Step(
         step_type=StepType.DISCOVERY,
@@ -132,7 +132,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
 
 def _read_user_record(project_root: Path, flow_id: str, step_id: str) -> dict:
     """Return the single persisted ``user`` record from the step jsonl."""
-    path = project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    path = project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
     assert path.exists(), f"history jsonl not written at {path}"
     user_records = []
     for line in path.read_text(encoding="utf-8").splitlines():

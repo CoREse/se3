@@ -232,7 +232,7 @@ def test_server_version_works_without_server_extra():
     proc = _run_python(code)
     assert proc.returncode == 0, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert "EXITCODE 0" in proc.stdout
-    assert f"se3-server version {__version__}" in proc.stdout
+    assert f"tianluo-server version {__version__}" in proc.stdout
 
 
 @pytest.mark.parametrize("module", ["tianluo.cli", "tianluo.daemon", "tianluo.daemon.daemon"])

@@ -1,4 +1,4 @@
-"""Standalone garbage collector for leaked ``se3 run --worktree`` runs.
+"""Standalone garbage collector for leaked ``luo run --worktree`` runs.
 
 Why this module exists
 ----------------------
@@ -13,7 +13,7 @@ real flows escape it:
 * a human who merges a branch back by hand never runs the finalize step at all.
 
 Both leave the whole isolation worktree — including its multi-MB
-``engine.json`` — stranded under ``se3/worktrees/`` indefinitely (observed:
+``engine.json`` — stranded under ``tianluo/worktrees/`` indefinitely (observed:
 a 50 MB ``engine.json`` sitting for 7 days, whose feature branch was never
 merged back and which nobody knew about). Enough of them stacked up saturate
 the daemon event loop and freeze the webui.
@@ -31,10 +31,11 @@ hot/cold cold-partition promotion, archive-before-destroy gating) rather than
 re-implementing them.
 
 This is the single authoritative core shared by both trigger surfaces — the
-``se3 worktree gc`` CLI command and the daemon's low-frequency periodic task.
+``luo worktree gc`` CLI command and the daemon's low-frequency periodic task.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import dual_runtime_glob, runtime_dir
 
 import json
 import logging
@@ -74,7 +75,7 @@ class WorktreeGCReport:
     """Outcome of one ``gc_worktree_runs`` sweep.
 
     ``archived`` lists every worktree that was (or, under ``dry_run``, would be)
-    copied into ``se3/worktrees/.archive/``; each entry is
+    copied into ``tianluo/worktrees/.archive/``; each entry is
     ``(name, archive_path, bytes)`` where ``archive_path`` is ``None`` for a
     dry run (nothing was written). ``retained_unmerged`` lists the branches
     whose refs were deliberately KEPT because they are not provably merged —
@@ -198,7 +199,7 @@ def find_stale_worktree_runs(
 ) -> list[dict]:
     """Enumerate terminal, over-age isolation-worktree runs eligible for GC.
 
-    Globs ``se3/worktrees/*/se3/state/engine.json`` and keeps only entries that
+    Globs ``tianluo/worktrees/*/tianluo/state/engine.json`` and keeps only entries that
     pass all three filters: the run is ``is_worktree_mode`` True, its ``status``
     is terminal (COMPLETED / FAILED), and the engine.json mtime is at least
     ``max_age_seconds`` old. Non-worktree runs, non-terminal runs, freshly
@@ -210,13 +211,13 @@ def find_stale_worktree_runs(
     ``engine_json``, ``worktree_branch``, ``worktree_original_branch``,
     ``flow_id`` and ``status``.
     """
-    worktrees_root = project_root / "se3" / "worktrees"
+    worktrees_root = runtime_dir(project_root) / "worktrees"
     if not worktrees_root.is_dir():
         return []
 
     now = time.time()
     records: list[dict] = []
-    for engine_json in sorted(worktrees_root.glob("*/se3/state/engine.json")):
+    for engine_json in sorted(dual_runtime_glob(worktrees_root, "*/", "state/engine.json")):
         # The physical worktree directory is glob-parent[..] rather than the
         # JSON's recorded ``worktree_path`` field: a repo copied/moved on disk
         # keeps a stale absolute path in the JSON, but the file we just globbed
@@ -328,7 +329,7 @@ def gc_worktree_runs(
                 report.errors.append(
                     (
                         name,
-                        f"archive to se3/worktrees/.archive/ failed: "
+                        f"archive to tianluo/worktrees/.archive/ failed: "
                         f"{type(exc).__name__}: {exc}",
                     )
                 )

@@ -153,7 +153,7 @@ class TestCreateWorktree:
 
         wt_path = create_worktree(tmp_path, branch_name)
 
-        expected = tmp_path / "se3" / "worktrees" / "wt-test"
+        expected = tmp_path / "tianluo" / "worktrees" / "wt-test"
         assert wt_path == expected
 
     def test_worktree_listed_by_git(self, tmp_path: Path) -> None:
@@ -181,7 +181,7 @@ class TestRemoveWorktree:
     def test_handles_already_removed(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         # Try removing a non-existent worktree path — should not raise
-        fake_path = tmp_path / "se3" / "worktrees" / "nonexistent"
+        fake_path = tmp_path / "tianluo" / "worktrees" / "nonexistent"
         remove_worktree(tmp_path, fake_path)  # Should not raise
 
 
@@ -642,7 +642,7 @@ class TestCreateWorktreeRetry:
         branch_name, _ = _make_test_branch(tmp_path, timestamp="retry-clean")
 
         safe_name = branch_name.replace("/", "-")
-        worktree_path = tmp_path / "se3" / "worktrees" / safe_name
+        worktree_path = tmp_path / "tianluo" / "worktrees" / safe_name
 
         original_run_git = __import__(
             "tianluo.engine.worktree", fromlist=["_run_git"]

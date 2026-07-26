@@ -5,12 +5,13 @@ Replaces start/work/done with a state machine-driven workflow that:
 - Handles all step types programmatically
 
 Usage:
-    se3 run "Implement feature X"              # New flow
-    se3 run --resume                           # Resume interrupted flow
-    se3 run "Fix bug" --type=bugfix            # Specify task type
+    luo run "Implement feature X"              # New flow
+    luo run --resume                           # Resume interrupted flow
+    luo run "Fix bug" --type=bugfix            # Specify task type
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import dual_runtime_glob, runtime_dir
 
 import json
 import logging
@@ -79,6 +80,8 @@ except ImportError:
 app = typer.Typer()
 logger = logging.getLogger(__name__)
 
+# Deprecated constant kept for importers; path resolution goes through
+# runtime_dir() so legacy tianluo/ layouts keep working (removed in 13.0.0).
 SE3_DIR = "se3"
 STATE_FILE = "state/engine.json"
 
@@ -103,8 +106,8 @@ def get_project_root() -> Path:
     worktree root (so SE3 state files remain isolated per-worktree).
     Config lookup via :func:`config.get_project_config_path` automatically
     ascends to the main repository when appropriate, so worktree-local
-    ``se3.local.yaml`` still takes precedence and the main repo's
-    ``se3.local.yaml`` can override the worktree's tracked ``se3.yaml``.
+    ``tianluo.local.yaml`` still takes precedence and the main repo's
+    ``tianluo.local.yaml`` can override the worktree's tracked ``tianluo.yaml``.
 
     Also binds the i18n language to the discovered root: this is the point at
     which the command settles on *which project* it operates on, and the root can
@@ -118,7 +121,7 @@ def get_project_root() -> Path:
     root = cwd
     for parent in [cwd] + list(cwd.parents):
         # Check for .git directory, or any SE3 project marker
-        # (se3.yaml, se3.local.yaml, se3.config.yaml).
+        # (tianluo.yaml, tianluo.local.yaml, se3.config.yaml).
         if (parent / ".git").exists() or is_se3_project_root(parent):
             root = parent
             break
@@ -193,7 +196,7 @@ def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root:
     Returns:
         StepStatus if response found and processed, None otherwise
     """
-    calls_dir = project_root / "se3" / "calls"
+    calls_dir = runtime_dir(project_root) / "calls"
     if not calls_dir.exists():
         return None
 
@@ -406,7 +409,7 @@ def _handle_confirm_pause(
 def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
     """Find all existing flow state files."""
     flows = []
-    se3_dir = project_root / SE3_DIR
+    se3_dir = runtime_dir(project_root)
     state_file = se3_dir / "state" / "engine.json"
 
     if not state_file.exists():
@@ -432,10 +435,10 @@ def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
 def find_resumable_snapshot_flows(project_root: Path) -> List[Dict[str, Any]]:
     """Find resumable flows that exist only as per-flow snapshots.
 
-    The single-slot engine.json is overwritten by the next ``se3 run``, so a
+    The single-slot engine.json is overwritten by the next ``luo run``, so a
     paused/interrupted/failed flow's recoverable state would otherwise be lost.
     :class:`PersistenceManager` mirrors every non-COMPLETED save into
-    ``se3/state/resumable/<flow_id>.json``; this surfaces those snapshots in the
+    ``tianluo/state/resumable/<flow_id>.json``; this surfaces those snapshots in the
     resume picker shaped like :func:`find_existing_flows` entries. COMPLETED
     flows never have a snapshot (it is cleared on completion), so they cannot
     appear here.
@@ -479,7 +482,7 @@ def prompt_user_choice(message: str, options: List[str]) -> int:
 def _stdin_is_interactive() -> bool:
     """Return whether the process has an interactive (TTY) stdin.
 
-    Off a terminal (a daemon-spawned ``se3 run --output-format json``, CI, a
+    Off a terminal (a daemon-spawned ``luo run --output-format json``, CI, a
     pipe), there is no operator to host an interactive prompt — the failure
     decision must instead be externalised as a call file.
     """
@@ -577,7 +580,7 @@ def _resolve_step_failure_action(
 
     Regardless of whether the process owns a terminal, a
     :data:`~tianluo.engine.interaction_calls.CALL_KIND_RETRY_DECISION` call file is
-    written under ``se3/calls/`` so a webui bystander sees the failure as a
+    written under ``tianluo/calls/`` so a webui bystander sees the failure as a
     Retry/Skip/Abort chip and can answer it. This is what makes the CLI and
     the web console *equivalent* on the failure-decision path (it fixes both
     "webui can't see the failure" and "webui can't retry").
@@ -599,7 +602,7 @@ def _resolve_step_failure_action(
       poller) — whoever answers first wins.
     * ``("pause", call_path)`` — non-interactive, no answer yet: the caller
       pauses the flow so the decision can be made out-of-band and applied on
-      the next ``se3 run --resume`` (unchanged from the prior behavior).
+      the next ``luo run --resume`` (unchanged from the prior behavior).
     """
     from ..engine import interaction_calls
 
@@ -814,14 +817,14 @@ def _drain_pending_interjections(
 
     The web console pushes mid-flow instructions through the server as
     ``MSG_INTERJECT_FLOW``; the daemon turns each into an ``interjection``-kind
-    call file under ``se3/calls/``. This function drains those files and:
+    call file under ``tianluo/calls/``. This function drains those files and:
 
     * folds each into ``flow.state.context["user_interjections"]`` using the
       same entry shape as a Ctrl-C interjection;
     * recomposes the current step's ``task_description`` so the instruction
       takes effect on the next run / iteration;
     * writes a ``{role: 'user', kind: 'interjection', ...}`` line into the
-      current step's history jsonl so ``se3 history show`` and the web
+      current step's history jsonl so ``luo history show`` and the web
       console see the user's bubble at the point the interjection arrived;
     * when the current step is PAUSED (waiting on a prompt response), also
       buffers each drained text into
@@ -1187,7 +1190,7 @@ def _restore_discovery_display(current_step: Any) -> None:
 def _maybe_write_discovery_call(
     flow: FlowInstance, current_step: Any, project_root: Optional[Path]
 ) -> Optional[Path]:
-    """Mirror an interactive discovery pause to a ``se3/calls/`` call file.
+    """Mirror an interactive discovery pause to a ``tianluo/calls/`` call file.
 
     Writing the call file makes the web console surface the *same* pending
     interaction the terminal is blocking on, so a CLI-started discovery session
@@ -1456,7 +1459,7 @@ def _handle_discovery_pause(
 ) -> Optional[str]:
     """Handle an interactive discovery pause — get the user's response.
 
-    The clarifying question is mirrored to a ``se3/calls/`` call file (when a
+    The clarifying question is mirrored to a ``tianluo/calls/`` call file (when a
     project root is known) so the web console surfaces the same pending
     interaction; the terminal and the web response file are then awaited in
     parallel and whichever answers first drives the flow in this same process
@@ -1699,7 +1702,7 @@ def _discovery_call_question(current_step: Any) -> str:
 def _write_discovery_call(
     flow: FlowInstance, current_step: Any, project_root: Path
 ) -> Path:
-    """Write a ``se3/calls/`` call file for a non-interactive discovery pause.
+    """Write a ``tianluo/calls/`` call file for a non-interactive discovery pause.
 
     The call joins the unified human-call queue via the shared
     :func:`~tianluo.engine.interaction_calls.write_call` helper, so the daemon
@@ -1798,7 +1801,7 @@ def _handle_discovery_pause_noninteractive(
     """Handle a discovery pause without a terminal (daemon ``--output-format json``).
 
     Rather than blocking on a terminal read, the clarifying question is written
-    to a ``se3/calls/`` call file and the flow pauses; the web answers via the
+    to a ``tianluo/calls/`` call file and the flow pauses; the web answers via the
     existing call/response mechanism. On resume the response is consumed and
     fed back into discovery as the next user turn.
 
@@ -1982,11 +1985,11 @@ def _resolve_main_lock_root(project_root: Path) -> Path:
     """Resolve the main-repository root that owns the main-worktree lock.
 
     The main-worktree mutex always lives at the *main repository's*
-    ``se3/state/merge.lock`` (never inside a linked worktree). When
+    ``tianluo/state/merge.lock`` (never inside a linked worktree). When
     ``project_root`` is itself a linked git worktree, resolve back to the main
     repo via :func:`config._resolve_main_repo_root`; otherwise ``project_root``
     is already the main repo and is returned unchanged. This guarantees a
-    synchronous ``se3 run`` launched from inside a worktree still contends on
+    synchronous ``luo run`` launched from inside a worktree still contends on
     the single project-wide lock.
     """
     from ..config import _resolve_main_repo_root
@@ -2157,16 +2160,16 @@ def run_flow(
             historical CLI output), ``"json"`` hangs the structured
             :class:`JsonSink` (NDJSON to stdout) for daemon consumption.
         acquire_main_lock: When ``True`` (the default for a synchronous
-            ``se3 run``), acquire the project's main-worktree mutex
+            ``luo run``), acquire the project's main-worktree mutex
             (``MergeLock(main_repo).acquire(blocking=True)``) before running and
             hold it for the *entire* run, releasing it on every exit path. The
-            lock always targets the main repository's ``se3/state/merge.lock``
+            lock always targets the main repository's ``tianluo/state/merge.lock``
             (resolved from a worktree via :func:`_resolve_main_lock_root`), so
             synchronous runs serialise against each other and against any
-            ``se3 merge``. When ``False`` — the case for a ``--worktree`` run's
+            ``luo merge``. When ``False`` — the case for a ``--worktree`` run's
             isolated flow body — no lock is taken, so multiple worktree flow
             bodies execute concurrently and only contend at their trailing
-            ``se3 merge`` step. The DAG implement-step isolation worktrees never
+            ``luo merge`` step. The DAG implement-step isolation worktrees never
             call ``run_flow`` and so never participate in this lock.
         worktree_branch: For a new ``--worktree`` flow, the isolation branch
             name to record on the flow (``worktree_branch``); ignored on resume.
@@ -2174,9 +2177,9 @@ def run_flow(
             run was launched from / will merge back into; recorded on the flow
             (``worktree_original_branch``) so resume can drive the trailing
             merge. Ignored on resume.
-        manage_pidfile: When ``True`` (default for a synchronous ``se3 run``),
-            ``run_flow`` writes ``se3/state/run.pid`` on entry and clears it on
-            exit so ``se3 end-session`` can locate the live process. When
+        manage_pidfile: When ``True`` (default for a synchronous ``luo run``),
+            ``run_flow`` writes ``tianluo/state/run.pid`` on entry and clears it on
+            exit so ``luo end-session`` can locate the live process. When
             ``False`` — the case for a ``--worktree`` run's isolated flow body —
             the CALLER (``run_worktree_mode`` / ``_resume_worktree_run``) owns
             the pidfile for the WHOLE worktree-run lifecycle, INCLUDING the
@@ -2213,7 +2216,7 @@ def run_flow(
     # isolated flow body — no lock object is created at all, so the body runs
     # lock-free.
     main_lock = None
-    # Record this process's pid into ``se3/state/run.pid`` so ``se3 end-session``
+    # Record this process's pid into ``tianluo/state/run.pid`` so ``luo end-session``
     # can RELIABLY identify the live flow process even when it is a ``--worktree``
     # run whose process ``cwd`` stays at the main repo (engine.json lives in the
     # worktree) and which is momentarily between agent/test subprocesses, i.e.
@@ -2265,9 +2268,9 @@ def run_flow(
 
 
 def _write_run_pidfile(persistence: PersistenceManager) -> None:
-    """Best-effort: record the current pid into ``se3/state/run.pid``.
+    """Best-effort: record the current pid into ``tianluo/state/run.pid``.
 
-    Read by ``se3 end-session`` to reliably locate the live flow process. Never
+    Read by ``luo end-session`` to reliably locate the live flow process. Never
     raises — a failure to write the marker only degrades end-session back to its
     process-scan heuristics.
     """
@@ -2282,7 +2285,7 @@ def _write_run_pidfile(persistence: PersistenceManager) -> None:
 
 
 def _clear_run_pidfile(persistence: PersistenceManager) -> None:
-    """Best-effort: remove ``se3/state/run.pid`` when it still names this process.
+    """Best-effort: remove ``tianluo/state/run.pid`` when it still names this process.
 
     Only unlinks when the recorded pid is our own, so a concurrently-relaunched
     flow that overwrote the marker (e.g. a fast ``--resume`` in the same state
@@ -2330,7 +2333,7 @@ def _run_flow_impl(
     for step_type, handler in STEP_HANDLERS.items():
         state_machine.register_handler(step_type, handler)
 
-    # Build the unified event stream and hang the outermost sink. ``se3 run``
+    # Build the unified event stream and hang the outermost sink. ``luo run``
     # is caller-agnostic: it always emits the same structured event stream and
     # only the tail sink differs. ``cli`` hangs the Rich rendering CliSink
     # (byte-identical to the historical CLI output — flow-level events are a
@@ -2355,7 +2358,7 @@ def _run_flow_impl(
             # Header-first lazy resume (issue #244 B4). ``load_flow_by_id``
             # resolves the active engine.json first, else the per-flow resumable
             # snapshot (resumable/<flow_id>.json) when engine.json has since been
-            # overwritten by a later ``se3 run`` — and in BOTH cases reads only
+            # overwritten by a later ``luo run`` — and in BOTH cases reads only
             # the KB-scale header, faulting in each step's cold body on first
             # keyed access. Resuming a paused/interrupted flow with many large
             # completed step cold files therefore no longer re-materializes every
@@ -2377,7 +2380,7 @@ def _run_flow_impl(
 
             # A COMPLETED flow is terminal and must not be resumed, regardless of
             # whether it came from the active engine.json or a stale per-flow
-            # snapshot under se3/state/resumable/. This mirrors the
+            # snapshot under tianluo/state/resumable/. This mirrors the
             # daemon/server/frontend completed-flow guard so the CLI resume path
             # agrees with the rest of the stack. Guard BEFORE persisting a
             # recovered snapshot so a stale COMPLETED snapshot is never
@@ -2466,7 +2469,7 @@ def _run_flow_impl(
 
             # Record the worktree-isolation metadata on a new --worktree flow so
             # it persists in the worktree's engine.json. This lets a later
-            # `se3 run --resume` from the main repo discover the run, re-dispatch
+            # `luo run --resume` from the main repo discover the run, re-dispatch
             # it inside its worktree, and merge the right branch back.
             if is_worktree_mode:
                 flow.worktree_path = str(project_root)
@@ -2649,7 +2652,7 @@ def _run_flow_impl(
             # Otherwise engine.json records status=running + waiting_for_lock=True
             # for a dead process, and the daemon/web console would keep rendering
             # it as a live "running · waiting for lock" flow until a manual
-            # `se3 run --resume` re-acquires and clears the flag.
+            # `luo run --resume` re-acquires and clears the flag.
             flow.waiting_for_lock = False
             persistence.save_flow(flow)
             emitter.emit(new_event(
@@ -2930,7 +2933,7 @@ def _run_flow_impl(
         if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:
             if output_format == "json":
                 # Non-interactive (daemon spawn): write the clarifying question
-                # as a se3/calls/ call file and let the web answer it through
+                # as a tianluo/calls/ call file and let the web answer it through
                 # the existing "Respond to Flow" mechanism.
                 user_response = _handle_discovery_pause_noninteractive(
                     flow, current_step, persistence, project_root
@@ -2952,7 +2955,7 @@ def _run_flow_impl(
                     return 0
             else:
                 # Discovery is waiting for an interactive user response. The
-                # pause is mirrored to a se3/calls/ call file so the web console
+                # pause is mirrored to a tianluo/calls/ call file so the web console
                 # can answer it too; terminal + web are awaited in parallel and
                 # whichever answers first drives this same live process. The
                 # flow stays RUNNING (never PAUSED) so the daemon does not spawn
@@ -3172,7 +3175,7 @@ def _finalize_sync_source_issue(
     issue is never clobbered.
 
     Worktree flows are skipped: their resolve is owned by the trailing
-    ``se3 merge`` (only a successful merge-back should resolve), so this only
+    ``luo merge`` (only a successful merge-back should resolve), so this only
     handles the non-worktree case. Any failure is swallowed — issue
     bookkeeping must never change the flow's exit code.
 
@@ -3215,7 +3218,7 @@ def _collect_from_issue_flow_ids(
 
     This exists to tell a *stale prior run's* leftover state apart from state
     the *current* dispatch actually persisted. The main-repo
-    ``se3/state/engine.json`` is a single reused slot: after a ``--from-issue A``
+    ``tianluo/state/engine.json`` is a single reused slot: after a ``--from-issue A``
     run completes it still carries A's ``source_issue_id`` until the NEXT run's
     first ``save_flow`` overwrites it. Keying "does a persisted flow own this
     issue's finalize?" on ``source_issue_id`` alone would therefore mistake that
@@ -3248,18 +3251,18 @@ def _collect_from_issue_flow_ids(
 
     if worktree:
         # A --worktree flow persists its state in its own worktree engine.json
-        # (live under se3/worktrees/*, or copied into .archive/ once merged/GC'd).
+        # (live under tianluo/worktrees/*, or copied into .archive/ once merged/GC'd).
         # A failure before fork_worktree never creates any of these.
-        worktrees_dir = project_root / SE3_DIR / "worktrees"
+        worktrees_dir = runtime_dir(project_root) / "worktrees"
         if not worktrees_dir.is_dir():
             return ids
-        for ef in worktrees_dir.glob("*/se3/state/engine.json"):
+        for ef in dual_runtime_glob(worktrees_dir, "*/", "state/engine.json"):
             _collect(ef)
-        for ef in (worktrees_dir / ".archive").glob("*/se3/state/engine.json"):
+        for ef in dual_runtime_glob(worktrees_dir / ".archive", "*/", "state/engine.json"):
             _collect(ef)
         return ids
 
-    _collect(project_root / SE3_DIR / "state" / "engine.json")
+    _collect(runtime_dir(project_root) / "state" / "engine.json")
     return ids
 
 
@@ -3340,7 +3343,7 @@ def _generate_worktree_branch_name(task: str) -> str:
     branches and proceed in parallel. The ``worktree/`` prefix keeps these
     branches greppable and distinct from the implement step's internal
     ``impl/*`` DAG branches, and the suffix contains no slashes so the result
-    still lands the worktree under ``se3/worktrees/<branch-safe-name>/`` via
+    still lands the worktree under ``tianluo/worktrees/<branch-safe-name>/`` via
     :func:`worktree.create_worktree`'s path rule.
     """
     slug = _slugify_for_branch(task)
@@ -3355,7 +3358,7 @@ def _worktree_flow_status(worktree_path: Path) -> Optional[str]:
     Returns the persisted ``status`` string (e.g. ``"COMPLETED"`` / ``"PAUSED"``)
     or ``None`` when the file is missing / unreadable.
     """
-    engine_file = worktree_path / SE3_DIR / "state" / "engine.json"
+    engine_file = runtime_dir(worktree_path) / "state" / "engine.json"
     try:
         with open(engine_file) as f:
             data = json.load(f)
@@ -3369,11 +3372,11 @@ def _read_worktree_source_issue_id(worktree_path: Path) -> Optional[str]:
 
     The source-issue finalize decision must NOT depend on the original wrapper
     process being alive (a paused run may be resumed by a fresh
-    ``se3 run --resume`` process); the only cross-process-stable signal is the
+    ``luo run --resume`` process); the only cross-process-stable signal is the
     id persisted in the worktree's own flow state. Returns ``None`` when the
     file is missing/unreadable or the flow carried no source issue.
     """
-    engine_file = worktree_path / SE3_DIR / "state" / "engine.json"
+    engine_file = runtime_dir(worktree_path) / "state" / "engine.json"
     try:
         with open(engine_file) as f:
             data = json.load(f)
@@ -3405,12 +3408,12 @@ def _finalize_worktree_source_issue(
       branch (integrate succeeds, work is on master) and then FAIL in the cheap
       ``version_reconcile`` step. Reopening the issue then would spawn duplicate
       work for code that already landed; the version miscompute is a merge-side
-      retry (``se3 merge`` / resume re-runs reconcile), not unmerged work. So
+      retry (``luo merge`` / resume re-runs reconcile), not unmerged work. So
       when the branch is an ancestor of master, leave the issue IN_PROGRESS.
     - ``status == COMPLETED`` → the resolve is owned by ``run_merge`` (it only
       resolves on a successful merge-back, ``merge_rc == 0``); when the merge
       failed (``merge_rc != 0``) the issue is deliberately left IN_PROGRESS so
-      the retry-merge path (``se3 merge <branch>``) can resolve it later. Either
+      the retry-merge path (``luo merge <branch>``) can resolve it later. Either
       way there is nothing to do here for COMPLETED.
 
     Only an issue that is currently IN_PROGRESS is touched, so a pause (which
@@ -3596,10 +3599,10 @@ def run_worktree_mode(
 ) -> int:
     """Run a flow in an isolated git worktree, then merge the result back.
 
-    Thin orchestration wrapper for ``se3 run --worktree``:
+    Thin orchestration wrapper for ``luo run --worktree``:
 
     1. Generate an isolation branch name and fork a worktree from the current
-       branch (``se3/worktrees/<branch-safe-name>/``).
+       branch (``tianluo/worktrees/<branch-safe-name>/``).
     2. Run the *exact same* flow as a synchronous run, but with
        ``project_root=worktree`` and ``acquire_main_lock=False`` — so the flow
        body executes in isolation and does NOT hold the main-worktree mutex,
@@ -3644,7 +3647,7 @@ def run_worktree_mode(
 
     # Own the worktree's ``run.pid`` marker for the ENTIRE worktree-run lifecycle
     # — the isolated flow body AND the trailing merge/cleanup phase below — so
-    # ``se3 end-session`` can reliably terminate this still-live wrapper process
+    # ``luo end-session`` can reliably terminate this still-live wrapper process
     # at any point. ``run_flow`` is told NOT to manage the marker
     # (``manage_pidfile=False``); if it cleared the marker in its own ``finally``
     # the still-running merge would be undiscoverable (the wrapper keeps
@@ -3731,10 +3734,10 @@ def run_worktree_mode(
 
 
 def find_resumable_worktree_runs(project_root: Path) -> List[Dict[str, Any]]:
-    """Discover resumable ``--worktree`` runs under ``se3/worktrees/``.
+    """Discover resumable ``--worktree`` runs under ``tianluo/worktrees/``.
 
     Each isolated ``--worktree`` run persists its flow state in its own
-    ``se3/worktrees/<name>/se3/state/engine.json``. This scans those files and
+    ``tianluo/worktrees/<name>/tianluo/state/engine.json``. This scans those files and
     returns one entry per non-COMPLETED worktree flow so the resume picker can
     surface them alongside the main-repo flow. A successfully-merged run has had
     its worktree archived/removed by ``--delete-merged``, so only failed or
@@ -3745,12 +3748,12 @@ def find_resumable_worktree_runs(project_root: Path) -> List[Dict[str, Any]]:
     resume dispatcher can re-run the flow inside the worktree and merge it back.
     """
     runs: List[Dict[str, Any]] = []
-    worktrees_dir = project_root / SE3_DIR / "worktrees"
+    worktrees_dir = runtime_dir(project_root) / "worktrees"
     if not worktrees_dir.is_dir():
         return runs
 
     terminal_statuses = {FlowStatus.COMPLETED.value}
-    for engine_file in sorted(worktrees_dir.glob("*/se3/state/engine.json")):
+    for engine_file in sorted(dual_runtime_glob(worktrees_dir, "*/", "state/engine.json")):
         try:
             with open(engine_file) as f:
                 data = json.load(f)
@@ -3790,14 +3793,14 @@ def find_worktree_source_issue_by_branch(
     """Return the ``source_issue_id`` of the worktree flow on ``branch``.
 
     Scans both live worktree state
-    (``se3/worktrees/*/se3/state/engine.json``) and archived worktree state
-    (``se3/worktrees/.archive/*/se3/state/engine.json``) for an
+    (``tianluo/worktrees/*/tianluo/state/engine.json``) and archived worktree state
+    (``tianluo/worktrees/.archive/*/tianluo/state/engine.json``) for an
     ``is_worktree_mode`` flow whose ``worktree_branch`` matches ``branch`` and
     returns its ``source_issue_id``.
 
     Unlike :func:`find_resumable_worktree_runs`, COMPLETED flows are NOT
     excluded — they are in fact the *only* flows this returns: by the time
-    ``se3 merge`` resolves a source issue the flow must (by construction) have
+    ``luo merge`` resolves a source issue the flow must (by construction) have
     already reached COMPLETED, and a leftover branch whose first merge failed
     may only be re-merged long after its worktree was GC'd into ``.archive`` —
     both cases still map back to the source issue. A non-COMPLETED flow (e.g.
@@ -3812,7 +3815,7 @@ def find_worktree_source_issue_by_branch(
     """
     if not branch:
         return None
-    worktrees_dir = project_root / SE3_DIR / "worktrees"
+    worktrees_dir = runtime_dir(project_root) / "worktrees"
     if not worktrees_dir.is_dir():
         return None
 
@@ -3821,9 +3824,9 @@ def find_worktree_source_issue_by_branch(
     # including its engine.json — under ``.archive/`` before removing the live
     # directory, so a retry-merge of a GC'd branch still finds its source issue.
     engine_files: List[Path] = []
-    engine_files.extend(sorted(worktrees_dir.glob("*/se3/state/engine.json")))
+    engine_files.extend(sorted(dual_runtime_glob(worktrees_dir, "*/", "state/engine.json")))
     engine_files.extend(
-        sorted((worktrees_dir / ".archive").glob("*/se3/state/engine.json"))
+        sorted(dual_runtime_glob(worktrees_dir / ".archive", "*/", "state/engine.json"))
     )
     for engine_file in engine_files:
         try:
@@ -3865,17 +3868,17 @@ def _self_worktree_run(
 ) -> Optional[Dict[str, Any]]:
     """Return a worktree-run record when ``project_root`` *is* the worktree.
 
-    The daemon resumes a ``--worktree`` run by relaunching ``se3 run --resume``
+    The daemon resumes a ``--worktree`` run by relaunching ``luo run --resume``
     with its ``cwd`` set to the worktree directory itself — that is where the
     run's ``engine.json`` / history live, where its WebUI call-responses are
     written, and what the daemon's resume validation reads. In that case the
     flow is not discoverable via :func:`find_resumable_worktree_runs` (which
-    scans ``<main_repo>/se3/worktrees/``, one level up), so this reads the
+    scans ``<main_repo>/tianluo/worktrees/``, one level up), so this reads the
     worktree's own ``engine.json`` and recognises it as a resumable worktree
     run. Returns ``None`` when ``project_root`` is not an ``is_worktree_mode``
     flow, the flow id does not match, or the flow is already COMPLETED.
     """
-    engine_file = project_root / SE3_DIR / "state" / "engine.json"
+    engine_file = runtime_dir(project_root) / "state" / "engine.json"
     try:
         with open(engine_file) as f:
             data = json.load(f)
@@ -3922,7 +3925,7 @@ def _resume_worktree_run(
     # Own the worktree's ``run.pid`` marker for the whole resume lifecycle (flow
     # body + trailing merge), mirroring ``run_worktree_mode`` — ``run_flow`` is
     # told not to manage it so the marker survives into the post-COMPLETED merge,
-    # keeping the still-live process discoverable by ``se3 end-session``. See the
+    # keeping the still-live process discoverable by ``luo end-session``. See the
     # ``run_flow`` ``manage_pidfile`` docstring.
     wt_persistence = PersistenceManager(worktree_path)
     _write_run_pidfile(wt_persistence)
@@ -4002,9 +4005,9 @@ def resume_run(
     """Dispatch a resume by flow id to the right path (worktree vs. main).
 
     If ``flow_id`` names a resumable ``--worktree`` run (discovered under
-    ``se3/worktrees/``), it is resumed inside its worktree and merged back on
+    ``tianluo/worktrees/``), it is resumed inside its worktree and merged back on
     success. When ``project_root`` *is itself* such a worktree — the shape the
-    daemon uses when it relaunches ``se3 run --resume`` with ``cwd`` set to the
+    daemon uses when it relaunches ``luo run --resume`` with ``cwd`` set to the
     worktree directory — the same lock-free body + merge-back path is taken,
     with the merge driven from the resolved main repo. Otherwise the main-repo
     flow is resumed in place (a synchronous run that acquires the main-worktree

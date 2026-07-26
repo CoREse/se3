@@ -16,11 +16,14 @@ from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
+from ..version_intent import intent_dir_relpath
+from ...runtime_paths import runtime_dir
 
 logger = logging.getLogger(__name__)
 
 
-VERSION_RULES_FILE_RELPATH = "se3/version-rules.md"
+# Root-aware: resolved against the project's runtime dir name at use time.
+VERSION_RULES_FILE_SUBPATH = "version-rules.md"
 VERSION_RULES_MAX_BYTES = 64 * 1024
 
 
@@ -154,7 +157,7 @@ VERSION_ANALYZE_PROMPT = inject_boundary(
 
 
 _NO_CUSTOM_RULES_PLACEHOLDER = (
-    "_No project-specific rules file found at `se3/version-rules.md`. "
+    "_No project-specific rules file found at `tianluo/version-rules.md`. "
     "Use the default Semantic Versioning 2.0.0 rules above._"
 )
 
@@ -384,7 +387,8 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 f"version_analyze: could not persist the version intent for "
                 f"worktree flow {flow.flow_id}: {exc}. The merge-side "
                 f"version_reconcile step depends on "
-                f"se3/version-intents/{flow.flow_id}.json to derive the final "
+                f"the committed {intent_dir_relpath(project_root)}/"
+                f"{flow.flow_id}.json to derive the final "
                 f"version; without it this feature would merge with no version "
                 f"bump or changelog entry. Fix the cause and resume."
             )
@@ -431,7 +435,7 @@ def _emit_version_intent(
     """Persist a worktree session's version bump as a branch-committed intent.
 
     Builds a :class:`VersionIntent` from the analysis and writes it to the
-    flow-branch-tracked ``se3/version-intents/`` directory so the merge-side
+    flow-branch-tracked ``tianluo/version-intents/`` directory so the merge-side
     ``version_reconcile`` step can read it after the merge and derive the final
     version. ``suggested_version`` is carried only as
     ``provisional_suggested_version`` (a non-authoritative reference) and is
@@ -505,7 +509,7 @@ def _build_change_summary(
 
 
 def _read_version_rules_file(project_root: Path) -> Optional[str]:
-    """Read project-specific version rules from ``se3/version-rules.md``.
+    """Read project-specific version rules from ``tianluo/version-rules.md``.
 
     The file is a free-form Markdown / natural-language document. It is
     injected verbatim into the version_analyze prompt so the LLM can use
@@ -521,7 +525,7 @@ def _read_version_rules_file(project_root: Path) -> Optional[str]:
         unreadable. Read errors never propagate.
     """
     try:
-        rules_path = project_root / VERSION_RULES_FILE_RELPATH
+        rules_path = runtime_dir(project_root) / VERSION_RULES_FILE_SUBPATH
     except Exception:
         return None
 
@@ -898,7 +902,7 @@ def _validate_result(
         # When the pair is not comparable SemVer the default policy simply has no
         # verdict, and no tag is created — inferring one from the garble-prone
         # label would tag a release the SemVer rule never asked to tag. A project
-        # on a non-SemVer scheme states its intent through se3/version-rules.md.
+        # on a non-SemVer scheme states its intent through tianluo/version-rules.md.
         is_tag = semver_tag_decision(current_version, suggested_version) is True
 
     confidence = str(result.get("confidence", "medium")).lower()

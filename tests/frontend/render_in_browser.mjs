@@ -29,7 +29,7 @@
 (function (root) {
   "use strict";
 
-  // Sentinel markers — mirror src/se3/engine/prompt_markers.py and the app.js
+  // Sentinel markers — mirror src/tianluo/engine/prompt_markers.py and the app.js
   // constants. Kept here so the user-turn split judgement has a single home.
   const TEMPLATE_PREFIX_END = "<!--SE3:TEMPLATE_END-->";
   const USER_CONTENT_BEGIN = "<!--SE3:USER_CONTENT-->";

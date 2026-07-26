@@ -1,4 +1,4 @@
-"""Shared renumber primitives for the two ``se3 merge`` issue channels.
+"""Shared renumber primitives for the two ``luo merge`` issue channels.
 
 Both the git three-way-merge channel (committed issues, reconciled in the
 orchestrator) and the runtime-sync channel (uncommitted worktree issues,
@@ -36,11 +36,12 @@ pure primitives that both channels call:
 * :func:`mask_issue_references` — canonicalize ``#<digits>`` tokens, used as a
   coarse candidate prefilter for the renumber-aware dedup comparison.
 
-Every read/write here is confined to ``se3/issues/`` (the issue files plus the
-``.next_id`` counter); nothing else under ``se3/`` is touched.
+Every read/write here is confined to ``tianluo/issues/`` (the issue files plus the
+``.next_id`` counter); nothing else under ``tianluo/`` is touched.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import fcntl
 import logging
@@ -69,7 +70,7 @@ def _norm_id(value: object) -> int:
 
 
 def _issue_files(issues_dir: Path):
-    """Yield every ``*.yaml`` under ``se3/issues/{open,closed}/`` (sorted)."""
+    """Yield every ``*.yaml`` under ``tianluo/issues/{open,closed}/`` (sorted)."""
     for sub in ("open", "closed"):
         directory = issues_dir / sub
         if not directory.exists():
@@ -105,7 +106,7 @@ def rewrite_issue_references(
     exercise token precision in isolation, where no kept side exists).
 
     Args:
-        project_root: Project root (contains ``se3/issues/``).
+        project_root: Project root (contains ``tianluo/issues/``).
         old_id: The ID being retired (zero-padded string or int).
         new_id: The replacement ID (zero-padded string or int).
         scope_files: The incoming-side files whose references should move. When
@@ -116,13 +117,13 @@ def rewrite_issue_references(
     """
     old_val = _norm_id(old_id)
     new_ref = f"#{_norm_id(new_id):03d}"
-    issues_dir = project_root / "se3" / "issues"
+    issues_dir = runtime_dir(project_root) / "issues"
 
     if scope_files is None:
         paths = list(_issue_files(issues_dir))
     else:
         # Restrict to the given files that actually exist and live under the
-        # issue store — the contract is "only touch se3/issues/".
+        # issue store — the contract is "only touch tianluo/issues/".
         paths = [
             p for p in scope_files
             if p.exists() and issues_dir in p.parents
@@ -177,7 +178,7 @@ def rewrite_issue_references_bulk(
     historical record and must not be repointed.
 
     Args:
-        project_root: Project root (contains ``se3/issues/``).
+        project_root: Project root (contains ``tianluo/issues/``).
         id_map: Mapping of old ID → new ID (zero-padded strings or ints).
             Identity pairs are ignored.
         scope_files: Same scoping contract as
@@ -195,7 +196,7 @@ def rewrite_issue_references_bulk(
     if not norm_map:
         return 0
 
-    issues_dir = project_root / "se3" / "issues"
+    issues_dir = runtime_dir(project_root) / "issues"
     if scope_files is None:
         paths = list(_issue_files(issues_dir))
     else:
@@ -316,7 +317,7 @@ def rewrite_references_in_added_lines(
 
     Args:
         path: The on-disk file to rewrite (caller confines it to
-            ``se3/issues/``).
+            ``tianluo/issues/``).
         baseline_text: The file's full content at the pre-merge commit.
         old_id: The ID being retired (zero-padded string or int).
         new_id: The replacement ID (zero-padded string or int).
@@ -486,7 +487,7 @@ def find_issue_id_owner(
     """
     target = _norm_id(target_id)
     excluded = {p.resolve() for p in exclude_files}
-    issues_dir = project_root / "se3" / "issues"
+    issues_dir = runtime_dir(project_root) / "issues"
     for path in _issue_files(issues_dir):
         if path.resolve() in excluded:
             continue
@@ -507,7 +508,7 @@ def reserve_next_id(project_root: Path) -> int:
 
     Reserving under the lock — and bumping the counter *before* the reserving
     caller has written its ``N_*.yaml`` file — is what makes concurrent
-    allocators safe against each other: none of ``se3 issue create`` (CLI /
+    allocators safe against each other: none of ``luo issue create`` (CLI /
     webui / discovery) contend on the merge lock, so if the merge channel
     allocated by scanning the working-tree maximum alone it could re-mint a
     number a concurrent creator had just reserved but not yet materialised.
@@ -518,7 +519,7 @@ def reserve_next_id(project_root: Path) -> int:
     Returns:
         The reserved integer ID (the counter is left at ``reserved + 1``).
     """
-    issues_dir = project_root / "se3" / "issues"
+    issues_dir = runtime_dir(project_root) / "issues"
     issues_dir.mkdir(parents=True, exist_ok=True)
     counter_file = issues_dir / ".next_id"
 
@@ -551,7 +552,7 @@ def reserve_next_id(project_root: Path) -> int:
 
 
 def advance_next_id_to_max(project_root: Path) -> int:
-    """Advance ``se3/issues/.next_id`` to at least ``max(existing ID) + 1``.
+    """Advance ``tianluo/issues/.next_id`` to at least ``max(existing ID) + 1``.
 
     Scans every issue under ``open/`` and ``closed/`` for the highest numeric
     ID and pushes the counter forward to ``max_id + 1`` so a future allocation
@@ -565,7 +566,7 @@ def advance_next_id_to_max(project_root: Path) -> int:
     deleted issues or a hand-set-high counter) is harmless; reusing one is
     not. This matches ``_next_id``'s ``max(counter, max_id + 1)`` rule so
     every allocator agrees. Callers must invoke this only AFTER every
-    renumbered file is on disk; within ``se3 merge`` that ordering is given
+    renumbered file is on disk; within ``luo merge`` that ordering is given
     (renumbered files are written first) and the merge lock serializes the
     channels against each other.
 
@@ -582,7 +583,7 @@ def advance_next_id_to_max(project_root: Path) -> int:
     Returns:
         The counter value now in effect (``max(current, max_id + 1)``).
     """
-    issues_dir = project_root / "se3" / "issues"
+    issues_dir = runtime_dir(project_root) / "issues"
     issues_dir.mkdir(parents=True, exist_ok=True)
     counter_file = issues_dir / ".next_id"
 
@@ -625,15 +626,15 @@ def format_renumber_trace(old_id: object, new_id: object) -> str:
     ``Issue.display_title`` / slug derivation unchanged.
 
     Returns:
-        A line of the form ``旧号 #014 → 新号 #240 (se3 merge)``.
+        A line of the form ``旧号 #014 → 新号 #240 (luo merge)``.
     """
-    return f"旧号 #{_norm_id(old_id):03d} → 新号 #{_norm_id(new_id):03d} (se3 merge)"
+    return f"旧号 #{_norm_id(old_id):03d} → 新号 #{_norm_id(new_id):03d} (luo merge)"
 
 
 # Matches one full audit line produced by :func:`format_renumber_trace`. Kept
 # next to the formatter so the two never drift: whoever changes the trace text
 # updates the pattern that strips/parses it back out.
-_TRACE_LINE_RE = re.compile(r"^\s*旧号 #(\d+) → 新号 #(\d+) \(se3 merge\)\s*$")
+_TRACE_LINE_RE = re.compile(r"^\s*旧号 #(\d+) → 新号 #(\d+) \(luo merge\)\s*$")
 
 
 def format_ambiguous_reference_note(old_id: object, new_ids: Iterable) -> str:
@@ -648,17 +649,17 @@ def format_ambiguous_reference_note(old_id: object, new_ids: Iterable) -> str:
     issue itself rather than only in a transient log line.
 
     Returns:
-        A line of the form ``歧义引用 #005 → 候选 #011 / #012 (se3 merge)``.
+        A line of the form ``歧义引用 #005 → 候选 #011 / #012 (luo merge)``.
     """
     candidates = " / ".join(f"#{_norm_id(n):03d}" for n in new_ids)
-    return f"歧义引用 #{_norm_id(old_id):03d} → 候选 {candidates} (se3 merge)"
+    return f"歧义引用 #{_norm_id(old_id):03d} → 候选 {candidates} (luo merge)"
 
 
 # Companion pattern to _TRACE_LINE_RE, for the ambiguity notes: they must be
 # stripped by strip_renumber_traces for the same re-run-idempotency reason
 # (the adopted copy carries the note, its worktree source does not).
 _AMBIGUOUS_NOTE_RE = re.compile(
-    r"^\s*歧义引用 #(\d+) → 候选 #\d+(?: / #\d+)* \(se3 merge\)\s*$"
+    r"^\s*歧义引用 #(\d+) → 候选 #\d+(?: / #\d+)* \(luo merge\)\s*$"
 )
 
 

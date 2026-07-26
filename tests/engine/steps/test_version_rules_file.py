@@ -16,7 +16,7 @@ from unittest.mock import patch
 import pytest
 
 from tianluo.engine.steps.version_analyze import (
-    VERSION_RULES_FILE_RELPATH,
+    VERSION_RULES_FILE_SUBPATH,
     VERSION_RULES_MAX_BYTES,
     _read_version_rules_file,
 )
@@ -26,17 +26,17 @@ class TestVersionRulesFileLoader:
     """Cover every branch of _read_version_rules_file."""
 
     def test_returns_none_when_file_missing(self, tmp_path: Path) -> None:
-        """No se3/version-rules.md file → loader returns None silently."""
+        """No <runtime>/version-rules.md file → loader returns None silently."""
         assert _read_version_rules_file(tmp_path) is None
 
     def test_returns_none_when_se3_dir_missing(self, tmp_path: Path) -> None:
-        """Project root without an se3/ dir at all → loader returns None."""
+        """Project root without an tianluo/ dir at all → loader returns None."""
         # tmp_path is intentionally empty
         assert _read_version_rules_file(tmp_path) is None
 
     def test_returns_full_content_for_normal_file(self, tmp_path: Path) -> None:
         """A normal Markdown rules file is returned verbatim."""
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         content = (
             "# Project Version Rules\n\n"
@@ -56,7 +56,7 @@ class TestVersionRulesFileLoader:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """File over the byte cap → truncated payload + truncation notice + warning."""
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         # 1 KB past the cap to comfortably exceed it
         oversized = "x" * (VERSION_RULES_MAX_BYTES + 1024)
@@ -77,7 +77,7 @@ class TestVersionRulesFileLoader:
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
         """An OSError raised while reading the file degrades to None + warning."""
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         rules_path = rules_dir / "version-rules.md"
         rules_path.write_text("rules go here", encoding="utf-8")
@@ -102,5 +102,5 @@ class TestVersionRulesFileRelPath:
     """The relpath constant is the contract — pin it explicitly."""
 
     def test_relpath_is_the_documented_location(self) -> None:
-        """The loader looks at se3/version-rules.md inside project_root."""
-        assert VERSION_RULES_FILE_RELPATH == "se3/version-rules.md"
+        """The loader looks at <runtime>/version-rules.md inside project_root."""
+        assert VERSION_RULES_FILE_SUBPATH == "version-rules.md"

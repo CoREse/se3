@@ -94,7 +94,7 @@ class TestCommitHandlerPassesBaseline:
 
         flow = MagicMock(spec=FlowInstance)
         flow.baseline_commit = "deadbeef"
-        flow.change_path = Path("/tmp/proj/se3.yaml")
+        flow.change_path = Path("/tmp/proj/tianluo.yaml")
         flow.flow_id = "test-flow"
         flow.task_type = "bugfix"
         flow.task_description = "fix something"
@@ -120,7 +120,7 @@ class TestCommitHandlerPassesBaseline:
 
         flow = MagicMock(spec=FlowInstance)
         flow.baseline_commit = None
-        flow.change_path = Path("/tmp/proj/se3.yaml")
+        flow.change_path = Path("/tmp/proj/tianluo.yaml")
         flow.flow_id = "test-flow"
         flow.task_type = "bugfix"
         flow.task_description = "fix something"

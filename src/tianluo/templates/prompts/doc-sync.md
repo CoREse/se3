@@ -40,7 +40,7 @@ localized siblings) into agreement with:
   public entry point the project currently exposes. Remove docs for
   anything removed; add anything missing; correct any drifted behavior.
 - **Specs** — the README's description of capabilities must not
-  contradict the documented behavior under `se3/specs/`.
+  contradict the documented behavior under `tianluo/specs/`.
 - **Directory / project structure** — the package layout and any
   runtime-directory tree shown in the docs must match disk.
 - **Version display** — any version badge or version reference must

@@ -162,14 +162,14 @@ class TestCriticalTestsConfigLoading:
     def test_default_is_empty_list(self, tmp_path):
         from tianluo.config import TestConfig
 
-        # No se3.yaml present -> defaults, critical_tests empty.
+        # No tianluo.yaml present -> defaults, critical_tests empty.
         cfg = TestConfig.load(tmp_path)
         assert cfg.critical_tests == []
 
     def test_loads_string_list(self, tmp_path):
         from tianluo.config import TestConfig
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "test:\n"
             "  critical_tests:\n"
             "    - tests/test_ui.py::test_render_paradigm\n"
@@ -184,7 +184,7 @@ class TestCriticalTestsConfigLoading:
     def test_non_list_falls_back_to_empty(self, tmp_path):
         from tianluo.config import TestConfig
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "test:\n  critical_tests: not-a-list\n"
         )
         cfg = TestConfig.load(tmp_path)
@@ -193,7 +193,7 @@ class TestCriticalTestsConfigLoading:
     def test_elements_coerced_to_str(self, tmp_path):
         from tianluo.config import TestConfig
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "test:\n  critical_tests:\n    - 123\n    - test_x\n"
         )
         cfg = TestConfig.load(tmp_path)

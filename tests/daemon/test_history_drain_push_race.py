@@ -58,7 +58,7 @@ _RECORD_CONTENT_BYTES = 12_000
 
 
 def _step_path(root, flow_id: str, step: str):
-    return root / "se3" / "history" / flow_id / step
+    return root / "tianluo" / "history" / flow_id / step
 
 
 def _append_backlog(root, flow_id: str, step: str, *, start: int, count: int) -> List[str]:

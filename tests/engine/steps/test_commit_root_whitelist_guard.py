@@ -45,7 +45,7 @@ def _init_git_repo(tmp_path: Path, gitignore: str) -> Path:
 
 # A minimal root default-deny + whitelist .gitignore: everything at root is
 # denied except the handful of explicitly re-admitted top-level entries.
-_ROOT_DENY = "/*\n!/.gitignore\n!/README.md\n!/src.py\n!/se3/\n"
+_ROOT_DENY = "/*\n!/.gitignore\n!/README.md\n!/src.py\n!/tianluo/\n"
 
 
 def _head_tree_files(repo: Path) -> str:
@@ -67,7 +67,7 @@ def _make_flow(repo: Path) -> FlowInstance:
     flow.flow_id = "test-flow"
     flow.task_description = "change"
     flow.task_type = "feature"
-    flow.change_path = repo / "se3.yaml"
+    flow.change_path = repo / "tianluo.yaml"
     flow.baseline_commit = None
     state = MagicMock(spec=State)
     state.selected_steps = [StepType.COMMIT, StepType.SUMMARIZE]
@@ -147,10 +147,10 @@ class TestDetectRootWhitelistExclusions:
         self, tmp_path: Path
     ) -> None:
         repo = _init_git_repo(tmp_path, _ROOT_DENY)
-        # `!/se3/` re-admits se3/; its interior follows normal rules and is not
+        # `!/tianluo/` re-admits tianluo/; its interior follows normal rules and is not
         # a top-level exclusion the guard should surface.
-        (repo / "se3").mkdir()
-        (repo / "se3" / "note.md").write_text("# x\n")
+        (repo / "tianluo").mkdir()
+        (repo / "tianluo" / "note.md").write_text("# x\n")
 
         assert _detect_root_whitelist_exclusions(repo) == []
 

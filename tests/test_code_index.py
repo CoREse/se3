@@ -9,7 +9,7 @@ Covers:
 - ``code_index_render`` root-view vs drill-in, reading only the md.
 
 The degrade-mode three-condition gate has its own co-located module,
-``src/se3/engine/test_code_index_degrade.py``.
+``src/tianluo/engine/test_code_index_degrade.py``.
 """
 
 from __future__ import annotations
@@ -98,7 +98,7 @@ def project(tmp_path: Path) -> Path:
     root.mkdir()
     _init_git_project(root)
     (root / ".gitignore").write_text(
-        "ignored_dir/\n*.log\n/se3/*\n", encoding="utf-8"
+        "ignored_dir/\n*.log\n/tianluo/*\n", encoding="utf-8"
     )
     (root / "src").mkdir()
     (root / "src" / "mod.py").write_text(
@@ -123,9 +123,9 @@ def project(tmp_path: Path) -> Path:
 
 class TestFileEnum:
     def test_enumerate_respects_gitignore_and_excludes_se3(self, project: Path):
-        # se3/ runtime content must never be enumerated.
-        (project / "se3").mkdir()
-        (project / "se3" / "state.json").write_text("{}", encoding="utf-8")
+        # tianluo/ runtime content must never be enumerated.
+        (project / "tianluo").mkdir()
+        (project / "tianluo" / "state.json").write_text("{}", encoding="utf-8")
         rels = {
             p.resolve().relative_to(project.resolve()).as_posix()
             for p in file_enum.enumerate_index_files(project)
@@ -135,8 +135,8 @@ class TestFileEnum:
         # gitignored files / dirs are absent.
         assert "ignored_dir/junk.py" not in rels
         assert "noise.log" not in rels
-        # se3/ excluded.
-        assert not any(r.startswith("se3/") for r in rels)
+        # tianluo/ excluded.
+        assert not any(r.startswith("tianluo/") for r in rels)
 
     def test_new_untracked_file_picked_up(self, project: Path):
         # A brand-new, non-ignored, uncommitted file is captured via --others.
@@ -845,7 +845,7 @@ class TestRender:
         summ = RecordingSummarizer()
         build_index(project, summarizer=summ)
         # No json sidecar is written at all.
-        assert not (project / "se3" / "cache" / "code-index.json").exists()
+        assert not (project / "tianluo" / "cache" / "code-index.json").exists()
         # A second build with the source unchanged does zero LLM work, driven
         # purely by the fingerprints embedded in the committed md.
         summ.reset()
@@ -1052,7 +1052,7 @@ class TestCodeIndexCLI:
     def test_help_mentions_md_authoritative_product(self):
         result = runner.invoke(app, ["code-index", "--help"])
         assert result.exit_code == 0, result.output
-        assert "se3/code-index.md" in result.output
+        assert "tianluo/code-index.md" in result.output
 
 
 class TestConcurrentRebuildSafety:
@@ -1112,4 +1112,4 @@ class TestConcurrentRebuildSafety:
     def test_lock_path_lives_under_gitignored_cache(self, project: Path):
         lp = code_index.lock_path(project)
         assert lp.name == "code-index.lock"
-        assert lp.parent == project / "se3" / "cache"
+        assert lp.parent == project / "tianluo" / "cache"

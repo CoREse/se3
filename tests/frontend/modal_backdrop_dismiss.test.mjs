@@ -21,7 +21,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const APP_JS = path.join(here, "..", "..", "src", "se3", "server", "static", "app.js");
+const APP_JS = path.join(here, "..", "..", "src", "tianluo", "server", "static", "app.js");
 const js = readFileSync(APP_JS, "utf-8");
 
 let passed = 0;

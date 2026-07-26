@@ -67,7 +67,7 @@ class TestLoadClaudeCommands:
         global_se3_dir = tmp_path / ".se3"
         global_se3_dir.mkdir()
         (global_se3_dir / "config.yaml").write_text("claude_commands:\n  - cmd: global-claude\n    priority: 10\n")
-        (tmp_path / "se3.yaml").write_text("claude_commands:\n  - cmd: project-claude\n    priority: 5\n")
+        (tmp_path / "tianluo.yaml").write_text("claude_commands:\n  - cmd: project-claude\n    priority: 5\n")
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
@@ -84,7 +84,7 @@ class TestLoadClaudeCommands:
     def test_legacy_commands_preserve_written_order(self, tmp_path):
         # Legacy claude_commands migration preserves entry order; the
         # deprecated priority field is ignored for ordering.
-        (tmp_path / "se3.yaml").write_text("""claude_commands:
+        (tmp_path / "tianluo.yaml").write_text("""claude_commands:
   - cmd: low
     priority: 1
   - cmd: high
@@ -97,7 +97,7 @@ class TestLoadClaudeCommands:
         assert [c["cmd"] for c in commands] == ["low", "high", "mid"]
 
     def test_string_entries_normalized(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("claude_commands:\n  - claude\n  - kclaude\n")
+        (tmp_path / "tianluo.yaml").write_text("claude_commands:\n  - claude\n  - kclaude\n")
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 2
@@ -105,7 +105,7 @@ class TestLoadClaudeCommands:
         assert all("cmd" in c and "priority" in c for c in commands)
 
     def test_missing_priority_defaults_to_zero(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("claude_commands:\n  - cmd: claude\n")
+        (tmp_path / "tianluo.yaml").write_text("claude_commands:\n  - cmd: claude\n")
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert commands[0]["priority"] == 0
@@ -122,7 +122,7 @@ class TestLoadClaudeCommands:
         # An agent the user named explicitly must survive the legacy
         # conversion verbatim: silently swallowing it would hide a config
         # error behind a different agent doing the work.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  my-codex:\n"
             "    type: codex\n"
@@ -358,7 +358,7 @@ class TestResolveArgsStdinPath:
         args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
         assert args == ["-p"]
         assert stdin_prompt == prompt
-        tmp_dir = tmp_path / "se3" / "tmp"
+        tmp_dir = tmp_path / "tianluo" / "tmp"
         if tmp_dir.exists():
             assert list(tmp_dir.glob("*.prompt")) == []
 
@@ -458,7 +458,7 @@ class TestStdinLifecycle:
         # stdin carries the full prompt.
         assert captured_input["input"] == prompt
         assert result.returncode == 0
-        tmp_dir = tmp_path / "se3" / "tmp"
+        tmp_dir = tmp_path / "tianluo" / "tmp"
         assert not tmp_dir.exists() or list(tmp_dir.glob("*.prompt")) == []
 
     def test_run_small_prompt_no_stdin_input(self, tmp_path):
@@ -485,7 +485,7 @@ class TestStdinLifecycle:
         with patch("subprocess.run", side_effect=mock_run):
             result = runner.run(["-p", prompt], timeout=30, cwd=tmp_path)
         assert result.returncode == 124
-        tmp_dir = tmp_path / "se3" / "tmp"
+        tmp_dir = tmp_path / "tianluo" / "tmp"
         assert not tmp_dir.exists() or list(tmp_dir.glob("*.prompt")) == []
 
 
@@ -499,7 +499,7 @@ class TestClaudeSubprocessSettingSources:
     cannot lock the SE3 worker out of its own tools.
 
     Default is ``user``; explicit configuration via
-    ``claude_subprocess.setting_sources`` in ``se3.yaml`` can opt back into
+    ``claude_subprocess.setting_sources`` in ``tianluo.yaml`` can opt back into
     project/local sources.  These tests cover the three argv-emission sites
     (``run``, ``popen``, ``run_with_monitor``) plus configuration loading.
     """
@@ -561,7 +561,7 @@ class TestClaudeSubprocessSettingSources:
     def test_project_settings_json_does_not_leak_into_argv(self, tmp_path):
         """A target project's ``.claude/settings.json`` (with deny rules) must
         NOT influence the SE3 subprocess argv: the runner pulls its sources
-        from ``se3.yaml``'s ``claude_subprocess.setting_sources``, not from
+        from ``tianluo.yaml``'s ``claude_subprocess.setting_sources``, not from
         the target project's Claude settings file.
         """
         # Simulate a downstream project that denies core tools for its own
@@ -572,7 +572,7 @@ class TestClaudeSubprocessSettingSources:
             '{"permissions": {"deny": ["Read", "Write", "Edit", "Bash"]}}',
             encoding="utf-8",
         )
-        # No se3.yaml present → defaults apply.
+        # No tianluo.yaml present → defaults apply.
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             runner = ClaudeCodeRunner(
                 project_root=tmp_path,
@@ -596,9 +596,9 @@ class TestClaudeSubprocessSettingSources:
 
     def test_yaml_setting_sources_loaded_into_runner(self, tmp_path):
         """``claude_subprocess.setting_sources: [user, project]`` in
-        ``se3.yaml`` is loaded by the Runner constructor when
+        ``tianluo.yaml`` is loaded by the Runner constructor when
         ``setting_sources`` isn't passed explicitly."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "claude_subprocess:\n  setting_sources: [user, project]\n",
             encoding="utf-8",
         )
@@ -623,7 +623,7 @@ class TestClaudeSubprocessSettingSources:
         """``claude_subprocess.setting_sources: []`` is a config error —
         the loader raises rather than silently producing argv with an
         empty ``--setting-sources`` value."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "claude_subprocess:\n  setting_sources: []\n",
             encoding="utf-8",
         )

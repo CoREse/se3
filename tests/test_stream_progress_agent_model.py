@@ -107,7 +107,7 @@ _LEGACY_KEYS = {
 
 
 def _read_record(tmp_path, flow_id, step_id):
-    path = tmp_path / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    path = tmp_path / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
     return json.loads(path.read_text(encoding="utf-8").strip())
 
 

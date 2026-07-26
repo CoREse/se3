@@ -1,7 +1,7 @@
 """Regression tests for daemon event-loop spin caused by expensive repeated work.
 
 The daemon client's ``_push_loop`` calls ``build_index`` every fast tick
-(1 s) via ``_push_history``.  On a machine with a large ``se3/history``
+(1 s) via ``_push_history``.  On a machine with a large ``tianluo/history``
 tree the full directory walk + JSON parse is expensive enough to saturate
 thread-pool workers and starve the event loop of CPU — the same class of
 stall the aggregator's ``HISTORICAL_ROOTS_TTL`` fixed for
@@ -46,7 +46,7 @@ def _msg(role: str, content: str) -> dict:
 
 
 def _write_engine(root: Path, flow_id: str, status: str) -> None:
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -66,7 +66,7 @@ def test_build_index_caches_within_ttl(tmp_path):
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 
@@ -97,7 +97,7 @@ def test_build_index_rebuilds_after_ttl(tmp_path):
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 
@@ -126,7 +126,7 @@ def test_build_index_cache_invalidation(tmp_path):
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 
@@ -154,7 +154,7 @@ def test_build_index_cache_returns_fresh_data_after_invalidation(tmp_path):
     root = tmp_path / "proj"
     # First flow: history-only (no engine.json needed).
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 
@@ -164,7 +164,7 @@ def test_build_index_cache_returns_fresh_data_after_invalidation(tmp_path):
 
     # Add a new history-only flow and invalidate the cache.
     _write_jsonl(
-        root / "se3" / "history" / "f2" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f2" / "01_analyze.jsonl",
         [_msg("user", "world")],
     )
     reader.invalidate_index_cache()
@@ -248,7 +248,7 @@ def test_read_active_flows_drops_stale_flow_after_flow_change(tmp_path):
     # Initially F1 is active.
     _write_engine(root, "f1", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 
@@ -259,7 +259,7 @@ def test_read_active_flows_drops_stale_flow_after_flow_change(tmp_path):
     # F1 completes, F2 starts.
     _write_engine(root, "f2", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f2" / "01_discovery.jsonl",
+        root / "tianluo" / "history" / "f2" / "01_discovery.jsonl",
         [_msg("user", "new task")],
     )
     # Advance past TTL so the next build_index picks up F2.
@@ -314,7 +314,7 @@ def test_combined_poll_push_cadence_bounded(tmp_path):
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING")
     _write_jsonl(
-        root / "se3" / "history" / "f1" / "01_analyze.jsonl",
+        root / "tianluo" / "history" / "f1" / "01_analyze.jsonl",
         [_msg("user", "hello")],
     )
 

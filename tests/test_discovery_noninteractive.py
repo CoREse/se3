@@ -2,7 +2,7 @@
 
 When ``se3 run --discover`` runs under a daemon (``--output-format json``,
 no terminal), the discovery step cannot block on a terminal read. Instead it
-writes the clarifying question to a ``se3/calls/`` call file and pauses; the
+writes the clarifying question to a ``tianluo/calls/`` call file and pauses; the
 web answers it through the existing call/response mechanism. These tests
 exercise that path in :mod:`tianluo.commands.run`.
 """
@@ -47,7 +47,7 @@ def test_write_discovery_call_creates_question_call_file(tmp_path):
     call_file = _write_discovery_call(flow, step, tmp_path)
 
     assert call_file.exists()
-    assert call_file.parent == tmp_path / "se3" / "calls"
+    assert call_file.parent == tmp_path / "tianluo" / "calls"
     data = json.loads(call_file.read_text())
     # Question pauses ride the unified call queue as a plain ``call`` kind.
     assert data["kind"] == "call"

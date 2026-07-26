@@ -231,7 +231,7 @@ def test_cleanup_targets_only_deterministic_retry_decision_file(
 ) -> None:
     """Cleanup targets the retry_decision-kind deterministic filename only.
 
-    Other kinds of call files in the same ``se3/calls/`` directory (a plain
+    Other kinds of call files in the same ``tianluo/calls/`` directory (a plain
     ``call`` from MCP, a ``cli_confirm``, ...) must survive the cleanup.
     """
     from tianluo.commands import run

@@ -2,7 +2,7 @@
 
 This module is the *single source of truth* for the wire protocol spoken
 between an :class:`~tianluo.daemon.client.DaemonClient` (running inside a resident
-``se3 daemon``) and the central server (``se3-server``). Both sides import this
+``luo daemon``) and the central server (``tianluo-server``). Both sides import this
 module — the daemon from the core package, the server from ``tianluo.server`` —
 so the message schema can never drift between them.
 
@@ -146,7 +146,7 @@ def supports_presence(peer_version: Any) -> bool:
         return False
 
 # Default TCP port for the central server. This is the *single source of
-# truth* for the default port: ``se3-server`` binds it when ``--port`` is
+# truth* for the default port: ``tianluo-server`` binds it when ``--port`` is
 # omitted, and the daemon client fills it in when ``--server-url`` carries no
 # explicit port. Keeping it here — alongside the wire protocol — guarantees
 # both sides agree and removes the duplicated ``8080`` magic numbers.
@@ -156,8 +156,8 @@ DEFAULT_SERVER_PORT = 8080
 # this in — instead of :data:`DEFAULT_SERVER_PORT` — when ``--server-url``
 # carries a ``wss://`` (or ``https://`` normalized to ``wss://``) scheme with
 # no explicit port, because a TLS connection terminates at the reverse proxy's
-# HTTPS port (443), not at se3-server's plaintext default (8080). In short:
-# 8080 is the plaintext / ``ws`` default (and ``se3-server --port`` default),
+# HTTPS port (443), not at tianluo-server's plaintext default (8080). In short:
+# 8080 is the plaintext / ``ws`` default (and ``tianluo-server --port`` default),
 # 443 is the ``wss`` scheme-aware default. This keeps both defaults as named
 # constants here — the single source of truth — rather than as magic numbers
 # scattered through the client.
@@ -232,14 +232,14 @@ MSG_HISTORY_REQUEST = "history_request"
 MSG_HISTORY_INDEX_REQUEST = "history_index_request"
 #: server → daemon: deliver a mid-flow user interjection to a running flow.
 #: The daemon turns it into an ``interjection``-kind call file under
-#: ``se3/calls/`` which ``se3 run`` drains at the next step boundary.
+#: ``tianluo/calls/`` which ``luo run`` drains at the next step boundary.
 MSG_INTERJECT_FLOW = "interject_flow"
 
 #: server → daemon: end (terminate + archive) a session by ``flow_id``. The
 #: daemon validates the flow against its supervisor and then off-loads the heavy
-#: work — gracefully terminating the live ``se3 run`` process and archiving a
+#: work — gracefully terminating the live ``luo run`` process and archiving a
 #: worktree session the way a normally-completed session would be cleaned up —
-#: to an ``se3 end-session`` subprocess, so the event loop is never blocked by
+#: to an ``luo end-session`` subprocess, so the event loop is never blocked by
 #: the grace wait or the on-disk archival. Older daemons that do not recognise
 #: the type simply ignore it (mixed-version compatibility), so no
 #: ``PROTOCOL_VERSION`` bump is required.
@@ -322,7 +322,7 @@ HISTORY_MODES: FrozenSet[str] = frozenset({HISTORY_MODE_FULL, HISTORY_MODE_APPEN
 
 # -- interaction-call kinds -----------------------------------------------
 # Every human-in-the-loop interaction inside a running flow is carried by a
-# single artifact: a JSON call file under ``<project>/se3/calls/``. Its
+# single artifact: a JSON call file under ``<project>/tianluo/calls/``. Its
 # ``kind`` field is one of the constants below, so the daemon aggregator and
 # the web console can render and route each interaction without guessing.
 # Legacy call files written before this field existed have no ``kind`` key
@@ -550,7 +550,7 @@ def make_spawn_flow(
     resume_flow_id: str = "",
     from_issue_id: str = "",
 ) -> Message:
-    """server → daemon: instruct a daemon to spawn a new ``se3 run`` flow.
+    """server → daemon: instruct a daemon to spawn a new ``luo run`` flow.
 
     When *discover* is true the daemon's spawner appends ``--discover`` so the
     flow starts from the discovery step (see the spawner command assembly).
@@ -562,12 +562,12 @@ def make_spawn_flow(
     not bumped.
 
     When *resume_flow_id* is non-empty, the daemon resumes the named flow
-    (``se3 run --resume --flow-id <id>``) instead of starting a fresh one.
+    (``luo run --resume --flow-id <id>``) instead of starting a fresh one.
     The ``task_description`` is ignored in this case — the flow's own
     persisted state supplies the task.
 
     When *from_issue_id* is non-empty, the daemon spawns the flow from an
-    existing issue (``se3 run --from-issue <id>``); the issue's description
+    existing issue (``luo run --from-issue <id>``); the issue's description
     becomes the task and the request's ``task_description`` is ignored. It may
     be combined with *discover* (the daemon then also appends ``--discover``).
     Like *resume_flow_id*, the field is omitted from the wire when empty, so a
@@ -601,7 +601,7 @@ def make_spawn_failed(
 
     Sent when a server-dispatched :data:`MSG_SPAWN_FLOW` could not be carried
     out *after* the server already answered ``202 dispatched`` — e.g. the
-    ``ensure_se3_project`` init failed, the fresh ``se3 run`` could not be
+    ``ensure_se3_project`` init failed, the fresh ``luo run`` could not be
     launched, or a resume could not be started. *project_root* and *error*
     locate and explain the failure; the optional *task_description* /
     *from_issue_id* / *resume_flow_id* echo the originating request so the
@@ -652,7 +652,7 @@ def make_interject_flow(
     *text* is the user-typed instruction to fold into the running flow (the
     same content a local operator would type at the Ctrl-C interjection
     prompt). The daemon writes *text* as an ``interjection``-kind call file
-    under the flow's ``se3/calls/`` directory; the running ``se3 run`` process
+    under the flow's ``tianluo/calls/`` directory; the running ``luo run`` process
     drains it at the next step boundary and folds it into ``user_interjections``.
     """
     return Message(
@@ -674,9 +674,9 @@ def make_end_session(
     """server → daemon: end (terminate + archive) the session *flow_id*.
 
     The daemon locates *flow_id* among its supervised flows, then off-loads the
-    actual work to an ``se3 end-session`` subprocess: it gracefully terminates
-    the live ``se3 run`` process and, for a worktree session, archives it the
-    way a normally-completed session is cleaned up (``se3/worktrees/.archive``
+    actual work to an ``luo end-session`` subprocess: it gracefully terminates
+    the live ``luo run`` process and, for a worktree session, archives it the
+    way a normally-completed session is cleaned up (``tianluo/worktrees/.archive``
     + a promoted main-repo ``engine_<flow_id>.json`` + history sync + branch /
     worktree-metadata removal). The work is never done on the event loop.
 
@@ -882,7 +882,7 @@ def make_viewers(count: int, *, seq: int = 0) -> Message:
 
 
 # -- history messages (protocol revision 2) -------------------------------
-# These carry the per-machine `se3 history` records to the central server so
+# These carry the per-machine `luo history` records to the central server so
 # the web UI can list and inspect historical sessions. The server is only an
 # in-memory relay/cache — it does not persist history to disk.
 
@@ -891,7 +891,7 @@ def make_history_index(sessions: Any, *, seq: int = 0) -> Message:
     """daemon → server: report the index of known history sessions.
 
     *sessions* is a list of session-meta dicts (flow id, task description,
-    status, timestamps, active flag, …) — one per ``se3 history`` entry the
+    status, timestamps, active flag, …) — one per ``luo history`` entry the
     daemon can serve. Sent on connect and whenever the index changes.
     """
     return Message(

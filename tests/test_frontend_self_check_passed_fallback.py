@@ -29,7 +29,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-APP_JS = REPO_ROOT / "src" / "se3" / "server" / "static" / "app.js"
+APP_JS = REPO_ROOT / "src" / "tianluo" / "server" / "static" / "app.js"
 FRONTEND_TEST = REPO_ROOT / "tests" / "frontend" / "test_app_pure.mjs"
 SELF_CHECK_TEST = REPO_ROOT / "tests" / "frontend" / "self_check_passed_fallback.test.mjs"
 

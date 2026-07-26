@@ -50,7 +50,7 @@ from tianluo.engine.persistence import PersistenceManager
 
 
 def _build_failed_flow(project_root: Path, retry_count: int = 0) -> FlowInstance:
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     flow = FlowInstance(
         flow_id="dc-flow-001",
         task_description="dual-channel task",

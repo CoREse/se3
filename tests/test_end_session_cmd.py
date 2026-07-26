@@ -52,7 +52,7 @@ def _write_fake_se3(directory: Path, body: str) -> Path:
     console-script shape the tightened ``_cmdline_is_se3_run`` matches at
     argv[1]. Inline ``python -c <code> se3 run`` is no longer recognised.
     """
-    path = directory / "se3"
+    path = directory / "tianluo"
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -66,7 +66,7 @@ def _make_worktree_session(
 ) -> Path:
     """Create a real worktree session with engine.json + history + snapshot."""
     safe = _branch_safe_name(branch)
-    wt_path = main / "se3" / "worktrees" / safe
+    wt_path = main / "tianluo" / "worktrees" / safe
     wt_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
         ["git", "-C", str(main), "worktree", "add", str(wt_path), "-b", branch],
@@ -74,7 +74,7 @@ def _make_worktree_session(
     )
 
     # engine.json inside the worktree
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = {
         "flow_id": flow_id,
@@ -94,7 +94,7 @@ def _make_worktree_session(
     (resumable_dir / f"{flow_id}.json").write_text(json.dumps(engine, indent=2))
 
     # history
-    hist_dir = wt_path / "se3" / "history" / flow_id
+    hist_dir = wt_path / "tianluo" / "history" / flow_id
     hist_dir.mkdir(parents=True, exist_ok=True)
     (hist_dir / "01_discovery_ab12.jsonl").write_text(
         json.dumps({"role": "user", "content": "hello"}) + "\n"
@@ -103,8 +103,8 @@ def _make_worktree_session(
 
 
 def _make_main_session(main: Path, flow_id: str, status: str = "PAUSED") -> None:
-    """Create a main-branch session (engine.json at main/se3/state + snapshot)."""
-    state_dir = main / "se3" / "state"
+    """Create a main-branch session (engine.json at main/tianluo/state + snapshot)."""
+    state_dir = main / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = {
         "flow_id": flow_id,
@@ -136,12 +136,12 @@ def test_worktree_session_is_archived(tmp_path: Path) -> None:
     assert rc == 0
 
     # Worktree archived under .archive/
-    archive_root = main / "se3" / "worktrees" / ".archive"
+    archive_root = main / "tianluo" / "worktrees" / ".archive"
     assert archive_root.is_dir()
     assert any(archive_root.iterdir())
 
     # Terminal state promoted into the main archive (force=True, status PAUSED)
-    promoted = main / "se3" / "state" / "archive" / f"engine_{flow_id}.json"
+    promoted = main / "tianluo" / "state" / "archive" / f"engine_{flow_id}.json"
     assert promoted.exists()
     promoted_data = json.loads(promoted.read_text())
     assert promoted_data["flow_id"] == flow_id
@@ -149,7 +149,7 @@ def test_worktree_session_is_archived(tmp_path: Path) -> None:
     assert Path(promoted_data["project_root"]).resolve() == main.resolve()
 
     # History synced into the main project
-    main_hist = main / "se3" / "history" / flow_id / "01_discovery_ab12.jsonl"
+    main_hist = main / "tianluo" / "history" / flow_id / "01_discovery_ab12.jsonl"
     assert main_hist.exists()
 
     # Branch + worktree metadata cleaned up
@@ -170,7 +170,7 @@ def test_worktree_session_history_collision_uses_sidecar(tmp_path: Path) -> None
     _make_worktree_session(main, flow_id, branch)
 
     # Pre-existing main history file with the SAME name → collision.
-    main_hist_dir = main / "se3" / "history" / flow_id
+    main_hist_dir = main / "tianluo" / "history" / flow_id
     main_hist_dir.mkdir(parents=True, exist_ok=True)
     existing = main_hist_dir / "01_discovery_ab12.jsonl"
     existing.write_text(json.dumps({"role": "assistant", "content": "old"}) + "\n")
@@ -195,8 +195,8 @@ def test_main_branch_session_is_archived(tmp_path: Path) -> None:
     flow_id = "main-flow-1"
     _make_main_session(main, flow_id, status="FAILED")
 
-    state_file = main / "se3" / "state" / "engine.json"
-    snapshot = main / "se3" / "state" / "resumable" / f"{flow_id}.json"
+    state_file = main / "tianluo" / "state" / "engine.json"
+    snapshot = main / "tianluo" / "state" / "resumable" / f"{flow_id}.json"
     assert state_file.exists()
     assert snapshot.exists()
 
@@ -205,7 +205,7 @@ def test_main_branch_session_is_archived(tmp_path: Path) -> None:
 
     # engine.json moved into archive/
     assert not state_file.exists()
-    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir = main / "tianluo" / "state" / "archive"
     assert any(archive_dir.glob("engine_*.json"))
 
     # resumable snapshot cleared
@@ -223,7 +223,7 @@ def test_flow_id_resolved_from_main_engine(tmp_path: Path) -> None:
 
     rc = end_session(project_root=main, flow_id=None)
     assert rc == 0
-    snapshot = main / "se3" / "state" / "resumable" / f"{flow_id}.json"
+    snapshot = main / "tianluo" / "state" / "resumable" / f"{flow_id}.json"
     assert not snapshot.exists()
 
 
@@ -364,7 +364,7 @@ def test_worktree_without_branch_is_still_cleaned_up(tmp_path: Path) -> None:
     wt_path = _make_worktree_session(main, flow_id, branch)
 
     # Strip worktree_branch from the worktree engine.json (older/corrupt state).
-    engine_file = wt_path / "se3" / "state" / "engine.json"
+    engine_file = wt_path / "tianluo" / "state" / "engine.json"
     data = json.loads(engine_file.read_text())
     data.pop("worktree_branch", None)
     engine_file.write_text(json.dumps(data, indent=2))
@@ -398,8 +398,8 @@ def test_stale_unregistered_worktree_dir_is_removed(tmp_path: Path) -> None:
     # Build a worktree session dir manually — it is NOT a registered git
     # worktree, and its engine.json has no worktree_branch, so the branch can
     # neither be recorded nor inferred.
-    wt_path = main / "se3" / "worktrees" / "stale"
-    state_dir = wt_path / "se3" / "state"
+    wt_path = main / "tianluo" / "worktrees" / "stale"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     engine = {
         "flow_id": flow_id,
@@ -417,7 +417,7 @@ def test_stale_unregistered_worktree_dir_is_removed(tmp_path: Path) -> None:
     # The stale worktree directory is gone (archived first, then removed).
     assert not wt_path.exists()
     # And it was archived before removal.
-    archive_root = main / "se3" / "worktrees" / ".archive"
+    archive_root = main / "tianluo" / "worktrees" / ".archive"
     assert archive_root.exists() and any(archive_root.iterdir())
 
 
@@ -514,7 +514,7 @@ def test_discovers_live_worktree_parent_via_pidfile(tmp_path: Path) -> None:
     )
     try:
         # ``se3 run`` writes its pid into the worktree's state dir; simulate it.
-        (wt_path / "se3" / "state" / "run.pid").write_text(str(proc.pid))
+        (wt_path / "tianluo" / "state" / "run.pid").write_text(str(proc.pid))
 
         pids = end_session_cmd._discover_pids_for_flow(flow_id, main, wt_path)
         assert proc.pid in pids
@@ -541,7 +541,7 @@ def test_stale_pidfile_is_ignored(tmp_path: Path) -> None:
     # Spawn and reap a short-lived process to get a definitely-dead pid.
     dead = subprocess.Popen([sys.executable, "-c", "pass"])
     dead.wait()
-    (wt_path / "se3" / "state" / "run.pid").write_text(str(dead.pid))
+    (wt_path / "tianluo" / "state" / "run.pid").write_text(str(dead.pid))
 
     pids = end_session_cmd._discover_pids_for_flow(flow_id, main, wt_path)
     assert dead.pid not in pids
@@ -559,7 +559,7 @@ def test_no_live_process_still_archives(tmp_path: Path) -> None:
     rc = end_session(project_root=main, flow_id=flow_id, pid=None)
     assert rc == 0
     assert not exists_for_branch(main, branch)
-    assert (main / "se3" / "state" / "archive" / f"engine_{flow_id}.json").exists()
+    assert (main / "tianluo" / "state" / "archive" / f"engine_{flow_id}.json").exists()
 
 
 def test_unkillable_process_skips_destructive_archive(
@@ -593,7 +593,7 @@ def test_unkillable_process_skips_destructive_archive(
     assert _branch_exists(main, branch)
     assert exists_for_branch(main, branch)
     assert not (
-        main / "se3" / "state" / "archive" / f"engine_{flow_id}.json"
+        main / "tianluo" / "state" / "archive" / f"engine_{flow_id}.json"
     ).exists()
 
 
@@ -622,8 +622,8 @@ def test_mismatched_main_flow_is_not_archived(tmp_path: Path) -> None:
     _init_repo(main)
     # The main project is busy with flow B.
     _make_main_session(main, "flow-B", status="RUNNING")
-    state_file = main / "se3" / "state" / "engine.json"
-    b_snapshot = main / "se3" / "state" / "resumable" / "flow-B.json"
+    state_file = main / "tianluo" / "state" / "engine.json"
+    b_snapshot = main / "tianluo" / "state" / "resumable" / "flow-B.json"
     assert state_file.exists()
 
     # Ending flow A, whose worktree is already gone (no worktree on disk).
@@ -635,7 +635,7 @@ def test_mismatched_main_flow_is_not_archived(tmp_path: Path) -> None:
     assert json.loads(state_file.read_text())["flow_id"] == "flow-B"
     assert b_snapshot.exists()
     # And no archived engine_flow-B.json was produced.
-    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir = main / "tianluo" / "state" / "archive"
     assert not list(archive_dir.glob("engine_*.json")) if archive_dir.exists() else True
 
 
@@ -651,7 +651,7 @@ def test_unreadable_main_flow_is_not_archived(tmp_path: Path) -> None:
     main.mkdir()
     _init_repo(main)
 
-    state_dir = main / "se3" / "state"
+    state_dir = main / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     state_file = state_dir / "engine.json"
     # engine.json belongs to an active flow B but its flow_id is absent/corrupt.

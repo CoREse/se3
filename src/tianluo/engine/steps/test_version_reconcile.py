@@ -355,8 +355,8 @@ def test_empty_changelog_still_recorded_in_versions_md(tmp_path):
 
 def test_custom_rules_channel_uses_llm_output(tmp_path):
     root = _make_project(tmp_path, "1.2.3")
-    (root / "se3").mkdir(exist_ok=True)
-    (root / "se3" / "version-rules.md").write_text(
+    (root / "tianluo").mkdir(exist_ok=True)
+    (root / "tianluo" / "version-rules.md").write_text(
         "Use date-style versions.", encoding="utf-8"
     )
     _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
@@ -385,8 +385,8 @@ def test_custom_rules_channel_uses_llm_output(tmp_path):
 
 def test_custom_rules_is_tag_false_does_not_create_tag(tmp_path):
     root = _make_project(tmp_path, "1.2.3")
-    (root / "se3").mkdir(exist_ok=True)
-    (root / "se3" / "version-rules.md").write_text(
+    (root / "tianluo").mkdir(exist_ok=True)
+    (root / "tianluo" / "version-rules.md").write_text(
         "Use date-style versions.", encoding="utf-8"
     )
     _put_intent(root, "flowA", bump_type="minor", versions_changes=["feat"])
@@ -603,8 +603,8 @@ def test_unscoped_noop_survives_historical_tag_collision(tmp_path):
 
 def test_custom_rules_empty_response_raises(tmp_path):
     root = _make_project(tmp_path, "1.2.3")
-    (root / "se3").mkdir(exist_ok=True)
-    (root / "se3" / "version-rules.md").write_text("rules", encoding="utf-8")
+    (root / "tianluo").mkdir(exist_ok=True)
+    (root / "tianluo" / "version-rules.md").write_text("rules", encoding="utf-8")
     _put_intent(root, "flowA", bump_type="minor")
 
     with pytest.raises(ReconcileError):
@@ -685,8 +685,8 @@ def test_validate_default_channel_still_rejects_build_metadata_only():
 
 def test_reconcile_rejects_llm_regression(tmp_path):
     root = _make_project(tmp_path, "5.0.0")
-    (root / "se3").mkdir(exist_ok=True)
-    (root / "se3" / "version-rules.md").write_text("rules", encoding="utf-8")
+    (root / "tianluo").mkdir(exist_ok=True)
+    (root / "tianluo" / "version-rules.md").write_text("rules", encoding="utf-8")
     _put_intent(root, "flowA", bump_type="minor")
 
     with pytest.raises(VersionRegressionError):
@@ -799,7 +799,7 @@ def test_historical_versions_parsed(tmp_path):
 # --- script mode (version script rewrites pyproject.toml) --------------------
 #
 # Regression coverage for the worktree merge-reconcile + script-mode defect:
-# when a version SCRIPT (se3/scripts/version.py) rewrites pyproject.toml,
+# when a version SCRIPT (tianluo/scripts/version.py) rewrites pyproject.toml,
 # detect_version_file returns the SCRIPT path — so the file the script actually
 # bumps was never in the commit pathspec and the bump leaked out as working-tree
 # dirt (Specom flow 20260716-105509_043642a0). reconcile now measures the
@@ -849,7 +849,7 @@ if __name__ == "__main__":
 def _make_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
     """A git project whose version lives in pyproject.toml, bumped via a script.
 
-    The presence of se3/scripts/version.py auto-activates script mode
+    The presence of tianluo/scripts/version.py auto-activates script mode
     (DEFAULT_SCRIPT_PATHS), so detect_version_file returns the script — the exact
     condition under which the reconcile bump used to leak out of the commit.
     """
@@ -861,7 +861,7 @@ def _make_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
     (root / "VERSIONS.md").write_text(
         VERSIONS_TEMPLATE.format(version=version), encoding="utf-8"
     )
-    scripts_dir = root / "se3" / "scripts"
+    scripts_dir = root / "tianluo" / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "version.py").write_text(VERSION_SCRIPT, encoding="utf-8")
     _git(root, "init", "-q")
@@ -874,7 +874,7 @@ def _make_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
 
 def test_script_project_fixture_activates_script_mode(tmp_path):
     # Anchor for the whole script-mode regression suite: if the fixture ever
-    # silently degraded to file mode (e.g. se3/scripts/version.py drops off the
+    # silently degraded to file mode (e.g. tianluo/scripts/version.py drops off the
     # DEFAULT_SCRIPT_PATHS list), detect_version_file would return pyproject.toml
     # directly and the leak this suite guards against could never reproduce — the
     # tests below would pass for the wrong reason. Assert the fixture really trips
@@ -887,7 +887,7 @@ def test_script_project_fixture_activates_script_mode(tmp_path):
 
     root = _make_script_project(tmp_path, "0.31.1")
 
-    assert find_version_script(root) == root / "se3" / "scripts" / "version.py"
+    assert find_version_script(root) == root / "tianluo" / "scripts" / "version.py"
 
     # Build the bumper exactly as reconcile does (project-scoped config) so the
     # detection this asserts matches the code path under test.
@@ -895,7 +895,7 @@ def test_script_project_fixture_activates_script_mode(tmp_path):
     detected = bumper.detect_version_file(root)
     # script mode returns the SCRIPT path (the exact condition behind the defect),
     # not the pyproject.toml the script rewrites.
-    assert detected == root / "se3" / "scripts" / "version.py"
+    assert detected == root / "tianluo" / "scripts" / "version.py"
     assert bumper._use_script_mode is True
 
     # The symmetric read side (delegated to the script's ``get``) sees the file.
@@ -1138,7 +1138,7 @@ VERSION_SCRIPT_UNICODE = '''\
 import sys
 from pathlib import Path
 
-VERSION_FILE = Path("se3") / "版本.txt"
+VERSION_FILE = Path("tianluo") / "版本.txt"
 
 
 def main(argv):
@@ -1159,7 +1159,7 @@ if __name__ == "__main__":
 def _make_unicode_script_project(tmp_path: Path, version: str = "0.31.1") -> Path:
     """A script-mode project whose version lives in a non-ASCII-named file.
 
-    The version script rewrites ``se3/版本.txt`` (tracked, so the reconcile diff
+    The version script rewrites ``tianluo/版本.txt`` (tracked, so the reconcile diff
     bracket observes it). Reproduces the quotePath encoding path where a bare
     `git diff --name-only` would emit a quoted octal-escaped pseudo-path.
     """
@@ -1168,12 +1168,12 @@ def _make_unicode_script_project(tmp_path: Path, version: str = "0.31.1") -> Pat
     (root / "VERSIONS.md").write_text(
         VERSIONS_TEMPLATE.format(version=version), encoding="utf-8"
     )
-    scripts_dir = root / "se3" / "scripts"
+    scripts_dir = root / "tianluo" / "scripts"
     scripts_dir.mkdir(parents=True)
     (scripts_dir / "version.py").write_text(
         VERSION_SCRIPT_UNICODE, encoding="utf-8"
     )
-    (root / "se3" / "版本.txt").write_text(
+    (root / "tianluo" / "版本.txt").write_text(
         version + "\n", encoding="utf-8"
     )
     _git(root, "init", "-q")
@@ -1194,7 +1194,7 @@ def test_script_mode_bump_lands_when_version_file_is_non_ascii(tmp_path):
     # clean. Left dirty (or dropped from the commit), _assert_version_bump_committed
     # would raise; reaching success here proves the encoding path is closed.
     root = _make_unicode_script_project(tmp_path, "0.31.1")
-    version_relpath = "se3/版本.txt"
+    version_relpath = "tianluo/版本.txt"
     _put_intent(root, "flowUnicode", bump_type="patch", versions_changes=["fix x"])
 
     result = reconcile(root)

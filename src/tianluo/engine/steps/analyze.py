@@ -9,7 +9,7 @@ It programmatically collects project context (replacing the former
 PROJECT_SUMMARY step). Project-level conventions (the charter) and the
 structural orientation map (the code-index top map) are injected into the
 prompt; deeper function-level detail is pulled on demand by the agent via
-``se3 code-index show <path>``. The retired per-requirement spec index /
+``luo code-index show <path>``. The retired per-requirement spec index /
 spec-selection mechanism has been removed — there is no longer a spec set to
 select from.
 """
@@ -55,9 +55,9 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 Before reading source, consult the code-index map (injected below) to locate the
 relevant modules / symbols; pull deeper detail on demand via
-``se3 code-index show <path>`` rather than reading whole files blindly. To find
-items by keyword or regex, use ``se3 code-index search <pattern>`` instead of
-``grep 'pattern' se3/code-index.md`` — each hit carries the item's full locating
+``luo code-index show <path>`` rather than reading whole files blindly. To find
+items by keyword or regex, use ``luo code-index search <pattern>`` instead of
+``grep 'pattern' tianluo/code-index.md`` — each hit carries the item's full locating
 path (a symbol renders as ``relpath::local_id``, which a raw grep line cannot
 show); its syntax matches grep (regex ``pattern`` by default, ``-i``/``-F``/``-m``).
 
@@ -139,7 +139,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt += injection
     # Inject the project charter (full text) + code-index top map: project-level
     # conventions and the structural orientation map (function-level detail
-    # pulled on demand via `se3 code-index show <path>`).
+    # pulled on demand via `luo code-index show <path>`).
     prompt += get_charter_injection(project_root)
     # Read-side freshness boundary: analyze is the FIRST step of the read/plan
     # run (analyze → plan → plan_tasks → implement → self_check), and code is not
@@ -393,7 +393,7 @@ def _update_flow_steps(
 
     project_root = resolve_flow_project_root(flow)
 
-    # Append optional steps from se3.yaml (e.g. summarize).
+    # Append optional steps from tianluo.yaml (e.g. summarize).
     # _update_flow_steps rebuilds from the default sequence every time, so
     # applying the config once here mirrors state_machine.create_flow's
     # (default -> apply_step_config -> [worktree merge steps] ->

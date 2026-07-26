@@ -251,7 +251,7 @@ class TestIssueManagerCreate:
         assert issue.source == "human"
 
         # YAML file should exist in open/
-        files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+        files = list((tmp_path / "tianluo" / "issues" / "open").glob("*.yaml"))
         assert len(files) == 1
         assert files[0].name.startswith("001_")
 
@@ -647,7 +647,7 @@ class TestNextId:
         mgr = IssueManager(tmp_path)
         for i in range(5):
             mgr.create(f"Issue {i}")  # 001..005 -> counter 6
-        (tmp_path / "se3" / "issues" / ".next_id").write_text("5")
+        (tmp_path / "tianluo" / "issues" / ".next_id").write_text("5")
 
         assert mgr._next_id() == "006"
 
@@ -655,7 +655,7 @@ class TestNextId:
         """An ahead counter may be a peer's live reservation — keep it."""
         mgr = IssueManager(tmp_path)
         mgr.create("Issue")  # 001 -> counter 2
-        (tmp_path / "se3" / "issues" / ".next_id").write_text("9")
+        (tmp_path / "tianluo" / "issues" / ".next_id").write_text("9")
 
         assert mgr._next_id() == "009"
 
@@ -663,11 +663,11 @@ class TestNextId:
         """A file whose parsed ``id`` outruns its filename still owns that ID."""
         mgr = IssueManager(tmp_path)
         mgr._ensure_dirs()
-        (tmp_path / "se3" / "issues" / "open" / "005_x.yaml").write_text(
+        (tmp_path / "tianluo" / "issues" / "open" / "005_x.yaml").write_text(
             "id: '100'\ndescription: hand-edited\nstatus: open\n",
             encoding="utf-8",
         )
-        (tmp_path / "se3" / "issues" / ".next_id").write_text("6")
+        (tmp_path / "tianluo" / "issues" / ".next_id").write_text("6")
 
         assert mgr._next_id() == "101"
 

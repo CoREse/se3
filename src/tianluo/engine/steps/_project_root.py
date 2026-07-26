@@ -2,13 +2,13 @@
 
 Single convergence point for the write side of "one flow, one history home".
 
-WHY: In ``se3 run --worktree`` the wrapper process keeps its cwd in the MAIN
-checkout (intentional — see ``src/se3/commands/run.py``), and modern flows carry
+WHY: In ``luo run --worktree`` the wrapper process keeps its cwd in the MAIN
+checkout (intentional — see ``src/tianluo/commands/run.py``), and modern flows carry
 ``change_path = None``. So the historical
 ``flow.change_path.parent if flow.change_path else Path.cwd()`` idiom resolves a
 worktree flow's project_root to the main checkout, and the in-process discovery
 round-1 LLMCaller writes the first user prompt / stream / assistant chat records
-into the MAIN repo's ``se3/history/<flow_id>/`` while the orchestrator (which
+into the MAIN repo's ``tianluo/history/<flow_id>/`` while the orchestrator (which
 holds the correct project_root) writes ``step_started``/``step_status`` events
 into the WORKTREE copy — the head of the transcript forks across two files and
 the daemon/WebUI (which serve the worktree copy) can never show it.

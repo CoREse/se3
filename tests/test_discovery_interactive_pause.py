@@ -1,7 +1,7 @@
 """Tests for the interactive (CLI-terminal) discovery pause dual-path wait.
 
 An interactive ``se3 run --discover`` pause now ALSO mirrors itself to a
-``se3/calls/`` call file so the web console can answer it, and the run loop
+``tianluo/calls/`` call file so the web console can answer it, and the run loop
 waits on the terminal and the web response file in parallel — whichever answers
 first drives the *same* live process forward (no ``--resume``). The flow stays
 RUNNING throughout, so a watching daemon never races it with a duplicate spawn.
@@ -61,7 +61,7 @@ class _RecordingPersistence:
 
 
 def _calls_dir(project_root: Path) -> Path:
-    return project_root / "se3" / "calls"
+    return project_root / "tianluo" / "calls"
 
 
 def _only_call_file(project_root: Path) -> Path:
@@ -286,8 +286,8 @@ def test_no_project_root_is_terminal_only(tmp_path):
         result = _handle_discovery_pause(flow, step, persistence, None, None)
 
     assert result == "hi"
-    # No se3/calls/ directory created when there is no web channel.
-    assert not (tmp_path / "se3" / "calls").exists()
+    # No tianluo/calls/ directory created when there is no web channel.
+    assert not (tmp_path / "tianluo" / "calls").exists()
 
 
 # --------------------------------------------------------------------------
@@ -365,9 +365,9 @@ def test_dedup_preserves_first_seen_order():
 def test_dedup_integrates_with_snapshot(tmp_path):
     """End-to-end: two discovery call files sharing a step_id surface as one
     pending call in the per-flow snapshot."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     calls_dir.mkdir(parents=True)
 
     engine = {

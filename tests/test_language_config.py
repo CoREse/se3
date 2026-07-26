@@ -55,21 +55,21 @@ class TestLanguageConfigLoad:
     """Tests for LanguageConfig.load() and load_language_config()."""
 
     def test_defaults_when_no_file(self, tmp_path):
-        """Both fields default to None when se3.yaml doesn't exist."""
+        """Both fields default to None when tianluo.yaml doesn't exist."""
         config = LanguageConfig.load(tmp_path)
         assert config.language is None
         assert config.spec_language is None
 
     def test_defaults_when_no_language_section(self, tmp_path):
         """Both fields default to None when language section is missing."""
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         config = LanguageConfig.load(tmp_path)
         assert config.language is None
         assert config.spec_language is None
 
     def test_defaults_when_null_values(self, tmp_path):
         """Both fields are None when explicitly set to null."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: null\n  spec_language: null\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -78,7 +78,7 @@ class TestLanguageConfigLoad:
 
     def test_both_set(self, tmp_path):
         """Both fields are loaded when set."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -87,7 +87,7 @@ class TestLanguageConfigLoad:
 
     def test_only_language_set(self, tmp_path):
         """Only language is set, spec_language defaults to None."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -96,7 +96,7 @@ class TestLanguageConfigLoad:
 
     def test_only_spec_language_set(self, tmp_path):
         """Only spec_language is set, language defaults to None."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  spec_language: en\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -105,7 +105,7 @@ class TestLanguageConfigLoad:
 
     def test_load_language_config_convenience(self, tmp_path):
         """load_language_config() convenience function works."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: ja\n  spec_language: ko\n"
         )
         config = load_language_config(tmp_path)
@@ -114,14 +114,14 @@ class TestLanguageConfigLoad:
 
     def test_invalid_yaml(self, tmp_path):
         """Gracefully handles invalid YAML."""
-        (tmp_path / "se3.yaml").write_text("{{invalid yaml")
+        (tmp_path / "tianluo.yaml").write_text("{{invalid yaml")
         config = LanguageConfig.load(tmp_path)
         assert config.language is None
         assert config.spec_language is None
 
     def test_language_section_not_dict(self, tmp_path):
         """Handles case where language section is a scalar instead of dict."""
-        (tmp_path / "se3.yaml").write_text("language: zh-CN\n")
+        (tmp_path / "tianluo.yaml").write_text("language: zh-CN\n")
         config = LanguageConfig.load(tmp_path)
         assert config.language is None
         assert config.spec_language is None
@@ -133,7 +133,7 @@ class TestLanguageConfigGlobalMerge:
     def test_project_overrides_global(self, tmp_path, global_home):
         """A project value wins over the global one, field by field."""
         _write_global_language(global_home, language="en-US", spec_language="en-US")
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: ja\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -143,7 +143,7 @@ class TestLanguageConfigGlobalMerge:
     def test_global_only(self, tmp_path, global_home):
         """With no project value, the global value is used."""
         _write_global_language(global_home, language="zh-CN", spec_language="en-US")
-        # No project se3.yaml at all.
+        # No project tianluo.yaml at all.
         config = LanguageConfig.load(tmp_path)
         assert config.language == "zh-CN"
         assert config.spec_language == "en-US"
@@ -152,7 +152,7 @@ class TestLanguageConfigGlobalMerge:
         """An unset project field inherits the global value (per-field merge)."""
         _write_global_language(global_home, language="en-US", spec_language="ko")
         # Project sets only language; spec_language should fall through.
-        (tmp_path / "se3.yaml").write_text("language:\n  language: zh-CN\n")
+        (tmp_path / "tianluo.yaml").write_text("language:\n  language: zh-CN\n")
         config = LanguageConfig.load(tmp_path)
         assert config.language == "zh-CN"
         assert config.spec_language == "ko"
@@ -167,7 +167,7 @@ class TestLanguageConfigGlobalMerge:
     def test_project_null_falls_through_to_global(self, tmp_path, global_home):
         """An explicit project null does not mask a set global value."""
         _write_global_language(global_home, language="zh-CN")
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: null\n  spec_language: null\n"
         )
         config = LanguageConfig.load(tmp_path)
@@ -216,7 +216,7 @@ class TestGetStepLanguageInstruction:
     def _write_config(self, tmp_path, language=None, spec_language=None,
                       confirmation_enabled=False, confirmation_steps=None,
                       reviewer="human"):
-        """Helper to write se3.yaml using the per-step confirmation schema.
+        """Helper to write tianluo.yaml using the per-step confirmation schema.
 
         ``confirmation_enabled`` retains the old keyword for test
         readability, but maps to the new schema by listing the steps in
@@ -237,7 +237,7 @@ class TestGetStepLanguageInstruction:
                     # when omitted; explicit None keeps the test focused
                     # on the language-injection behavior.
                     lines.append(f"    {s}: {{}}")
-        (tmp_path / "se3.yaml").write_text("\n".join(lines) + "\n")
+        (tmp_path / "tianluo.yaml").write_text("\n".join(lines) + "\n")
 
     def test_summarize_uses_general_language(self, tmp_path):
         """Summarize step uses config.language."""
@@ -324,7 +324,7 @@ class TestGetStepLanguageInstruction:
         assert result == ""
 
     def test_no_yaml_file(self, tmp_path):
-        """Works when se3.yaml doesn't exist."""
+        """Works when tianluo.yaml doesn't exist."""
         result = get_step_language_instruction("summarize", tmp_path)
         assert result == ""
 
@@ -337,7 +337,7 @@ class TestContextBuilderLanguageInjection:
 
     def test_language_instruction_includes_language(self, tmp_path):
         """get_step_language_instruction returns language for human-facing steps."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: null\n"
         )
         from tianluo.engine.context_builder import get_step_language_instruction
@@ -346,7 +346,7 @@ class TestContextBuilderLanguageInjection:
 
     def test_no_language_for_implement(self, tmp_path):
         """get_step_language_instruction returns empty for implement step."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         from tianluo.engine.context_builder import get_step_language_instruction
@@ -355,7 +355,7 @@ class TestContextBuilderLanguageInjection:
 
     def test_spec_language_for_update_spec(self, tmp_path):
         """get_step_language_instruction uses spec_language for update_spec step."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         from tianluo.engine.context_builder import get_step_language_instruction
@@ -416,7 +416,7 @@ class TestLanguageInstructionWording:
 
     def test_update_spec_instruction_is_spec_flavored(self, tmp_path):
         """update_spec step routes through the for_spec variant."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         result = get_step_language_instruction("update_spec", tmp_path)
@@ -433,7 +433,7 @@ class TestSpecLanguageInstructionHelper:
 
     def test_returns_instruction_when_spec_language_set(self, tmp_path):
         from tianluo.engine.context_builder import get_spec_language_instruction
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         result = get_spec_language_instruction(tmp_path)
@@ -444,7 +444,7 @@ class TestSpecLanguageInstructionHelper:
 
     def test_empty_when_spec_language_unset(self, tmp_path):
         from tianluo.engine.context_builder import get_spec_language_instruction
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: null\n"
         )
         assert get_spec_language_instruction(tmp_path) == ""
@@ -479,7 +479,7 @@ class TestUnconfirmedStepsNoLanguageInjection:
     """
 
     def test_no_injection_for_llm_choice_steps(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         for step in ("analyze", "implement", "verify_spec"):

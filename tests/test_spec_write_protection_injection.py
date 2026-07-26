@@ -113,7 +113,7 @@ class TestGetSpecWriteProtectionInjection:
 
     def test_constraint_forbids_spec_writes(self):
         injection = get_spec_write_protection_injection("implement")
-        assert "se3/specs" in injection
+        assert "tianluo/specs" in injection
         for tool in ("Write", "Edit", "NotebookEdit", "Bash"):
             assert tool in injection
 

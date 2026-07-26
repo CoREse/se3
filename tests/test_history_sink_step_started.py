@@ -45,7 +45,7 @@ from tianluo.engine.models import (
 
 
 def _step_path(project_root: Path, flow_id: str, step_id: str) -> Path:
-    return project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    return project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
 
 
 def _read_lines(path: Path) -> list[dict]:
@@ -293,7 +293,7 @@ def _build_flow(step_type: StepType) -> FlowInstance:
 def _run_single_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
     from tianluo.commands.run import run_flow
 
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
     with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
         "tianluo.commands.run.StateMachine"
@@ -452,7 +452,7 @@ def _run_discovery_pause(project_root: Path, flow: FlowInstance):
     cleanly (130) right after the orchestrator persists the step_status."""
     from tianluo.commands.run import run_flow
 
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
     with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
         "tianluo.commands.run.StateMachine"

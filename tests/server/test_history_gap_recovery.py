@@ -61,7 +61,7 @@ async def _active_worktree_flow(state: ServerState, status: str = "paused") -> N
             "flows": [
                 {
                     "flow_id": FLOW,
-                    "project_root": "/repo/se3/worktrees/wt-a4af4b75",
+                    "project_root": "/repo/tianluo/worktrees/wt-a4af4b75",
                     "status": status,
                 }
             ],

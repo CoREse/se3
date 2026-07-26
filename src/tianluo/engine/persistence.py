@@ -4,6 +4,7 @@ Handles JSON serialization/deserialization with atomic writes
 to prevent state corruption during interruptions.
 """
 
+from tianluo.runtime_paths import runtime_dir
 import hashlib
 import json
 import logging
@@ -218,12 +219,12 @@ class PersistenceManager:
     BACKUP_EXTENSION = ".bak"
     RESUMABLE_DIRNAME = "resumable"
     # Hot/cold split (issue #244 一期): heavy per-step inputs/outputs and the
-    # shared context are externalized to se3/state/steps/<flow_id>/. Partitioned
+    # shared context are externalized to tianluo/state/steps/<flow_id>/. Partitioned
     # by flow_id so a resumable snapshot's cold files never collide with a later
     # flow that reuses the same auto-generated step ids.
     STEPS_DIRNAME = "steps"
     CONTEXT_COLD_FILENAME = "_context.json"
-    # Dirty sentinel: se3/state/.dirty holds {"seq": N}, bumped after every
+    # Dirty sentinel: tianluo/state/.dirty holds {"seq": N}, bumped after every
     # successful state persist (save_flow / snapshot save / snapshot clear /
     # archive). Consumed by the daemon's DaemonHistoryReader, whose fast tick
     # gates an idle root's deep scan on this one file's stat — see the
@@ -239,10 +240,10 @@ class PersistenceManager:
             project_root: Root directory of the project
         """
         self.project_root = Path(project_root)
-        self.state_dir = self.project_root / "se3" / "state"
+        self.state_dir = runtime_dir(self.project_root) / "state"
         self.state_file = self.state_dir / self.STATE_FILENAME
         self.context_file = self.state_dir / self.CONTEXT_FILENAME
-        # Per-flow resumable snapshots: se3/state/resumable/<flow_id>.json.
+        # Per-flow resumable snapshots: tianluo/state/resumable/<flow_id>.json.
         # Unlike the single-slot engine.json (overwritten by the next run) and
         # the archive/ dir (terminal/completed snapshots only), this directory
         # holds the full FlowInstance of every flow that has NOT yet completed
@@ -311,7 +312,7 @@ class PersistenceManager:
             raise
 
     def _touch_dirty_sentinel(self) -> None:
-        """Bump the ``se3/state/.dirty`` sentinel's sequence number.
+        """Bump the ``tianluo/state/.dirty`` sentinel's sequence number.
 
         Called at the end of every successful state persist (``save_flow``,
         ``save_resumable_snapshot``, ``clear_resumable_snapshot``,
@@ -829,7 +830,7 @@ class PersistenceManager:
         and shares the same ``steps/<flow_id>/`` cold partition, so it is only a
         KB-scale header write — it no longer grows linearly with an in-flight
         flow's inputs/outputs (issue #244 B2). It is the durable, per-flow copy
-        that survives a later ``se3 run`` overwriting the single-slot
+        that survives a later ``luo run`` overwriting the single-slot
         engine.json, so an interrupted/paused/failed flow can still be located
         and resumed by flow_id.
 
@@ -912,7 +913,7 @@ class PersistenceManager:
 
         The snapshot is a *reference* to the shared ``steps/<flow_id>/`` cold
         partition, so dropping it can leave that partition orphaned. The two
-        real callers (``se3 end-session`` / ``se3 salvage``) do exactly this:
+        real callers (``luo end-session`` / ``luo salvage``) do exactly this:
         they ``clear_state()`` — which, seeing the still-live snapshot, only
         *copies* the cold files into the archive and leaves the live partition
         in place (its snapshot_alive guard) — and then call this to drop the
@@ -940,7 +941,7 @@ class PersistenceManager:
         ever read it again. Leaving it turns every end-session/salvage of a
         paused new-format flow (and every new run overwriting a prior COMPLETED
         flow's engine.json) into a permanent multi-MB leak under
-        ``se3/state/steps/``. Best effort: a failed removal only leaves a
+        ``tianluo/state/steps/``. Best effort: a failed removal only leaves a
         harmless orphan, so log rather than raise.
         """
         if not flow_id:
@@ -1067,7 +1068,7 @@ class PersistenceManager:
     def load_archived_flow_by_id(self, flow_id: str) -> Optional[FlowInstance]:
         """Load an archived flow by id — split-aware and size-guarded.
 
-        Scans ``se3/state/archive/engine_*.json`` for the header whose
+        Scans ``tianluo/state/archive/engine_*.json`` for the header whose
         ``flow_id`` matches. The read is size-guarded (:func:`_read_snapshot_header`):
 
         * A **new-format** archive header (KB-scale) is parsed whole, then its
@@ -1077,7 +1078,7 @@ class PersistenceManager:
           (issue #244 B5). Missing/corrupt cold files degrade that step to empty.
         * A **giant legacy** archive is NOT fully parsed: only its top-level
           identity keys are scanned from a bounded head+tail window, so a
-          ``se3 history show`` / listing never stalls decoding a 100 MB snapshot.
+          ``luo history show`` / listing never stalls decoding a 100 MB snapshot.
           Such a degraded header lacks ``state``/timestamps, so it cannot be
           reconstructed into a full FlowInstance and returns ``None`` — the
           caller then falls back to history-only detail rather than freezing.
@@ -1091,7 +1092,7 @@ class PersistenceManager:
         archive_steps = archive_dir / self.STEPS_DIRNAME
         # Newest-first: the same flow_id can hold several archives (archive ->
         # history restore -> resume -> complete -> re-archive), and
-        # ``se3 history show`` should present the most recent one. Iterating
+        # ``luo history show`` should present the most recent one. Iterating
         # oldest-first would surface a stale earlier snapshot, and a degraded
         # oversized-legacy older archive (whose size-guarded read yields only a
         # header from_dict can't reconstruct) would mask a fully loadable newer
@@ -1368,7 +1369,7 @@ class PersistenceManager:
         Split-format archival (issue #244 B5) keeps the flow *whole*: the
         engine.json header AND the flow's entire cold-data directory
         (``steps/<flow_id>/`` — per-step inputs/outputs plus ``_context.json``)
-        move together into ``se3/state/archive/`` so no artifact is lost. The
+        move together into ``tianluo/state/archive/`` so no artifact is lost. The
         archived header keeps its ``engine_format`` marker and cold files sit at
         ``archive/steps/<flow_id>/``, mirroring the live layout, so a full-
         fidelity reload against the archive dir still finds them; the history /
@@ -1382,7 +1383,7 @@ class PersistenceManager:
         as before.
 
         If a resumable snapshot for this flow still exists (a non-completed flow
-        archived by ``se3 end-session`` / ``se3 salvage``), its cold refs point at
+        archived by ``luo end-session`` / ``luo salvage``), its cold refs point at
         this very live partition, so the cold files are *copied* into the archive
         and the live partition is left in place — the snapshot keeps resuming at
         full fidelity instead of silently degrading to empty payloads. Only when
@@ -1426,7 +1427,7 @@ class PersistenceManager:
         # entries; if it were archived first (the old order) and the cold
         # copy/move then failed — permissions, disk exhaustion after the header
         # write, a destination collision — the archive would advertise cold files
-        # that never arrived, and load_archived_flow_by_id / ``se3 history show`` /
+        # that never arrived, and load_archived_flow_by_id / ``luo history show`` /
         # context export would silently degrade every step and the context to
         # empty payloads. So archival now fails CLOSED: any failure before the
         # header moves re-raises with the live flow (engine.json + its
@@ -1490,7 +1491,7 @@ class PersistenceManager:
         # — publish via rename, then stamp the partition into the published header
         # — left a crash window in which the newer archive's header was live but
         # unstamped, so its cold_ref entries resolved to steps/<flow_id>/, the
-        # OLDER sibling archive's partition: `se3 history show` would silently
+        # OLDER sibling archive's partition: `luo history show` would silently
         # render the FIRST run's data as the second's. So for the collision case
         # we stamp the partition into the header dict and write it atomically to
         # the archive path, then drop the live header (copy+remove = fail-closed
@@ -1568,8 +1569,8 @@ class PersistenceManager:
     def list_all_flows(self) -> List[Dict[str, Any]]:
         """List all flows from all data sources: active, archived, and history-only.
 
-        Combines se3/state/engine.json, se3/state/archive/engine_*.json,
-        and se3/history/{flow_id}/ directories. De-duplicates by flow_id
+        Combines tianluo/state/engine.json, tianluo/state/archive/engine_*.json,
+        and tianluo/history/{flow_id}/ directories. De-duplicates by flow_id
         and sorts by updated_at descending.
 
         Returns:
@@ -1601,7 +1602,7 @@ class PersistenceManager:
             except Exception:
                 pass
 
-        # 2. Archived flows from se3/state/archive/
+        # 2. Archived flows from tianluo/state/archive/
         archive_dir = self.state_dir / "archive"
         if archive_dir.exists():
             for archive_file in archive_dir.glob("engine_*.json"):
@@ -1632,8 +1633,8 @@ class PersistenceManager:
                 except Exception:
                     continue
 
-        # 3. History-only flows from se3/history/{flow_id}/
-        history_dir = self.project_root / "se3" / "history"
+        # 3. History-only flows from tianluo/history/{flow_id}/
+        history_dir = runtime_dir(self.project_root) / "history"
         if history_dir.exists():
             for flow_dir in history_dir.iterdir():
                 if not flow_dir.is_dir():
@@ -1678,7 +1679,7 @@ class PersistenceManager:
         1. The user's literal input cut out by the ``USER_CONTENT`` markers
            (:func:`~tianluo.engine.prompt_markers.extract_user_content`);
         2. otherwise the embedded ``Task description: --- ... ---`` block (the
-           first-step-not-discovery ``se3 run "task"`` flow);
+           first-step-not-discovery ``luo run "task"`` flow);
         3. otherwise the truncated raw content.
 
         The first jsonl line is frequently a ``step_started`` (or other) *event*

@@ -1,6 +1,6 @@
 """Tests for the run-loop interjection drain + PAUSED prefix consumer.
 
-Covers G2's behavior contract in ``src/se3/commands/run.py``:
+Covers G2's behavior contract in ``src/tianluo/commands/run.py``:
 
 * :func:`_drain_pending_interjections` writes a ``record_user_interjection``
   entry to the per-step jsonl when the current step has a step_id;
@@ -76,7 +76,7 @@ def test_drain_buffers_only_for_paused_step(tmp_path: Path):
     persistence = _RecordingPersistence()
 
     interaction_calls.write_interjection_request(
-        tmp_path / "se3" / "calls", "hello A", flow_id=flow.flow_id, call_id="iA"
+        tmp_path / "tianluo" / "calls", "hello A", flow_id=flow.flow_id, call_id="iA"
     )
     drained = run_mod._drain_pending_interjections(flow, tmp_path, persistence)
     assert drained == ["hello A"]
@@ -95,7 +95,7 @@ def test_drain_does_not_buffer_for_running_step(tmp_path: Path):
     persistence = _RecordingPersistence()
 
     interaction_calls.write_interjection_request(
-        tmp_path / "se3" / "calls", "running", flow_id=flow.flow_id, call_id="iR"
+        tmp_path / "tianluo" / "calls", "running", flow_id=flow.flow_id, call_id="iR"
     )
     drained = run_mod._drain_pending_interjections(flow, tmp_path, persistence)
     assert drained == ["running"]
@@ -120,7 +120,7 @@ def test_drain_does_not_buffer_for_confirm_paused_step(tmp_path: Path):
     persistence = _RecordingPersistence()
 
     interaction_calls.write_interjection_request(
-        tmp_path / "se3" / "calls", "confirm interject", flow_id=flow.flow_id, call_id="iC"
+        tmp_path / "tianluo" / "calls", "confirm interject", flow_id=flow.flow_id, call_id="iC"
     )
     drained = run_mod._drain_pending_interjections(flow, tmp_path, persistence)
     assert drained == ["confirm interject"]
@@ -144,11 +144,11 @@ def test_drain_writes_history_jsonl(tmp_path: Path):
     persistence = _RecordingPersistence()
 
     interaction_calls.write_interjection_request(
-        tmp_path / "se3" / "calls", "history bubble", flow_id=flow.flow_id, call_id="iH"
+        tmp_path / "tianluo" / "calls", "history bubble", flow_id=flow.flow_id, call_id="iH"
     )
     run_mod._drain_pending_interjections(flow, tmp_path, persistence)
 
-    jsonl = tmp_path / "se3" / "history" / flow.flow_id / "01_discovery_xyz.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / flow.flow_id / "01_discovery_xyz.jsonl"
     assert jsonl.exists()
     lines = [
         json.loads(line)

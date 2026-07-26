@@ -519,7 +519,7 @@ A *binding invariant* is a rule that the Task Description, the Charter, or a tou
 You may ONLY report a violation when you can quote the recorded rule **verbatim** from the anchored material above. If a concern is real but is not written down anywhere above, it is OUT OF SCOPE here — do NOT report it. Unwritten expectations are intentionally not machine-guarded. This is NOT a free code review: do NOT report style, missing tests, performance, or "nice to have" concerns, and do NOT report anything a downstream specialized step owns (e.g. version bumping is decided by version_analyze).
 
 ## Constitutional-amendment exemption
-If the diff edits `se3/charter.md` AND the Task Description explicitly calls for that charter change, the specific clauses the task directs you to modify MUST NOT be cited as a violation: a task-sanctioned amendment to the charter is legitimate governance, not a breach of the (now-superseded) old text. Do not read a directed rewrite of an old rule as a violation of that old rule. All OTHER invariants — and every charter clause the task did NOT name — still apply in full.
+If the diff edits `tianluo/charter.md` AND the Task Description explicitly calls for that charter change, the specific clauses the task directs you to modify MUST NOT be cited as a violation: a task-sanctioned amendment to the charter is legitimate governance, not a breach of the (now-superseded) old text. Do not read a directed rewrite of an old rule as a violation of that old rule. All OTHER invariants — and every charter clause the task did NOT name — still apply in full.
 
 ## Issue Schema (HARD requirements — handler validates and drops violators)
 Each issue MUST be a JSON object with:

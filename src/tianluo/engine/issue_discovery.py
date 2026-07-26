@@ -303,7 +303,7 @@ class IssueDiscovery:
             f"The fix loop reached maximum iterations while working on: {flow.task_description}",
             "",
             f"**Flow ID:** {flow.flow_id}",
-            f"**History path:** se3/history/{flow.flow_id}",
+            f"**History path:** tianluo/history/{flow.flow_id}",
         ]
 
         # Include refined_description if it differs from the original task_description.

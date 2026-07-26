@@ -2,7 +2,7 @@
 
 A worktree-mode flow runs its discovery step in the main repo root (writing one
 ``01_discovery`` history file there) and every later step under the worktree
-root, so the same ``flow_id`` ends up with a ``se3/history/<flow_id>/``
+root, so the same ``flow_id`` ends up with a ``tianluo/history/<flow_id>/``
 directory under TWO distinct roots. The daemon's legacy ``_resolve_flow_dir``
 heuristic — scan every registered root and take the FIRST that contains the
 flow's history dir — then returns the main repo's discovery-only directory, and
@@ -41,12 +41,12 @@ def test_project_root_from_history_index_is_authoritative():
         await state.update_history_index(
             "m1",
             [
-                {"flow_id": "f1", "project_root": "/repo/se3/worktrees/wt-a"},
+                {"flow_id": "f1", "project_root": "/repo/tianluo/worktrees/wt-a"},
                 {"flow_id": "f2", "project_root": "/other/repo"},
             ],
         )
         root = await state.get_history_flow_project_root("f1")
-        assert root == "/repo/se3/worktrees/wt-a"
+        assert root == "/repo/tianluo/worktrees/wt-a"
 
     asyncio.run(scenario())
 
@@ -68,10 +68,10 @@ def test_project_root_not_first_match_but_authoritative_for_flow():
         )
         await state.update_history_index(
             "m-wt",
-            [{"flow_id": "f-wt", "project_root": "/repo/se3/worktrees/wt-a"}],
+            [{"flow_id": "f-wt", "project_root": "/repo/tianluo/worktrees/wt-a"}],
         )
         root = await state.get_history_flow_project_root("f-wt")
-        assert root == "/repo/se3/worktrees/wt-a"
+        assert root == "/repo/tianluo/worktrees/wt-a"
 
     asyncio.run(scenario())
 
@@ -86,12 +86,12 @@ def test_project_root_falls_back_to_live_flow_set():
             {
                 "machine_id": "m1",
                 "flows": [
-                    {"flow_id": "f-live", "project_root": "/repo/se3/worktrees/wt-b"}
+                    {"flow_id": "f-live", "project_root": "/repo/tianluo/worktrees/wt-b"}
                 ],
             },
         )
         root = await state.get_history_flow_project_root("f-live")
-        assert root == "/repo/se3/worktrees/wt-b"
+        assert root == "/repo/tianluo/worktrees/wt-b"
 
     asyncio.run(scenario())
 
@@ -102,7 +102,7 @@ def test_project_root_index_preferred_over_live_flow():
 
     async def scenario():
         await state.update_history_index(
-            "m1", [{"flow_id": "f1", "project_root": "/repo/se3/worktrees/wt"}]
+            "m1", [{"flow_id": "f1", "project_root": "/repo/tianluo/worktrees/wt"}]
         )
         await state.update_status(
             "m1",
@@ -112,7 +112,7 @@ def test_project_root_index_preferred_over_live_flow():
             },
         )
         root = await state.get_history_flow_project_root("f1")
-        assert root == "/repo/se3/worktrees/wt"
+        assert root == "/repo/tianluo/worktrees/wt"
 
     asyncio.run(scenario())
 
@@ -190,7 +190,7 @@ def _receive_until(daemon, msg_type):
 
 
 def test_is_active_worktree_flow_true_for_running_worktree():
-    """A running flow under ``se3/worktrees/<name>`` is an active worktree flow."""
+    """A running flow under ``tianluo/worktrees/<name>`` is an active worktree flow."""
     state = ServerState()
 
     async def scenario():
@@ -202,7 +202,7 @@ def test_is_active_worktree_flow_true_for_running_worktree():
                     {
                         "flow_id": "f1",
                         "status": "running",
-                        "project_root": "/repo/se3/worktrees/wt-a",
+                        "project_root": "/repo/tianluo/worktrees/wt-a",
                     }
                 ],
             },
@@ -227,7 +227,7 @@ def test_is_active_worktree_flow_true_for_paused_worktree():
                     {
                         "flow_id": "f1",
                         "status": "paused",
-                        "project_root": "/repo/se3/worktrees/wt-a",
+                        "project_root": "/repo/tianluo/worktrees/wt-a",
                     }
                 ],
             },
@@ -250,7 +250,7 @@ def test_is_active_worktree_flow_false_when_completed():
                     {
                         "flow_id": "f1",
                         "status": "completed",
-                        "project_root": "/repo/se3/worktrees/wt-a",
+                        "project_root": "/repo/tianluo/worktrees/wt-a",
                     }
                 ],
             },
@@ -328,7 +328,7 @@ def test_is_active_worktree_flow_owner_scoped():
                     {
                         "flow_id": "f1",
                         "status": "running",
-                        "project_root": "/repo/se3/worktrees/wt-a",
+                        "project_root": "/repo/tianluo/worktrees/wt-a",
                     }
                 ],
             },
@@ -437,7 +437,7 @@ async def _paused_worktree_flow(state, flow_id="f1"):
     await _register_flow(
         state,
         status="paused",
-        project_root="/repo/se3/worktrees/wt-a",
+        project_root="/repo/tianluo/worktrees/wt-a",
         flow_id=flow_id,
     )
 
@@ -483,7 +483,7 @@ def test_empty_full_does_not_wipe_existing_bundle():
             {"status": "running", "project_root": "/repo"}, id="non-worktree-running"
         ),
         pytest.param(
-            {"status": "completed", "project_root": "/repo/se3/worktrees/wt-a"},
+            {"status": "completed", "project_root": "/repo/tianluo/worktrees/wt-a"},
             id="terminal-worktree",
         ),
     ],
@@ -640,7 +640,7 @@ def test_shrinking_full_still_replaces_bundle_for_a_completed_worktree_flow():
 
     async def scenario():
         await _register_flow(
-            state, status="completed", project_root="/repo/se3/worktrees/wt-a"
+            state, status="completed", project_root="/repo/tianluo/worktrees/wt-a"
         )
         await state.append_history(
             "f1",
@@ -804,7 +804,7 @@ def test_running_worktree_selfheal_reconciles_missing_round(
     # Drop the reconcile throttle so the self-heal fires on the very next poll
     # (the throttle itself is asserted separately below).
     monkeypatch.setattr(_SS, "_HISTORY_FULL_PULL_MIN_INTERVAL", 0.0)
-    wt = "/repo/se3/worktrees/wt-a"
+    wt = "/repo/tianluo/worktrees/wt-a"
     round1 = {
         "step_id": "01_discovery_ab12",
         "step_type": "discovery",
@@ -865,7 +865,7 @@ def test_running_worktree_selfheal_respects_throttle(client_and_app):
     in-sync poll answers ``not_modified`` cheaply, so the 3 s self-heal cannot
     fan out one回源 pull per tick."""
     client, app = client_and_app  # default throttle (>0) in effect
-    wt = "/repo/se3/worktrees/wt-a"
+    wt = "/repo/tianluo/worktrees/wt-a"
     round1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"round": 1}}
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
@@ -919,7 +919,7 @@ def test_cache_miss_pull_sends_authoritative_project_root(client_and_app):
     authoritative ``SessionMeta.project_root`` (the worktree root), not an empty
     string that lets the daemon fall back to first-match guessing."""
     client, app = client_and_app
-    worktree_root = "/repo/se3/worktrees/wt-a"
+    worktree_root = "/repo/tianluo/worktrees/wt-a"
     with client.websocket_connect("/ws") as daemon:
         daemon.send_text(authed_hello(app, "m1", "host", "6.4.0"))
         recv_daemon_frame(daemon)  # WELCOME

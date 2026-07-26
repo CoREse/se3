@@ -23,7 +23,7 @@ from tianluo.commands.merge.merge_lock import (
 )
 
 # Default lock path relative to a project root.
-LOCK_REL = Path("se3/state/merge.lock")
+LOCK_REL = Path("tianluo/state/merge.lock")
 
 
 def _lock_path(project_root: Path) -> Path:

@@ -3,7 +3,7 @@
 This module proves the G5 claim of the per-group-status feature: appending a
 ``group_status`` NDJSON line (written by
 :func:`tianluo.engine.chat_history.record_group_status`) to the main repo's
-``se3/history/<flow_id>/<step_id>.jsonl`` shifts the change-detection token
+``tianluo/history/<flow_id>/<step_id>.jsonl`` shifts the change-detection token
 returned by :meth:`tianluo.daemon.history.DaemonHistoryReader.active_flow_signature`.
 
 That shift is exactly what drives the daemon client's incremental
@@ -18,7 +18,7 @@ the file's byte size, the token changes on every append even when two writes
 land inside the filesystem's mtime resolution. The existing fingerprint covers
 this scenario, so :mod:`tianluo.daemon.history` needs no reinforcement; this test
 locks the behavior in. The verification object is deliberately
-``src/se3/daemon/history.py`` — the daemon-side reader the client polls — not
+``src/tianluo/daemon/history.py`` — the daemon-side reader the client polls — not
 ``aggregator.py``.
 """
 
@@ -30,7 +30,7 @@ from tianluo.daemon.history import DaemonHistoryReader
 from tianluo.engine.chat_history import record_group_status
 
 
-# Verification target lives in src/se3/daemon/history.py (the daemon-side
+# Verification target lives in src/tianluo/daemon/history.py (the daemon-side
 # reader polled by the client), not aggregator.py.
 assert DaemonHistoryReader.__module__ == "tianluo.daemon.history"
 
@@ -46,7 +46,7 @@ def _make_reader(root):
 
 def _write_active_engine(root, flow_id=FLOW_ID, status="RUNNING"):
     """Write a minimal active ``engine.json`` so the flow is seen as active."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -55,7 +55,7 @@ def _write_active_engine(root, flow_id=FLOW_ID, status="RUNNING"):
 
 def _seed_step_jsonl(root, flow_id=FLOW_ID, step_id=STEP_ID):
     """Seed an existing per-step history jsonl with one chat line."""
-    hist_dir = root / "se3" / "history" / flow_id
+    hist_dir = root / "tianluo" / "history" / flow_id
     hist_dir.mkdir(parents=True, exist_ok=True)
     jsonl = hist_dir / f"{step_id}.jsonl"
     jsonl.write_text(
@@ -125,7 +125,7 @@ def test_first_group_status_creates_jsonl_and_shifts_signature(tmp_path):
     """
     _write_active_engine(tmp_path)
     # No history jsonl yet — only the engine.json exists.
-    (tmp_path / "se3" / "history" / FLOW_ID).mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tianluo" / "history" / FLOW_ID).mkdir(parents=True, exist_ok=True)
     reader = _make_reader(tmp_path)
 
     before = reader.active_flow_signature()

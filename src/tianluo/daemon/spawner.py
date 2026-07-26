@@ -1,21 +1,22 @@
-"""Spawns new ``se3 run`` flows on behalf of the SE3 daemon.
+"""Spawns new ``luo run`` flows on behalf of the SE3 daemon.
 
-:class:`DaemonSpawner` starts ``se3 run --output-format json <task>`` child
+:class:`DaemonSpawner` starts ``luo run --output-format json <task>`` child
 processes via :class:`subprocess.Popen`. The daemon is a *parent* of the flow,
-never an in-process caller: this keeps ``se3 run`` independently testable and
+never an in-process caller: this keeps ``luo run`` independently testable and
 ensures a daemon crash does not take a running flow down with it.
 
 The spawner deliberately passes ``--output-format json`` so the child emits the
 unified structured event stream as NDJSON on stdout. Because a real flow emits
 far more output than the OS pipe buffer can hold (~64 KB), the child's stdout
 and stderr are redirected to per-flow log files under
-``<project_root>/se3/logs/daemon/`` rather than to ``subprocess.PIPE``. This
+``<project_root>/tianluo/logs/daemon/`` rather than to ``subprocess.PIPE``. This
 guarantees the child can always write without blocking — even when nothing
 actively consumes its output — so a spawned flow never deadlocks. :meth:`iter_events`
 tails the stdout log file and yields the NDJSON events back as parsed dicts.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -44,7 +45,7 @@ def resolve_login_shell_path(timeout: float = 5.0) -> Optional[str]:
 
     This is the VSCode-style "shell environment resolution" approach: one
     probe at daemon startup, cached for the daemon's lifetime, so spawned
-    ``se3 run`` children inherit the full login-shell PATH even when the
+    ``luo run`` children inherit the full login-shell PATH even when the
     daemon itself was started from a sparse environment (systemd, cron,
     container).
     """
@@ -110,12 +111,12 @@ SpawnCallback = Callable[["SpawnedProcess"], None]
 
 @dataclass
 class SpawnedProcess:
-    """A ``se3 run`` child process started by the daemon.
+    """A ``luo run`` child process started by the daemon.
 
     Attributes:
         process: The underlying :class:`subprocess.Popen` handle.
         project_root: Directory the flow runs in (the child's ``cwd``).
-        task_description: The task passed to ``se3 run``.
+        task_description: The task passed to ``luo run``.
         args: The full argv used to launch the child.
         started_at: Unix epoch seconds at spawn time.
         stdout_log: File the child's stdout (NDJSON event stream) is written
@@ -203,15 +204,15 @@ class EnsureResult:
     """Outcome of :meth:`DaemonSpawner.ensure_se3_project`.
 
     Attributes:
-        initialized: ``True`` when ``se3 init`` was actually invoked because
+        initialized: ``True`` when ``luo init`` was actually invoked because
             the directory was not yet an SE3 project; ``False`` when an
             existing SE3 project was detected and init was skipped.
         error: An error description when the init invocation failed; empty
             on success. Callers treat a non-empty ``error`` as a short-circuit
             signal — do not proceed with ``spawn_flow``.
-        stdout: Captured stdout from the ``se3 init`` child (empty on the
+        stdout: Captured stdout from the ``luo init`` child (empty on the
             skip path).
-        stderr: Captured stderr from the ``se3 init`` child (empty on the
+        stderr: Captured stderr from the ``luo init`` child (empty on the
             skip path).
     """
 
@@ -224,17 +225,17 @@ class EnsureResult:
 def _is_se3_project(project_root: Path) -> bool:
     """Return whether *project_root* is already an SE3-initialized project.
 
-    The presence of ``<root>/se3/charter.md`` is the durable marker that
-    ``se3 init`` ran successfully in this directory; ``se3 init`` creates the
+    The presence of ``<root>/tianluo/charter.md`` is the durable marker that
+    ``luo init`` ran successfully in this directory; ``luo init`` creates the
     charter unconditionally on success. (This replaced the retired
-    ``se3/specs/base/spec.md`` marker when the spec corpus was retired in
+    ``tianluo/specs/base/spec.md`` marker when the spec corpus was retired in
     favour of the code-index + charter + why-comment knowledge system.)
     """
-    return (project_root / "se3" / "charter.md").is_file()
+    return (runtime_dir(project_root) / "charter.md").is_file()
 
 
 class DaemonSpawner:
-    """Starts and manages ``se3 run`` child processes."""
+    """Starts and manages ``luo run`` child processes."""
 
     def __init__(
         self,
@@ -286,13 +287,13 @@ class DaemonSpawner:
     ) -> EnsureResult:
         """Make sure *project_root* is an SE3-initialized project.
 
-        When *project_root* already contains the ``se3/charter.md`` marker
+        When *project_root* already contains the ``tianluo/charter.md`` marker
         file, the directory is treated as an existing SE3 project and the call
         is a no-op (``EnsureResult(initialized=False)``).
 
         Otherwise the directory (which may be a brand-new empty path the user
         just typed into the web *New Task* form) is initialized in-place by
-        spawning ``se3 init -p <root>`` as a subprocess; the daemon owns the
+        spawning ``luo init -p <root>`` as a subprocess; the daemon owns the
         local filesystem, so it is the right place to run init from. A
         non-zero exit code or any other launch failure surfaces as
         ``EnsureResult(error=...)``; callers MUST treat that as a
@@ -312,7 +313,7 @@ class DaemonSpawner:
         except OSError as exc:
             return EnsureResult(error=f"cannot create {root}: {exc}")
         args = _resolve_se3_command() + ["init", "-p", str(root)]
-        logger.info("Auto-initializing SE3 project at %s via `se3 init`", root)
+        logger.info("Auto-initializing SE3 project at %s via `luo init`", root)
         init_env = os.environ.copy()
         if self._login_shell_path is not None:
             init_env["PATH"] = merge_path_env(
@@ -330,14 +331,14 @@ class DaemonSpawner:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return EnsureResult(error=f"`se3 init` failed to launch: {exc}")
+            return EnsureResult(error=f"`luo init` failed to launch: {exc}")
         stdout = (result.stdout or b"").decode("utf-8", errors="replace")
         stderr = (result.stderr or b"").decode("utf-8", errors="replace")
         if result.returncode != 0:
             return EnsureResult(
                 initialized=False,
                 error=(
-                    f"`se3 init` returned exit code {result.returncode}: "
+                    f"`luo init` returned exit code {result.returncode}: "
                     f"{stderr.strip() or stdout.strip() or 'no output'}"
                 ),
                 stdout=stdout,
@@ -347,8 +348,8 @@ class DaemonSpawner:
             return EnsureResult(
                 initialized=False,
                 error=(
-                    "`se3 init` reported success but the SE3 project marker "
-                    f"{root / 'se3' / 'charter.md'} is still missing"
+                    "`luo init` reported success but the SE3 project marker "
+                    f"{runtime_dir(root) / 'charter.md'} is still missing"
                 ),
                 stdout=stdout,
                 stderr=stderr,
@@ -369,9 +370,9 @@ class DaemonSpawner:
         extra_args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
-        """Start a new ``se3 run`` flow and return its :class:`SpawnedProcess`.
+        """Start a new ``luo run`` flow and return its :class:`SpawnedProcess`.
 
-        The child runs ``se3 run <task> --type <task_type> --output-format json``
+        The child runs ``luo run <task> --type <task_type> --output-format json``
         with the daemon's environment inherited (so the Python path stays
         correct) and ``cwd`` set to *project_root*.
 
@@ -387,7 +388,7 @@ class DaemonSpawner:
 
         When *from_issue_id* is non-empty, the flow is started from an existing
         issue instead: the argv becomes
-        ``se3 run --from-issue <id> --output-format json`` (plus ``--discover``
+        ``luo run --from-issue <id> --output-format json`` (plus ``--discover``
         when *discover* is true), and *task_description* / *task_type* are
         **not** placed on the argv — the CLI's ``--from-issue`` path takes the
         task from the issue's own description and drives the issue's
@@ -444,12 +445,12 @@ class DaemonSpawner:
         project_root: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
-        """Resume a paused flow by spawning ``se3 run --resume --flow-id``.
+        """Resume a paused flow by spawning ``luo run --resume --flow-id``.
 
-        A daemon-spawned flow (``se3 run --output-format json``) exits its
+        A daemon-spawned flow (``luo run --output-format json``) exits its
         process whenever it pauses for a human call — for example a discovery
         clarification. Once the web UI answers and the daemon writes the
-        ``.response`` file, *something* must re-run ``se3 run --resume`` for the
+        ``.response`` file, *something* must re-run ``luo run --resume`` for the
         paused flow or it would stay PAUSED forever and never reach analyze /
         implement. This method is that something: it relaunches the flow with
         ``--resume --flow-id <flow_id>`` so the conversation continues from the
@@ -475,13 +476,13 @@ class DaemonSpawner:
         pid: Optional[int] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
-        """End a session by spawning ``se3 end-session`` as a child process.
+        """End a session by spawning ``luo end-session`` as a child process.
 
         This is the daemon-side mechanism behind a server end-session request.
-        The heavy work — gracefully terminating the live ``se3 run`` process
+        The heavy work — gracefully terminating the live ``luo run`` process
         (SIGTERM → grace wait → SIGKILL) and archiving a worktree session the
         way a normally-completed run is cleaned up — is delegated to the
-        ``se3 end-session`` CLI subcommand rather than performed inline, so the
+        ``luo end-session`` CLI subcommand rather than performed inline, so the
         daemon's event loop is never blocked by the grace wait or the on-disk
         archival.
 
@@ -489,7 +490,7 @@ class DaemonSpawner:
         merged-PATH ``_launch`` machinery as :meth:`spawn` / :meth:`resume`, so
         the subprocess always runs the daemon's own ``se3`` wheel. The
         ``flow_id`` is passed positionally (matching the CLI's
-        ``se3 end-session <flow_id>`` signature), and ``--pid`` is appended only
+        ``luo end-session <flow_id>`` signature), and ``--pid`` is appended only
         when a *pid* hint is supplied.
         """
         cwd = str(Path(project_root).resolve()) if project_root else os.getcwd()
@@ -511,7 +512,7 @@ class DaemonSpawner:
         task_description: str,
         env: Optional[Dict[str, str]],
     ) -> SpawnedProcess:
-        """Start *args* as a detached ``se3 run`` child and track it.
+        """Start *args* as a detached ``luo run`` child and track it.
 
         Shared by :meth:`spawn` and :meth:`resume`: both differ only in the
         argv they build; the environment inheritance, per-flow log-file
@@ -532,7 +533,7 @@ class DaemonSpawner:
             stdout_path, stderr_path
         )
 
-        logger.info("Spawning se3 run flow in %s", cwd)
+        logger.info("Spawning luo run flow in %s", cwd)
         try:
             process = subprocess.Popen(
                 args,
@@ -584,11 +585,11 @@ class DaemonSpawner:
     ) -> tuple[Optional[Path], Optional[Path]]:
         """Return (stdout_log, stderr_log) paths for a new flow, or (None, None).
 
-        Logs live under ``<project_root>/se3/logs/daemon/``. When that
+        Logs live under ``<project_root>/tianluo/logs/daemon/``. When that
         directory cannot be created, returns ``(None, None)`` so the caller
         falls back to ``/dev/null``.
         """
-        log_dir = Path(cwd) / "se3" / "logs" / "daemon"
+        log_dir = runtime_dir(Path(cwd)) / "logs" / "daemon"
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
         except OSError:  # pragma: no cover - defensive

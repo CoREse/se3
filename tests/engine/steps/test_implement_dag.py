@@ -51,7 +51,7 @@ def _make_flow(tmp_path=None, **kwargs):
         "flow_id": "test-flow",
     }
     if tmp_path:
-        defaults["change_path"] = tmp_path / "se3"
+        defaults["change_path"] = tmp_path / "tianluo"
     defaults.update(kwargs)
     return FlowInstance(**defaults)
 

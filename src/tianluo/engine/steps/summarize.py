@@ -5,6 +5,7 @@ Uses LLM to create a comprehensive summary in natural language.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 from datetime import datetime
@@ -320,7 +321,7 @@ def _format_knowledge_guards(flow: FlowInstance) -> str:
         if auto_updated:
             lines.append("### Charter Auto-Update")
             lines.append(
-                "The project charter (`se3/charter.md`) was automatically updated "
+                "The project charter (`tianluo/charter.md`) was automatically updated "
                 "to descriptively reflect this session's already-reviewed changes."
             )
             diff = str(charter_outputs.get("charter_diff", "") or "")
@@ -576,8 +577,8 @@ def _save_summary(flow: FlowInstance, summary_text: str) -> None:
     """
     project_root = resolve_flow_project_root(flow)
 
-    # Save to se3/state/summary-{flow_id}.md (Markdown format)
-    summary_dir = project_root / "se3" / "state"
+    # Save to tianluo/state/summary-{flow_id}.md (Markdown format)
+    summary_dir = runtime_dir(project_root) / "state"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
     summary_file = summary_dir / f"summary-{flow.flow_id}.md"

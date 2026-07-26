@@ -187,7 +187,7 @@ def test_welcome_rejection_records_reason_in_last_error():
 
 def test_default_respond_handler_writes_file(tmp_path):
     _default_respond_handler("call-7", str(tmp_path), {"answer": "go"})
-    target = tmp_path / "se3" / "calls" / "call-7.response.json"
+    target = tmp_path / "tianluo" / "calls" / "call-7.response.json"
     assert target.is_file()
     payload = json.loads(target.read_text())
     assert payload["call_id"] == "call-7"
@@ -467,7 +467,7 @@ def test_dispatch_respond_call_routes_to_handler(tmp_path):
         )
 
     asyncio.run(scenario())
-    target = tmp_path / "se3" / "calls" / "c9.response.json"
+    target = tmp_path / "tianluo" / "calls" / "c9.response.json"
     assert target.is_file()
 
 
@@ -508,7 +508,7 @@ def test_dispatch_issue_command_create(tmp_path):
 
     asyncio.run(scenario())
 
-    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir = tmp_path / "tianluo" / "issues" / "open"
     assert issues_dir.is_dir()
     files = list(issues_dir.glob("*.yaml"))
     assert len(files) == 1
@@ -615,7 +615,7 @@ def test_dispatch_issue_command_rejects_unregistered_root(tmp_path):
 
     asyncio.run(scenario())
     # No issue should have been created
-    assert not (other / "se3" / "issues").exists()
+    assert not (other / "tianluo" / "issues").exists()
 
 
 def test_dispatch_issue_command_rejects_relative_path():
@@ -650,7 +650,7 @@ def test_dispatch_issue_command_ignores_empty_operation():
 def test_issue_command_reuses_cached_project_roots_without_snapshot(tmp_path):
     """With a warm cache, the issue command must not rebuild the snapshot.
 
-    The heavy snapshot provider (which walks se3/history) is the cause of the
+    The heavy snapshot provider (which walks tianluo/history) is the cause of the
     ack delay; a populated ``_last_known_project_roots`` cache means the
     project_root validation reuses it and never invokes the provider.
     """
@@ -677,7 +677,7 @@ def test_issue_command_reuses_cached_project_roots_without_snapshot(tmp_path):
     # Snapshot provider was never called on the issue hot path.
     assert calls["n"] == 0
     # The issue still landed on disk.
-    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    files = list((tmp_path / "tianluo" / "issues" / "open").glob("*.yaml"))
     assert len(files) == 1
 
 
@@ -705,7 +705,7 @@ def test_issue_command_falls_back_to_snapshot_when_cache_cold(tmp_path):
     # Snapshot built exactly once for validation, then cached for next time.
     assert calls["n"] == 1
     assert client._last_known_project_roots == {str(Path(tmp_path).resolve())}
-    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    files = list((tmp_path / "tianluo" / "issues" / "open").glob("*.yaml"))
     assert len(files) == 1
 
 
@@ -746,7 +746,7 @@ def test_issue_command_replies_failure_when_cold_snapshot_raises(tmp_path):
     # The cache stays cold so a later snapshot can still populate it.
     assert client._last_known_project_roots is None
     # No issue was written to disk.
-    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir = tmp_path / "tianluo" / "issues" / "open"
     assert not issues_dir.exists() or not list(issues_dir.glob("*.yaml"))
 
 
@@ -883,7 +883,7 @@ def test_project_command_ack_echoes_normalized_path(tmp_path):
         client,
         ws,
         operation="add",
-        project_root="/main/repo/se3/worktrees/wt-1",
+        project_root="/main/repo/tianluo/worktrees/wt-1",
         request_id="req-norm",
     )
 
@@ -1132,7 +1132,7 @@ def test_push_status_sends_status_update():
 def test_push_status_does_not_block_event_loop():
     """A slow synchronous snapshot provider must be offloaded to a thread.
 
-    The snapshot build walks ``se3/history`` and can take seconds on a large
+    The snapshot build walks ``tianluo/history`` and can take seconds on a large
     history; if it ran inline on the event loop it would starve the heartbeat
     and SPAWN_FLOW handling (the bug this fixes). We model the heavy build with
     a blocking ``time.sleep`` and assert a concurrently-scheduled coroutine
@@ -1336,12 +1336,12 @@ def test_dispatch_history_index_request_invalidates_cache(tmp_path):
     from tianluo.daemon.history import DaemonHistoryReader
 
     root = tmp_path / "proj"
-    state = root / "se3" / "state"
+    state = root / "tianluo" / "state"
     state.mkdir(parents=True)
     (state / "engine.json").write_text(
         json.dumps({"flow_id": "f1", "status": "RUNNING"}), encoding="utf-8"
     )
-    hist = root / "se3" / "history" / "f1"
+    hist = root / "tianluo" / "history" / "f1"
     hist.mkdir(parents=True)
     (hist / "01_analyze.jsonl").write_text(
         json.dumps({"role": "user", "content": "hello"}) + "\n", encoding="utf-8"
@@ -1353,7 +1353,7 @@ def test_dispatch_history_index_request_invalidates_cache(tmp_path):
     assert [m.flow_id for m in r1] == ["f1"]
 
     # Add a new flow; the cache is still warm so build_index would miss it.
-    hist2 = root / "se3" / "history" / "f2"
+    hist2 = root / "tianluo" / "history" / "f2"
     hist2.mkdir(parents=True)
     (hist2 / "01_analyze.jsonl").write_text(
         json.dumps({"role": "user", "content": "world"}) + "\n", encoding="utf-8"
@@ -1879,7 +1879,7 @@ def test_session_connects_with_raised_ws_max_size():
 
 def _make_reader_root(tmp_path, flow_id, status="RUNNING"):
     """Write a minimal active engine.json so build_index lists *flow_id*."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -1932,7 +1932,7 @@ def test_interject_falls_back_to_history_index_root(tmp_path):
 
     asyncio.run(scenario())
 
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     assert calls_dir.is_dir()
     files = list(calls_dir.glob("*.json"))
     assert files, "interjection call file must be written under the index root"

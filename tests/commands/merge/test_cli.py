@@ -645,7 +645,7 @@ class TestRunMergeEndToEndAcceptance:
             check=True, capture_output=True,
         )
         (path / ".gitignore").write_text(
-            "/se3/*\n!/se3/specs/\n!/se3/issues/\n"
+            "/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n"
         )
         (path / "pyproject.toml").write_text(
             '[build-system]\nrequires = ["setuptools"]\n\n'

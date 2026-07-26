@@ -1,8 +1,8 @@
 """SE3 End-Session command — terminate and archive a running session.
 
-Ends an se3 run flow: terminates the live ``se3 run`` process (if any) and
+Ends an luo run flow: terminates the live ``luo run`` process (if any) and
 archives the session. For a ``--worktree`` session this reuses the existing
-``se3 merge --delete-merged`` archival machinery (archive the worktree, promote
+``luo merge --delete-merged`` archival machinery (archive the worktree, promote
 the terminal engine state into the main project's archive, sync history, delete
 the isolation branch + worktree, clear the resumable snapshot) so the session
 ends up archived exactly like a normally completed run — but WITHOUT merging the
@@ -11,16 +11,17 @@ session it simply archives the engine state and clears the resumable snapshot.
 
 The primary motivation is the hanging worktree problem: a main-branch session
 can simply be abandoned, but a ``--worktree`` session leaves a never-cleaned
-worktree on disk; ``se3 end-session`` gives the operator (and the daemon, on
+worktree on disk; ``luo end-session`` gives the operator (and the daemon, on
 behalf of the web console) a reliable way to clean it up.
 
-Mirroring ``se3 salvage``, the work is a fixed sequence of independently
+Mirroring ``luo salvage``, the work is a fixed sequence of independently
 fault-tolerant steps: a failure in one step is recorded but does not abort the
 others, results are rendered as a Rich summary table, and the exit code is
 non-zero when any step failed.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import dual_runtime_glob, runtime_dir
 
 import json
 import logging
@@ -63,7 +64,7 @@ def end_session(
             copy path is normalized back to its owning main root.
         flow_id: The flow to end. When None, resolved from the main project's
             active ``engine.json``.
-        pid: Optional hint for the live ``se3 run`` process to terminate. When
+        pid: Optional hint for the live ``luo run`` process to terminate. When
             absent, the process is discovered by ``flow_id`` via psutil.
         archive_worktree: When True (default), a worktree session is archived
             (worktree archived + branch/worktree cleaned). When False, the live
@@ -125,7 +126,7 @@ def end_session(
         results.append((t("end_session.step.find_worktree"), "FAIL", str(e)[:80]))
         logger.warning("Step 2 (find worktree) failed: %s", e)
 
-    # -- Step 3: terminate the live se3 run process -----------------------
+    # -- Step 3: terminate the live luo run process -----------------------
     # ``terminate_ok`` gates the destructive archive path below: when the
     # session process could not be killed it may still be executing, so
     # archiving / deleting its worktree (or clearing the main snapshot) would
@@ -202,7 +203,7 @@ def _find_project_root() -> Optional[Path]:
 def _resolve_main_root(project_root: Optional[Path]) -> Optional[Path]:
     """Resolve the main project root, normalizing a worktree-copy path.
 
-    A worktree isolation directory (``<main>/se3/worktrees/<name>``) is
+    A worktree isolation directory (``<main>/tianluo/worktrees/<name>``) is
     normalized back to its owning ``<main>`` so the archival writes land in the
     main project, not inside the worktree we are about to delete.
     """
@@ -224,7 +225,7 @@ def _resolve_main_root(project_root: Optional[Path]) -> Optional[Path]:
 
 def _read_main_flow_id(project_root: Path) -> Optional[str]:
     """Best-effort read of ``flow_id`` from the main project's engine.json."""
-    engine_json = project_root / "se3" / "state" / "engine.json"
+    engine_json = runtime_dir(project_root) / "state" / "engine.json"
     try:
         data = json.loads(engine_json.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -239,20 +240,20 @@ def _read_main_flow_id(project_root: Path) -> Optional[str]:
 def _find_worktree_session(
     project_root: Path, flow_id: str
 ) -> Optional[Dict[str, Any]]:
-    """Locate the worktree session for *flow_id* under ``se3/worktrees/``.
+    """Locate the worktree session for *flow_id* under ``tianluo/worktrees/``.
 
-    Scans ``<main>/se3/worktrees/*/se3/state/engine.json`` for an entry whose
+    Scans ``<main>/tianluo/worktrees/*/tianluo/state/engine.json`` for an entry whose
     ``flow_id`` matches. Unlike :func:`run.find_resumable_worktree_runs` this is
     NOT filtered by status — a terminated flow may be in any non-COMPLETED state
     (PAUSED / FAILED / RUNNING) or even COMPLETED-but-unmerged, and we still
     want to clean it up. Returns ``None`` when no matching worktree is found
     (a main-branch session, or an already-cleaned worktree).
     """
-    worktrees_dir = project_root / "se3" / "worktrees"
+    worktrees_dir = runtime_dir(project_root) / "worktrees"
     if not worktrees_dir.is_dir():
         return None
 
-    for engine_file in sorted(worktrees_dir.glob("*/se3/state/engine.json")):
+    for engine_file in sorted(dual_runtime_glob(worktrees_dir, "*/", "state/engine.json")):
         try:
             data = json.loads(engine_file.read_text(encoding="utf-8"))
         except (OSError, ValueError, TypeError):
@@ -313,7 +314,7 @@ def _collect_descendants(pids: List[int]) -> set:
     """Return *pids* plus all their live recursive descendants.
 
     Ending a worktree session must terminate the whole live process tree, not
-    just the top ``se3 run`` parent: a running flow typically has an active
+    just the top ``luo run`` parent: a running flow typically has an active
     Claude/Codex agent **child** subprocess executing inside the worktree, and
     killing only the parent would orphan that child (reparented to init), which
     would keep writing into the worktree while the command proceeds to archive
@@ -347,7 +348,7 @@ def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
     """Terminate a pid and its whole descendant tree (SIGTERM → grace → SIGKILL).
 
     Ending a session must stop the entire live process tree — the top
-    ``se3 run`` parent **and** every agent (Claude/Codex) subprocess it spawned
+    ``luo run`` parent **and** every agent (Claude/Codex) subprocess it spawned
     — before the worktree is archived or deleted, so no writer can keep mutating
     the worktree underneath the cleanup. The descendant set is captured up front
     (before the parent is killed and the children are orphaned), SIGTERM'd as a
@@ -418,16 +419,16 @@ def _terminate_one(pid: int, grace_seconds: float) -> Tuple[bool, str]:
 
 
 def _read_run_pidfile(state_root: Path) -> Optional[int]:
-    """Read the live-flow pid recorded in ``<state_root>/se3/state/run.pid``.
+    """Read the live-flow pid recorded in ``<state_root>/tianluo/state/run.pid``.
 
-    ``se3 run`` writes its own pid into this marker for the lifetime of the flow
+    ``luo run`` writes its own pid into this marker for the lifetime of the flow
     (in the *worktree's* state dir for a ``--worktree`` run), so end-session can
     locate the live process deterministically — including the otherwise
     un-findable case of a ``--worktree`` parent that keeps ``cwd==main_root`` and
     is momentarily between agent/test subprocesses (no descendant inside the
     worktree). Returns ``None`` when the marker is absent / unreadable / empty.
     """
-    pid_file = state_root / "se3" / "state" / "run.pid"
+    pid_file = runtime_dir(state_root) / "state" / "run.pid"
     try:
         raw = pid_file.read_text(encoding="utf-8").strip()
     except (OSError, ValueError):
@@ -440,13 +441,13 @@ def _read_run_pidfile(state_root: Path) -> Optional[int]:
 
 
 def _pid_is_live_se3_run(pid: int) -> bool:
-    """Return whether *pid* is a live process whose cmdline is an ``se3 run``.
+    """Return whether *pid* is a live process whose cmdline is an ``luo run``.
 
     Guards the ``run.pid`` marker against staleness: a recorded pid that has
     since died, or been recycled by an unrelated process, must NOT be signalled.
     When psutil is unavailable we fall back to a bare liveness probe (the
     cmdline cannot be inspected), which is still safe because the pid was written
-    by an ``se3 run`` into this flow's own state dir.
+    by an ``luo run`` into this flow's own state dir.
     """
     if not _proc_alive(pid):
         return False
@@ -466,7 +467,7 @@ def _pid_is_live_se3_run(pid: int) -> bool:
 def _proc_has_descendant_in_dir(proc: Any, target_real: str) -> bool:
     """Return whether *proc*'s process tree is anchored inside *target_real*.
 
-    A ``se3 run --worktree`` flow's parent process never chdirs: it keeps its
+    A ``luo run --worktree`` flow's parent process never chdirs: it keeps its
     ``cwd`` at the main root and writes its ``engine.json`` into the worktree, so
     the main project's ``engine.json`` carries a different / absent ``flow_id``
     and cannot confirm this flow. The agent (Claude/Codex) subprocess it spawns,
@@ -535,14 +536,14 @@ def _discover_pids_for_flow(
     main_root: Path,
     worktree_path: Optional[Path],
 ) -> List[int]:
-    """Discover live ``se3 run`` pids that belong to *flow_id*.
+    """Discover live ``luo run`` pids that belong to *flow_id*.
 
-    The most reliable source is the ``run.pid`` marker ``se3 run`` writes into the
-    flow's own ``se3/state`` dir (the worktree's for a ``--worktree`` run): it
+    The most reliable source is the ``run.pid`` marker ``luo run`` writes into the
+    flow's own ``tianluo/state`` dir (the worktree's for a ``--worktree`` run): it
     pins the live process regardless of ``cwd`` and even when the parent is
     momentarily between agent/test subprocesses with no descendant in the
     worktree. Failing that (an older run that predates the marker, or a stale
-    marker), a match is also made when an ``se3 run`` process's ``cwd`` is the
+    marker), a match is also made when an ``luo run`` process's ``cwd`` is the
     worktree path (worktree session) or the main root (main-branch session) and
     its ``engine.json`` carries the requested ``flow_id``, OR when its command
     line explicitly carries ``--flow-id <flow_id>`` (the resume case), OR — for a
@@ -555,7 +556,7 @@ def _discover_pids_for_flow(
     # 1) The authoritative source: the on-disk run.pid marker. For a worktree
     #    session it lives in the worktree's own state dir; for a main-branch
     #    session it lives in the main root's state dir. Verify the recorded pid
-    #    is a live ``se3 run`` before trusting it, so a dead / recycled pid is
+    #    is a live ``luo run`` before trusting it, so a dead / recycled pid is
     #    never signalled.
     pid_roots: List[Path] = []
     if worktree_path is not None:
@@ -624,7 +625,7 @@ def _discover_pids_for_flow(
                 # A cwd inside the session-unique worktree path is itself a
                 # session-specific match and is accepted directly. A cwd at the
                 # (shared) main root is ambiguous — an unrelated concurrent
-                # ``se3 run`` may also run there — so when a specific flow_id is
+                # ``luo run`` may also run there — so when a specific flow_id is
                 # requested we require the engine.json at that cwd to POSITIVELY
                 # confirm the same flow_id. An unreadable/absent on-disk flow_id
                 # (corrupt, mid-write, or an INIT-phase flow not yet carrying a
@@ -636,7 +637,7 @@ def _discover_pids_for_flow(
                 if flow_id and not is_worktree_cwd:
                     on_disk = _read_main_flow_id(Path(cwd_real))
                     if on_disk != str(flow_id):
-                        # A ``se3 run --worktree`` flow's parent keeps
+                        # A ``luo run --worktree`` flow's parent keeps
                         # cwd==main_root while its engine.json lives in the
                         # worktree, so the main engine.json's flow_id cannot
                         # confirm it. Fall back to matching a descendant (the
@@ -662,7 +663,7 @@ def _terminate_session_process(
     worktree_path: Optional[Path],
     grace_seconds: float,
 ) -> Tuple[bool, str]:
-    """Terminate the live ``se3 run`` process(es) for the session.
+    """Terminate the live ``luo run`` process(es) for the session.
 
     Uses *pid* when supplied; otherwise discovers candidates by *flow_id*.
     Returns ``(ok, summary)``. ``ok`` is ``True`` when every targeted process is
@@ -720,7 +721,7 @@ def _archive_worktree_session(
     # unmerged work in the live worktree, so deleting it would lose that work.
     archive_ok = False
 
-    # 4.1 — copy the worktree directory into se3/worktrees/.archive/.
+    # 4.1 — copy the worktree directory into tianluo/worktrees/.archive/.
     if worktree_path.exists():
         try:
             archive_path = _archive_worktree(
@@ -773,12 +774,12 @@ def _archive_worktree_session(
         logger.warning("Sync history failed: %s", e)
 
     # 4.4 — clear the worktree's resumable snapshot. Done BEFORE the worktree
-    # is removed below: PersistenceManager re-creates ``se3/state/`` on
+    # is removed below: PersistenceManager re-creates ``tianluo/state/`` on
     # construction, so clearing after deletion would leave a stray empty dir
     # behind in the just-removed worktree path. For the same reason, skip this
     # entirely when the worktree directory is already gone: there is no snapshot
     # to clear in a vanished worktree, and constructing PersistenceManager would
-    # re-create ``<worktree_path>/se3/state`` on disk — exactly the stray remnant
+    # re-create ``<worktree_path>/tianluo/state`` on disk — exactly the stray remnant
     # we are trying to avoid.
     if worktree_path.exists():
         try:
@@ -999,10 +1000,10 @@ def _sync_worktree_history(
 
     if not flow_id:
         return 0
-    src_dir = worktree_path / "se3" / "history" / flow_id
+    src_dir = runtime_dir(worktree_path) / "history" / flow_id
     if not src_dir.is_dir():
         return 0
-    dst_dir = project_root / "se3" / "history" / flow_id
+    dst_dir = runtime_dir(project_root) / "history" / flow_id
 
     safe_branch = "worktree"
     if branch:

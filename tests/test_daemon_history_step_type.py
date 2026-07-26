@@ -132,7 +132,7 @@ def test_parse_is_pure_no_side_effects():
 
 def test_read_flow_injects_step_type_envelope(tmp_path):
     """Each returned record carries an authoritative envelope ``step_type``."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist / "01_discovery_975607bb.jsonl",
         [{"role": "assistant", "content": "hi"}],
@@ -156,7 +156,7 @@ def test_read_flow_injects_step_type_envelope(tmp_path):
 
 def test_read_flow_does_not_mutate_message_content(tmp_path):
     """The injected envelope leaves the original ``message`` bytes untouched."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     original = {
         "role": "assistant",
         "content": "payload",
@@ -182,7 +182,7 @@ def test_read_flow_legacy_step_completed_event_not_broken(tmp_path):
     overwrite or corrupt a message body that already carries its own
     ``step_type`` (e.g. a HistorySink ``step_completed`` event).
     """
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     event = {
         "type": "step_completed",
         "step_type": "analyze",
@@ -200,7 +200,7 @@ def test_read_flow_legacy_step_completed_event_not_broken(tmp_path):
 
 def test_read_flow_legacy_filename_envelope_falls_back(tmp_path):
     """A history file with a legacy stem yields a graceful envelope value."""
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist / "commit_summary.jsonl",
         [{"role": "assistant", "content": "x"}],

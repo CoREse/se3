@@ -1,4 +1,4 @@
-"""Tests for the invariant_check step (src/se3/engine/steps/invariant_check.py).
+"""Tests for the invariant_check step (src/tianluo/engine/steps/invariant_check.py).
 
 INVARIANT_CHECK is the anchored replacement for the retired spec_gate/spec_check.
 Coverage:

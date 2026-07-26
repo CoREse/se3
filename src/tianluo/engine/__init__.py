@@ -25,7 +25,7 @@ from .sink import (
 )
 
 # ``EventStream`` is the public name for the in-memory pub/sub emitter that
-# ``se3 run`` drives; ``EventEmitter`` is its implementation class.
+# ``luo run`` drives; ``EventEmitter`` is its implementation class.
 EventStream = EventEmitter
 
 __all__ = [

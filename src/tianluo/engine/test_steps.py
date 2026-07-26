@@ -933,7 +933,7 @@ class TestLLMCallerIntegration:
     """Tests for LLM caller integration with retry logic."""
 
     # Pin agent rotation off: LLMCaller() with no explicit agents resolves the
-    # project's se3.yaml multi-agent chain and rotates agents on every failure,
+    # project's tianluo.yaml multi-agent chain and rotates agents on every failure,
     # which would reach the real CodexRunner. Forcing _rotate_agent to report
     # "no rotation available" isolates the retry-on-same-agent behavior these
     # tests target (the single mocked ClaudeCodeRunner).
@@ -1051,11 +1051,11 @@ class TestIssueDiscoveryInjection:
         assert result == ""
 
     def test_custom_whitelist_from_config(self, tmp_path):
-        """Custom se3.yaml whitelist is respected."""
+        """Custom tianluo.yaml whitelist is respected."""
         from .context_builder import get_issue_discovery_injection
 
-        # Create se3.yaml with custom whitelist including 'design'
-        config_path = tmp_path / "se3.yaml"
+        # Create tianluo.yaml with custom whitelist including 'design'
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(
             "issue_discovery:\n  steps:\n    - design\n    - summarize\n"
         )
@@ -1073,8 +1073,8 @@ class TestIssueDiscoveryInjection:
         """Forbidden step returns empty even if config includes it."""
         from .context_builder import get_issue_discovery_injection
 
-        # Create se3.yaml that tries to whitelist forbidden 'implement'
-        config_path = tmp_path / "se3.yaml"
+        # Create tianluo.yaml that tries to whitelist forbidden 'implement'
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(
             "issue_discovery:\n  steps:\n    - implement\n    - summarize\n"
         )
@@ -1083,11 +1083,11 @@ class TestIssueDiscoveryInjection:
         assert result == ""
 
     def test_missing_config_uses_empty_default(self, tmp_path):
-        """Missing se3.yaml uses the default whitelist, which is now empty —
+        """Missing tianluo.yaml uses the default whitelist, which is now empty —
         summarize receives no injection."""
         from .context_builder import get_issue_discovery_injection
 
-        # No se3.yaml exists in tmp_path
+        # No tianluo.yaml exists in tmp_path
         result = get_issue_discovery_injection("summarize", tmp_path)
         assert result == ""
 
@@ -1692,7 +1692,7 @@ class TestDiscoveryIssueOperations:
         sm.register_handler(StepType.DISCOVERY, discovery_mod.discovery_handler)
         flow = sm.create_flow("discover issues", task_type="discovery")
         # discovery_handler derives project_root from change_path.parent; point
-        # it at tmpdir so the IssueManager writes under tmpdir/se3/issues/.
+        # it at tmpdir so the IssueManager writes under tmpdir/tianluo/issues/.
         flow.change_path = Path(tmpdir) / "change"
         step = flow.state.get_current_step()
         assert step.step_type == StepType.DISCOVERY

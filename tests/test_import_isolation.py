@@ -12,11 +12,26 @@ imported by the pytest session do not mask a leaked import.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
+
+# The worktree's src/ must be importable in the fresh subprocesses these
+# tests spawn: pytest's `pythonpath = ["src"]` applies only to the test
+# session itself, and relying on an *installed* distribution would silently
+# test stale code (or, post-rename, no `tianluo` at all).
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+
+
+def _subprocess_env() -> dict:
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = _SRC_DIR + (os.pathsep + existing if existing else "")
+    return env
 
 # Core modules that a core-only install MUST be able to import without the
 # server extra present.
@@ -42,6 +57,7 @@ def _run_python(code: str) -> subprocess.CompletedProcess:
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
+        env=_subprocess_env(),
     )
 
 
@@ -88,6 +104,7 @@ def test_core_command_help_has_no_import_error(command: str) -> None:
         [sys.executable, "-m", "tianluo.cli", command, "--help"],
         capture_output=True,
         text=True,
+        env=_subprocess_env(),
     )
     assert proc.returncode == 0, (
         f"`se3 {command} --help` failed: "
@@ -122,6 +139,6 @@ def test_se3_server_reports_clear_hint_when_extra_missing() -> None:
     # The friendly hint goes to stderr; exit code is non-zero (1).
     assert "EXITCODE 1" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert "pip install" in proc.stderr
-    assert "se3[server]" in proc.stderr
+    assert "tianluo[server]" in proc.stderr
     # No raw traceback should reach the user.
     assert "Traceback (most recent call last)" not in proc.stderr

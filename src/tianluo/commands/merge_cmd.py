@@ -1,9 +1,9 @@
 """SE3 Merge command — Sequential merge of branches into current branch.
 
 Usage:
-    se3 merge <branch> [<branch> ...]
-    se3 merge <branch> [<branch> ...] --strategy=default|strict|fast
-    se3 merge <branch> [<branch> ...] --delete-merged
+    luo merge <branch> [<branch> ...]
+    luo merge <branch> [<branch> ...] --strategy=default|strict|fast
+    luo merge <branch> [<branch> ...] --delete-merged
 """
 
 from __future__ import annotations
@@ -412,15 +412,15 @@ def _append_human_call_lines(
     """Render the human-escalation recovery artifact for a failure branch.
 
     In the normal (non-suppressed) mode the orchestrator wrote a real
-    ``se3/calls/`` file and ``report.human_call_file`` points at it, so the
-    operator can ``se3 merge respond`` against it — render that path.
+    ``tianluo/calls/`` file and ``report.human_call_file`` points at it, so the
+    operator can ``luo merge respond`` against it — render that path.
 
-    In library / suppress mode (change C: the ``se3 merge`` CLI drives no
+    In library / suppress mode (change C: the ``luo merge`` CLI drives no
     confirmation gate) NO call file is created — ``_RecordingNullHumanCallWriter``
-    returns a phantom ``se3/calls/`` path without touching disk. Printing that
+    returns a phantom ``tianluo/calls/`` path without touching disk. Printing that
     path would tell the operator to respond to a file that does not exist. So
     here we instead render the recorded escalation payload and direct the
-    operator to the actual recovery: rerun ``se3 merge`` (integrate is now a
+    operator to the actual recovery: rerun ``luo merge`` (integrate is now a
     no-op; the failing step re-attempts). ``recorded_escalations`` is read
     defensively (a pre-typed-model report stub may lack it).
     """
@@ -569,7 +569,7 @@ def _has_user_uncommitted_changes(project_root: Path) -> bool:
         # Porcelain v1: XY <space> <path>. Status code is two chars,
         # then a space, then the path.
         path = line[3:] if len(line) > 3 else ""
-        if path.startswith("se3/state/") or path.startswith("se3/cache/"):
+        if path.startswith(("tianluo/state/", "tianluo/cache/", "se3/state/", "se3/cache/")):
             # SE3 runtime artifacts we own; ignore for stash purposes.
             continue
         return True
@@ -648,7 +648,7 @@ def _fast_stash_pop(
          bare pop, which would target ``stash@{0}`` — possibly an unrelated
          concurrent stash). A clean pop drops the stash itself — nothing to do.
       2. On any non-clean pop the still-live stash's *entire* recoverable
-         content is archived to ``se3/worktrees/.archive`` (full bytes, not
+         content is archived to ``tianluo/worktrees/.archive`` (full bytes, not
          just paths) BEFORE any disposition or drop. If that cannot be
          proven the stash is kept, not dropped.
       3. The two conflict classes are no longer lumped into one take-ours:
@@ -693,7 +693,7 @@ def _fast_stash_pop(
         project_root, stash_label, pop, timestamp=timestamp,
         conflict_resolver=make_llm_stashpop_resolver(
             context=(
-                "`se3 merge` fast strategy: reconciling the user's "
+                "`luo merge` fast strategy: reconciling the user's "
                 "pre-merge uncommitted changes with the just-merged result."
             ),
         ),
@@ -736,7 +736,7 @@ def _fast_stash_pop(
         try:
             IssueManager(project_root).create(
                 title=(
-                    f"se3 merge: stash-pop recovery INCOMPLETE "
+                    f"luo merge: stash-pop recovery INCOMPLETE "
                     f"(label: {stash_label})"
                 ),
                 description=(
@@ -787,7 +787,7 @@ def _fast_stash_pop(
     )
     try:
         IssueManager(project_root).create(
-            title=f"se3 merge: stash-pop recovery (label: {stash_label})",
+            title=f"luo merge: stash-pop recovery (label: {stash_label})",
             description=description,
             priority="medium",
             type="task",
@@ -839,7 +839,7 @@ def _backfill_resolved_source_issues(
     This is the single choke point for "merge succeeded → source issue
     resolved". It serves both a worktree run's own finalizing merge (a
     ``--from-issue --worktree`` run merging back on COMPLETED) and a later
-    manual ``se3 merge <leftover-branch>`` retry of a branch whose first merge
+    manual ``luo merge <leftover-branch>`` retry of a branch whose first merge
     failed — both reach a resolved issue through exactly this code.
 
     *merged_branches* MUST include both newly-merged AND already-ancestor
@@ -849,7 +849,7 @@ def _backfill_resolved_source_issues(
     merge landed the commit but never ran this backfill (the merge returned
     non-zero via the stash-pop-incomplete recovery path, or the process died
     between the merge commit and the backfill). The guaranteed retry path is
-    ``se3 merge <branch>``, on which the branch re-classifies as already-
+    ``luo merge <branch>``, on which the branch re-classifies as already-
     ancestor; excluding that bucket would strand the issue IN_PROGRESS with no
     automated route to RESOLVED. The IN_PROGRESS guard below keeps this safe:
     a normal repeat merge of an already-resolved branch is a no-op.
@@ -896,7 +896,7 @@ def _acquire_merge_lock_with_callbacks(
 
     With no ``on_lock_wait`` callback this is exactly
     ``lock.acquire(blocking=True)`` — the legacy unconditional blocking acquire —
-    so ``se3 merge`` (and any caller that passes no callbacks) is behaviourally
+    so ``luo merge`` (and any caller that passes no callbacks) is behaviourally
     unchanged, including the queue-and-wait semantics.
 
     When ``on_lock_wait`` IS provided, the lock is first probed non-blocking so
@@ -939,13 +939,13 @@ def _acquire_merge_lock_with_callbacks(
 def _run_deferred_branch_cleanup(project_root: Path, report, branches: list[str]) -> None:
     """Delete the merged source branches AFTER the reconcile half has settled.
 
-    Change B/C recovery contract: the ``se3 merge`` CLI drives
+    Change B/C recovery contract: the ``luo merge`` CLI drives
     ``integrate() -> reconcile()`` back-to-back, so branch deletion must NOT
     happen inside ``integrate()`` (as it does for a flow step, whose resume
     boundary re-runs only reconcile). Deferring it to here — the last thing a
     fully clean CLI run does — keeps the documented whole-command rerun
     recoverable: a reconcile fault leaves the source branch intact so
-    ``se3 merge <branch>`` can re-attempt the version decision instead of
+    ``luo merge <branch>`` can re-attempt the version decision instead of
     failing branch validation against a branch that ``--delete-merged`` already
     removed.
 
@@ -992,7 +992,7 @@ def run_merge(
     """Run the merge command: integrate the branches, then reconcile the version.
 
     This is the back-to-back ``integrate() -> reconcile()`` sequence that the
-    ``se3 merge`` CLI drives (change B/C). ``integrate`` owns the merge
+    ``luo merge`` CLI drives (change B/C). ``integrate`` owns the merge
     invariants (lock, runtime sync, issue renumber, post-conditions);
     ``reconcile`` is the merge-side version release point — it runs
     UNCONDITIONALLY on a clean integrate, in-lock on the main checkout, and
@@ -1012,8 +1012,8 @@ def run_merge(
         project_root: Project root directory. Auto-detected if None.
         suppress_human_call: When True, run the integrate half in library mode
             — the orchestrator records escalations on the returned result
-            instead of writing ``se3/calls/`` files or printing terminal
-            instructions. The ``se3 merge`` CLI passes True (no confirmation
+            instead of writing ``tianluo/calls/`` files or printing terminal
+            instructions. The ``luo merge`` CLI passes True (no confirmation
             gate, failure is expressed via the exit code and the operator
             reruns the whole command). Defaults to False so the worktree
             merge-back keeps its existing call-file behaviour.
@@ -1119,7 +1119,7 @@ def run_merge(
     branch_issue_map = _map_branches_to_source_issues(project_root, branches)
 
     # Run the orchestrator under the main-worktree mutex so that two
-    # `se3 merge` invocations (and any synchronous `se3 run` holding the
+    # `luo merge` invocations (and any synchronous `luo run` holding the
     # same lock) cannot mutate the same working tree, index, and runtime
     # sync targets simultaneously (K1 / G1). The lock is acquired in
     # BLOCKING mode: a second invocation queues until the in-progress
@@ -1142,10 +1142,10 @@ def run_merge(
     from .run import _resolve_main_lock_root
 
     # The main-worktree mutex always lives at the *main repository's*
-    # ``se3/state/merge.lock``. When ``se3 merge`` runs with cwd inside a
-    # linked worktree (``se3/`` is gitignored and therefore per-worktree),
+    # ``tianluo/state/merge.lock``. When ``luo merge`` runs with cwd inside a
+    # linked worktree (``tianluo/`` is gitignored and therefore per-worktree),
     # resolve ``project_root`` back to the main repo — the same way a
-    # synchronous ``se3 run`` does in ``run_flow`` — so all three
+    # synchronous ``luo run`` does in ``run_flow`` — so all three
     # main-worktree-mutex acquirers contend on a single lock file. The
     # orchestrator and stash logic still operate on the original
     # ``project_root`` (the worktree being mutated); only the lock target
@@ -1153,7 +1153,7 @@ def run_merge(
     lock_root = _resolve_main_lock_root(project_root)
 
     # Capture whether the user's tree has WIP BEFORE entering the lock.
-    # The lock context writes ``se3/state/merge.lock`` (gitignored in
+    # The lock context writes ``tianluo/state/merge.lock`` (gitignored in
     # production, but not in fixture repos), so a porcelain check
     # AFTER lock acquisition would observe our own lock file as
     # untracked dirty state and spuriously trigger a stash. Doing the
@@ -1186,7 +1186,7 @@ def run_merge(
         lock = MergeLock(lock_root, blocking=True)
         _acquire_merge_lock_with_callbacks(lock, on_lock_wait, on_lock_acquired)
         try:
-            # Stashing happens INSIDE the lock so two racing ``se3 merge``
+            # Stashing happens INSIDE the lock so two racing ``luo merge``
             # invocations cannot interleave; the second blocks at lock
             # acquisition above and only proceeds once the first has
             # popped and released. The pre-lock dirty check is therefore
@@ -1247,7 +1247,7 @@ def run_merge(
                 # Thin adapter: drive the SAME integrate() library entry the
                 # merge_integrate step uses so the two entry points stay
                 # equivalent — any invariant, return-shape, or recovery change
-                # to integrate() applies to `se3 merge` too (a test patching
+                # to integrate() applies to `luo merge` too (a test patching
                 # tianluo.engine.merge.integrate now affects both paths).
                 #
                 # The CLI wrapper already holds the merge lock via the
@@ -1257,7 +1257,7 @@ def run_merge(
                 #
                 # Change C: the CLI drives no confirmation gate and expresses
                 # failure via the exit code (rerun the whole command). In that
-                # mode the integrate half must not self-write se3/calls files or
+                # mode the integrate half must not self-write tianluo/calls files or
                 # print terminal instructions — an escalation surfaces on the
                 # returned report instead. The worktree merge-back leaves
                 # ``suppress_human_call`` False to keep its call-file behaviour.
@@ -1267,7 +1267,7 @@ def run_merge(
                 # the source branches survive until AFTER the reconcile half
                 # settles below. This preserves the whole-command rerun recovery
                 # contract — a reconcile fault must not have already deleted the
-                # branch out from under the documented ``se3 merge <branch>``
+                # branch out from under the documented ``luo merge <branch>``
                 # retry (which would then fail branch validation / capture an
                 # empty intent scope). The actual cleanup runs post-reconcile via
                 # ``_run_deferred_branch_cleanup``.
@@ -1407,7 +1407,7 @@ def run_merge(
         # branch. If we skipped backfill on this path the issue would strand
         # IN_PROGRESS with no automated route to RESOLVED: delete_merged has by
         # now archived the worktree and deleted the isolation branch, so the
-        # documented ``se3 merge <branch>`` retry would fail at
+        # documented ``luo merge <branch>`` retry would fail at
         # ``_branch_exists`` ("branch does not exist"). Backfill is idempotent
         # and best-effort (only IN_PROGRESS issues transition; failures are
         # swallowed) so it cannot alter this path's non-zero exit code.

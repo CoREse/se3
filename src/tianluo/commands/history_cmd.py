@@ -4,17 +4,19 @@ Provides commands to list flows, show flow details, restore previous sessions,
 and list archived flows.
 
 Usage:
-    se3 history                          # List all flows
-    se3 history list                     # List all flows
-    se3 history show <flow_id>           # Show flow details
-    se3 history restore <flow_id>        # Restore a flow
-    se3 history archived                 # List archived flows
+    luo history                          # List all flows
+    luo history list                     # List all flows
+    luo history show <flow_id>           # Show flow details
+    luo history restore <flow_id>        # Restore a flow
+    luo history archived                 # List archived flows
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -97,7 +99,7 @@ def list_all_flows(project_root: Path) -> List[Dict[str, Any]]:
 
 def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     """List all archived flows from the archive directory."""
-    archive_dir = project_root / "se3" / "state" / "archive"
+    archive_dir = runtime_dir(project_root) / "state" / "archive"
     if not archive_dir.exists():
         return []
 
@@ -187,7 +189,7 @@ def _load_archived_flow(project_root: Path, flow_id: str) -> Optional[Any]:
 
     Delegates to the split-aware, size-guarded persistence loader: a new-format
     archive header has its externalized cold step payloads resolved from
-    ``archive/steps/<flow_id>/`` (so ``se3 history show`` reports each step's
+    ``archive/steps/<flow_id>/`` (so ``luo history show`` reports each step's
     real outputs, not empty ones), while a giant legacy archive is read
     head+tail rather than fully parsed (issue #243 / #244 B5). A legacy archive
     that can only be read degraded returns ``None``, so the caller falls back to
@@ -199,7 +201,7 @@ def _load_archived_flow(project_root: Path, flow_id: str) -> Optional[Any]:
 
 def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]]:
     """Build a minimal detail dict from history-only data."""
-    history_dir = project_root / "se3" / "history" / flow_id
+    history_dir = runtime_dir(project_root) / "history" / flow_id
     if not history_dir.is_dir():
         return None
 
@@ -292,9 +294,9 @@ def get_flow_detail(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]
     """Get detailed information about a specific flow.
 
     Searches across three data sources in order:
-    1. Active flow (se3/state/engine.json)
-    2. Archived flows (se3/state/archive/engine_*.json)
-    3. History-only flows (se3/history/{flow_id}/)
+    1. Active flow (tianluo/state/engine.json)
+    2. Archived flows (tianluo/state/archive/engine_*.json)
+    3. History-only flows (tianluo/history/{flow_id}/)
     """
     persistence = PersistenceManager(project_root)
 
@@ -603,7 +605,7 @@ def restore_cmd(
 ):
     """Restore a previous session by resuming the flow.
 
-    This delegates to 'se3 run --resume --flow-id <flow_id>'.
+    This delegates to 'luo run --resume --flow-id <flow_id>'.
     """
     project_root = get_project_root()
 
@@ -636,10 +638,10 @@ def restore_cmd(
         typer.echo(t("history.restore.command", flow_id=flow_id))
         return
 
-    # Delegate to se3 run --resume
+    # Delegate to luo run --resume
     typer.echo(t("history.restore.restoring", flow_id=flow_id))
     result = subprocess.run(
-        ["se3", "run", "--resume", "--flow-id", flow_id],
+        [sys.executable, "-m", "tianluo", "run", "--resume", "--flow-id", flow_id],
         cwd=project_root,
     )
     raise typer.Exit(result.returncode)

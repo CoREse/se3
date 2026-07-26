@@ -38,7 +38,7 @@ _PATCHES = {
 
 def _make_flow(tmp_path: Path) -> FlowInstance:
     flow = FlowInstance(task_description="test task")
-    flow.change_path = tmp_path / "se3.yaml"
+    flow.change_path = tmp_path / "tianluo.yaml"
     return flow
 
 

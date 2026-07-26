@@ -51,10 +51,10 @@ UI_EVENT_INTERJECTION = "interjection_event"
 UI_EVENT_SPAWN_FAILED = "spawn_failed"
 
 #: Lifecycle phases emitted on :data:`UI_EVENT_INTERJECTION`. ``pending`` is
-#: the moment the interjection call file appears in ``se3/calls/`` (the
+#: the moment the interjection call file appears in ``tianluo/calls/`` (the
 #: server saw a brand-new interjection-kind ``call_id`` in a flow's
 #: ``pending_calls`` snapshot); ``consumed`` is the moment that ``call_id``
-#: disappears (the running ``se3 run`` drained the file).
+#: disappears (the running ``luo run`` drained the file).
 INTERJECTION_PHASE_PENDING = "pending"
 INTERJECTION_PHASE_CONSUMED = "consumed"
 

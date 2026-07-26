@@ -1,8 +1,8 @@
 """Tests for daemon surfacing of per-flow resumable snapshots (group G3).
 
 A paused / interrupted / failed flow writes a snapshot under
-``se3/state/resumable/<flow_id>.json`` (see ``PersistenceManager``); the next
-``se3 run`` overwrites the single-slot ``se3/state/engine.json`` but leaves that
+``tianluo/state/resumable/<flow_id>.json`` (see ``PersistenceManager``); the next
+``se3 run`` overwrites the single-slot ``tianluo/state/engine.json`` but leaves that
 snapshot intact. These tests pin the behaviour that:
 
 * :meth:`DaemonAggregator.get_snapshot` re-surfaces such an overwritten flow as
@@ -57,20 +57,20 @@ def _engine_payload(flow_id: str, status: str) -> dict:
 
 def _write_engine(root: Path, flow_id: str, status: str) -> None:
     _write_json(
-        root / "se3" / "state" / "engine.json", _engine_payload(flow_id, status)
+        root / "tianluo" / "state" / "engine.json", _engine_payload(flow_id, status)
     )
 
 
 def _write_resumable(root: Path, flow_id: str, status: str) -> None:
     _write_json(
-        root / "se3" / "state" / "resumable" / f"{flow_id}.json",
+        root / "tianluo" / "state" / "resumable" / f"{flow_id}.json",
         _engine_payload(flow_id, status),
     )
 
 
 def _write_history_dir(root: Path, flow_id: str) -> None:
-    """Create a non-empty se3/history/<flow_id>/ to exercise dedup ordering."""
-    flow_dir = root / "se3" / "history" / flow_id
+    """Create a non-empty tianluo/history/<flow_id>/ to exercise dedup ordering."""
+    flow_dir = root / "tianluo" / "history" / flow_id
     flow_dir.mkdir(parents=True, exist_ok=True)
     (flow_dir / "01_analyze_abc.jsonl").write_text(
         json.dumps({"role": "user", "content": "hi"}) + "\n", encoding="utf-8"
@@ -145,7 +145,7 @@ def test_aggregator_stale_completed_snapshot_not_resumable(tmp_path: Path) -> No
     """A stale completed resumable snapshot is ignored, not surfaced resumable.
 
     If ``clear_resumable_snapshot`` failed (or an operator/test artifact
-    remains), a ``completed`` snapshot can linger under ``se3/state/resumable/``.
+    remains), a ``completed`` snapshot can linger under ``tianluo/state/resumable/``.
     The aggregator must NOT advertise it as resumable — the daemon resume
     validator rejects a COMPLETED flow — so it is dropped entirely.
     """

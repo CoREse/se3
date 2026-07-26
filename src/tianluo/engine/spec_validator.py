@@ -7,7 +7,7 @@ the spec-format v1 contract. Used by:
   sub-agent meta summaries instead of real spec content.
 * ``sync_engine`` — verify written-back content from sub-agent
   responses before refreshing the in-memory cache.
-* ``se3 sync --validate-only`` CLI — manual audit of all on-disk specs.
+* ``luo sync --validate-only`` CLI — manual audit of all on-disk specs.
 
 The module has no external dependencies (stdlib only) so it stays
 cheap to import from any layer.

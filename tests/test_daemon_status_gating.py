@@ -179,7 +179,7 @@ def test_collected_issue_description_is_clipped(tmp_path: Path):
     STATUS_UPDATE; the collected snapshot must carry only a preview so the full
     text is fetched on demand.
     """
-    issues_open = tmp_path / "se3" / "issues" / "open"
+    issues_open = tmp_path / "tianluo" / "issues" / "open"
     issues_open.mkdir(parents=True)
     long_desc = "x" * 500
     (issues_open / "001_big.yaml").write_text(
@@ -243,7 +243,7 @@ def test_machine_wide_pending_call_prompt_is_clipped():
     """
     call = PendingCall(
         call_id="c1",
-        path="/p/se3/calls/c1.json",
+        path="/p/tianluo/calls/c1.json",
         project_root="/p",
         prompt="y" * 500,
     )

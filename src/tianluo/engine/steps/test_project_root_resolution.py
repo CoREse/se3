@@ -99,7 +99,7 @@ class _FakeLLMCaller:
 
     def call(self, prompt, **kwargs):
         # Mirror the real caller's write side: the user prompt and the
-        # assistant response both land under self.project_root/se3/history.
+        # assistant response both land under self.project_root/tianluo/history.
         from tianluo.engine import chat_history
 
         chat_history.record_prompt(
@@ -158,8 +158,8 @@ def test_discovery_round1_history_lands_in_worktree_not_cwd(tmp_path, monkeypatc
     status = discovery.discovery_handler(step, flow)
     assert status == StepStatus.PAUSED  # question mode pauses for the user
 
-    worktree_hist = worktree_root / "se3" / "history" / flow.flow_id
-    main_hist = main_cwd / "se3" / "history" / flow.flow_id
+    worktree_hist = worktree_root / "tianluo" / "history" / flow.flow_id
+    main_hist = main_cwd / "tianluo" / "history" / flow.flow_id
     assert worktree_hist.is_dir(), "round-1 history must land under the worktree"
     assert (worktree_hist / "discovery.jsonl").exists()
     assert not main_hist.exists(), "no history may fork into the main checkout"
@@ -180,6 +180,6 @@ def test_discovery_round1_falls_back_to_cwd_without_context(tmp_path, monkeypatc
     status = discovery.discovery_handler(step, flow)
     assert status == StepStatus.PAUSED
 
-    cwd_hist = main_cwd / "se3" / "history" / flow.flow_id
+    cwd_hist = main_cwd / "tianluo" / "history" / flow.flow_id
     assert cwd_hist.is_dir(), "without context, history falls back to cwd"
     assert (cwd_hist / "discovery.jsonl").exists()

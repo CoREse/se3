@@ -200,7 +200,7 @@ def test_provider_without_live_flow_ids_falls_back_to_prune():
 
 
 def _write_engine_json(root, flow_id, status):
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         '{"flow_id": "%s", "status": "%s"}' % (flow_id, status),
@@ -229,6 +229,6 @@ def test_live_flow_ids_bounded_to_one_per_root(tmp_path):
 def test_live_flow_ids_empty_without_engine_json(tmp_path):
     """A root with no engine.json contributes nothing (no spurious retention)."""
     root = tmp_path / "empty"
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     reader = DaemonHistoryReader(lambda: [str(root)])
     assert reader.live_flow_ids() == set()

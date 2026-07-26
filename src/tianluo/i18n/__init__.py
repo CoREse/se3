@@ -11,7 +11,7 @@ The active language is a lazily-resolved module-level singleton: the first
 current working directory and caches the answer. Resolution order is::
 
     SE3_LANG env
-      > project se3.yaml / se3.local.yaml language.language (merged w/ global)
+      > project tianluo.yaml / tianluo.local.yaml language.language (merged w/ global)
       > ~/.se3/config.yaml language.language
       > system locale (LC_ALL / LC_MESSAGES / LANG)
       > en-US
@@ -48,7 +48,7 @@ _LOCALE_ENV_VARS = ("LC_ALL", "LC_MESSAGES", "LANG")
 
 
 def _decide_explicit(raw: Optional[str]) -> Optional[str]:
-    """Resolve an *explicit* se3 language request (env var / config value).
+    """Resolve an *explicit* luo language request (env var / config value).
 
     Distinguishes "unset" from "set but unsupported": an unset/empty value
     returns ``None`` so resolution falls through to the next tier, but a value
@@ -89,7 +89,7 @@ def _safe_cwd() -> Optional[Path]:
 def resolve_language(project_root: Optional[Path]) -> str:
     """Resolve the effective UI language via the precedence chain.
 
-    The two explicit se3 tiers (``SE3_LANG`` and the merged config
+    The two explicit luo tiers (``SE3_LANG`` and the merged config
     ``language.language``) are authoritative when *set*: a set-but-unsupported
     value resolves to :data:`BASE_LANGUAGE` rather than falling through, because
     the user explicitly requested a language. Only an unset value at a tier
@@ -105,7 +105,7 @@ def resolve_language(project_root: Optional[Path]) -> str:
     if decided:
         return decided
 
-    # 2/3. Project se3.yaml (merged with ~/.se3/config.yaml, project-first).
+    # 2/3. Project tianluo.yaml (merged with ~/.se3/config.yaml, project-first).
     # Import lazily to keep this module import-side-effect free and avoid any
     # import cycle with tianluo.config.
     try:
@@ -119,7 +119,7 @@ def resolve_language(project_root: Optional[Path]) -> str:
     except Exception as exc:  # config read must never break language resolution
         logger.debug("i18n: language config load failed: %s", exc)
 
-    # 4. System locale — an OS hint, not an explicit se3 request, so an
+    # 4. System locale — an OS hint, not an explicit luo request, so an
     # unsupported locale falls through (to en-US below) rather than locking on.
     for var in _LOCALE_ENV_VARS:
         picked = normalize_language(os.environ.get(var))

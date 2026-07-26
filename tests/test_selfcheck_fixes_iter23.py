@@ -49,7 +49,7 @@ def _make_flow(n_steps: int = 2) -> FlowInstance:
 
 
 def _cold_step_path(tmp_path: Path, flow_id: str, step_id: str) -> Path:
-    return tmp_path / "se3" / "state" / "steps" / flow_id / f"{step_id}.json"
+    return tmp_path / "tianluo" / "state" / "steps" / flow_id / f"{step_id}.json"
 
 
 # -- Issue 1: a re-executed step's re-produced body survives and persists -----

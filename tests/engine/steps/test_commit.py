@@ -29,7 +29,7 @@ def _make_flow(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-001",
         "task_description": "Fix authentication bug",
         "task_type": "bugfix",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
         # Mirror the real FlowInstance default: without this a MagicMock(spec=…)
         # returns a truthy MagicMock for is_worktree_mode, which would trip the
         # commit step's worktree de-versioning branch and skip the version bump
@@ -420,7 +420,7 @@ def _make_flow_with_state(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-summary",
         "task_description": "Add new feature",
         "task_type": "feature",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
     }
     defaults.update(kwargs)
 
@@ -492,10 +492,10 @@ class TestTemplateSummaryGeneration:
         mock_template.assert_not_called()
 
     def test_generate_template_summary_creates_file(self, tmp_path):
-        """_generate_template_summary writes a summary file to se3/state/."""
+        """_generate_template_summary writes a summary file to tianluo/state/."""
         flow = _make_flow_with_state(
             flow_id="ts-001",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             task_description="Implement auth",
             task_type="feature",
             step_history=[],
@@ -511,7 +511,7 @@ class TestTemplateSummaryGeneration:
 
         _generate_template_summary(flow, step)
 
-        summary_file = tmp_path / "se3" / "state" / "summary-ts-001.md"
+        summary_file = tmp_path / "tianluo" / "state" / "summary-ts-001.md"
         assert summary_file.exists()
         content = summary_file.read_text()
         assert "Implement auth" in content
@@ -529,7 +529,7 @@ class TestTemplateSummaryVersionAnalysis:
         """When step.inputs['reasoning'] has a value, summary includes ### Version Analysis."""
         flow = _make_flow_with_state(
             flow_id="va-001",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             task_description="Add feature X",
             task_type="feature",
         )
@@ -543,7 +543,7 @@ class TestTemplateSummaryVersionAnalysis:
 
         _generate_template_summary(flow, step)
 
-        summary_file = tmp_path / "se3" / "state" / "summary-va-001.md"
+        summary_file = tmp_path / "tianluo" / "state" / "summary-va-001.md"
         content = summary_file.read_text()
         assert "### Version Analysis" in content
         assert "This is a minor bump because a new backward-compatible feature was added." in content
@@ -552,7 +552,7 @@ class TestTemplateSummaryVersionAnalysis:
         """When step.inputs has no 'reasoning' key, summary does not include ### Version Analysis."""
         flow = _make_flow_with_state(
             flow_id="va-002",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             task_description="Fix bug Y",
             task_type="bugfix",
         )
@@ -565,7 +565,7 @@ class TestTemplateSummaryVersionAnalysis:
 
         _generate_template_summary(flow, step)
 
-        summary_file = tmp_path / "se3" / "state" / "summary-va-002.md"
+        summary_file = tmp_path / "tianluo" / "state" / "summary-va-002.md"
         content = summary_file.read_text()
         assert "### Version Analysis" not in content
 
@@ -573,7 +573,7 @@ class TestTemplateSummaryVersionAnalysis:
         """When step.inputs['reasoning'] is an empty string, summary does not include ### Version Analysis."""
         flow = _make_flow_with_state(
             flow_id="va-003",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             task_description="Refactor Z",
             task_type="small",
         )
@@ -586,7 +586,7 @@ class TestTemplateSummaryVersionAnalysis:
 
         _generate_template_summary(flow, step)
 
-        summary_file = tmp_path / "se3" / "state" / "summary-va-003.md"
+        summary_file = tmp_path / "tianluo" / "state" / "summary-va-003.md"
         content = summary_file.read_text()
         assert "### Version Analysis" not in content
 
@@ -594,7 +594,7 @@ class TestTemplateSummaryVersionAnalysis:
         """### Version Analysis appears after Version line and before ### Commit Message."""
         flow = _make_flow_with_state(
             flow_id="va-004",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             task_description="Add feature W",
             task_type="feature",
         )
@@ -608,7 +608,7 @@ class TestTemplateSummaryVersionAnalysis:
 
         _generate_template_summary(flow, step)
 
-        summary_file = tmp_path / "se3" / "state" / "summary-va-004.md"
+        summary_file = tmp_path / "tianluo" / "state" / "summary-va-004.md"
         content = summary_file.read_text()
         version_pos = content.index("**Version:** 2.0.0")
         analysis_pos = content.index("### Version Analysis")
@@ -934,7 +934,7 @@ class TestCommitVersionTagIntegration:
         include_in_commit_message: bool = True,
     ) -> tuple[StepStatus, Step]:
         flow = _make_flow_with_state(
-            change_path=repo / "se3.yaml",
+            change_path=repo / "tianluo.yaml",
             selected_steps=[StepType.VERSION_ANALYZE, StepType.COMMIT, StepType.SUMMARIZE],
         )
         flow.state.context = flow_context if flow_context is not None else {}
@@ -1392,26 +1392,26 @@ class TestDetectRuntimeLeaks:
             (".se3", True),
             (".se3/tmp/scratch.json", True),
             # Nested ``.se3`` carrying a runtime subtree (also rule A via top).
-            (".se3/archive/slug-123/se3/state/engine.json", True),
+            (".se3/archive/slug-123/tianluo/state/engine.json", True),
             # Rule (B): non-top-level ``se3``/``.se3`` + runtime subtree child.
-            ("foo/se3/logs/x", True),
-            ("a/b/se3/cache/index", True),
+            ("foo/tianluo/logs/x", True),
+            ("a/b/tianluo/cache/index", True),
             ("a/b/.se3/tmp/scratch", True),
-            ("deep/nest/se3/worktrees/wt/file", True),
-            # Exempt: top-level ``se3/`` is the legitimate runtime root.
-            ("se3/state/x", False),
-            ("se3/specs/base/spec.md", False),
-            ("se3/issues/open/001.yaml", False),
-            ("se3/worktrees/.archive/x", False),
+            ("deep/nest/tianluo/worktrees/wt/file", True),
+            # Exempt: top-level ``tianluo/`` is the legitimate runtime root.
+            ("tianluo/state/x", False),
+            ("tianluo/specs/base/spec.md", False),
+            ("tianluo/issues/open/001.yaml", False),
+            ("tianluo/worktrees/.archive/x", False),
             ("se3", False),
             # Exempt: ``se3`` as a source package dir (child not a subtree).
-            ("src/se3/engine/steps/commit.py", False),
-            ("foo/se3/engine/x.py", False),
+            ("src/tianluo/engine/steps/commit.py", False),
+            ("foo/tianluo/engine/x.py", False),
             # Exempt: ordinary source / project files.
             ("pyproject.toml", False),
             ("README.md", False),
             ("tests/test_commit.py", False),
-            # Exempt: a runtime-subtree name that is NOT preceded by se3/.se3.
+            # Exempt: a runtime-subtree name that is NOT preceded by tianluo/.se3.
             ("logs/app.log", False),
             ("foo/state/x", False),
         ],
@@ -1422,15 +1422,15 @@ class TestDetectRuntimeLeaks:
 
     def test_mixed_batch_filters_only_leaks(self) -> None:
         paths = [
-            "src/se3/engine/steps/commit.py",  # exempt
+            "src/tianluo/engine/steps/commit.py",  # exempt
             ".se3/archive/x.json",             # leak
-            "se3/specs/base/spec.md",          # exempt
-            "foo/se3/logs/run.log",            # leak
+            "tianluo/specs/base/spec.md",          # exempt
+            "foo/tianluo/logs/run.log",            # leak
             "pyproject.toml",                  # exempt
         ]
         assert _detect_runtime_leaks(paths) == [
             ".se3/archive/x.json",
-            "foo/se3/logs/run.log",
+            "foo/tianluo/logs/run.log",
         ]
 
     def test_empty_and_blank_inputs(self) -> None:
@@ -1440,7 +1440,7 @@ class TestDetectRuntimeLeaks:
     def test_no_subprocess_or_io(self) -> None:
         """The detector must be a pure function — no subprocess use at all."""
         with patch("tianluo.engine.steps.commit.subprocess") as mock_sub:
-            _detect_runtime_leaks([".se3/archive/x", "se3/state/y", "src/a.py"])
+            _detect_runtime_leaks([".se3/archive/x", "tianluo/state/y", "src/a.py"])
         mock_sub.run.assert_not_called()
 
 
@@ -1472,7 +1472,7 @@ class TestRuntimeLeakGuardIntegration:
 
     def _run_commit(self, repo: Path, step: Step) -> StepStatus:
         flow = _make_flow_with_state(
-            change_path=repo / "se3.yaml",
+            change_path=repo / "tianluo.yaml",
             selected_steps=[
                 StepType.IMPLEMENT, StepType.COMMIT, StepType.SUMMARIZE,
             ],
@@ -1489,13 +1489,13 @@ class TestRuntimeLeakGuardIntegration:
 
     def test_leak_unstaged_normal_artifact_committed(self, tmp_path: Path) -> None:
         repo = _init_git_repo(tmp_path)
-        # A leaking runtime file outside se3/ (the .se3/ root-cause shape).
+        # A leaking runtime file outside tianluo/ (the .se3/ root-cause shape).
         (repo / ".se3" / "archive").mkdir(parents=True)
         (repo / ".se3" / "archive" / "x.json").write_text("{}\n")
-        # A normal source file and a legit whitelist-tracked se3/ artifact.
+        # A normal source file and a legit whitelist-tracked tianluo/ artifact.
         (repo / "src.py").write_text("print('x')\n")
-        (repo / "se3" / "specs" / "base").mkdir(parents=True)
-        (repo / "se3" / "specs" / "base" / "spec.md").write_text("# spec\n")
+        (repo / "tianluo" / "specs" / "base").mkdir(parents=True)
+        (repo / "tianluo" / "specs" / "base" / "spec.md").write_text("# spec\n")
 
         result = self._run_commit(repo, _make_step())
         assert result == StepStatus.COMPLETED
@@ -1503,7 +1503,7 @@ class TestRuntimeLeakGuardIntegration:
         tree = _head_tree_files(repo)
         # Normal artifacts committed.
         assert "src.py" in tree
-        assert "se3/specs/base/spec.md" in tree
+        assert "tianluo/specs/base/spec.md" in tree
         # Leaked runtime path NOT committed.
         assert ".se3/archive/x.json" not in tree
         # Soft removal: the file stays on disk, just unstaged (untracked).
@@ -1519,16 +1519,16 @@ class TestRuntimeLeakGuardIntegration:
     def test_no_leak_commits_everything(self, tmp_path: Path) -> None:
         repo = _init_git_repo(tmp_path)
         (repo / "src.py").write_text("print('ok')\n")
-        (repo / "se3" / "state").mkdir(parents=True)
-        (repo / "se3" / "state" / "engine.json").write_text("{}\n")
+        (repo / "tianluo" / "state").mkdir(parents=True)
+        (repo / "tianluo" / "state" / "engine.json").write_text("{}\n")
 
         result = self._run_commit(repo, _make_step())
         assert result == StepStatus.COMPLETED
         tree = _head_tree_files(repo)
         assert "src.py" in tree
-        # Top-level se3/ content is exempt from the guard (would normally be
+        # Top-level tianluo/ content is exempt from the guard (would normally be
         # gitignored, but here we prove the guard does not strip it).
-        assert "se3/state/engine.json" in tree
+        assert "tianluo/state/engine.json" in tree
 
     def test_guard_git_failure_does_not_block_commit(self, tmp_path: Path) -> None:
         """When the guard's git restore fails, the commit still completes."""
@@ -1536,7 +1536,7 @@ class TestRuntimeLeakGuardIntegration:
         (repo / "src.py").write_text("x\n")
 
         flow = _make_flow_with_state(
-            change_path=repo / "se3.yaml",
+            change_path=repo / "tianluo.yaml",
             selected_steps=[StepType.COMMIT, StepType.SUMMARIZE],
         )
         flow.baseline_commit = None
@@ -1550,7 +1550,7 @@ class TestRuntimeLeakGuardIntegration:
             # Force the guard to target a path that is not actually staged so
             # ``git restore --staged`` errors — the guard must only warn.
             "tianluo.engine.steps.commit._detect_runtime_leaks",
-            return_value=["does/not/exist/se3/state/x"],
+            return_value=["does/not/exist/tianluo/state/x"],
         ):
             result = commit_handler(_make_step(), flow)
 
@@ -1558,12 +1558,12 @@ class TestRuntimeLeakGuardIntegration:
         assert "src.py" in _head_tree_files(repo)
 
     def test_only_leak_empties_index_no_op_success(self, tmp_path: Path) -> None:
-        """When the SOLE working-tree change is a runtime leak outside se3/,
+        """When the SOLE working-tree change is a runtime leak outside tianluo/,
         stripping it empties the index. The commit step must treat this as a
         clean no-op success, never failing the step (regression: stripping all
         staged paths used to make ``git commit`` exit non-zero → FAILED)."""
         repo = _init_git_repo(tmp_path)
-        # The only change is a stray runtime artifact leaking outside se3/.
+        # The only change is a stray runtime artifact leaking outside tianluo/.
         (repo / ".se3" / "archive").mkdir(parents=True)
         (repo / ".se3" / "archive" / "x.json").write_text("{}\n")
 

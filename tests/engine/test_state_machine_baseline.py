@@ -195,14 +195,14 @@ class TestImplementSessionCommitsForwarding:
             {
                 "sha": "def456",
                 "subject": "fix off-by-one",
-                "files": ["src/se3/engine/loop.py"],
+                "files": ["src/tianluo/engine/loop.py"],
             },
         ]
         impl_step = Step(
             step_type=StepType.IMPLEMENT,
             status=StepStatus.COMPLETED,
             outputs={
-                "files_changed": ["pyproject.toml", "VERSIONS.md", "src/se3/engine/loop.py"],
+                "files_changed": ["pyproject.toml", "VERSIONS.md", "src/tianluo/engine/loop.py"],
                 "pre_session_version": "5.1.0",
                 "session_commits": session_commits,
             },

@@ -31,6 +31,7 @@ The cache lives at ``se3/state/test_baseline_cache.json`` — gitignored by the
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import hashlib
 import json
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BASELINE_CACHE_SCHEMA_VERSION = 1
-_CACHE_REL_PATH = Path("se3") / "state" / "test_baseline_cache.json"
+_CACHE_SUBPATH = Path("state") / "test_baseline_cache.json"
 
 # Wall-clock bound (seconds) for a pre-implement baseline run when the project's
 # ``test.timeout`` cannot be read. Mirrors the test step's own fallback timeout
@@ -180,7 +181,7 @@ def _git_untracked_files(root: Path) -> List[str]:
 
 def cache_path(project_root: Path) -> Path:
     """Return the path to the baseline cache file for *project_root*."""
-    return Path(project_root) / _CACHE_REL_PATH
+    return runtime_dir(project_root) / _CACHE_SUBPATH
 
 
 def _read_cache_entries(path: Path) -> "dict":

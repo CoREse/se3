@@ -9,7 +9,7 @@ are supported:
 * Blocking (``acquire(blocking=True)`` or ``MergeLock(root, blocking=True)``):
   uses ``LOCK_EX`` (no ``LOCK_NB``) so competing callers queue and wait
   until the current holder releases the lock. This is the "main-worktree
-  mutex" semantics used by ``se3 merge`` and synchronous ``se3 run`` so
+  mutex" semantics used by ``luo merge`` and synchronous ``luo run`` so
   that only one holder mutates the main working tree at a time.
 
 The lock is automatically released when the file descriptor is closed
@@ -24,6 +24,7 @@ because the kernel guarantees exclusivity on return from ``flock``.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import errno
 import fcntl
@@ -37,7 +38,22 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Default path relative to project root.
-_DEFAULT_LOCK_PATH = Path("se3/state/merge.lock")
+# Sentinel default: resolved root-aware (tianluo/ or legacy se3/) at use
+# time via _resolve_lock_path(); an explicit lock_path bypasses resolution.
+_DEFAULT_LOCK_PATH = Path("tianluo/state/merge.lock")
+
+
+def _resolve_lock_path(project_root: Path, lock_path: Path) -> Path:
+    """Resolve *lock_path* against *project_root*, honouring the runtime dir.
+
+    The default sentinel maps to ``<runtime>/state/merge.lock`` for the
+    project's actual layout; any other relative path joins the root as-is.
+    """
+    if lock_path.is_absolute():
+        return lock_path
+    if lock_path == _DEFAULT_LOCK_PATH:
+        return runtime_dir(project_root) / "state" / "merge.lock"
+    return Path(project_root) / lock_path
 
 
 # Module-level registry of resolved lock paths held by *this* process.
@@ -62,10 +78,7 @@ def is_lock_held_in_process(project_root: Path, lock_path: Path = _DEFAULT_LOCK_
     ``acquire_lock=True`` default behaviour when the CLI wrapper
     already holds the lock).
     """
-    if lock_path.is_absolute():
-        resolved = lock_path
-    else:
-        resolved = project_root / lock_path
+    resolved = _resolve_lock_path(project_root, lock_path)
     return str(resolved) in _HELD_LOCK_PATHS
 
 
@@ -79,7 +92,7 @@ def _stale_break_jitter() -> float:
 
 
 class MergeLockBusy(RuntimeError):
-    """Another ``se3 merge`` process holds the lock."""
+    """Another ``luo merge`` process holds the lock."""
 
     def __init__(self, lock_file: Path, holder_pid: Optional[int] = None) -> None:
         self.lock_file = lock_file
@@ -376,7 +389,7 @@ class MergeLock:
         environment ``os.kill(12345, 0)`` either returns success
         (B has its own pid 12345 unrelated to A's) or ESRCH.  We
         cannot disambiguate "alive in another namespace" from "alive
-        in mine" with a kill probe.  Operators running se3 across
+        in mine" with a kill probe.  Operators running luo across
         container boundaries on a shared volume should not rely on
         ``break_stale=True`` recovery — they should instead bind-mount
         a per-container lock directory or share the host PID namespace.
@@ -503,7 +516,7 @@ class MergeLock:
                 (without ``LOCK_NB``) and wait until the current holder
                 releases the lock, then acquire it. This gives the merge
                 lock blocking "main-worktree mutex" semantics — competing
-                ``se3 merge`` / synchronous ``se3 run`` callers serialise
+                ``luo merge`` / synchronous ``luo run`` callers serialise
                 rather than failing fast. Defaults to ``False`` (the
                 legacy non-blocking ``LOCK_EX | LOCK_NB`` fail-fast path
                 that raises :class:`MergeLockBusy` / :class:`MergeLockStale`

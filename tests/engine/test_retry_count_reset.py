@@ -221,7 +221,7 @@ class TestDiscoveryUserResponseResetsRetryCount:
         # retry_count pop).
         user_response = "new reply from user"
 
-        # Reproduce the run-loop branch semantics (src/se3/commands/run.py
+        # Reproduce the run-loop branch semantics (src/tianluo/commands/run.py
         # near the DISCOVERY+PAUSED handler). We don't call the whole
         # run_flow machinery — we just exercise the state transitions it
         # applies on user-response.

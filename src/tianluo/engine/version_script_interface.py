@@ -1,7 +1,7 @@
 """Version script interface for SE3.
 
 Provides a unified script-based interface for version management operations.
-When a version script exists (se3/scripts/version.py or .sh), it is called
+When a version script exists (tianluo/scripts/version.py or .sh), it is called
 via subprocess for get/bump/set operations. When no script exists and
 auto_generate_script is enabled, LLM generates one based on the project structure.
 
@@ -9,6 +9,7 @@ Falls back to built-in handlers when no script is available.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 import os
@@ -22,8 +23,12 @@ from .version_bumper import Version
 
 logger = logging.getLogger(__name__)
 
-# Default script search paths (relative to project root)
+# Default script search paths (relative to project root). Canonical
+# ``tianluo/`` first, legacy ``se3/`` fallback so pre-rename projects keep
+# resolving their existing script.
 DEFAULT_SCRIPT_PATHS = [
+    "tianluo/scripts/version.py",
+    "tianluo/scripts/version.sh",
     "se3/scripts/version.py",
     "se3/scripts/version.sh",
 ]
@@ -151,7 +156,7 @@ def find_version_script(
 
     Searches in order:
     1. Configured script_path (if set)
-    2. Default paths: se3/scripts/version.py, se3/scripts/version.sh
+    2. Default paths: tianluo/scripts/version.py, tianluo/scripts/version.sh
 
     Args:
         project_root: Project root directory
@@ -218,7 +223,7 @@ def generate_version_script(
 
     Args:
         project_root: Project root directory
-        script_path: Target path for the script (default: se3/scripts/version.py)
+        script_path: Target path for the script (default: tianluo/scripts/version.py)
 
     Returns:
         Path to the generated script
@@ -230,7 +235,7 @@ def generate_version_script(
     from .version_bumper import VersionDetector
 
     if script_path is None:
-        script_path = project_root / "se3" / "scripts" / "version.py"
+        script_path = runtime_dir(project_root) / "scripts" / "version.py"
 
     # Ensure parent directory exists so the LLM's Write tool can succeed
     script_path.parent.mkdir(parents=True, exist_ok=True)

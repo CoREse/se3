@@ -24,9 +24,9 @@ from tianluo.engine.state_machine import StateMachine
 
 def _make_flow(tmp_path: Path, task_description: str = "Test task") -> FlowInstance:
     """Create a flow with PLAN completed in step history."""
-    # Ensure a minimal se3/specs directory exists so that full_spec loading
+    # Ensure a minimal tianluo/specs directory exists so that full_spec loading
     # (used by update_spec by default) does not fail on missing directory.
-    specs_dir = tmp_path / "se3" / "specs"
+    specs_dir = tmp_path / "tianluo" / "specs"
     specs_dir.mkdir(parents=True, exist_ok=True)
     (specs_dir / "base").mkdir(exist_ok=True)
     (specs_dir / "base" / "spec.md").write_text(

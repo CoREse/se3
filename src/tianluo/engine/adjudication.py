@@ -1,4 +1,4 @@
-"""Pure logic for the se3 fix-loop adjudication ("警察") mechanism.
+"""Pure logic for the luo fix-loop adjudication ("警察") mechanism.
 
 This module holds the LLM-free core of the adjudication feature: fingerprint
 normalization, the cross-round issue *ledger* persisted on ``flow.state.context``,

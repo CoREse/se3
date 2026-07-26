@@ -12,7 +12,7 @@ Discovery/loading go through :mod:`importlib.resources` so they work identically
 from a source checkout and from an installed wheel (the locales ship as package
 data). Loading is fail-safe: a missing or malformed catalog yields ``{}`` rather
 than raising, because UI-text lookup sits on every console output path and must
-never break the ``se3 run`` state machine.
+never break the ``luo run`` state machine.
 """
 
 from __future__ import annotations

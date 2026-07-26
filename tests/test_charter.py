@@ -4,9 +4,9 @@ and the context-injection surface).
 This module is the shared home for the new code-index / charter surface. It
 covers three layers:
 
-* ``CodeIndexConfig`` — the ``se3 config`` knobs the code-index subsystem
+* ``CodeIndexConfig`` — the ``luo config`` knobs the code-index subsystem
   consumes (degrade thresholds, chunk granularity, explicit-exclude list).
-* the charter subsystem (``src/se3/engine/charter.py``) — whole-text loading
+* the charter subsystem (``src/tianluo/engine/charter.py``) — whole-text loading
   (incl. the missing-file degrade and sandbox conventions-channel role),
   template rendering with placeholder substitution, and the altitude gate's
   monitoring-light (warn-not-block) byte threshold.
@@ -48,7 +48,7 @@ from tianluo.engine.context_builder import (
 
 
 # ===========================================================================
-# CodeIndexConfig — the se3 config knobs (G8)
+# CodeIndexConfig — the luo config knobs (G8)
 # ===========================================================================
 class TestCodeIndexConfigDefaults:
     """Default values when nothing is configured (built-in defaults)."""
@@ -86,7 +86,7 @@ class TestCodeIndexConfigDefaults:
 
 
 class TestCodeIndexConfigOverride:
-    """``se3.yaml`` overrides and ``load()`` — code_index.* takes effect."""
+    """``tianluo.yaml`` overrides and ``load()`` — code_index.* takes effect."""
 
     def test_load_defaults_when_no_file(self, tmp_path):
         # Acceptance: absent config returns built-in defaults.
@@ -94,13 +94,13 @@ class TestCodeIndexConfigOverride:
         assert cfg == CodeIndexConfig()
 
     def test_load_defaults_when_no_section(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         cfg = CodeIndexConfig.load(tmp_path)
         assert cfg == CodeIndexConfig()
 
     def test_yaml_override_takes_effect(self, tmp_path):
-        # Acceptance: se3.yaml code_index.* override is honored.
-        (tmp_path / "se3.yaml").write_text(
+        # Acceptance: tianluo.yaml code_index.* override is honored.
+        (tmp_path / "tianluo.yaml").write_text(
             "code_index:\n"
             "  degrade_trigger_lines: 5000\n"
             "  degrade_trigger_bytes: 524288\n"
@@ -118,7 +118,7 @@ class TestCodeIndexConfigOverride:
         assert cfg.exclude == ["vendor/", "generated/big.json"]
 
     def test_partial_override_keeps_other_defaults(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "code_index:\n  chunk_lines: 50\n"
         )
         cfg = CodeIndexConfig.load(tmp_path)
@@ -128,7 +128,7 @@ class TestCodeIndexConfigOverride:
         assert cfg.exclude == []
 
     def test_load_code_index_config_helper(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "code_index:\n  degrade_trigger_bytes: 1234\n"
         )
         cfg = load_code_index_config(tmp_path)
@@ -186,12 +186,12 @@ class TestCodeIndexConfigFaultTolerance:
         assert cfg.chunk_lines == DEFAULT_CODE_INDEX_CHUNK_LINES
 
     def test_invalid_yaml_falls_back_to_defaults(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("{{invalid yaml")
+        (tmp_path / "tianluo.yaml").write_text("{{invalid yaml")
         cfg = CodeIndexConfig.load(tmp_path)
         assert cfg == CodeIndexConfig()
 
     def test_non_dict_section_falls_back(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("code_index: true\n")
+        (tmp_path / "tianluo.yaml").write_text("code_index: true\n")
         cfg = CodeIndexConfig.load(tmp_path)
         assert cfg == CodeIndexConfig()
 
@@ -201,7 +201,7 @@ class TestCodeIndexConfigFaultTolerance:
 # ===========================================================================
 def test_load_charter_returns_full_text(tmp_path: Path):
     """Charter full text is returned verbatim for injection into any step."""
-    se3_dir = tmp_path / "se3"
+    se3_dir = tmp_path / "tianluo"
     se3_dir.mkdir()
     content = "# Demo — Charter\n\n## Purpose\nfull text here\n"
     (se3_dir / "charter.md").write_text(content, encoding="utf-8")
@@ -210,7 +210,7 @@ def test_load_charter_returns_full_text(tmp_path: Path):
 
 
 def test_load_charter_accepts_str_project_root(tmp_path: Path):
-    se3_dir = tmp_path / "se3"
+    se3_dir = tmp_path / "tianluo"
     se3_dir.mkdir()
     (se3_dir / "charter.md").write_text("x", encoding="utf-8")
     # str path, not Path, must also work (subprocess conventions channel)
@@ -223,7 +223,7 @@ def test_load_charter_missing_file_degrades_to_empty(tmp_path: Path):
 
 
 def test_charter_path_points_at_se3_charter_md(tmp_path: Path):
-    assert charter_path(tmp_path) == tmp_path / "se3" / "charter.md"
+    assert charter_path(tmp_path) == tmp_path / "tianluo" / "charter.md"
 
 
 # --------------------------------------------------------------------------
@@ -345,7 +345,7 @@ class TestCharterInjection:
     """The charter is injected in full, unconditionally, into every step."""
 
     def test_injects_full_charter_text(self, tmp_path: Path):
-        se3_dir = tmp_path / "se3"
+        se3_dir = tmp_path / "tianluo"
         se3_dir.mkdir()
         body = "# Demo — Charter\n\n## Purpose\nproject conventions live here\n"
         (se3_dir / "charter.md").write_text(body, encoding="utf-8")
@@ -362,35 +362,35 @@ class TestCharterInjection:
         assert get_charter_injection(tmp_path) == ""
 
     def test_blank_charter_degrades_to_empty(self, tmp_path: Path):
-        se3_dir = tmp_path / "se3"
+        se3_dir = tmp_path / "tianluo"
         se3_dir.mkdir()
         (se3_dir / "charter.md").write_text("   \n\n", encoding="utf-8")
         assert get_charter_injection(tmp_path) == ""
 
     def test_does_not_inject_spec_name_list(self, tmp_path: Path):
         """Acceptance: the retired spec-name list is no longer injected."""
-        se3_dir = tmp_path / "se3"
+        se3_dir = tmp_path / "tianluo"
         se3_dir.mkdir()
         (se3_dir / "charter.md").write_text("# C\n\n## Purpose\nx\n", encoding="utf-8")
         out = get_charter_injection(tmp_path)
         assert "Available Specifications" not in out
-        assert "se3 spec index" not in out
+        assert "luo spec index" not in out
 
 
 class TestCodeIndexInjection:
     """The code-index top map is injected; deeper detail is on-demand."""
 
     def _write_md(self, tmp_path: Path) -> None:
-        se3_dir = tmp_path / "se3"
+        se3_dir = tmp_path / "tianluo"
         se3_dir.mkdir()
         # Minimal authoritative md parseable by CodeIndex.from_md: file headings
         # plus one symbol bullet (drill-in detail, NOT shown in the top map).
         md = (
             "# Code Index\n\n"
-            "### `src/se3/engine/spec_index.py` (module) — builds item-level spec index\n"
+            "### `src/tianluo/engine/spec_index.py` (module) — builds item-level spec index\n"
             "  - `load_or_build` (function) — incremental rebuild entry point\n"
             "\n"
-            "### `src/se3/engine/charter.py` (module) — charter load + altitude gate\n"
+            "### `src/tianluo/engine/charter.py` (module) — charter load + altitude gate\n"
         )
         (se3_dir / "code-index.md").write_text(md, encoding="utf-8")
 
@@ -398,11 +398,11 @@ class TestCodeIndexInjection:
         self._write_md(tmp_path)
         out = get_code_index_injection(tmp_path)
         # File-level one-liners (the top map) are present...
-        assert "src/se3/engine/spec_index.py" in out
+        assert "src/tianluo/engine/spec_index.py" in out
         assert "builds item-level spec index" in out
-        assert "src/se3/engine/charter.py" in out
+        assert "src/tianluo/engine/charter.py" in out
         # ...and the drill-down convention is always present.
-        assert "se3 code-index show" in out
+        assert "luo code-index show" in out
         assert "Before reading source code" in out
 
     def test_top_map_omits_symbol_detail(self, tmp_path: Path):
@@ -415,8 +415,8 @@ class TestCodeIndexInjection:
     def test_unbuilt_index_still_injects_convention_and_note(self, tmp_path: Path):
         """No md yet -> still injects the drill-down protocol + a build note."""
         out = get_code_index_injection(tmp_path)
-        assert "se3 code-index show" in out
-        assert "se3 code-index rebuild" in out
+        assert "luo code-index show" in out
+        assert "luo code-index rebuild" in out
         assert "Before reading source code" in out
 
     def test_does_not_inject_spec_name_list(self, tmp_path: Path):

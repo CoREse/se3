@@ -360,7 +360,7 @@ class StateMachine:
             task_type: Type of task (feature, bugfix, review, etc.)
             change_name: Optional associated change name
             is_worktree_mode: Whether this flow runs in worktree isolation mode
-                (``se3 run --worktree``)
+                (``luo run --worktree``)
 
         Returns:
             New flow instance
@@ -380,7 +380,7 @@ class StateMachine:
         # Determine initial step sequence
         selected_steps = get_default_step_sequence(task_type)
 
-        # Append optional steps from se3.yaml (e.g. summarize)
+        # Append optional steps from tianluo.yaml (e.g. summarize)
         selected_steps = self._apply_step_config(selected_steps)
 
         # For a worktree flow, the release point is the merge — extend the
@@ -527,7 +527,7 @@ class StateMachine:
         return str(self._resolve_main_checkout_root())
 
     def _apply_step_config(self, steps: list[StepType]) -> list[StepType]:
-        """Append optional steps from se3.yaml steps.append configuration.
+        """Append optional steps from tianluo.yaml steps.append configuration.
 
         Args:
             steps: Original step sequence
@@ -591,7 +591,7 @@ class StateMachine:
         """Return True when the post-step spec-diff fallback guard applies to *step*.
 
         The guard (the second hard layer of the spec-write protection) catches a
-        write to ``se3/specs/**`` that a step performed by going *around* the
+        write to ``tianluo/specs/**`` that a step performed by going *around* the
         PreToolUse hook — most notably a ``Bash`` redirect / ``sed`` / ``tee``,
         which the tool-matcher hook (Write|Edit|NotebookEdit) never observes. It
         applies to every step NOT in the shared exemption set
@@ -746,7 +746,7 @@ class StateMachine:
         by the main-worktree mutex. This manager, for the duration of the step:
 
           * acquires the blocking main-worktree merge lock at the override root
-            (queue-and-wait — the same mutex sync runs and ``se3 merge`` take);
+            (queue-and-wait — the same mutex sync runs and ``luo merge`` take);
           * rebinds ``self.project_root`` and the flow's ``context['project_root']``
             to the override so the step's context / issue-discovery / spec paths
             all resolve to the main checkout consistently.
@@ -764,7 +764,7 @@ class StateMachine:
         fallback resolves the main checkout and proceeds — so it must NOT run
         unserialised. Keying the lock on the presence of ``step.cwd`` would let
         such a step land branches / write versions on master concurrently with a
-        ``se3 merge``. So for a merge-side step we resolve the main checkout the
+        ``luo merge``. So for a merge-side step we resolve the main checkout the
         same strict way and acquire the lock at that root regardless.
         """
         _merge_side = step.step_type in (
@@ -780,7 +780,7 @@ class StateMachine:
         # never degrading to the isolation worktree).
         override_root = Path(step.cwd) if step.cwd else self._resolve_main_checkout_root()
         saved_root = self.project_root
-        # The merge lock file lives at ``<main checkout>/se3/state/merge.lock``;
+        # The merge lock file lives at ``<main checkout>/tianluo/state/merge.lock``;
         # the override root IS the main checkout, so it is the lock root.
         from ..commands.merge.merge_lock import MergeLock, is_lock_held_in_process
 
@@ -895,7 +895,7 @@ class StateMachine:
         logger.info(f"Running step: {step.step_type.value}")
 
         # Hard fallback layer (the second, post-hoc guard): snapshot every
-        # se3/specs/** file's content hash before a non-exempt step runs, so a
+        # tianluo/specs/** file's content hash before a non-exempt step runs, so a
         # within-step spec write that slipped past the PreToolUse hook (most
         # notably a Bash redirect / sed / tee, which the tool-matcher hook never
         # sees) can be detected after the handler returns. This guard only asks
@@ -905,7 +905,7 @@ class StateMachine:
         # the shared SPEC_WRITE_ALLOWED_STEPS set (see _spec_diff_guard_enabled).
         # We capture full byte content (not just hashes) so the post-step guard
         # can REVERT an illegal write, not merely flag it — a left-on-disk spec
-        # change would otherwise survive a later `se3 run --resume` and leak
+        # change would otherwise survive a later `luo run --resume` and leak
         # through to commit.
         spec_guard_before: Optional[Dict[str, bytes]] = None
         if self._spec_diff_guard_enabled(step):
@@ -957,7 +957,7 @@ class StateMachine:
         finally:
             step.completed_at = datetime.now()
 
-            # Hard fallback layer: if a non-exempt step wrote any se3/specs/**
+            # Hard fallback layer: if a non-exempt step wrote any tianluo/specs/**
             # file (detected by content-hash diff against the pre-step snapshot),
             # fail the step. This backstops the PreToolUse hook against a Bash
             # redirect / sed / tee that the tool-matcher hook never observes. We
@@ -982,7 +982,7 @@ class StateMachine:
                         # Revert the illegal write so it cannot persist on disk:
                         # restore each touched file to its pre-step content (or
                         # delete a newly-created one). Without this, a left-on-disk
-                        # spec change survives a later `se3 run --resume` (the
+                        # spec change survives a later `luo run --resume` (the
                         # resumed pre-step snapshot already holds the tampered
                         # content, the re-run diffs clean, and the change reaches
                         # commit).
@@ -1001,10 +1001,10 @@ class StateMachine:
                         )
                         step.error_message = (
                             f"Step '{step.step_type.value}' illegally modified "
-                            f"spec file(s) under se3/specs/: "
+                            f"spec file(s) under tianluo/specs/: "
                             f"{', '.join(changed)}. Writing spec files is the "
                             f"dedicated responsibility of the update_spec step "
-                            f"and `se3 sync`; no other step may create, modify, "
+                            f"and `luo sync`; no other step may create, modify, "
                             f"or delete spec files. Changing existing code "
                             f"behavior IS allowed — declare any needed spec "
                             f"change through the plan spec_changes channel "
@@ -1223,7 +1223,7 @@ class StateMachine:
         # default: unless `adjudicate` is explicitly opted into
         # confirmation.steps, `_maybe_confirm_adjudication` returns None and the
         # ruling auto-passes; only when opted in is a description-changing ruling
-        # gated behind the confirmation门 (human review via se3/calls, or an LLM
+        # gated behind the confirmation门 (human review via tianluo/calls, or an LLM
         # reviewer) first. Once confirmation clears (or when none is required),
         # the pending fix_instructions are dropped (superseded, recorded in the
         # ADJUDICATE outputs for audit) and the flow re-runs SELF_CHECK directly
@@ -1803,7 +1803,7 @@ class StateMachine:
         ``adjudicate: {reviewer: human}`` when that rewrite must be human-gated.
 
         When the entry *is* present, the reviewer decides: reviewer=human →
-        PAUSED / se3 calls; an LLM reviewer → synchronous review. One carve-out
+        PAUSED / luo calls; an LLM reviewer → synchronous review. One carve-out
         survives the flipped default: a ruling that only overrides the **plan /
         test expectations** (no description rewrite) is *never* human-gated even
         when explicitly configured ``reviewer: human`` — human review guards
@@ -1877,7 +1877,7 @@ class StateMachine:
         Placed immediately after the ADJUDICATE slot (before the SELF_CHECK the
         ruling re-runs). ``_build_step_inputs`` resolves the reviewer from
         ``confirmation.steps.adjudicate`` (the most-recent unconfirmed non-confirm
-        step is this ADJUDICATE), so a human reviewer PAUSEs on a se3/calls file
+        step is this ADJUDICATE), so a human reviewer PAUSEs on a tianluo/calls file
         and an LLM reviewer runs synchronously — reusing confirm.py wholesale, no
         new counter. A rejected review flows back through the shared
         ``_transition_to_revision`` path (review_iterations-bounded) to re-run
@@ -2140,7 +2140,7 @@ class StateMachine:
     def _get_workflow_config(self) -> "WorkflowConfig":
         """Load and cache workflow configuration for the current transition.
 
-        Memoized on the instance to avoid re-reading se3.yaml within a
+        Memoized on the instance to avoid re-reading tianluo.yaml within a
         single transition cycle. The cache is invalidated at the top of
         ``transition_to_next`` so each transition starts fresh.
 
@@ -2159,7 +2159,7 @@ class StateMachine:
         ``last_good is None``, which covers two cases:
 
         1. Startup via ``create_flow`` — the canonical fail-fast path.
-           The user must fix se3.yaml before the flow starts.
+           The user must fix tianluo.yaml before the flow starts.
         2. The first transition of a freshly resumed flow on a brand-new
            ``StateMachine`` instance (e.g. after process restart). The
            on-disk config is re-validated and an invalid value still
@@ -2214,7 +2214,7 @@ class StateMachine:
                 "Workflow config became invalid mid-flow (%s); "
                 "continuing with previously-loaded config to avoid "
                 "leaving the flow in an inconsistent state. Fix "
-                "se3.yaml to clear the warning.",
+                "tianluo.yaml to clear the warning.",
                 e,
             )
             cfg = last_good
@@ -2268,7 +2268,7 @@ class StateMachine:
         resolution = self._get_self_check_resolution()
         # One-shot WARNING when an explicit count is smaller than the chain
         # count (extra chains will not run). The effective count itself is
-        # computed by the shared helper so the state machine and ``se3 history
+        # computed by the shared helper so the state machine and ``luo history
         # show`` can never disagree on the ``#i/N`` denominator.
         if (
             resolution.form == "nested"
@@ -2650,7 +2650,7 @@ class StateMachine:
             # re-load WorkflowConfig on the initial pass (the per-transition
             # cache covers the second call within the same transition, but
             # the handler runs in a different code path and would re-parse
-            # se3.yaml otherwise). Treat the input as a hard contract: the
+            # tianluo.yaml otherwise). Treat the input as a hard contract: the
             # handler may now assume it is always present and an int.
             inputs["max_fix_iterations"] = self._get_max_fix_iterations()
             fix_iteration = flow.state.get_fix_iteration()

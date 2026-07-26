@@ -31,8 +31,8 @@ from tianluo.engine.models import (
 @pytest.fixture
 def project_root(tmp_path):
     """Create a minimal project directory."""
-    (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "open").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "closed").mkdir(parents=True)
     return tmp_path
 
 
@@ -148,7 +148,7 @@ class TestCreateFromFixLoopExhaustion:
         issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
 
         assert issue is not None
-        assert f"**History path:** se3/history/{basic_flow.flow_id}" in issue.description
+        assert f"**History path:** tianluo/history/{basic_flow.flow_id}" in issue.description
 
     def test_description_includes_refined_description(self, discovery, basic_flow):
         # Add a completed DISCOVERY step with a refined_description

@@ -1,5 +1,6 @@
 """SE3 Init command - Initialize a new SE3 project."""
 
+from tianluo.runtime_paths import runtime_dir
 import fnmatch
 import subprocess
 from datetime import datetime
@@ -36,7 +37,7 @@ def _render_template(template_name: str, **values: str) -> str:
 DEFAULT_SE3_YAML = """# SE3 Project Configuration
 # https://github.com/Fission-AI/SE3
 #
-# For local-only overrides, create se3.local.yaml in the project root.
+# For local-only overrides, create tianluo.local.yaml in the project root.
 # When present, it fully replaces this file at load time and is
 # gitignored by default so personal tweaks never get committed.
 
@@ -107,10 +108,10 @@ DEFAULT_GITIGNORE_TEMPLATE = """# ==============================================
 !/VERSIONS.md
 !/progress.md
 !/pyproject.toml
-!/se3.yaml
+!/tianluo.yaml
 !/docs/
 !/scripts/
-!/se3/
+!/tianluo/
 !/src/
 !/tests/
 
@@ -153,25 +154,25 @@ env/
 .DS_Store
 
 # SE3: ignore runtime content, whitelist committed artifacts.
-# `!/se3/` above un-ignores the se3/ directory so git descends into it;
-# `/se3/*` then re-applies default-deny one level down, tracking only the
+# `!/tianluo/` above un-ignores the tianluo/ directory so git descends into it;
+# `/tianluo/*` then re-applies default-deny one level down, tracking only the
 # committable artifacts whitelisted below.
-/se3/*
-!/se3/code-index.md
-!/se3/charter.md
-!/se3/issues/
-!/se3/scripts/
-!/se3/version-rules.md
+/tianluo/*
+!/tianluo/code-index.md
+!/tianluo/charter.md
+!/tianluo/issues/
+!/tianluo/scripts/
+!/tianluo/version-rules.md
 # Version-reconcile intent metadata: written by a worktree session's commit
 # step and committed on the flow branch so the merge-side reconcile step can
 # read every merged-in branch's intent from master. Must be tracked, unlike
-# the rest of se3/ runtime content that /se3/* ignores.
-!/se3/version-intents/
+# the rest of tianluo/ runtime content that /tianluo/* ignores.
+!/tianluo/version-intents/
 
 # SE3: local-only config overrides (never committed). Redundant under the
 # root default-deny, but kept explicit so the intent survives manual edits
-# that whitelist se3.local.yaml's siblings.
-se3.local.yaml
+# that whitelist tianluo.local.yaml's siblings.
+tianluo.local.yaml
 """
 
 
@@ -217,13 +218,13 @@ def init_repository(path: Path) -> tuple[bool, str]:
         return False, "Git is not installed or not in PATH"
 
 
-LOCAL_CONFIG_PATTERN = "se3.local.yaml"
+LOCAL_CONFIG_PATTERN = "tianluo.local.yaml"
 # Sentinel used to distinguish narrow negation patterns (that specifically
-# un-ignore ``se3.local.yaml``) from broad ones (like ``!*.yaml``). A
+# un-ignore ``tianluo.local.yaml``) from broad ones (like ``!*.yaml``). A
 # negation is "narrow" only if it matches LOCAL_CONFIG_PATTERN while NOT
-# also matching the committed ``se3.yaml`` — i.e. the user was targeting
+# also matching the committed ``tianluo.yaml`` — i.e. the user was targeting
 # the ``.local.yaml`` name specifically, not ``.yaml`` in general.
-_PROJECT_CONFIG_PATTERN = "se3.yaml"
+_PROJECT_CONFIG_PATTERN = "tianluo.yaml"
 # No leading newline here — callers add exactly one blank-line separator
 # before this block, independent of whether the existing file ends with
 # a newline. Keeping the separator logic out of the constant avoids the
@@ -241,7 +242,7 @@ def _normalize_gitignore_pattern(pattern: str) -> str:
     - Leading ``/``: gitignore root anchor, not part of the filename.
     - Leading ``**/``: git's recursive-glob semantics — matches the file
       at any depth. ``fnmatchcase`` does not model ``**``, so without
-      stripping we would miss patterns like ``**/se3.local.yaml`` and
+      stripping we would miss patterns like ``**/tianluo.local.yaml`` and
       append a redundant rule.
     - Trailing ``/``: directory-only marker. A directory-only pattern
       does not strictly ignore a regular file, but the user has already
@@ -258,13 +259,13 @@ def _normalize_gitignore_pattern(pattern: str) -> str:
 
 
 def _gitignore_has_local_pattern(content: str) -> bool:
-    """Return True when .gitignore already ignores ``se3.local.yaml``.
+    """Return True when .gitignore already ignores ``tianluo.local.yaml``.
 
-    Matches literal lines (``se3.local.yaml`` / ``/se3.local.yaml`` /
-    ``**/se3.local.yaml``) as well as glob patterns that already cover
+    Matches literal lines (``tianluo.local.yaml`` / ``/tianluo.local.yaml`` /
+    ``**/tianluo.local.yaml``) as well as glob patterns that already cover
     the filename (e.g. ``*.local.yaml``, ``*.local.*``, ``tianluo.local.*``).
     Without this the user would get a redundant append block on every
-    ``se3 init`` even though the file is already ignored by an existing
+    ``luo init`` even though the file is already ignored by an existing
     broader pattern. Negation patterns (``!...``) are skipped — they
     weaken ignore rules rather than add them.
     """
@@ -281,18 +282,18 @@ def _gitignore_has_local_pattern(content: str) -> bool:
 
 
 def _gitignore_has_local_negation(content: str) -> bool:
-    """Return True when .gitignore *narrowly* un-ignores ``se3.local.yaml``.
+    """Return True when .gitignore *narrowly* un-ignores ``tianluo.local.yaml``.
 
     Git's ``!pattern`` syntax re-includes a previously-ignored path. If
-    the user has explicitly written ``!se3.local.yaml`` (perhaps because
+    the user has explicitly written ``!tianluo.local.yaml`` (perhaps because
     a broad pattern like ``*.yaml`` was ignoring it and they wanted the
-    file tracked), silently appending ``se3.local.yaml`` afterwards
+    file tracked), silently appending ``tianluo.local.yaml`` afterwards
     creates two conflicting rules that fight by last-line-wins order —
     the user could end up with the file tracked or ignored depending on
     unrelated edits, without any warning.
 
-    "Narrow" here means the negation pattern matches ``se3.local.yaml``
-    but does NOT also match ``se3.yaml``. Broad patterns such as
+    "Narrow" here means the negation pattern matches ``tianluo.local.yaml``
+    but does NOT also match ``tianluo.yaml``. Broad patterns such as
     ``!*.yaml``, ``!se3.*``, or ``!*`` happen to cover our file too, but
     the user was not explicitly un-ignoring it — they just have a general
     rule that tracks all YAML (or all) files. In that case appending our
@@ -316,23 +317,23 @@ def _gitignore_has_local_negation(content: str) -> bool:
 
 
 def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
-    """Ensure ``.gitignore`` ignores ``se3.local.yaml``.
+    """Ensure ``.gitignore`` ignores ``tianluo.local.yaml``.
 
     Five outcomes are returned via ``status``:
 
     - ``"created"`` — file did not exist (or ``force=True``); template was
       written from scratch.
-    - ``"appended"`` — file existed without ``se3.local.yaml`` in it; we
+    - ``"appended"`` — file existed without ``tianluo.local.yaml`` in it; we
       appended the local-config-ignore block (idempotent: re-running is a
       no-op). Even without ``--force`` this happens, because the task
       explicitly requires the pattern to be present.
     - ``"negated"`` — file existed and contained an explicit negation
-      (``!se3.local.yaml``) that would fight a plain ``se3.local.yaml``
+      (``!tianluo.local.yaml``) that would fight a plain ``tianluo.local.yaml``
       append. We leave the file untouched and surface a warning rather
       than create two conflicting rules that silently resolve by
       last-line-wins.
     - ``"unchanged"`` — file existed and already ignored
-      ``se3.local.yaml``.
+      ``tianluo.local.yaml``.
     - ``"error"`` — an I/O error prevented reading or writing the file.
       Distinct from ``"unchanged"`` so callers can surface the real
       failure instead of showing a misleading "already exists" message.
@@ -362,14 +363,14 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
 
     # Negation check runs BEFORE the ignore-pattern check on purpose: a
     # file can contain both a broad ignore (e.g. ``*.yaml``) AND an
-    # explicit ``!se3.local.yaml`` negation. Semantically the negation
+    # explicit ``!tianluo.local.yaml`` negation. Semantically the negation
     # wins — git keeps the file tracked — so returning ``"unchanged"``
     # because the broad pattern also matches would make us silently
-    # accept a state where se3.local.yaml is NOT ignored and the
+    # accept a state where tianluo.local.yaml is NOT ignored and the
     # operator never gets warned. Surface the negation warning first.
     if _gitignore_has_local_negation(existing):
-        # User explicitly un-ignored se3.local.yaml. Appending a plain
-        # ``se3.local.yaml`` line now would create two conflicting rules
+        # User explicitly un-ignored tianluo.local.yaml. Appending a plain
+        # ``tianluo.local.yaml`` line now would create two conflicting rules
         # where later-line-wins determines the outcome — exactly the
         # kind of silent foot-gun we want to avoid. Do not modify the
         # file; the caller will surface the warning to the operator.
@@ -412,11 +413,11 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
 def _get_charter_template(project_name: str) -> str:
     """Generate the project charter content from the ``charter.md`` template.
 
-    The charter (``se3/charter.md``) is the new-knowledge-system replacement
-    for the retired base spec: it is injected — in full — into every `se3 run`
+    The charter (``tianluo/charter.md``) is the new-knowledge-system replacement
+    for the retired base spec: it is injected — in full — into every `luo run`
     step and doubles as the conventions channel for sandboxed LLM
-    sub-processes. ``se3 init`` scaffolds it (rather than the retired
-    ``se3/specs/base/spec.md``) so a fresh, non-migrated project bootstraps the
+    sub-processes. ``luo init`` scaffolds it (rather than the retired
+    ``tianluo/specs/base/spec.md``) so a fresh, non-migrated project bootstraps the
     code-index + charter + why-comment triad with a committable charter from
     the start.
 
@@ -424,7 +425,7 @@ def _get_charter_template(project_name: str) -> str:
     prompts the old base-spec skeleton used, so a fresh project still gets a
     guided skeleton; the rendering is delegated to
     ``charter.render_charter_template`` so it stays consistent with the
-    `se3 migrate` charter assembly and the packaged template stays the single
+    `luo migrate` charter assembly and the packaged template stays the single
     source of truth.
     """
     return charter_mod.render_charter_template(
@@ -435,7 +436,7 @@ def _get_charter_template(project_name: str) -> str:
         coding_conventions="（请填写代码规范）",
         key_constraints="（请填写关键约束）",
         workflow_conventions=(
-            '使用 `se3 run "task description"` 启动开发流程\n'
+            '使用 `luo run "task description"` 启动开发流程\n'
             "- 运行测试后才可标记功能完成\n"
             "- 主分支保持可运行状态"
         ),
@@ -445,7 +446,7 @@ def _get_charter_template(project_name: str) -> str:
 def _get_versions_md_template(project_name: str) -> str:
     """Generate the initial ``VERSIONS.md`` content from its template.
 
-    Reads ``src/se3/templates/versions_md.md`` and fills the
+    Reads ``src/tianluo/templates/versions_md.md`` and fills the
     ``{project_name}`` / ``{date}`` placeholders. The rendered file starts
     with a ``# Version History`` title and a ``## 0.1.0 - <date>`` entry,
     matching the changelog shape the documentation-updater pipeline inserts
@@ -474,16 +475,16 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     created = []
     skipped = []
 
-    # Create se3 runtime directory. The retired spec corpus (se3/specs/) is no
+    # Create se3 runtime directory. The retired spec corpus (tianluo/specs/) is no
     # longer scaffolded — the new knowledge system stores project conventions
-    # in se3/charter.md (committable via the gitignore whitelist) and the
-    # auto-maintained se3/code-index.md.
-    se3_dir = root / "se3"
+    # in tianluo/charter.md (committable via the gitignore whitelist) and the
+    # auto-maintained tianluo/code-index.md.
+    se3_dir = runtime_dir(root)
     se3_dir.mkdir(exist_ok=True)
 
-    # Create se3.yaml (never touch se3.local.yaml — it is user-owned and
+    # Create tianluo.yaml (never touch tianluo.local.yaml — it is user-owned and
     # takes precedence at load time).
-    se3_yaml = root / "se3.yaml"
+    se3_yaml = root / "tianluo.yaml"
     if not se3_yaml.exists() or force:
         se3_yaml.write_text(
             DEFAULT_SE3_YAML.format(project_name=project_name), encoding="utf-8"
@@ -492,20 +493,20 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     else:
         skipped.append(t("init.file_exists", path=str(se3_yaml.relative_to(root))))
 
-    # Detect (but do not modify) an existing se3.local.yaml so the operator
-    # knows it will shadow the just-generated se3.yaml at load time.
-    local_yaml = root / "se3.local.yaml"
+    # Detect (but do not modify) an existing tianluo.local.yaml so the operator
+    # knows it will shadow the just-generated tianluo.yaml at load time.
+    local_yaml = root / "tianluo.local.yaml"
     # Use is_file() (not exists()) so the warning fires only for a real
-    # file that will actually shadow se3.yaml at load time — matches the
+    # file that will actually shadow tianluo.yaml at load time — matches the
     # check in get_project_config_path(). A directory or dangling symlink
     # at this path would not shadow, so we shouldn't warn about it.
     local_overrides_yaml = local_yaml.is_file()
 
-    # Create the project charter (se3/charter.md). This is the single
+    # Create the project charter (tianluo/charter.md). This is the single
     # project-convention artifact the new knowledge system scaffolds; it is
-    # whitelisted by the generated .gitignore (!/se3/charter.md) so it is
+    # whitelisted by the generated .gitignore (!/tianluo/charter.md) so it is
     # committable, and get_charter_injection injects it in full into every
-    # step. Writing a base spec into the now-gitignored se3/specs/ tree would
+    # step. Writing a base spec into the now-gitignored tianluo/specs/ tree would
     # leave a fresh project with no committable, no injectable conventions.
     charter_file = charter_mod.charter_path(root)
     if not charter_file.exists() or force:
@@ -542,8 +543,8 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
             git_initialized = True
 
     # Create or update .gitignore. Five outcomes are surfaced: created
-    # (brand-new file), appended (existing file gained the se3.local.yaml
-    # pattern), negated (file explicitly un-ignores se3.local.yaml so we
+    # (brand-new file), appended (existing file gained the tianluo.local.yaml
+    # pattern), negated (file explicitly un-ignores tianluo.local.yaml so we
     # refused to append a conflicting rule), unchanged (existing file
     # already had the pattern), and error (an I/O error prevented the
     # read or write). The error status is kept distinct from unchanged so
@@ -581,9 +582,9 @@ def init_cmd(
     """Initialize a new SE3 project.
 
     Creates the standard SE3 directory structure:
-    - se3.yaml - Project configuration
-    - se3/ - SE3 runtime directory
-    - se3/charter.md - Project charter (injected into every flow step)
+    - tianluo.yaml - Project configuration
+    - tianluo/ - SE3 runtime directory
+    - tianluo/charter.md - Project charter (injected into every flow step)
     """
     root = Path(project_root).resolve()
 
@@ -622,7 +623,7 @@ def init_cmd(
     elif result.get("gitignore_already_existed"):
         typer.echo(t("init.gitignore_exists"))
 
-    # Warn when an existing se3.local.yaml will shadow the generated se3.yaml
+    # Warn when an existing tianluo.local.yaml will shadow the generated tianluo.yaml
     if result.get("local_overrides_yaml"):
         typer.echo(t("init.local_overrides"))
 

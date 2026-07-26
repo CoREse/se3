@@ -1,4 +1,4 @@
-"""i18n routing for user-visible ``se3 run`` console text (src/se3/commands/run.py).
+"""i18n routing for user-visible ``se3 run`` console text (src/tianluo/commands/run.py).
 
 These assert that run.py's migrated prompts/status text render through the
 ``tianluo.i18n`` catalog — the en-US reference and the zh-CN translation — rather

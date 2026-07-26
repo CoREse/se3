@@ -1,7 +1,7 @@
 # {project_name} — Base Specification
 
 ## Purpose
-项目基础约定。此 spec 由 `se3 init` 生成，在所有 `se3 run` 流程中自动加载。
+项目基础约定。此 spec 由 `luo init` 生成，在所有 `luo run` 流程中自动加载。
 
 ## Requirements
 
@@ -29,7 +29,7 @@
 **版本号文件（单一真相源）:**
 - Python 项目: `pyproject.toml` 中的 `project.version` 字段
 - Node.js 项目: `package.json` 中的 `version` 字段
-- 其他项目: 在 `se3.yaml` 中显式指定 `version.file_path`
+- 其他项目: 在 `tianluo.yaml` 中显式指定 `version.file_path`
 
 **版本格式:**
 遵循 SemVer 2.0.0: `MAJOR.MINOR.PATCH[-prerelease][+build]`
@@ -40,7 +40,7 @@
 **版本决策模型:**
 - `version_analyze` 步骤的 `suggested_version` 字段是新版本号的唯一权威来源
   （由 LLM 基于实际变更内容、SemVer 2.0.0 默认规则以及可选的项目级规则文件推导）
-- 可选自定义规则: 在 `se3/version-rules.md` 写入自然语言规则，
+- 可选自定义规则: 在 `tianluo/version-rules.md` 写入自然语言规则，
   `version_analyze` 会将其注入 LLM prompt 作为决策依据；文件不存在时回落到默认 SemVer 2.0.0 规则
 - `commit` 步骤直接采用 `suggested_version` 写入版本文件；若该字段缺失或步骤失败，
   流程报错中断并提示人工介入（不再有静默 patch bump 兜底）
@@ -49,7 +49,7 @@
 - README.md: 显示当前版本徽章/头部
 - VERSIONS.md: 维护版本历史变更日志
 
-**配置（se3.yaml）:**
+**配置（tianluo.yaml）:**
 ```yaml
 version:
   enabled: true
@@ -65,7 +65,7 @@ version:
 - **AND** 所有变更一起提交
 
 #### Scenario: 手动版本控制
-- **GIVEN** 在 `se3.yaml` 中设置 `version.enabled: false`
+- **GIVEN** 在 `tianluo.yaml` 中设置 `version.enabled: false`
 - **WHEN** 执行 commit 步骤
 - **THEN** 不自动 bump 版本
 - **AND** 需要手动更新版本号

@@ -42,7 +42,7 @@ def _good_spec(name: str = "auth") -> str:
 # be detected as invalid.
 _DOCUMENTATION_UPDATER_META = (
     "I have explored the documentation-updater module. The main file is "
-    "src/se3/engine/docs_updater.py. The class DocumentationUpdater "
+    "src/tianluo/engine/docs_updater.py. The class DocumentationUpdater "
     "manages README.md and VERSIONS.md updates. It has methods for "
     "updating version badges and inserting changelog entries. The "
     "module exposes a Template helper and three regexes for badge "

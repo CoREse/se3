@@ -566,7 +566,7 @@ def test_create_app_kwargs_from_server_config_translates_auth():
     assert kwargs["db_path"] == "/tmp/custom-server.db"
     # providers expanded into full entries carrying each provider's options,
     # including trust_proxy so the proxy-header provider is actually enableable
-    # purely through se3.yaml.
+    # purely through tianluo.yaml.
     entries = kwargs["auth_config"]["providers"]
     assert entries[0] == "local"
     assert entries[1] == {

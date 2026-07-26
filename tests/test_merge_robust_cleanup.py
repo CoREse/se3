@@ -1,10 +1,10 @@
 """Tests for ``--delete-merged`` archive-before-delete behavior.
 
 Commit 5 (this file): every successful deletion archives the worktree
-under ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` BEFORE running
+under ``<project_root>/tianluo/worktrees/.archive/<slug>-<ts>/`` BEFORE running
 ``git worktree remove`` + ``git branch -d``. Archive failures preserve
 the worktree + branch so an operator can recover. The archive lands inside
-the sole ignored runtime root ``se3/`` (covered by ``/se3/*``) so it can
+the sole ignored runtime root ``tianluo/`` (covered by ``/tianluo/*``) so it can
 never leak into git.
 
 Archive is strategy-agnostic — these tests use the default robust
@@ -112,13 +112,13 @@ class TestArchiveWorktreeHelper:
         )
         archive_path = _archive_worktree(tmp_path, branch, wt_path)
         assert archive_path.is_dir()
-        # New落点: archive is the hidden ``.archive`` subdir of se3/worktrees/.
+        # New落点: archive is the hidden ``.archive`` subdir of tianluo/worktrees/.
         assert archive_path.parent.name == ".archive"
         # The whole archive path is anchored inside the ignored runtime root
-        # ``se3/worktrees/.archive`` — never under a leaking ``.se3/``.
-        assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
+        # ``tianluo/worktrees/.archive`` — never under a leaking ``.se3/``.
+        assert archive_path.parent == tmp_path / "tianluo" / "worktrees" / ".archive"
         rel = archive_path.relative_to(tmp_path)
-        assert rel.parts[:3] == ("se3", "worktrees", ".archive")
+        assert rel.parts[:3] == ("tianluo", "worktrees", ".archive")
         assert ".se3" not in rel.parts
         # Tracked file present in archive
         assert (archive_path / "tracked.py").exists()
@@ -175,9 +175,9 @@ class TestCleanupArchiveIntegration:
         archived_branch, archive_path = report.archived[0]
         assert archived_branch == branch
         assert archive_path.exists()
-        # Archive lands inside the ignored runtime root se3/worktrees/.archive,
+        # Archive lands inside the ignored runtime root tianluo/worktrees/.archive,
         # not a leaking .se3/.
-        assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
+        assert archive_path.parent == tmp_path / "tianluo" / "worktrees" / ".archive"
         assert ".se3" not in archive_path.relative_to(tmp_path).parts
         # Archive contains tracked content
         assert (archive_path / "tracked.py").exists()

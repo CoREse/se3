@@ -589,7 +589,7 @@ class TestAnalyzePersistsAnalyzedType:
             task_description="Add a new capability",
             task_type=explicit_type or "pending",
             change_name="test-change",
-            change_path=project_root / "se3.yaml",
+            change_path=project_root / "tianluo.yaml",
         )
         if explicit_type:
             flow.state.context["explicit_type"] = explicit_type

@@ -26,7 +26,7 @@ def _make_step_and_flow(tmp_path: Path, task_groups: list[dict]) -> tuple[Step, 
     )
     flow = FlowInstance(
         task_description="Test task",
-        change_path=tmp_path / "se3",
+        change_path=tmp_path / "tianluo",
     )
     return step, flow
 

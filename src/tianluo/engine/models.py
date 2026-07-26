@@ -639,7 +639,7 @@ class FlowInstance:
     # Baseline commit for change detection (used in multi-worktree scenarios)
     baseline_commit: Optional[str] = None
 
-    # Worktree isolation mode (se3 run --worktree)
+    # Worktree isolation mode (luo run --worktree)
     is_worktree_mode: bool = False
     worktree_branch: Optional[str] = None
     worktree_path: Optional[str] = None
@@ -895,7 +895,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     StepType.CHARTER_FRESHNESS: {
         "name": "charter_freshness",
         # WHY: read_only is False even though the LLM sub-call stays read-only.
-        # The handler itself may write se3/charter.md: sitting after a COMPLETED
+        # The handler itself may write tianluo/charter.md: sitting after a COMPLETED
         # invariant_check, a *descriptive* charter update (making the constitution
         # reflect the already-approved new reality) is closed inside the handler
         # via propose -> gate -> apply, with no issue and no state-machine route.
@@ -907,7 +907,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
             "Charter freshness: does this diff touch any of charter's three "
             "content classes (project identity / top-level architecture / "
             "project-wide cross-cutting conventions)? On a hit the handler may "
-            "write se3/charter.md itself — a descriptive, anchored, gated update "
+            "write tianluo/charter.md itself — a descriptive, anchored, gated update "
             "closed in-handler (propose -> gate -> apply); write execution is the "
             "handler's Python, the LLM sub-call only proposes text and stays "
             "read-only. The overwhelming majority of flows pass cheaply. Never "

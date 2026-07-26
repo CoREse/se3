@@ -69,7 +69,7 @@ def extract_user_content(content: str) -> Optional[str]:
     """Extract the user's literal input out of a step-prompt body, or ``None``.
 
     The Python-side equivalent of the web console's ``splitUserPromptByMarker``
-    (``src/se3/server/static/app.js``), reusing the same marker constants so the
+    (``src/tianluo/server/static/app.js``), reusing the same marker constants so the
     two implementations cannot drift. It locates the three markers in canonical
     order — :data:`TEMPLATE_PREFIX_END` → :data:`USER_CONTENT_BEGIN` →
     :data:`USER_CONTENT_END` — and returns the middle (user-content) segment

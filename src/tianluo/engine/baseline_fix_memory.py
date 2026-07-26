@@ -21,11 +21,12 @@ read corruption-tolerantly (a missing / corrupt / schema-mismatched file reads
 as an empty set), and bounded to :data:`MAX_ENTRIES` most-recently-touched ids
 (insertion-order LRU) so the file cannot grow without limit.
 
-The store lives at ``se3/state/baseline_fix_attempts.json`` — gitignored by the
-``/se3/*`` rule and therefore never tracked.
+The store lives at ``tianluo/state/baseline_fix_attempts.json`` — gitignored by the
+``/tianluo/*`` rule and therefore never tracked.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -41,7 +42,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BASELINE_FIX_MEMORY_SCHEMA_VERSION = 1
-_MEMORY_REL_PATH = Path("se3") / "state" / "baseline_fix_attempts.json"
+_MEMORY_SUBPATH = Path("state") / "baseline_fix_attempts.json"
 
 # Bound the on-disk store so a long-lived project accumulating given-up baseline
 # failures over many flows cannot grow the file without limit. Most-recently
@@ -55,7 +56,7 @@ MAX_ENTRIES = 500
 
 def memory_path(project_root: Path) -> Path:
     """Return the path to the baseline-fix memory file for *project_root*."""
-    return Path(project_root) / _MEMORY_REL_PATH
+    return runtime_dir(project_root) / _MEMORY_SUBPATH
 
 
 # ---------------------------------------------------------------------------

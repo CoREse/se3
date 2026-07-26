@@ -32,13 +32,13 @@ def _init_repo(path: Path) -> None:
         check=True, capture_output=True,
     )
     (path / "README.md").write_text("# Test\n")
-    # Ignore se3/ runtime directory so that merge lock files and logs
+    # Ignore tianluo/ runtime directory so that merge lock files and logs
     # do not cause "untracked working tree files would be overwritten".
     # version-intents is whitelisted (matching the real init/migrate template)
     # so worktree sessions' intents actually travel with the branch — write_intent
     # now refuses to write to a gitignored path.
     (path / ".gitignore").write_text(
-        "/se3/*\n!/se3/specs/\n!/se3/issues/\n!/se3/version-intents/\n"
+        "/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n!/tianluo/version-intents/\n"
     )
     subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
     subprocess.run(
@@ -215,10 +215,10 @@ class TestMergeOrchestrator:
                 bump_type="minor",
             ),
         )
-        # se3/ is gitignored in this fixture; force-add so the intent lands in
+        # tianluo/ is gitignored in this fixture; force-add so the intent lands in
         # the committed tree that intent_flow_ids_at_ref reads.
         subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "-f", "se3/version-intents"],
+            ["git", "-C", str(tmp_path), "add", "-f", "tianluo/version-intents"],
             check=True, capture_output=True,
         )
         subprocess.run(
@@ -725,7 +725,7 @@ class TestMergeOrchestrator:
         """If guardrails detect violations but rollback fails, report.rollback_failed=True."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -772,7 +772,7 @@ class TestMergeOrchestrator:
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -913,7 +913,7 @@ class TestMergeOrchestrator:
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -1169,7 +1169,7 @@ class TestMergeOrchestrator:
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -1656,7 +1656,7 @@ class TestMergeOrchestratorConflictResolution:
 
         # Call file should exist and be set on report
         assert report.human_call_file is not None
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         call_files = list(calls_dir.glob("merge_*.json"))
         assert len(call_files) >= 1
 
@@ -2537,7 +2537,7 @@ class TestMergeOrchestratorCleanupInteraction:
         file is written."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -2583,7 +2583,7 @@ class TestMergeOrchestratorCleanupInteraction:
         assert post_head == pre_head
 
         # Human call file should exist (generic CHECK_FAILURE)
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         call_files = list(calls_dir.glob("merge_*_guardrail.json"))
         assert len(call_files) == 1
         data = json.loads(call_files[0].read_text())
@@ -3761,7 +3761,7 @@ class TestFastAbortBehavior:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_before = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
@@ -3784,7 +3784,7 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
         # No new call files should have been created
-        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
     def test_fast_per_file_requires_human_review_on_non_spec_accept(self, tmp_path: Path, monkeypatch) -> None:
@@ -3814,7 +3814,7 @@ class TestFastAbortBehavior:
             "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_before = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
@@ -3829,7 +3829,7 @@ class TestFastAbortBehavior:
         assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
 
         # No new call files should have been created
-        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
     def test_fast_incomplete_resolution_aborts_no_call_file(self, tmp_path: Path, monkeypatch) -> None:
@@ -4270,7 +4270,7 @@ class TestFastAbortBehavior:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_before = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
@@ -4293,7 +4293,7 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
         # No new call files
-        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
     def test_fast_spec_file_low_confidence_aborts_no_call_file(self, tmp_path: Path, monkeypatch) -> None:
@@ -4308,7 +4308,7 @@ class TestFastAbortBehavior:
         default_branch = _get_default_branch(tmp_path)
 
         # Set up a spec file and create conflicting branches
-        spec_dir = tmp_path / "se3" / "specs" / "test"
+        spec_dir = tmp_path / "tianluo" / "specs" / "test"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate.\n")
         subprocess.run(
@@ -4353,7 +4353,7 @@ class TestFastAbortBehavior:
             return LLMResolution(
                 files=[
                     FileResolution(
-                        path="se3/specs/test/spec.md",
+                        path="tianluo/specs/test/spec.md",
                         resolved_content="## Requirement: Auth\n\nThe system SHALL validate all inputs.\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged")],
                         overall_confidence=Confidence.LOW,
@@ -4374,7 +4374,7 @@ class TestFastAbortBehavior:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_before = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
@@ -4397,7 +4397,7 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
         # No new call files should have been created
-        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
 
@@ -4408,7 +4408,7 @@ class TestGuardrailsStrategyAware:
         """Init repo with a spec file. Returns default branch name."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -4457,7 +4457,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4478,7 +4478,7 @@ class TestGuardrailsStrategyAware:
         # Mock GuardrailRepairer to succeed
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
             from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
 
         monkeypatch.setattr(
             "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
@@ -4522,7 +4522,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4584,7 +4584,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4633,7 +4633,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4682,7 +4682,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4703,7 +4703,7 @@ class TestGuardrailsStrategyAware:
         # Mock repairer to succeed
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
             from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
 
         monkeypatch.setattr(
             "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
@@ -4822,7 +4822,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4878,7 +4878,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4937,7 +4937,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -4965,7 +4965,7 @@ class TestGuardrailsStrategyAware:
             import json
             return json.dumps({
                 "files": [{
-                    "path": "se3/specs/base/spec.md",
+                    "path": "tianluo/specs/base/spec.md",
                     "corrected_content": (
                         "## Requirement: Auth\n\n"
                         "The system SHALL validate all user inputs.\n"
@@ -5009,7 +5009,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -5089,7 +5089,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -5152,7 +5152,7 @@ class TestGuardrailsStrategyAware:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -5195,7 +5195,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -5263,7 +5263,7 @@ class TestGuardrailsStrategyAware:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -5286,7 +5286,7 @@ class TestGuardrailsStrategyAware:
             import json
             return json.dumps({
                 "files": [{
-                    "path": "se3/specs/base/spec.md",
+                    "path": "tianluo/specs/base/spec.md",
                     "corrected_content": (
                         "## Requirement: Auth\n\n"
                         "The system SHALL validate all user inputs.\n"
@@ -5911,8 +5911,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Add UNCOMMITTED tier A runtime files to the worktree's se3/
-        wt_se3 = wt_dir / "se3"
+        # Add UNCOMMITTED tier A runtime files to the worktree's tianluo/
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("wt log")
         (wt_se3 / "logs").mkdir(parents=True, exist_ok=True)
@@ -5926,8 +5926,8 @@ class TestRuntimeSyncIntegration:
         assert report.success is True
         assert report.merged_branches == ["feature"]
 
-        # Tier A files from the worktree should be copied into target se3/
-        target_se3 = tmp_path / "se3"
+        # Tier A files from the worktree should be copied into target tianluo/
+        target_se3 = tmp_path / "tianluo"
         assert (target_se3 / "history" / "flow1.log").exists()
         assert (target_se3 / "history" / "flow1.log").read_text() == "wt log"
         assert (target_se3 / "logs" / "app.log").exists()
@@ -5935,7 +5935,7 @@ class TestRuntimeSyncIntegration:
         assert (target_se3 / "state" / "summary-abc.md").exists()
         assert (target_se3 / "state" / "summary-abc.md").read_text() == "wt summary"
 
-        # Cleanup worktree (force because se3/ files are gitignored but present)
+        # Cleanup worktree (force because tianluo/ files are gitignored but present)
         subprocess.run(
             ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
             check=True, capture_output=True,
@@ -5962,8 +5962,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Set up target se3/ with an UNCOMMITTED file that will collide
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with an UNCOMMITTED file that will collide
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -5974,7 +5974,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -6001,7 +6001,7 @@ class TestRuntimeSyncIntegration:
         # The colliding file in target should remain unchanged
         assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
 
-        # Cleanup worktree (force because se3/ files are gitignored but present)
+        # Cleanup worktree (force because tianluo/ files are gitignored but present)
         subprocess.run(
             ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
             check=True, capture_output=True,
@@ -6011,7 +6011,7 @@ class TestRuntimeSyncIntegration:
         """Tier-A collision from inside the orchestrator: verify MergeReport shape.
 
         Creates two branches with bound worktrees; the first merges cleanly and
-        copies its tier-A file into the target se3/. The second branch's merge
+        copies its tier-A file into the target tianluo/. The second branch's merge
         succeeds git-wise but runtime_sync collides because the target now has
         the first branch's file. Verifies:
         - failure_reason='runtime_sync_collision'
@@ -6053,8 +6053,8 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_a), "feature-a"],
             check=True, capture_output=True,
         )
-        (wt_a / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_a / "se3" / "history" / "h1.md").write_text("feature-a history")
+        (wt_a / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_a / "tianluo" / "history" / "h1.md").write_text("feature-a history")
 
         # Create bound worktree for feature-b with SAME tier-A file (collision)
         wt_b = (tmp_path / ".." / "feature-b-wt").resolve()
@@ -6062,8 +6062,8 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
             check=True, capture_output=True,
         )
-        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_b / "se3" / "history" / "h1.md").write_text("feature-b history")
+        (wt_b / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "tianluo" / "history" / "h1.md").write_text("feature-b history")
 
         orch = MergeOrchestrator(
             project_root=tmp_path, strict_runtime_sync=True,
@@ -6164,7 +6164,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True)
         (wt_se3 / "history" / "flow1.log").write_text("wt log")
 
@@ -6182,7 +6182,7 @@ class TestRuntimeSyncIntegration:
         assert report2.merged_branches == ["feature"]
         # Tier A files from the worktree should be synced even though
         # the branch was already merged
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         assert (target_se3 / "history" / "flow1.log").exists()
         assert (target_se3 / "history" / "flow1.log").read_text() == "wt log"
 
@@ -6222,7 +6222,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -6329,8 +6329,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Set up target se3/ with a colliding file
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with a colliding file
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -6341,7 +6341,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -6420,8 +6420,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Set up target se3/ with a colliding file for B's worktree
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with a colliding file for B's worktree
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -6432,7 +6432,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_b_se3 = wt_b_dir / "se3"
+        wt_b_se3 = wt_b_dir / "tianluo"
         (wt_b_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_b_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -6501,7 +6501,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "conflict-branch"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow.log").write_text("branch history")
 
@@ -6547,7 +6547,7 @@ class TestRuntimeSyncIntegration:
         # The conflict was resolved to ours
         assert (tmp_path / "shared.txt").read_text() == "ours content"
         # Runtime sync should have copied tier A files from the worktree
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         assert (target_se3 / "history" / "flow.log").exists()
         assert (target_se3 / "history" / "flow.log").read_text() == "branch history"
 
@@ -6909,8 +6909,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Set up target se3/ with an UNCOMMITTED file that will collide
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with an UNCOMMITTED file that will collide
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -6921,7 +6921,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -6964,8 +6964,8 @@ class TestRuntimeSyncIntegration:
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
 
-        # Set up target se3/ with a file that both branches will collide with
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with a file that both branches will collide with
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -6992,8 +6992,8 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_a), "feature-a"],
             check=True, capture_output=True,
         )
-        (wt_a / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_a / "se3" / "history" / "flow1.log").write_text("feature-a log")
+        (wt_a / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_a / "tianluo" / "history" / "flow1.log").write_text("feature-a log")
 
         wt_b = tmp_path / ".." / "feature-b-wt"
         wt_b = wt_b.resolve()
@@ -7001,8 +7001,8 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
             check=True, capture_output=True,
         )
-        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_b / "se3" / "history" / "flow1.log").write_text("feature-b log")
+        (wt_b / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "tianluo" / "history" / "flow1.log").write_text("feature-b log")
 
         # Lenient mode — both collisions bypassed
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -7056,8 +7056,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        # Set up target se3/ with colliding file
-        target_se3 = tmp_path / "se3"
+        # Set up target tianluo/ with colliding file
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -7068,8 +7068,8 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature"],
             check=True, capture_output=True,
         )
-        (wt_dir / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_dir / "se3" / "history" / "flow1.log").write_text("feature log")
+        (wt_dir / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_dir / "tianluo" / "history" / "flow1.log").write_text("feature log")
 
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
@@ -7112,7 +7112,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -7122,7 +7122,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -7179,7 +7179,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -7189,14 +7189,14 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-collide"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-collide log")
 
         # Sentinel side-effect setup: bind a worktree to feature-c containing
         # a unique runtime file. If the strict-mode halt logic regresses and
         # feature-c IS attempted, sync_branch_runtime would copy this sentinel
-        # into the target project's se3/history/. Asserting the sentinel's
+        # into the target project's tianluo/history/. Asserting the sentinel's
         # absence is independent of the monkey-patch — even if the monkeypatch
         # becomes a no-op due to a future call-site refactor, the file-system
         # check below will still detect a regression.
@@ -7206,7 +7206,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_c_dir), "feature-c"],
             check=True, capture_output=True,
         )
-        wt_c_se3 = wt_c_dir / "se3"
+        wt_c_se3 = wt_c_dir / "tianluo"
         (wt_c_se3 / "history").mkdir(parents=True, exist_ok=True)
         sentinel_rel = "history/feature-c-sentinel.log"
         (wt_c_se3 / "history" / "feature-c-sentinel.log").write_text(
@@ -7336,7 +7336,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -7346,7 +7346,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-collide"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-collide log")
 
@@ -7651,7 +7651,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -7661,7 +7661,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
@@ -7729,7 +7729,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         src_content = "feature-b log content"
         (wt_se3 / "history" / "flow1.log").write_text(src_content)
@@ -7739,7 +7739,7 @@ class TestRuntimeSyncIntegration:
 
         # Pre-populate target with primary file AND all three sidecar paths
         # so disambiguation exhausts.
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
         (target_se3 / "history" / "flow1.log.from-feature-b").write_text(
@@ -7830,14 +7830,14 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
             check=True, capture_output=True,
         )
-        wt_se3 = wt_dir / "se3"
+        wt_se3 = wt_dir / "tianluo"
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         src_content = "feature-b idempotent log"
         (wt_se3 / "history" / "flow1.log").write_text(src_content)
 
         # Pre-populate target with primary file (different content) AND a
         # sidecar that already matches source — triggers the idempotent path.
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
         (target_se3 / "history" / "flow1.log.from-feature-b").write_text(
@@ -7933,7 +7933,7 @@ class TestRuntimeSyncIntegration:
         HEAD is unchanged -> merge succeeds (side-effect clearance accepted)."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -7946,7 +7946,7 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
             check=True, capture_output=True,
         )
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -7990,7 +7990,7 @@ class TestRuntimeSyncIntegration:
                     passed=False,
                     violations=[GuardrailViolation(
                         violation_type="must_not_weaken",
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         message="SHALL weakened to SHOULD",
                     )],
                 )
@@ -8060,7 +8060,7 @@ class TestRuntimeSyncCollisionVersionAggregation:
         )
 
         # feature-b: no version change, but a worktree with a tier-A file
-        # that will collide with target se3/.
+        # that will collide with target tianluo/.
         _create_branch(tmp_path, "feature-b")
         (tmp_path / "b.txt").write_text("b")
         _commit(tmp_path, "feature-b: add b.txt (no version change)")
@@ -8069,9 +8069,9 @@ class TestRuntimeSyncCollisionVersionAggregation:
             check=True, capture_output=True,
         )
 
-        # Pre-place a colliding tier-A file in target se3/ so feature-b's
+        # Pre-place a colliding tier-A file in target tianluo/ so feature-b's
         # runtime sync hits a strict collision.
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -8080,8 +8080,8 @@ class TestRuntimeSyncCollisionVersionAggregation:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
             check=True, capture_output=True,
         )
-        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_b / "se3" / "history" / "flow1.log").write_text(
+        (wt_b / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "tianluo" / "history" / "flow1.log").write_text(
             "feature-b log (collides)"
         )
 
@@ -8171,7 +8171,7 @@ class TestRuntimeSyncCollisionVersionAggregation:
             check=True, capture_output=True,
         )
 
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -8180,8 +8180,8 @@ class TestRuntimeSyncCollisionVersionAggregation:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
             check=True, capture_output=True,
         )
-        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_b / "se3" / "history" / "flow1.log").write_text(
+        (wt_b / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "tianluo" / "history" / "flow1.log").write_text(
             "feature-b log (collides)"
         )
 
@@ -8256,7 +8256,7 @@ class TestRuntimeSyncCollisionVersionAggregation:
         )
 
         # Set up collision target
-        target_se3 = tmp_path / "se3"
+        target_se3 = tmp_path / "tianluo"
         (target_se3 / "history").mkdir(parents=True, exist_ok=True)
         (target_se3 / "history" / "flow1.log").write_text("target log")
 
@@ -8265,8 +8265,8 @@ class TestRuntimeSyncCollisionVersionAggregation:
             ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
             check=True, capture_output=True,
         )
-        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
-        (wt_b / "se3" / "history" / "flow1.log").write_text(
+        (wt_b / "tianluo" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "tianluo" / "history" / "flow1.log").write_text(
             "feature-b log (collides)"
         )
 
@@ -8398,11 +8398,11 @@ class TestMergeOrchestratorBatchResolverIntegration:
         # Use a low iteration cap so the test runs quickly.  Written
         # after _init_repo so we don't fight that helper's initial
         # commit logic.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "merge:\n  max_conflict_resolve_iterations: 2\n"
         )
         subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "se3.yaml"],
+            ["git", "-C", str(tmp_path), "add", "tianluo.yaml"],
             check=True, capture_output=True,
         )
         subprocess.run(

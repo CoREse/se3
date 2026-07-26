@@ -73,7 +73,7 @@ def _run_handle_spawn(client, payload):
 
 def _write_legacy_yaml(project_root: Path, issue_id: str = "001", **extra):
     """Write a minimal legacy issue YAML missing ``source`` and optional fields."""
-    issues_dir = project_root / "se3" / "issues" / "open"
+    issues_dir = project_root / "tianluo" / "issues" / "open"
     issues_dir.mkdir(parents=True, exist_ok=True)
     data = {"id": issue_id, "status": "open", "description": "Legacy issue"}
     data.update(extra)
@@ -94,7 +94,7 @@ def _write_modern_yaml(
     description: str = "A modern issue with all fields",
 ):
     """Write a fully-specified issue YAML."""
-    issues_dir = project_root / "se3" / "issues" / "open"
+    issues_dir = project_root / "tianluo" / "issues" / "open"
     issues_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "id": issue_id,
@@ -857,7 +857,7 @@ class TestIssueCrudRoundTrip:
 
     def test_aggregator_skips_malformed_yaml(self, tmp_path):
         """Malformed YAML files are silently skipped."""
-        issues_dir = tmp_path / "se3" / "issues" / "open"
+        issues_dir = tmp_path / "tianluo" / "issues" / "open"
         issues_dir.mkdir(parents=True, exist_ok=True)
 
         # Valid issue

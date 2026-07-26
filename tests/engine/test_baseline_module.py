@@ -299,11 +299,11 @@ class TestBaselineTimeoutKill:
 
 class TestResolveBaselineTimeout:
     def test_defaults_when_not_a_project(self, tmp_path):
-        # No se3.yaml → TestConfig defaults → test.timeout default (1800).
+        # No tianluo.yaml → TestConfig defaults → test.timeout default (1800).
         assert test_baseline.resolve_baseline_timeout(tmp_path) == 1800.0
 
     def test_reads_configured_timeout(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "test:\n  timeout: 600\n", encoding="utf-8",
         )
         assert test_baseline.resolve_baseline_timeout(tmp_path) == 600.0

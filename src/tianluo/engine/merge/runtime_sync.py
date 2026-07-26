@@ -1,11 +1,12 @@
-"""Runtime content synchronization for se3 merge.
+"""Runtime content synchronization for luo merge.
 
-After a successful git merge, git-ignored runtime data under ``se3/`` is not
+After a successful git merge, git-ignored runtime data under ``tianluo/`` is not
 automatically merged. This module copies tier A runtime content from the
-source branch's bound worktree into the current branch's ``se3/`` directory.
+source branch's bound worktree into the current branch's ``tianluo/`` directory.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import ctypes
 import ctypes.util
@@ -152,7 +153,7 @@ DEST_HASH_UNAVAILABLE: Final[str] = "unavailable"
 # Defense-in-depth limits on per-file read/write loops so a hostile or
 # malformed file (a magic file that streams forever, a FIFO that slipped
 # past the S_ISREG guard, a file being appended to faster than we can
-# read it) cannot hang ``se3 merge`` indefinitely.  Reaching any cap is a
+# read it) cannot hang ``luo merge`` indefinitely.  Reaching any cap is a
 # loud error rather than a silent truncation.  Sized generously for
 # legitimate runtime data: 256 MiB / 60 s is far above any expected log,
 # state-archive, or summary file we sync.
@@ -184,7 +185,7 @@ def _is_sidecar_filename(name: str) -> bool:
 
     Sidecar files (``<base>.from-<safe_branch>`` /
     ``<base>.from-<safe_branch>.<short_hash>``) created by lenient-mode
-    collision bypass on a previous ``se3 merge`` run.  When such a file
+    collision bypass on a previous ``luo merge`` run.  When such a file
     appears in the source worktree (e.g. inherited from a prior merge),
     syncing it forward would create chains like
     ``foo.from-A.from-B``.  Skip them at collection time.
@@ -366,14 +367,14 @@ def _is_history_supersede(rel_str: str, dest_file: Path, src_content: bytes) -> 
     )
 
 
-# Tier A: directories to recursively scan (relative to se3/)
+# Tier A: directories to recursively scan (relative to tianluo/)
 TIER_A_DIRS = [
     "history",
     "logs",
     "state/archive",
 ]
 
-# Tier A: glob patterns (relative to se3/).
+# Tier A: glob patterns (relative to tianluo/).
 # base.glob() matches direct children only, but when a match is a directory
 # _collect_glob_files recurses into it via _collect_files_under. So e.g.
 # "state/summary-*" collects files directly under state/ AND any nested
@@ -383,7 +384,7 @@ TIER_A_GLOBS = [
     "calls/confirm_*",
 ]
 
-# Tier B: specific files to discard from source (relative to se3/)
+# Tier B: specific files to discard from source (relative to tianluo/)
 # NOTE: state/known_test_failures.json has been retired — the deterministic
 # pre-implement test baseline replaces the known-list exemption, so the file is
 # no longer written or synced and therefore no longer appears here.
@@ -391,12 +392,12 @@ TIER_B_FILES = [
     "state/engine.json",
 ]
 
-# Tier B: directories to discard from source (relative to se3/)
+# Tier B: directories to discard from source (relative to tianluo/)
 TIER_B_DIRS = [
     "calls/active",
 ]
 
-# Tier C: directories completely skipped (relative to se3/)
+# Tier C: directories completely skipped (relative to tianluo/)
 TIER_C_DIRS = [
     "cache",
     "tmp",
@@ -501,11 +502,11 @@ class SyncReport:
     # matching the source. Surfaced as a weak signal so operators can detect
     # stale sidecar leftovers from a prior aborted run that may now mask a
     # genuinely new collision. Not added to ``collisions`` so re-runs of
-    # ``se3 merge`` do not produce repeated audit entries.
+    # ``luo merge`` do not produce repeated audit entries.
     idempotent_bypasses: int = 0
     # Per-file audit detail of idempotent bypasses (parallel to ``collisions``).
     # Stored as ``BypassedCollision`` records but kept on a separate list so
-    # the rendered output of ``se3 merge`` does not surface a noisy "collision"
+    # the rendered output of ``luo merge`` does not surface a noisy "collision"
     # row for every idempotent re-run, while operators investigating a stale
     # sidecar warning still get the per-file detail without re-running under
     # DEBUG logging. ``idempotent_bypasses`` (the counter above) is the
@@ -710,7 +711,7 @@ def merge_worktree_issues(
 ) -> list[IssueMergeRecord]:
     """Fold worktree-created issues back into the main project, renumbering.
 
-    A ``--worktree`` run clones ``se3/issues/`` into its isolation worktree and
+    A ``--worktree`` run clones ``tianluo/issues/`` into its isolation worktree and
     allocates new issue IDs from the worktree's own ``.next_id`` counter, which
     is independent of the main project's. On merge-back those IDs may collide
     with issue numbers the main project assigned independently. This function
@@ -748,7 +749,7 @@ def merge_worktree_issues(
         _numeric_id_or_none,
     )
 
-    source_issues_dir = source_worktree / "se3" / "issues"
+    source_issues_dir = runtime_dir(source_worktree) / "issues"
     if not source_issues_dir.exists():
         return []
 
@@ -923,7 +924,7 @@ def merge_worktree_issues(
             adopted_set = {fp.resolve() for fp in adopted_files}
             other_files = [
                 p
-                for p in _issue_files(project_root / "se3" / "issues")
+                for p in _issue_files(runtime_dir(project_root) / "issues")
                 if p.resolve() not in adopted_set
             ]
             rewrite_issue_references_bulk(
@@ -1268,7 +1269,7 @@ def _rel_path_str(path: Path, base: Path) -> str:
 
 
 def _is_tier_c_path(rel_path: str) -> bool:
-    """Return True if *rel_path* (relative to se3/) is inside a tier C directory."""
+    """Return True if *rel_path* (relative to tianluo/) is inside a tier C directory."""
     for tier_c in TIER_C_DIRS:
         if rel_path == tier_c or rel_path.startswith(tier_c + "/"):
             return True
@@ -1757,7 +1758,7 @@ def _write_sidecar(
         # ``<head63 chars>_`` as its branch identifier, so any future call
         # for a different branch sharing the same first 63 sanitized
         # characters will collapse to the same primary sidecar path and
-        # require hash-suffix disambiguation.  Operators inheriting a se3/
+        # require hash-suffix disambiguation.  Operators inheriting a tianluo/
         # tree should be able to see this from normal-operation logs
         # (INFO) rather than only catching it on a retry that hits the
         # idempotent-match warnings.
@@ -1896,11 +1897,11 @@ def sync_branch_runtime(
     *,
     strict: bool = False,
 ) -> SyncReport:
-    """Sync runtime content from *branch*'s bound worktree into current branch's se3/.
+    """Sync runtime content from *branch*'s bound worktree into current branch's tianluo/.
 
     Tier A files (``history/``, ``logs/``, ``state/summary-*``,
     ``state/archive/``, ``calls/confirm_*``) are copied from the source
-    worktree's ``se3/`` to the current branch's ``se3/`` if the target does
+    worktree's ``tianluo/`` to the current branch's ``tianluo/`` if the target does
     not already have a file at the same relative path. If a collision is
     detected:
     - ``strict=True``: ``RuntimeSyncCollision`` is raised (legacy behaviour).
@@ -1981,8 +1982,8 @@ def sync_branch_runtime(
         )
         return SyncReport(skipped=True)
 
-    source_se3 = source_wt / "se3"
-    target_se3 = project_root / "se3"
+    source_se3 = runtime_dir(source_wt)
+    target_se3 = runtime_dir(project_root)
     target_se3_existed = target_se3.exists()
 
     report = SyncReport()
@@ -2036,7 +2037,7 @@ def sync_branch_runtime(
             pass  # Fall through to hash comparison
         # Idempotent: when source and target have identical content,
         # treat as a no-op rather than a fatal collision. This allows
-        # re-running `se3 merge` on an already-synced branch.
+        # re-running `luo merge` on an already-synced branch.
         # Streaming hash comparison avoids loading large files into memory.
         # Defensive: a symlink at dest_file would raise ELOOP inside
         # _file_hash (O_NOFOLLOW). Surface it as a collision so a
@@ -2542,7 +2543,7 @@ def sync_branch_runtime(
                     report.ambiguous_audit_records.append(collision)
             else:
                 # Idempotent: sidecar already existed with identical content.
-                # Do NOT add to report.collisions so re-runs of se3 merge do
+                # Do NOT add to report.collisions so re-runs of luo merge do
                 # not surface spurious warnings.
                 # Surface a weak signal via report.idempotent_bypasses so
                 # operators inheriting a worktree with stale sidecar leftovers
@@ -2588,7 +2589,7 @@ def sync_branch_runtime(
         # Rollback policy by mode (Task 31 / E2):
         #
         #   * Strict mode: roll back EVERY file copied or bypassed inside
-        #     this invocation, plus directories we created and the se3/
+        #     this invocation, plus directories we created and the tianluo/
         #     root if we created it.  Strict mode promises an
         #     all-or-nothing transition, so a single failure must leave
         #     no half-applied bytes.
@@ -2619,7 +2620,7 @@ def sync_branch_runtime(
                 except OSError:
                     pass
             _cleanup_created_dirs(created_dirs)
-            # If se3/ itself did not exist before sync, remove it too so the
+            # If tianluo/ itself did not exist before sync, remove it too so the
             # rolled-back state matches the pre-sync state.
             if not target_se3_existed:
                 try:

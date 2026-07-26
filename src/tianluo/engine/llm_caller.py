@@ -804,7 +804,7 @@ class LLMCaller:
         self.project_root = Path(project_root) if project_root else Path.cwd()
         # WHY: decouples the step's registry-level read_only from a single LLM
         # call's read-only posture. charter_freshness declares read_only=False
-        # (its handler writes se3/charter.md), yet its LLM sub-calls must stay
+        # (its handler writes tianluo/charter.md), yet its LLM sub-calls must stay
         # read-only — they only PROPOSE candidate charter text, the handler's
         # Python does the writing. Passing force_read_only=True re-applies both
         # the prompt READ-ONLY injection and the runner --disallowedTools lock
@@ -1333,7 +1333,7 @@ class LLMCaller:
 
         Returns the guard plugin directory (installing the PreToolUse
         spec-write hook) when this step must be barred from writing
-        ``se3/specs/``, else ``None``.
+        ``tianluo/specs/``, else ``None``.
 
         The enable decision references ONLY the shared exemption set
         :data:`context_builder.SPEC_WRITE_ALLOWED_STEPS` — never a local literal

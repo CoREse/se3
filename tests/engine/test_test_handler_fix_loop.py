@@ -23,7 +23,7 @@ from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 def _make_flow(tmp_path: Path) -> FlowInstance:
     """Create a minimal FlowInstance with change_path set."""
     flow = FlowInstance(task_description="test task")
-    flow.change_path = tmp_path / "se3.yaml"
+    flow.change_path = tmp_path / "tianluo.yaml"
     return flow
 
 
@@ -342,7 +342,7 @@ class TestNoAutoPopulate:
         from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
-        kf_path = tmp_path / "se3" / "state" / "known_test_failures.json"
+        kf_path = tmp_path / "tianluo" / "state" / "known_test_failures.json"
         assert not kf_path.exists()
 
     @patch(_PATCHES["report"])
@@ -351,7 +351,7 @@ class TestNoAutoPopulate:
     @patch(_PATCHES["config"])
     def test_existing_known_file_left_untouched(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
         """A pre-existing known_test_failures.json is never written/updated."""
-        state_dir = tmp_path / "se3" / "state"
+        state_dir = tmp_path / "tianluo" / "state"
         state_dir.mkdir(parents=True)
         original = {
             "tests/test_a.py::test_two": {

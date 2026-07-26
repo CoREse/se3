@@ -39,7 +39,7 @@ from tianluo.engine.context_builder import (
 # Steps that MUST receive the spec-write-protection injection: every
 # non-read-only LLM step except the exempt write-spec steps. charter_freshness
 # joined this set when its read_only was flipped to False (its handler writes
-# se3/charter.md) — the injection only forbids se3/specs/ writes, which it never
+# tianluo/charter.md) — the injection only forbids tianluo/specs/ writes, which it never
 # does, so the connateral effect is harmless and directionally correct.
 PROTECTED_STEPS = [
     "implement",
@@ -170,7 +170,7 @@ class TestInjectionWording:
 
     def test_forbids_spec_writes_via_tools_and_bash(self):
         injection = get_spec_write_protection_injection("implement")
-        assert "se3/specs" in injection
+        assert "tianluo/specs" in injection
         for token in ("Write", "Edit", "NotebookEdit", "Bash"):
             assert token in injection
 

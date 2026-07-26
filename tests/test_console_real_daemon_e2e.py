@@ -251,7 +251,7 @@ class _IsolatedConsole:
             timeout=120,
         )
         assert init.returncode == 0, f"se3 init failed: {init.stdout}\n{init.stderr}"
-        assert (self.project / "se3" / "charter.md").exists()
+        assert (self.project / "tianluo" / "charter.md").exists()
 
         # 1b. Seed the admin owner + daemon key before the server opens the DB.
         self._seed_admin_and_key()
@@ -413,7 +413,7 @@ def _write_real_history_flow(project: Path, flow_id: str) -> Dict[str, str]:
     exercise the full parser matrix: a plain ``discovery``, a group-suffixed
     ``implement`` (``_G1``), and an underscore-bearing ``version_analyze``.
     """
-    hist = project / "se3" / "history" / flow_id
+    hist = project / "tianluo" / "history" / flow_id
     hist.mkdir(parents=True, exist_ok=True)
     (hist / "_meta.json").write_text(
         json.dumps(
@@ -470,7 +470,7 @@ def _write_real_history_flow(project: Path, flow_id: str) -> Dict[str, str]:
                 "outputs": {
                     "task_type": "feature",
                     "complexity": "medium",
-                    "scope": "src/se3/server",
+                    "scope": "src/tianluo/server",
                     "reasoning": "Add a GET /health endpoint to the server module.",
                     "relevant_specs": ["base:Server Modules"],
                 },
@@ -607,7 +607,7 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
     ``GET /api/history/{flow_id}`` records, and asserts the rendered DOM
     paradigm — NOT merely the HTTP envelope.
 
-    This is a *critical acceptance test* (registered in ``se3.yaml`` under
+    This is a *critical acceptance test* (registered in ``tianluo.yaml`` under
     ``test.critical_tests``): it is the only case that exercises the real UI
     render path end to end through a browser, so it MUST actually run rather
     than skip. When Playwright or its Chromium binary is missing the test
@@ -841,7 +841,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
     # Point the project's agent registry at the deterministic fake agent.
     fake_agent = console.tmp / "fake_agent.py"
     _write_fake_agent(fake_agent)
-    se3_yaml = project / "se3.yaml"
+    se3_yaml = project / "tianluo.yaml"
     se3_yaml.write_text(
         se3_yaml.read_text(encoding="utf-8")
         + f"\nagents:\n  fake: {{type: claude-code, cmd: {fake_agent}, priority: 10}}\n"
@@ -878,7 +878,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
                 break
 
     try:
-        engine_json = project / "se3" / "state" / "engine.json"
+        engine_json = project / "tianluo" / "state" / "engine.json"
 
         # 1. Wait for the live process to create the flow and pause.
         def _flow_id() -> Optional[str]:

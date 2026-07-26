@@ -1,8 +1,8 @@
 """Deterministic, mechanical resolvers for merge conflicts that need no LLM.
 
 Some tracked files conflict on *every* merge by construction — they are
-regenerated on both sides (``se3/code-index.md``) or are monotonic counters
-(``se3/issues/.next_id``). Feeding them to the LLM conflict resolver is both
+regenerated on both sides (``tianluo/code-index.md``) or are monotonic counters
+(``tianluo/issues/.next_id``). Feeding them to the LLM conflict resolver is both
 wasteful and actively harmful: a 2.5MB regenerated index produced a ~10M-char
 editor prompt that blew past every agent's input limit, so the whole conflict
 chain failed without a single LLM call ever running.
@@ -56,8 +56,11 @@ STAGE_BASE = 1
 STAGE_OURS = 2
 STAGE_THEIRS = 3
 
-CODE_INDEX_RELPATH = "se3/code-index.md"
-NEXT_ID_RELPATH = "se3/issues/.next_id"
+CODE_INDEX_RELPATHS = frozenset({"tianluo/code-index.md", "se3/code-index.md"})
+# Backwards-compat single canonical value (docs/tests); matching uses the set.
+CODE_INDEX_RELPATH = "tianluo/code-index.md"
+NEXT_ID_RELPATHS = frozenset({"tianluo/issues/.next_id", "se3/issues/.next_id"})
+NEXT_ID_RELPATH = "tianluo/issues/.next_id"
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +238,7 @@ def _actual_content_fp(project_root: Path, relpath: str) -> Optional[str]:
 
 
 class CodeIndexResolver:
-    """Entry-level union of the two regenerated ``se3/code-index.md`` sides.
+    """Entry-level union of the two regenerated ``tianluo/code-index.md`` sides.
 
     Both sides rebuild the index, so a textual three-way merge conflicts on
     nearly every entry while the *entries themselves* merge trivially. Each
@@ -252,7 +255,7 @@ class CodeIndexResolver:
     name = "code-index"
 
     def matches(self, relpath: str) -> bool:
-        return relpath == CODE_INDEX_RELPATH
+        return relpath in CODE_INDEX_RELPATHS
 
     def resolve(self, project_root: Path, relpath: str) -> str:
         ours_text = _git_show_stage(project_root, STAGE_OURS, relpath)
@@ -329,7 +332,7 @@ def _parse_counter(text: Optional[str]) -> Optional[int]:
 
 
 class NextIdResolver:
-    """``se3/issues/.next_id`` merges to the larger counter.
+    """``tianluo/issues/.next_id`` merges to the larger counter.
 
     Both sides allocated issue IDs below their own counter, so only a value
     above both can be handed out again without colliding.
@@ -338,7 +341,7 @@ class NextIdResolver:
     name = "next-id"
 
     def matches(self, relpath: str) -> bool:
-        return relpath == NEXT_ID_RELPATH
+        return relpath in NEXT_ID_RELPATHS
 
     def resolve(self, project_root: Path, relpath: str) -> str:
         ours = _parse_counter(_git_show_stage(project_root, STAGE_OURS, relpath))

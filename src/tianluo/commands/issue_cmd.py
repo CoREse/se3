@@ -3,18 +3,18 @@
 Provides commands to list, show, create, edit, close, and reset issues.
 
 Usage:
-    se3 issue                              # List open issues
-    se3 issue list                         # List open issues
-    se3 issue list --all                   # List all issues (including closed)
-    se3 issue list --source human          # Filter by source
-    se3 issue list --type bug              # Filter by type
-    se3 issue show <id>                    # Show issue details
-    se3 issue create "description"         # Create with positional description
-    se3 issue create                       # Create interactively (single prompt)
-    se3 issue create --editor              # Create via external editor
-    se3 issue edit <id>                    # Edit issue in external editor
-    se3 issue close <id> [--reason TEXT]   # Close an issue
-    se3 issue reset <id>                   # Reset in-progress issue to open
+    luo issue                              # List open issues
+    luo issue list                         # List open issues
+    luo issue list --all                   # List all issues (including closed)
+    luo issue list --source human          # Filter by source
+    luo issue list --type bug              # Filter by type
+    luo issue show <id>                    # Show issue details
+    luo issue create "description"         # Create with positional description
+    luo issue create                       # Create interactively (single prompt)
+    luo issue create --editor              # Create via external editor
+    luo issue edit <id>                    # Edit issue in external editor
+    luo issue close <id> [--reason TEXT]   # Close an issue
+    luo issue reset <id>                   # Reset in-progress issue to open
 """
 
 from __future__ import annotations
@@ -340,9 +340,9 @@ def create_cmd(
     """Create a new issue.
 
     Three input modes:
-      1. Positional:  se3 issue create "my description"
-      2. Piped stdin: echo "desc" | se3 issue create
-      3. Interactive: se3 issue create  (single description prompt via _read_multiline_input)
+      1. Positional:  luo issue create "my description"
+      2. Piped stdin: echo "desc" | luo issue create
+      3. Interactive: luo issue create  (single description prompt via _read_multiline_input)
 
     Use --editor to open $EDITOR with a full YAML template.
     """

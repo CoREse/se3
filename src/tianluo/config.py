@@ -14,8 +14,23 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
-PROJECT_CONFIG_FILENAME = "se3.yaml"
-PROJECT_LOCAL_CONFIG_FILENAME = "se3.local.yaml"
+# Canonical (post-rename) project config filenames, with the legacy names
+# still honoured as a fallback through 12.x (removed in 13.0.0). At every
+# lookup tier the canonical name wins over the legacy one.
+PROJECT_CONFIG_FILENAME = "tianluo.yaml"
+PROJECT_LOCAL_CONFIG_FILENAME = "tianluo.local.yaml"
+LEGACY_PROJECT_CONFIG_FILENAME = "tianluo.yaml"
+LEGACY_PROJECT_LOCAL_CONFIG_FILENAME = "tianluo.local.yaml"
+
+# Per-tier candidate name lists (canonical first).
+_LOCAL_CONFIG_FILENAMES = (
+    PROJECT_LOCAL_CONFIG_FILENAME,
+    LEGACY_PROJECT_LOCAL_CONFIG_FILENAME,
+)
+_MAIN_CONFIG_FILENAMES = (
+    PROJECT_CONFIG_FILENAME,
+    LEGACY_PROJECT_CONFIG_FILENAME,
+)
 
 
 def _resolve_main_repo_root(project_root: Path) -> Optional[Path]:
@@ -191,41 +206,45 @@ def get_project_config_path(project_root: Path) -> Path:
     """Return the active project config path for ``project_root``.
 
     When ``project_root`` is inside a git worktree, a four-tier lookup is
-    used so that the main repository's ``se3.local.yaml`` can override
-    the worktree's tracked ``se3.yaml`` (since ``se3.local.yaml`` is
-    gitignored and does not travel into worktrees):
+    used so that the main repository's local override can override the
+    worktree's tracked config (the local file is gitignored and does not
+    travel into worktrees):
 
-    1. ``<worktree>/se3.local.yaml``  (highest)
-    2. ``<main_repo>/se3.local.yaml``
-    3. ``<worktree>/se3.yaml``
-    4. ``<main_repo>/se3.yaml``       (lowest)
+    1. ``<worktree>/tianluo.local.yaml``  (highest)
+    2. ``<main_repo>/tianluo.local.yaml``
+    3. ``<worktree>/tianluo.yaml``
+    4. ``<main_repo>/tianluo.yaml``       (lowest)
+
+    At every tier the canonical ``tianluo.*`` name wins over the legacy
+    ``se3.*`` one (``tianluo.local.yaml`` / ``tianluo.yaml`` keep working through
+    12.x; the fallback is removed in 13.0.0).
 
     The first existing regular file wins (``is_file()`` follows symlinks).
-    If none of the four exist, the canonical ``<worktree>/se3.yaml`` is
-    returned so callers know which file would be read.
+    If none exist, the canonical ``<worktree>/tianluo.yaml`` is returned
+    so callers know which file would be read.
 
     For non-worktree projects (regular git repo or not under version
     control) the old two-tier logic is preserved:
-    ``<project_root>/se3.local.yaml`` wins over ``se3.yaml``.
+    ``<project_root>/tianluo.local.yaml`` wins over ``tianluo.yaml``.
 
     Using ``is_file()`` rather than ``exists()`` means a stray directory
-    or dangling symlink at ``se3.local.yaml`` does not silently shadow
-    the committed ``se3.yaml`` and trigger a misleading "malformed local
+    or dangling symlink at ``tianluo.local.yaml`` does not silently shadow
+    the committed ``tianluo.yaml`` and trigger a misleading "malformed local
     file" warning downstream — only a real file participates in the
     override.
 
     Symlinks that resolve to a regular file are treated as real files
     (``is_file()`` follows symlinks). A layout such as
-    ``se3.local.yaml -> ../shared-overrides.yaml`` is therefore picked
+    ``tianluo.local.yaml -> ../shared-overrides.yaml`` is therefore picked
     up as the active override, which is the intended behaviour for users
     who share local overrides between clones via a symlink. If you want
-    the committed ``se3.yaml`` to win, remove or rename the symlink.
+    the committed ``tianluo.yaml`` to win, remove or rename the symlink.
 
     TOCTOU note: there is a theoretical window between this ``is_file()``
     probe and the subsequent ``_read_yaml`` open inside the caller — if
-    ``se3.local.yaml`` is deleted in between, readers observe the file
+    ``tianluo.local.yaml`` is deleted in between, readers observe the file
     as absent and fall back to built-in defaults rather than reading
-    ``se3.yaml``. The failure mode is safe (defaults) and vanishingly
+    ``tianluo.yaml``. The failure mode is safe (defaults) and vanishingly
     rare in practice; eliminating the window would require passing an
     already-opened file handle through the loader stack and is not
     worth the churn unless the race is actually observed.
@@ -235,34 +254,45 @@ def get_project_config_path(project_root: Path) -> Path:
     downstream callers against ``project_root`` (the worktree root when
     running inside a worktree), NOT against the directory that contains
     the config file. Keep this in mind when editing a main-repo
-    ``se3.local.yaml`` that is read from inside a worktree: a relative
+    ``tianluo.local.yaml`` that is read from inside a worktree: a relative
     path written there is interpreted relative to the running worktree.
     """
     root = Path(project_root)
-    local = root / PROJECT_LOCAL_CONFIG_FILENAME
-    if local.is_file():
-        return local
+    for name in _LOCAL_CONFIG_FILENAMES:
+        local = root / name
+        if local.is_file():
+            return local
 
     main_repo = _resolve_main_repo_root(root)
     if main_repo is not None:
         candidates = [
-            main_repo / PROJECT_LOCAL_CONFIG_FILENAME,
-            root / PROJECT_CONFIG_FILENAME,
-            main_repo / PROJECT_CONFIG_FILENAME,
+            main_repo / name for name in _LOCAL_CONFIG_FILENAMES
+        ] + [
+            root / name for name in _MAIN_CONFIG_FILENAMES
+        ] + [
+            main_repo / name for name in _MAIN_CONFIG_FILENAMES
         ]
         for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+    else:
+        for name in _MAIN_CONFIG_FILENAMES:
+            candidate = root / name
             if candidate.is_file():
                 return candidate
 
     return root / PROJECT_CONFIG_FILENAME
 
 
-# Filenames that mark a directory as an SE3 project root. Used by
-# parent-walk detection in the CLI commands so that `se3.local.yaml`,
-# `se3.yaml`, or the legacy `se3.config.yaml` all count as markers.
+# Filenames that mark a directory as a project root. Used by parent-walk
+# detection in the CLI commands: the canonical `tianluo.(local.)yaml`, the
+# transitional `se3.(local.)yaml`, and the ancient `se3.config.yaml` all
+# count as markers.
 _PROJECT_ROOT_MARKERS = (
     PROJECT_LOCAL_CONFIG_FILENAME,
     PROJECT_CONFIG_FILENAME,
+    LEGACY_PROJECT_LOCAL_CONFIG_FILENAME,
+    LEGACY_PROJECT_CONFIG_FILENAME,
     "se3.config.yaml",
 )
 
@@ -270,7 +300,8 @@ _PROJECT_ROOT_MARKERS = (
 def is_se3_project_root(path: Path) -> bool:
     """Return True when ``path`` contains any recognised SE3 project marker.
 
-    Recognised markers: ``se3.local.yaml``, ``se3.yaml``, or the legacy
+    Recognised markers: ``tianluo.local.yaml`` / ``tianluo.yaml``, the
+    transitional ``tianluo.local.yaml`` / ``tianluo.yaml``, or the ancient
     ``se3.config.yaml``. The check is non-recursive — only files directly
     under ``path`` are considered.
 
@@ -288,7 +319,7 @@ def is_se3_project_root(path: Path) -> bool:
 
 # Dedup set keyed by absolute path string. The dedup is one-shot per
 # (process, path): if a long-running process (daemon, test session, IDE
-# integration) sees the user fix se3.local.yaml and then later
+# integration) sees the user fix tianluo.local.yaml and then later
 # reintroduce a typo at the same path, the second breakage will NOT
 # re-warn — the path is already in this set. Tests reset the set
 # explicitly between cases. Restart the process for a fresh warning.
@@ -296,16 +327,16 @@ _warned_malformed_local_for: set[str] = set()
 
 
 def _maybe_warn_local_shadow(config_path: Path) -> None:
-    """Warn (one-shot per path) when ``se3.local.yaml`` is unreadable.
+    """Warn (one-shot per path) when ``tianluo.local.yaml`` is unreadable.
 
-    A malformed local override silently shadows the committed ``se3.yaml``,
+    A malformed local override silently shadows the committed ``tianluo.yaml``,
     so without this warning the loaders would just fall back to built-in
     defaults and the user would never see why their project config stopped
-    taking effect. Only fires for ``se3.local.yaml``.
+    taking effect. Only fires for ``tianluo.local.yaml``.
 
     Dedup is per-process, per-path — see ``_warned_malformed_local_for``.
     """
-    if config_path.name != PROJECT_LOCAL_CONFIG_FILENAME:
+    if config_path.name not in _LOCAL_CONFIG_FILENAMES:
         return
     try:
         key = str(config_path.resolve())
@@ -314,7 +345,11 @@ def _maybe_warn_local_shadow(config_path: Path) -> None:
     if key in _warned_malformed_local_for:
         return
     _warned_malformed_local_for.add(key)
-    yaml_path = config_path.parent / PROJECT_CONFIG_FILENAME
+    yaml_path = config_path.parent / (
+        LEGACY_PROJECT_CONFIG_FILENAME
+        if config_path.name == LEGACY_PROJECT_LOCAL_CONFIG_FILENAME
+        else PROJECT_CONFIG_FILENAME
+    )
     logger.warning(
         "%s is unreadable or malformed and is shadowing %s — project "
         "configuration is falling back to built-in defaults until the "
@@ -346,7 +381,7 @@ def load_project_yaml(project_root: Path) -> tuple[dict, str]:
     """Read the active project YAML config tolerantly.
 
     Thin wrapper over :func:`_read_yaml` that resolves the active project
-    config path (``se3.local.yaml`` when present, otherwise ``se3.yaml``)
+    config path (``tianluo.local.yaml`` when present, otherwise ``tianluo.yaml``)
     and returns ``(data, source_label)`` where ``data`` is an empty dict
     when the file is missing, empty, malformed, or non-mapping. Never
     raises. Malformed/non-mapping/parse-error classification and the
@@ -354,16 +389,16 @@ def load_project_yaml(project_root: Path) -> tuple[dict, str]:
 
     This is a public API: cross-module readers (engine/context_builder,
     engine/steps/verify_spec, internal loaders) all route through this
-    single entry point to pick up ``se3.local.yaml`` precedence
+    single entry point to pick up ``tianluo.local.yaml`` precedence
     uniformly. Keep the signature stable.
 
     ``source_label`` semantics: always the filename (or directory-prefixed
     filename when from a different directory) that
-    :func:`get_project_config_path` *chose* (``se3.local.yaml`` when
-    present as a regular file, otherwise ``se3.yaml``) — **not**
+    :func:`get_project_config_path` *chose* (``tianluo.local.yaml`` when
+    present as a regular file, otherwise ``tianluo.yaml``) — **not**
     necessarily the file that was successfully read. When
-    ``se3.local.yaml`` exists but is unparsable, ``data`` is ``{}`` and
-    ``source_label`` still names ``se3.local.yaml``. This is intentional:
+    ``tianluo.local.yaml`` exists but is unparsable, ``data`` is ``{}`` and
+    ``source_label`` still names ``tianluo.local.yaml``. This is intentional:
     error messages and deprecation warnings should point at the file
     the user placed (and therefore needs to fix), not at the fallback
     committed file which is innocent. Callers that log ``source_label``
@@ -385,7 +420,7 @@ def load_project_yaml(project_root: Path) -> tuple[dict, str]:
 _load_project_yaml = load_project_yaml
 
 
-# Canonical dedup token shared by ``se3.yaml`` and ``se3.local.yaml``.
+# Canonical dedup token shared by ``tianluo.yaml`` and ``tianluo.local.yaml``.
 # Warning dedup sets are keyed on ``source_label``, which flips between
 # those two filenames depending on which file is active for the current
 # call. Without canonicalization, a long-running process that sees the
@@ -399,12 +434,12 @@ _PROJECT_DEDUP_TOKEN = "<project>"
 def _dedup_source_key(source_label: str) -> str:
     """Return the dedup token for a config source label.
 
-    Project-level labels (``se3.yaml`` / ``se3.local.yaml``) collapse
+    Project-level labels (``tianluo.yaml`` / ``tianluo.local.yaml``) collapse
     to a single token; any other label (e.g. ``~/.se3/config.yaml``)
     passes through unchanged.
 
     In worktree mode ``_config_source_label`` may emit a directory-
-    prefixed label such as ``main_repo/se3.local.yaml`` when the
+    prefixed label such as ``main_repo/tianluo.local.yaml`` when the
     selected config lives outside the worktree. Match by basename so
     those prefixed forms collapse to the same project token —
     otherwise a deprecated key surfaced under one label and then again
@@ -412,7 +447,7 @@ def _dedup_source_key(source_label: str) -> str:
     local override) would warn twice in the same process.
     """
     basename = source_label.rsplit("/", 1)[-1]
-    if basename in (PROJECT_CONFIG_FILENAME, PROJECT_LOCAL_CONFIG_FILENAME):
+    if basename in _LOCAL_CONFIG_FILENAMES + _MAIN_CONFIG_FILENAMES:
         return _PROJECT_DEDUP_TOKEN
     return source_label
 
@@ -429,7 +464,7 @@ class BumpType(Enum):
 class VersionConfig:
     """Version management configuration.
     
-    Loads version-related settings from se3.yaml with sensible defaults.
+    Loads version-related settings from tianluo.yaml with sensible defaults.
     """
     # Whether automatic version bumping is enabled
     enabled: bool = True
@@ -470,7 +505,7 @@ class VersionConfig:
     include_in_commit_message: bool = True
 
     # Version script interface
-    script_path: Optional[str] = None  # Path to version script (None = default se3/scripts/version.py)
+    script_path: Optional[str] = None  # Path to version script (None = default tianluo/scripts/version.py)
     auto_generate_script: bool = True  # Auto-generate script via LLM if not found
     
     @property
@@ -480,7 +515,7 @@ class VersionConfig:
     
     @classmethod
     def from_dict(cls, data: dict) -> "VersionConfig":
-        """Create VersionConfig from dictionary (typically loaded from se3.yaml)."""
+        """Create VersionConfig from dictionary (typically loaded from tianluo.yaml)."""
         if not data:
             return cls()
 
@@ -493,9 +528,9 @@ class VersionConfig:
         for deprecated_field in ("bump_rules", "smart_version_analysis"):
             if deprecated_field in version_data:
                 logger.warning(
-                    "se3.yaml version.%s is deprecated and ignored; remove it from "
+                    "tianluo.yaml version.%s is deprecated and ignored; remove it from "
                     "your config (version decisions are now driven by version_analyze's "
-                    "suggested_version, optionally guided by se3/version-rules.md).",
+                    "suggested_version, optionally guided by tianluo/version-rules.md).",
                     deprecated_field,
                 )
 
@@ -605,7 +640,7 @@ class DocsConfig:
         """Load documentation configuration from the active project YAML.
 
         Uses :func:`load_project_yaml`, which applies the worktree-aware
-        ``se3.local.yaml`` → ``se3.yaml`` lookup, so no new file-discovery
+        ``tianluo.local.yaml`` → ``tianluo.yaml`` lookup, so no new file-discovery
         logic is introduced here.
         """
         data, _src = load_project_yaml(project_root)
@@ -650,7 +685,7 @@ class Config:
 
     @classmethod
     def load(cls, project_root: Path) -> "Config":
-        """Load configuration from se3.yaml using the new per-step schema."""
+        """Load configuration from tianluo.yaml using the new per-step schema."""
         confirm = load_confirmation_config(project_root)
         return cls(
             project_root=project_root,
@@ -1065,7 +1100,7 @@ class AgentDef:
         }
 
 
-# The agents se3 is willing to pick up on its own when the user has
+# The agents luo is willing to pick up on its own when the user has
 # configured nothing at all. Written order is chain order. Reuses AgentDef
 # (rather than a bare tuple) so the table and the registry speak the same
 # shape; it therefore has to sit below the dataclass. The ``priority``
@@ -1123,7 +1158,7 @@ def _builtin_default_chain() -> list[dict]:
     raise ValueError(
         "no built-in agent is available on PATH. Supported built-in agents: "
         f"{supported}. Install one of them, or name an agent explicitly via "
-        "'llm_caller.defaults' in se3.yaml or ~/.se3/config.yaml."
+        "'llm_caller.defaults' in tianluo.yaml or ~/.se3/config.yaml."
     )
 
 
@@ -1139,8 +1174,8 @@ def _read_yaml(path: Path) -> Optional[dict]:
     the path actually exists but is unusable (parse error or non-mapping
     top level), a one-shot local-shadow warning is emitted via
     ``_maybe_warn_local_shadow`` — a no-op for any file other than
-    ``se3.local.yaml`` — so a broken local override cannot silently shadow
-    the committed ``se3.yaml`` regardless of which loader path reads it.
+    ``tianluo.local.yaml`` — so a broken local override cannot silently shadow
+    the committed ``tianluo.yaml`` regardless of which loader path reads it.
     """
     if not path.exists():
         return None
@@ -1180,7 +1215,7 @@ def _load_agent_configs(
     missing/invalid files are returned as empty dicts so callers can
     uniformly use ``.get(...)``. ``project_source_label`` is the
     filename of the project config actually consulted
-    (``se3.local.yaml`` when it exists, otherwise ``se3.yaml``) — used
+    (``tianluo.local.yaml`` when it exists, otherwise ``tianluo.yaml``) — used
     to produce accurate warning/error messages.
     """
     global_data = _read_yaml(Path.home() / _GLOBAL_CONFIG_PATH_SUFFIX[0] / _GLOBAL_CONFIG_PATH_SUFFIX[1]) or {}
@@ -1931,7 +1966,7 @@ def effective_self_check_passes_required(
 
     Single source of truth for the ``#i/N`` denominator, shared by the state
     machine's per-transition cached path (``_get_self_check_passes_required``)
-    and the ``se3 history show`` history-only renderer:
+    and the ``luo history show`` history-only renderer:
 
     - nested chains + no explicit ``self_check_passes_required`` → number of
       declared chains (the chain list alone expresses the intent);
@@ -1949,7 +1984,7 @@ def resolve_self_check_passes_required(project_root: Optional[Path] = None) -> i
     """Load config + resolution from disk and return the effective pass count.
 
     Convenience wrapper around :func:`effective_self_check_passes_required` for
-    callers (e.g. ``se3 history show``) that do not have the cached config and
+    callers (e.g. ``luo history show``) that do not have the cached config and
     resolution objects on hand. Degrades to the raw
     ``workflow.self_check_passes_required`` on any resolution loader error so a
     malformed self_check chain never crashes history rendering.
@@ -1991,7 +2026,7 @@ def load_step_agents(
 ) -> Optional[list[dict]]:
     """Load per-step agent override from ``llm_caller.steps.<step_type>``.
 
-    Reads ``llm_caller.steps.<step_type>`` from project-level se3.yaml with
+    Reads ``llm_caller.steps.<step_type>`` from project-level tianluo.yaml with
     fallback to the global ``~/.se3/config.yaml`` entry of the same shape.
     Project-level declaration of a given step fully replaces the global
     declaration for that step (no deep merge), mirroring ``load_agents``.
@@ -2296,8 +2331,8 @@ def get_language_labels(language: str) -> dict[str, str]:
 class LanguageConfig:
     """Unified human-language configuration.
 
-    Two settings, each merged project-over-global (project ``se3.yaml`` /
-    ``se3.local.yaml`` wins over ``~/.se3/config.yaml``, per field):
+    Two settings, each merged project-over-global (project ``tianluo.yaml`` /
+    ``tianluo.local.yaml`` wins over ``~/.se3/config.yaml``, per field):
 
     - ``language``: the *unified human language*. Drives BOTH the fixed CLI /
       console UI text (via :mod:`tianluo.i18n`) AND the human-facing LLM output
@@ -2319,7 +2354,7 @@ class LanguageConfig:
         """Load the merged language config for ``project_root``.
 
         Merges the ``language:`` section of the active project YAML (worktree-
-        aware ``se3.local.yaml`` → ``se3.yaml`` selection) over the global
+        aware ``tianluo.local.yaml`` → ``tianluo.yaml`` selection) over the global
         ``~/.se3/config.yaml``, field by field: a project value overrides the
         global one, an unset project field inherits the global value, and a
         field absent from both is ``None``. Reuses :func:`_load_agent_configs`
@@ -2510,7 +2545,7 @@ DEFAULT_ADJUDICATE_PERIOD = 10
 # Dedup set for the "which config source won" load-time log line, keyed by the
 # resolved active config path. ``WorkflowConfig.load`` is called per step, so
 # without dedup the effective-source line would flood the log; logging once per
-# (process, config file) is enough to surface the se3.local.yaml-shadows-se3.yaml
+# (process, config file) is enough to surface the tianluo.local.yaml-shadows-tianluo.yaml
 # ambiguity. Tests use fresh tmp_path dirs (distinct keys), so each gets its line.
 _logged_workflow_source_for: set[str] = set()
 
@@ -2526,7 +2561,7 @@ class ConfigError(ValueError):
 class WorkflowConfig:
     """Workflow-level configuration for the fix loop and self_check behavior.
 
-    Loaded from se3.yaml ``workflow:`` section with sensible defaults.
+    Loaded from tianluo.yaml ``workflow:`` section with sensible defaults.
     """
 
     max_fix_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
@@ -2794,7 +2829,7 @@ class WorkflowConfig:
     ) -> None:
         """Record which config file the resolved ``max_fix_iterations`` came from.
 
-        ``se3.local.yaml`` shadows ``se3.yaml`` as a whole, so when both set
+        ``tianluo.local.yaml`` shadows ``tianluo.yaml`` as a whole, so when both set
         ``workflow.max_fix_iterations`` the committed value can be silently
         overridden. Surfacing the winning source (and the resolved value) at
         load time makes that override visible. Deduped per resolved config path
@@ -2829,7 +2864,7 @@ def load_workflow_config(project_root: Optional[Path] = None) -> WorkflowConfig:
 
 @dataclass
 class TestConfig:
-    """Test step configuration loaded from se3.yaml test: section."""
+    """Test step configuration loaded from tianluo.yaml test: section."""
 
     command: Optional[str] = None
     timeout: int = 1800
@@ -2986,7 +3021,7 @@ def _coerce_bool(value: Any, default: bool) -> bool:
 
 @dataclass
 class ImplementConfig:
-    """Implement step configuration loaded from se3.yaml implement: section."""
+    """Implement step configuration loaded from tianluo.yaml implement: section."""
 
     group_loc_threshold: int = 300
     use_worktree: bool = True
@@ -3019,12 +3054,12 @@ class ImplementConfig:
 
 @dataclass
 class StepConfig:
-    """Step sequence configuration loaded from se3.yaml steps: section.
+    """Step sequence configuration loaded from tianluo.yaml steps: section.
 
     Allows appending optional steps (e.g. summarize) back into the default
     step sequence via configuration.
 
-    Example se3.yaml:
+    Example tianluo.yaml:
         steps:
           append:
             - summarize
@@ -3064,7 +3099,7 @@ def load_step_config(project_root: Optional[Path] = None) -> StepConfig:
 def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
     """Append configured steps to the step sequence.
 
-    Reads ``steps.append`` from se3.yaml and appends valid StepType values
+    Reads ``steps.append`` from tianluo.yaml and appends valid StepType values
     to the end of the step sequence (if not already present).
 
     Args:
@@ -3176,13 +3211,13 @@ class SpecLoadingConfig:
                 # per-step built-in default instead of shadowing it.
         return cls(steps=steps)
 
-    # Steps that default to full_spec loading (can be overridden in se3.yaml).
+    # Steps that default to full_spec loading (can be overridden in tianluo.yaml).
     #
     # Historically ``update_spec`` defaulted to ``full_spec`` so the LLM could
     # see all existing spec names for naming-collision avoidance. With the
     # index-first protocol, ``update_spec`` no longer reads ``spec_content`` at
     # all — its naming/placement context comes from the injected root view and
-    # on-demand ``se3 spec show`` directed reads — so it has been removed from
+    # on-demand ``luo spec show`` directed reads — so it has been removed from
     # this set. Programmatically re-rendering and persisting the entire spec
     # corpus into ``engine.json`` for an input no consumer uses was pure dead
     # weight (and the ``full_spec`` empty-``selected_items`` ValueError could
@@ -3197,7 +3232,7 @@ class SpecLoadingConfig:
         Defaults to ``"items"`` for every step. No step defaults to
         ``"full_spec"`` (``update_spec`` moved to the index-first protocol and
         no longer consumes full spec text), but any step can be switched to
-        ``"full_spec"`` via ``spec_loading.steps.<step>`` in ``se3.yaml``.
+        ``"full_spec"`` via ``spec_loading.steps.<step>`` in ``tianluo.yaml``.
         """
         # Explicit config always wins
         if step_type in self.steps:
@@ -3252,7 +3287,7 @@ _GUARDRAILS_SIZE_TIERS = ("warn", "enforce")
 class SpecGovernanceConfig:
     """Spec volume-governance thresholds and guardrails enforcement tier.
 
-    Loaded from the ``spec_governance:`` section of ``se3.yaml`` (sibling to
+    Loaded from the ``spec_governance:`` section of ``tianluo.yaml`` (sibling to
     ``spec_loading:``). Every field has a sensible default and loading is
     fault-tolerant: an illegal value falls back to the default and logs a
     warning rather than raising, so a malformed config never breaks a run.
@@ -3260,7 +3295,7 @@ class SpecGovernanceConfig:
     Fields:
         base_max_bytes: Upper bound on the ``base`` spec size (the spec injected
             in full into every step). Default 32768 (32 KiB).
-        index_render_threshold: Size threshold above which ``se3 spec index``
+        index_render_threshold: Size threshold above which ``luo spec index``
             output is greedily folded into group handles. Default 16384 (16 KiB).
         spec_file_warn_bytes: Per-spec-file size at/above which guardrails warns
             (a refactor-evaluation signal). Default 65536 (64 KiB).
@@ -3395,7 +3430,7 @@ DEFAULT_CODE_INDEX_MAX_CONCURRENCY = 4
 class CodeIndexConfig:
     """Code-index generation knobs loaded from the ``code_index:`` section.
 
-    Loaded from the ``code_index:`` section of ``se3.yaml``. Every field has a
+    Loaded from the ``code_index:`` section of ``tianluo.yaml``. Every field has a
     sensible default and loading is fault-tolerant: an illegal value falls back
     to the default and logs a warning rather than raising, so a malformed config
     never breaks index (re)building.
@@ -3576,7 +3611,7 @@ def load_code_index_config(
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     f"""Get the maximum number of fix iterations for the test-verify-fix loop.
 
-    Reads from se3.yaml workflow.max_fix_iterations, defaults to {DEFAULT_MAX_FIX_ITERATIONS}.
+    Reads from tianluo.yaml workflow.max_fix_iterations, defaults to {DEFAULT_MAX_FIX_ITERATIONS}.
 
     A return value of ``0`` is the sentinel for "unlimited" — fix-loop
     comparison points must treat ``max_iter == 0`` as no upper bound.
@@ -3598,10 +3633,10 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
 
 @dataclass
 class MergeConfig:
-    """Merge command configuration loaded from se3.yaml merge: section."""
+    """Merge command configuration loaded from tianluo.yaml merge: section."""
 
     strategy: str = "fast"
-    # Default flipped to True in 4.13.x: `se3 merge` now deletes merged
+    # Default flipped to True in 4.13.x: `luo merge` now deletes merged
     # branches (and archives their worktrees) by default. Pass
     # `--no-delete-merged` on the command line to opt out.
     delete_merged_default: bool = True
@@ -3793,7 +3828,7 @@ def load_claude_subprocess_config(
 
 
 # Defaults for the spec-write-protection guard. Both layers default ON so the
-# governance gap (non-update_spec / non-sync steps writing se3/specs/) is closed
+# governance gap (non-update_spec / non-sync steps writing tianluo/specs/) is closed
 # out of the box; either can be flipped off for debugging.
 DEFAULT_SPEC_WRITE_HOOK_ENABLED = True
 DEFAULT_SPEC_WRITE_DIFF_FALLBACK_ENABLED = True
@@ -3803,7 +3838,7 @@ DEFAULT_SPEC_WRITE_DIFF_FALLBACK_ENABLED = True
 class SpecWriteProtectionConfig:
     """Toggles for the two hard layers of spec-file write protection.
 
-    Loaded from the ``spec_write_protection:`` section of ``se3.yaml``. Both keys
+    Loaded from the ``spec_write_protection:`` section of ``tianluo.yaml``. Both keys
     default to ``True`` (fully on) and MAY be omitted entirely; an absent section
     yields both defaults. Values must be booleans — a non-boolean raises a
     :class:`ConfigError` at load time so a typo cannot silently disable the guard.
@@ -3888,7 +3923,7 @@ def load_spec_write_protection_config(
 # These settings configure the central server's authentication and identity
 # layer. Unlike the daemon/server *runtime* params documented in the
 # se3-config spec (host / port / poll_interval, sourced from CLI flags), the
-# ``server:`` section here lives in se3.yaml (and the global config) and drives
+# ``server:`` section here lives in tianluo.yaml (and the global config) and drives
 # the pluggable auth providers, UI session cookie security, the embedded sqlite
 # path, and the local-auth rate-limit / lockout parameters. Every item has an
 # explicit default so a server with no ``server:`` section still comes up with

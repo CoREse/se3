@@ -1,5 +1,6 @@
 """Shared utilities for SE 3.0 tools."""
 
+from tianluo.runtime_paths import runtime_dir
 import os
 import re
 from pathlib import Path
@@ -7,8 +8,8 @@ from typing import Dict, List, Optional, Any
 import shutil
 
 def _resolve_specs_dir(base_path: Path) -> Path:
-    """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
-    primary = base_path / "se3" / "specs"
+    """Resolve specs directory: tianluo/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
+    primary = runtime_dir(base_path) / "specs"
     fallback = base_path / "specs"
     legacy = base_path / "openspec" / "specs"
     if primary.exists():
@@ -218,8 +219,8 @@ def copy_file(src: Path, dst: Path) -> None:
 def get_source_mappings(project_root: Path) -> dict:
     """Get mapping of source files to output files.
 
-    With the SE3 module system, output/ only contains templates for `se3 init`.
-    Runtime files (CLAUDE.md, status.md, se3.yaml) are no longer synced.
+    With the SE3 module system, output/ only contains templates for `luo init`.
+    Runtime files (CLAUDE.md, status.md, tianluo.yaml) are no longer synced.
 
     Args:
         project_root: Root of the SE 3.0 project
@@ -231,7 +232,7 @@ def get_source_mappings(project_root: Path) -> dict:
     return {}
 
 
-def discover_changes(path: str = "se3/specs/_changelog") -> List[str]:
+def discover_changes(path: str = "tianluo/specs/_changelog") -> List[str]:
     """Discover all changelog entries.
 
     Args:
@@ -242,6 +243,10 @@ def discover_changes(path: str = "se3/specs/_changelog") -> List[str]:
     """
     changes = []
     changes_path = Path(path)
+
+    # Fallback to the legacy tianluo/ runtime dir name
+    if not changes_path.exists():
+        changes_path = Path("se3/specs/_changelog")
 
     # Fallback to specs/_changelog (legacy)
     if not changes_path.exists():

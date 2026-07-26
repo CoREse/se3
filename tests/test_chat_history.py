@@ -34,8 +34,8 @@ from tianluo.engine.chat_history import (
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """Create a temporary project directory with se3/history structure."""
-    (tmp_path / "se3" / "history").mkdir(parents=True)
+    """Create a temporary project directory with tianluo/history structure."""
+    (tmp_path / "tianluo" / "history").mkdir(parents=True)
     return tmp_path
 
 
@@ -737,14 +737,14 @@ class TestRecordResponseUsage:
         assert session.messages[0].token_usage is None
 
         # On-disk line does NOT carry the key (backward-compatible schema).
-        path = tmp_project / "se3" / "history" / "flow1" / "step1.jsonl"
+        path = tmp_project / "tianluo" / "history" / "flow1" / "step1.jsonl"
         line = path.read_text(encoding="utf-8").strip().splitlines()[0]
         assert "token_usage" not in json.loads(line)
 
     def test_user_prompt_record_omits_token_usage(self, tmp_project):
         """record_prompt never writes a token_usage key."""
         record_prompt(tmp_project, "flow1", "step1", "analyze", "hi", 0)
-        path = tmp_project / "se3" / "history" / "flow1" / "step1.jsonl"
+        path = tmp_project / "tianluo" / "history" / "flow1" / "step1.jsonl"
         line = path.read_text(encoding="utf-8").strip().splitlines()[0]
         assert "token_usage" not in json.loads(line)
 
@@ -1648,8 +1648,8 @@ class TestRenderSessionDetailedSpecFolding:
         "- 项目名称: SE3 Framework\n"
         "- 简述: SE 3.0 规范驱动开发框架\n\n"
         "### Requirement: Directory Structure\n"
-        "- src/se3/ — 框架源码\n"
-        "- se3/ — SE3 运行时目录\n"
+        "- src/tianluo/ — 框架源码\n"
+        "- tianluo/ — SE3 运行时目录\n"
         "- .claude/ — 开发依赖\n\n"
         "### Requirement: Coding Conventions\n"
         "- Python 风格遵循标准 PEP 8\n"

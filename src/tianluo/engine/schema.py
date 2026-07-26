@@ -83,7 +83,7 @@ class ColdRefSchema(TypedDict, total=False):
 
     New-format (hot/cold split, issue #244 一期) engine.json keeps only the
     per-step *status table* inline; each step's heavy inputs/outputs/artifacts
-    live in ``se3/state/steps/<flow_id>/<step_id>.json`` and are referenced here.
+    live in ``tianluo/state/steps/<flow_id>/<step_id>.json`` and are referenced here.
     ``hash`` is the cold payload's content hash, letting the incremental write
     path rewrite only the cold files that actually changed.
 
@@ -147,7 +147,7 @@ class ContextRefSchema(TypedDict, total=False):
     """Reference from the header to the externalized shared-context cold file.
 
     New-format state keeps ``context`` (and ``fix_history``) out of the header,
-    in ``se3/state/steps/<flow_id>/_context.json``, referenced here by hash.
+    in ``tianluo/state/steps/<flow_id>/_context.json``, referenced here by hash.
     """
 
     file: str
@@ -206,7 +206,7 @@ class FlowInstanceSchema(TypedDict, total=False):
             "updated_at": "2026-02-24T10:30:00",
             "completed_at": null,
             "change_name": "feature-x-implementation",
-            "change_path": "se3/specs/_changelog/feature-x",
+            "change_path": "tianluo/specs/_changelog/feature-x",
             "is_worktree_mode": false,
             "worktree_branch": null
         }

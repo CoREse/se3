@@ -263,7 +263,7 @@ class NewFlowRequest(BaseModel):
     issue: the issue's owner-scoped record is the authoritative source of the
     target machine / project, the request's *task* content is ignored (the
     issue description becomes the task), and the daemon drives the issue
-    lifecycle via the ``se3 run --from-issue`` CLI path.  *task* is optional in
+    lifecycle via the ``luo run --from-issue`` CLI path.  *task* is optional in
     that case, so it defaults to an empty string.
     """
 
@@ -888,7 +888,7 @@ def create_app(
         The issue's owner-scoped record is the authoritative source of the
         target machine / project — the request's *task* content is ignored and
         ``from_issue_id`` is threaded through to the daemon, which runs
-        ``se3 run --from-issue <id>`` and owns the full issue lifecycle
+        ``luo run --from-issue <id>`` and owns the full issue lifecycle
         (in-progress on start, resolved/open on exit).  Only ``open`` issues
         can be launched from the UI; the daemon still performs the final
         in-progress race check.
@@ -966,7 +966,7 @@ def create_app(
                 status_code=422, detail="'project_root' must not be empty"
             )
         # Only enforce absolute-path shape — the target need not be a known
-        # machine.project_roots entry. The owning daemon auto-runs `se3 init`
+        # machine.project_roots entry. The owning daemon auto-runs `luo init`
         # on first use, so a freshly typed brand-new directory is valid input.
         if not os.path.isabs(project_root):
             raise HTTPException(
@@ -1013,8 +1013,8 @@ def create_app(
     ) -> dict:
         # Ownership gate: a flow on another owner's machine reads as absent.
         # WHY reachable-first resolution matters here: a response is a file drop
-        # — the daemon writes ``se3/calls/<id>.response`` under the flow's
-        # project_root, which the live ``se3 run`` drains from that same (here
+        # — the daemon writes ``tianluo/calls/<id>.response`` under the flow's
+        # project_root, which the live ``luo run`` drains from that same (here
         # shared) disk. Any reachable daemon mounting it serves the answer, so
         # routing to a disconnected peer that merely reported the flow first
         # would bounce the operator's reply while the flow sits blocked.
@@ -1060,7 +1060,7 @@ def create_app(
         Unlike ``/respond`` (which answers an *existing* pending call), this
         endpoint pushes a fresh instruction into a flow that has no pending
         call: the owning daemon turns it into an ``interjection``-kind call
-        file that ``se3 run`` drains at the next step boundary.
+        file that ``luo run`` drains at the next step boundary.
         """
         text = req.text.strip()
         if not text:
@@ -1102,7 +1102,7 @@ def create_app(
         archived/history-only, and must belong to the requesting owner. The
         owning daemon receives a ``MSG_SPAWN_FLOW`` carrying the
         ``resume_flow_id`` field; the daemon validates the local
-        ``engine.json`` and spawns ``se3 run --resume --flow-id <id>``.
+        ``engine.json`` and spawns ``luo run --resume --flow-id <id>``.
 
         Validation mirrors ``daemon.request_resume()`` so the endpoint's
         receipt is honest about what actually happens:
@@ -1180,11 +1180,11 @@ def create_app(
     ) -> JSONResponse:
         """End (terminate + archive) a session.
 
-        For a main-branch session this just terminates the live ``se3 run``
+        For a main-branch session this just terminates the live ``luo run``
         process; for a worktree session it additionally archives the worktree
         the way a normally-completed session is cleaned up, so no dangling
         worktree is left behind. The owning daemon receives a
-        ``MSG_END_SESSION`` and off-loads the work to an ``se3 end-session``
+        ``MSG_END_SESSION`` and off-loads the work to an ``luo end-session``
         subprocess.
 
         The receipt is honest, mirroring the resume gate:
@@ -2570,7 +2570,7 @@ def _create_app_kwargs_from_server_config(server_cfg: Any) -> dict:
       thresholds come from ``server.auth.local``.
 
     This is what makes ``server.auth.*`` and ``server.db_path`` from
-    ``se3.yaml`` / the global config actually take effect on the running
+    ``tianluo.yaml`` / the global config actually take effect on the running
     server instead of being silently ignored.
     """
     auth = server_cfg.auth
@@ -2640,7 +2640,7 @@ def run(
 
     *db_path* selects the sqlite store backing owners / identities / daemon
     keys / break-glass tokens. The CLI passes the persistent default so a token
-    minted via ``se3-server bootstrap-token`` is consumable by the live server;
+    minted via ``tianluo-server bootstrap-token`` is consumable by the live server;
     ``None`` falls back to an in-memory store (used by tests). *auth_config* /
     *session_store* / *rate_limiter* carry the resolved ``server.auth.*``
     configuration through to :func:`create_app`.
@@ -2676,10 +2676,10 @@ def run(
 
 
 def main(argv: Optional[list] = None) -> None:
-    """``se3-server`` console-script entry point.
+    """``tianluo-server`` console-script entry point.
 
     Parses ``--host`` / ``--port`` / ``--db-path``, loads the ``server:``
-    configuration (``se3.yaml`` + global ``~/.se3/config.yaml``), and runs the
+    configuration (``tianluo.yaml`` + global ``~/.se3/config.yaml``), and runs the
     server with the resolved auth providers / cookie / lockout / db-path
     settings. Kept dependency-light (argparse + the core config loader) so the
     friendly missing-extra check in :func:`tianluo.server.main` stays the first
@@ -2690,13 +2690,13 @@ def main(argv: Optional[list] = None) -> None:
     from tianluo.config import load_server_config
 
     parser = argparse.ArgumentParser(
-        prog="se3-server", description="SE3 central control-plane server"
+        prog="tianluo-server", description="SE3 central control-plane server"
     )
     parser.add_argument(
         "--version",
         "-v",
         action="version",
-        version=f"se3-server version {__version__}",
+        version=f"tianluo-server version {__version__}",
         help="Show version information",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")

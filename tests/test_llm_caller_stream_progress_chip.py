@@ -342,7 +342,7 @@ def test_narrative_text_progress_jsonl_byte_identical_to_legacy(tmp_path):
     )
     path = (
         tmp_path
-        / "se3"
+        / "tianluo"
         / "history"
         / "flow-byte"
         / "01_discovery_abc12345.jsonl"
@@ -378,7 +378,7 @@ def test_record_stream_progress_writes_new_chip_fields_when_provided(tmp_path):
     )
     path = (
         tmp_path
-        / "se3"
+        / "tianluo"
         / "history"
         / "flow-chip-fields"
         / "01_implement_abc12345.jsonl"

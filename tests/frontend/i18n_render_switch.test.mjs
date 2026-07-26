@@ -19,7 +19,7 @@ import path from "node:path";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const STATIC_DIR = path.join(here, "..", "..", "src", "se3", "server", "static");
+const STATIC_DIR = path.join(here, "..", "..", "src", "tianluo", "server", "static");
 const app = require(path.join(STATIC_DIR, "app.js"));
 const { I18N } = app;
 

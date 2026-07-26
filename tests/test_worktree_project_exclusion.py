@@ -1,17 +1,17 @@
 """Tests for worktree-copy attribution and issue de-duplication.
 
 A ``se3 run --worktree`` flow body executes inside
-``<main>/se3/worktrees/<name>/`` — a transient isolation sandbox that clones the
-main project's ``se3/`` tree (including ``se3/issues/``). Two regressions are
+``<main>/tianluo/worktrees/<name>/`` — a transient isolation sandbox that clones the
+main project's ``tianluo/`` tree (including ``tianluo/issues/``). Two regressions are
 covered here:
 
 * the worktree copy directory being registered as a *standalone project* (so it
   pollutes the WebUI project list / registry), and
-* the worktree copy's ``se3/issues/`` being aggregated alongside the main
+* the worktree copy's ``tianluo/issues/`` being aggregated alongside the main
   project's, so every issue is counted twice during a run.
 
 Both are solved by a single realpath attribution: a process / root located
-under some main project's ``se3/worktrees/`` is attributed back to that main
+under some main project's ``tianluo/worktrees/`` is attributed back to that main
 project root rather than treated as its own project.
 """
 
@@ -33,15 +33,15 @@ from tianluo.daemon.supervisor import (
 
 def _make_project(root: Path) -> Path:
     """Create a minimal se3 project root and return it."""
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
-    (root / "se3" / "specs" / "base").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "specs" / "base").mkdir(parents=True, exist_ok=True)
     return root
 
 
 def _write_issue(root: Path, issue_id: str, *, status: str = "open") -> None:
-    """Write a single issue YAML under ``se3/issues/<status>/``."""
+    """Write a single issue YAML under ``tianluo/issues/<status>/``."""
     subdir = "closed" if status in ("closed", "resolved", "wontfix") else "open"
-    issues_dir = root / "se3" / "issues" / subdir
+    issues_dir = root / "tianluo" / "issues" / subdir
     issues_dir.mkdir(parents=True, exist_ok=True)
     (issues_dir / f"{issue_id}_x.yaml").write_text(
         "\n".join(
@@ -58,7 +58,7 @@ def _write_issue(root: Path, issue_id: str, *, status: str = "open") -> None:
 
 def _write_engine(root: Path, flow_id: str, *, worktree: bool) -> None:
     """Write a minimal engine.json for *root*."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -81,7 +81,7 @@ def _write_engine(root: Path, flow_id: str, *, worktree: bool) -> None:
 
 def test_resolve_worktree_attributes_to_main_root(tmp_path: Path) -> None:
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
 
     assert resolve_worktree_main_root(str(wt)) == str(main.resolve())
@@ -98,20 +98,20 @@ def test_resolve_nested_worktree_stops_at_immediate_parent(tmp_path: Path) -> No
     """A nested worktree resolves to its *immediate* parent, not the outermost.
 
     Guards the boundary where the main project itself lives under a parent
-    worktree: ``…/wt1/se3/worktrees/wt2`` must resolve to ``…/wt1``, never to
+    worktree: ``…/wt1/tianluo/worktrees/wt2`` must resolve to ``…/wt1``, never to
     the outer ``…`` root.
     """
     outer = _make_project(tmp_path / "outer")
-    wt1 = outer / "se3" / "worktrees" / "wt-1"
+    wt1 = outer / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt1)
-    wt2 = wt1 / "se3" / "worktrees" / "wt-2"
+    wt2 = wt1 / "tianluo" / "worktrees" / "wt-2"
     _make_project(wt2)
 
     assert resolve_worktree_main_root(str(wt2)) == str(wt1.resolve())
 
 
 def test_resolve_skips_non_worktree_structure(tmp_path: Path) -> None:
-    """A path not shaped like ``<main>/se3/worktrees/<name>`` is left alone."""
+    """A path not shaped like ``<main>/tianluo/worktrees/<name>`` is left alone."""
     # ``worktrees`` directly under the root (no intervening ``se3`` segment) must
     # NOT be treated as an se3 isolation sandbox.
     plain = tmp_path / "worktrees" / "x"
@@ -151,7 +151,7 @@ def test_scan_external_registers_main_root_for_worktree_proc(
     import tianluo.daemon.supervisor as sup_mod
 
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
 
     fake = _FakePsutil(
@@ -172,7 +172,7 @@ def test_scan_external_registers_main_root_for_worktree_proc(
 
 def test_collect_issues_skips_worktree_copy(tmp_path: Path) -> None:
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
     _write_issue(main, "001")
     _write_issue(wt, "001")  # the worktree's clone of the same issue
@@ -189,9 +189,9 @@ def test_snapshot_does_not_double_count_worktree_issues(tmp_path: Path) -> None:
     _write_issue(main, "002")
     _write_engine(main, "flow-main", worktree=False)
 
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
-    # The worktree clones se3/issues/ AND runs an is_worktree_mode flow, so it
+    # The worktree clones tianluo/issues/ AND runs an is_worktree_mode flow, so it
     # is an *observable* root (flow card) but its issue copy must be ignored.
     _write_issue(wt, "001")
     _write_issue(wt, "002")
@@ -219,7 +219,7 @@ def test_worktree_root_excluded_from_project_roots(tmp_path: Path) -> None:
     """The dropdown-facing ``project_roots`` never lists a worktree copy."""
     main = _make_project(tmp_path / "main")
     _write_engine(main, "flow-main", worktree=False)
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
     _write_engine(wt, "flow-wt", worktree=True)
 
@@ -250,12 +250,12 @@ def test_entry_point_seam_keeps_worktree_out_of_active_and_registry(
     All five entry points delegate to ``aggregator.add_project_root``; driving a
     worktree path straight through the live ``Daemon``'s aggregator exercises the
     shared seam and asserts neither the in-memory active set nor the persisted
-    registry retains the ``/se3/worktrees/`` copy.
+    registry retains the ``/tianluo/worktrees/`` copy.
     """
     from tianluo.daemon.daemon import Daemon, DaemonConfig, _read_project_roots
 
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
 
     config = DaemonConfig(pid_dir=tmp_path / "rt")
@@ -265,7 +265,7 @@ def test_entry_point_seam_keeps_worktree_out_of_active_and_registry(
     active = [str(p) for p in daemon.aggregator.project_roots]
     assert str(main.resolve()) in active
     assert str(wt.resolve()) not in active
-    assert all("/se3/worktrees/" not in r for r in active)
+    assert all("/tianluo/worktrees/" not in r for r in active)
 
     persisted = _read_project_roots(config.project_roots_file)
     assert str(main.resolve()) in persisted
@@ -277,7 +277,7 @@ def test_append_project_root_defence_normalizes_worktree(tmp_path: Path) -> None
     from tianluo.daemon.daemon import _append_project_root, _read_project_roots
 
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
     registry = tmp_path / "project_roots.json"
 
@@ -301,7 +301,7 @@ def test_startup_sanitize_cleans_polluted_registry_to_main_only(
     )
 
     main = _make_project(tmp_path / "main")
-    wt = main / "se3" / "worktrees" / "wt-1"
+    wt = main / "tianluo" / "worktrees" / "wt-1"
     _make_project(wt)
     registry = tmp_path / "project_roots.json"
     _atomic_write_json(
@@ -313,7 +313,7 @@ def test_startup_sanitize_cleans_polluted_registry_to_main_only(
 
     cleaned = _read_project_roots(registry)
     assert cleaned == [str(main.resolve())]
-    assert all("/se3/worktrees/" not in r for r in cleaned)
+    assert all("/tianluo/worktrees/" not in r for r in cleaned)
 
 
 def test_startup_sanitize_clean_registry_not_rewritten(tmp_path: Path) -> None:

@@ -479,15 +479,15 @@ class TestConfigMaxIterations:
     """Test cases for max_fix_iterations configuration."""
 
     def test_max_fix_iterations_from_se3_yaml(self, tmp_path):
-        """Test that max_fix_iterations can be configured via se3.yaml."""
+        """Test that max_fix_iterations can be configured via tianluo.yaml."""
         from tianluo.config import get_max_fix_iterations
 
-        # Create se3.yaml with custom max_fix_iterations
+        # Create tianluo.yaml with custom max_fix_iterations
         config_content = """
 workflow:
   max_fix_iterations: 5
 """
-        (tmp_path / "se3.yaml").write_text(config_content)
+        (tmp_path / "tianluo.yaml").write_text(config_content)
 
         result = get_max_fix_iterations(tmp_path)
 
@@ -502,7 +502,7 @@ workflow:
         assert result == DEFAULT_MAX_FIX_ITERATIONS == 100
 
     def test_max_fix_iterations_no_config_file(self, tmp_path):
-        """Test default when se3.yaml doesn't exist."""
+        """Test default when tianluo.yaml doesn't exist."""
         from tianluo.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
 
         non_existent_path = tmp_path / "non_existent"

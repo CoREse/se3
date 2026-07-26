@@ -41,7 +41,7 @@ def _write_global(tmp_path, yaml_text):
 
 
 def _write_project(tmp_path, yaml_text):
-    (tmp_path / "se3.yaml").write_text(yaml_text)
+    (tmp_path / "tianluo.yaml").write_text(yaml_text)
 
 
 class TestRegistryEntryLevelMerge:

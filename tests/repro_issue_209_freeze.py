@@ -110,15 +110,15 @@ def _synth_heavy_root(base: Path) -> Path:
     dirs + a multi-MB busy active flow — the realistic load that starves the
     daemon push loop."""
     root = base / "heavy_project"
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     flow_id = "20260101-000000_heavyflow"
     # ~1MB engine.json (parsed SYNC on the event loop by active_flow_signature
     # every tick).
     big_steps = {f"{i:02d}_step_{i:08x}": {"status": "RUNNING", "blob": "x" * 600}
                  for i in range(1200)}
-    (root / "se3" / "state" / "engine.json").write_text(json.dumps(
+    (root / "tianluo" / "state" / "engine.json").write_text(json.dumps(
         {"flow_id": flow_id, "status": "RUNNING", "state": {"steps": big_steps}}))
-    hist = root / "se3" / "history"
+    hist = root / "tianluo" / "history"
     # the busy active flow with multi-MB jsonl
     af = hist / flow_id
     af.mkdir(parents=True, exist_ok=True)
@@ -180,7 +180,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         fa = tmp / "fake_agent.py"
         fa.write_text(FAKE_AGENT)
         fa.chmod(0o755)
-        y = project / "se3.yaml"
+        y = project / "tianluo.yaml"
         y.write_text(y.read_text() +
                      f"\nagents:\n  fake: {{type: claude-code, cmd: {fa}, priority: 10}}\n"
                      "llm_caller:\n  defaults: [fake]\n")
@@ -297,7 +297,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
                     break
         threading.Thread(target=bgdrain, daemon=True).start()
 
-        ej = project / "se3" / "state" / "engine.json"
+        ej = project / "tianluo" / "state" / "engine.json"
 
         def flow_id():
             if not ej.exists():
@@ -327,7 +327,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         confirm_t = time.time()
 
         def analyze_on_disk():
-            hd = project / "se3" / "history" / fid
+            hd = project / "tianluo" / "history" / fid
             return hd.exists() and any("analyze" in f.name for f in hd.iterdir())
         _poll(analyze_on_disk, 200, 0.2)
         time.sleep(wait_after)

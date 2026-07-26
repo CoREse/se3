@@ -36,9 +36,9 @@ from tianluo.engine.models import (
 @pytest.fixture
 def project_root(tmp_path):
     """Create a minimal project structure."""
-    (tmp_path / "se3" / "state").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "open").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "closed").mkdir(parents=True)
     return tmp_path
 
 
@@ -187,7 +187,7 @@ class TestFixLoopLogic:
             task_description="Fix a bug",
             status=FlowStatus.RUNNING,
         )
-        flow.change_path = project_root / "se3.yaml"
+        flow.change_path = project_root / "tianluo.yaml"
         return step, flow
 
     def _mock_run_command(self, passed, stdout="", stderr=""):
@@ -341,7 +341,7 @@ class TestInheritedFailuresOutput:
             task_description="Fix a bug",
             status=FlowStatus.RUNNING,
         )
-        flow.change_path = project_root / "se3.yaml"
+        flow.change_path = project_root / "tianluo.yaml"
         return step, flow
 
     def _mock_run_command(self, passed, stdout="", stderr=""):
@@ -395,7 +395,7 @@ class TestInheritedFailuresOutput:
         step, flow = self._make_step_and_flow(project_root, baseline_failures=[])
         step_handler_call(step, flow)
 
-        kf_path = project_root / "se3" / "state" / "known_test_failures.json"
+        kf_path = project_root / "tianluo" / "state" / "known_test_failures.json"
         assert not kf_path.exists()
         # It is classified as introduced, not inherited.
         tr = step.outputs["test_results"]
@@ -472,7 +472,7 @@ class TestInheritedFailuresOutput:
             task_description="Fix a bug",
             status=FlowStatus.RUNNING,
         )
-        flow.change_path = project_root / "se3.yaml"
+        flow.change_path = project_root / "tianluo.yaml"
 
         for _ in range(3):
             step = Step(step_type=StepType.TEST, status=StepStatus.PENDING)
@@ -492,7 +492,7 @@ class TestInheritedFailuresOutput:
 # ---------------------------------------------------------------------------
 
 def step_handler_call(step, flow):
-    """Call test_handler with TestConfig mocked to avoid se3.yaml lookup.
+    """Call test_handler with TestConfig mocked to avoid tianluo.yaml lookup.
 
     The baseline-fix budget (mechanism B) is disabled here so these
     classification tests stay on the surface-not-loop path for *inherited*

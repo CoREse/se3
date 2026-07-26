@@ -5,6 +5,7 @@ enabling up/down arrow navigation through previous prompts.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 from pathlib import Path
@@ -81,7 +82,7 @@ def _truncate_history(path: Path, max_entries: int = MAX_ENTRIES) -> None:
 def get_prompt_history(project_root: Path) -> FileHistory:
     """Get a FileHistory instance for the given project.
 
-    The history file is stored at se3/history/prompt_history relative
+    The history file is stored at tianluo/history/prompt_history relative
     to project_root. The directory is created if it doesn't exist.
     The file is truncated if it exceeds MAX_ENTRIES.
 
@@ -91,7 +92,7 @@ def get_prompt_history(project_root: Path) -> FileHistory:
     Returns:
         A prompt_toolkit FileHistory instance.
     """
-    history_dir = project_root / "se3" / HISTORY_DIR
+    history_dir = runtime_dir(project_root) / HISTORY_DIR
     history_dir.mkdir(parents=True, exist_ok=True)
 
     history_path = history_dir / HISTORY_FILENAME

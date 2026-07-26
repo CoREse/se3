@@ -85,7 +85,7 @@ def _write_engine(root: Path, flow_id: str, status: str, steps: dict | None = No
     form); the boundary is the ONE place the full steps table is first written
     and ``status`` flips PAUSED→RUNNING while analyze starts.
     """
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -102,7 +102,7 @@ def _write_engine(root: Path, flow_id: str, status: str, steps: dict | None = No
 
 
 def _hist(root: Path, flow_id: str) -> Path:
-    return root / "se3" / "history" / flow_id
+    return root / "tianluo" / "history" / flow_id
 
 
 def _write_jsonl(path: Path, lines: list) -> None:
@@ -523,8 +523,8 @@ def test_active_flow_signature_moves_on_engine_middle_rewrite(tmp_path):
     disk_json_cache.clear_cache()
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
     # A >128KiB live engine.json + one active jsonl so the flow is in the sig.
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
-    ej = root / "se3" / "state" / "engine.json"
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+    ej = root / "tianluo" / "state" / "engine.json"
     ej.write_text(_build_large_engine(0), encoding="utf-8")
     hist = _hist(root, flow_id)
     _write_jsonl(hist / "02_analyze_cd34.jsonl", [_chat("assistant", "hi", 1)])

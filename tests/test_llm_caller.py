@@ -136,13 +136,13 @@ class TestCallPassesRequiredKeys:
 class TestCreateRunnerForwardsProjectRoot:
     """Regression: _create_runner must forward project_root to ClaudeCodeRunner
     so that ``claude_subprocess.setting_sources`` from the project's
-    ``se3.yaml`` actually reaches the subprocess. Without forwarding, the
+    ``tianluo.yaml`` actually reaches the subprocess. Without forwarding, the
     Runner falls back to the built-in default ``["user"]`` regardless of
     user config — silently neutralising the documented escape hatch.
     """
 
     def test_project_root_forwarded_so_yaml_setting_sources_takes_effect(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "claude_subprocess:\n  setting_sources: [user, project]\n",
             encoding="utf-8",
         )

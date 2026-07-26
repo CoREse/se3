@@ -6,6 +6,7 @@ Supports fix iterations for the test-verify-fix loop.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import copy
 import json
@@ -475,7 +476,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Charter (full text) + code-index top map replace the retired spec-name
     # list: project conventions come from the charter, and the code-index top
     # map orients the implementer (function-level detail on demand via
-    # `se3 code-index show <path>`).
+    # `luo code-index show <path>`).
     injection += get_charter_injection(project_root)
     # No code-index refresh here: the read-side map was refreshed once in analyze
     # (before any code changed) and the post-implement map is refreshed once just
@@ -1488,8 +1489,8 @@ def _merge_leaf_branch(
        only discards the master-pre-merge version of conflicting paths.
     4. Post-merge ``git stash pop``; any non-clean pop is recovered through
        the shared ``resolve_stashpop_safely`` (same entry point as the
-       ``se3 merge`` fast path). It archives the still-live stash's full
-       content to ``se3/worktrees/.archive`` BEFORE any disposition — case b
+       ``luo merge`` fast path). It archives the still-live stash's full
+       content to ``tianluo/worktrees/.archive`` BEFORE any disposition — case b
        (untracked-collision, e.g. concurrent discovery issue files) gives
        way to the merged tree and is never destroyed; case a (real 3-way
        tracked) is reconciled by an injected LLM resolver (symmetric with
@@ -1580,11 +1581,11 @@ def _merge_leaf_branch(
         if pop_result.returncode != 0:
             # Non-clean pop: hand the whole recovery to the shared
             # no-data-loss entry point so this leaf-back path and the
-            # ``se3 merge`` fast path behave identically. It archives the
+            # ``luo merge`` fast path behave identically. It archives the
             # still-live stash's full content (untracked collisions that
             # were never checked out — case b, plus tracked working-tree
             # changes about to be take-ours'd over — case a) to
-            # ``se3/worktrees/.archive`` BEFORE any disposition, gives case b
+            # ``tianluo/worktrees/.archive`` BEFORE any disposition, gives case b
             # away to the merged tree (never destroying the concurrent new
             # files, e.g. discovery's issue files), take-ours' case a, and
             # drops the stash only after archival is proven. ``stash_label``
@@ -1724,13 +1725,13 @@ def _take_theirs_fallback(
 ) -> bool:
     """Deterministic fallback when LLM conflict resolution is exhausted.
 
-    NOTE: This is the DAG leaf-merge path — NOT the ``se3 merge`` command
-    path. The ``se3 merge`` command has had every take-theirs route
+    NOTE: This is the DAG leaf-merge path — NOT the ``luo merge`` command
+    path. The ``luo merge`` command has had every take-theirs route
     removed (see merge strategy refactor: ``fast`` / ``safe`` / ``strict``
     all resolve via LLM-as-editor or escalate to human, never via
     take-theirs). The leaf-merge fallback here is preserved because it
     sits inside the DAG implement loop and has its own success/failure
-    contract independent of ``se3 merge``; reworking that loop is out
+    contract independent of ``luo merge``; reworking that loop is out
     of scope for the merge refactor.
 
     For every conflict file, ``git checkout --theirs`` (the leaf branch's
@@ -1790,8 +1791,8 @@ def _is_branch_reachable_from(
 
 
 # Module-scoped re-exports of the shared stash-pop helpers. Both
-# implement step and ``se3 merge`` (fast strategy) share the same
-# behavior (see src/se3/engine/stash_utils.py).
+# implement step and ``luo merge`` (fast strategy) share the same
+# behavior (see src/tianluo/engine/stash_utils.py).
 
 
 def _record_take_theirs_event(
@@ -1844,7 +1845,7 @@ def _record_stashpop_takeours_event(
     Unlike the original (which recorded only conflict-file *paths*, leaving
     nothing to restore from), this records the archive manifest — for each
     discarded/colliding file, where its full content was persisted under
-    ``se3/worktrees/.archive`` and a verifiable blob sha — so the operator
+    ``tianluo/worktrees/.archive`` and a verifiable blob sha — so the operator
     can actually recover. ``archive_failed`` flips the issue to a high-prio
     data-loss-risk alert: recovery did not finalize so the live stash was
     kept (not dropped) and must be recovered manually. The manifest is still
@@ -2003,7 +2004,7 @@ def _run_dag_parallel(
             branch = f"impl/{flow.flow_id}/{gid}"
             # Salvage history from stale worktree before cleanup
             safe_name = branch.replace("/", "-")
-            stale_wt = project_root / "se3" / "worktrees" / safe_name
+            stale_wt = runtime_dir(project_root) / "worktrees" / safe_name
             if stale_wt.exists():
                 try:
                     _salvage_history_from_worktree(stale_wt, project_root)
@@ -2481,7 +2482,7 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
     """Copy history files from a worktree back to the main repository.
 
     When LLM runs in a worktree, chat history is recorded under the worktree's
-    se3/history/ directory. This function copies those files to the main repo
+    tianluo/history/ directory. This function copies those files to the main repo
     before the worktree is cleaned up, preventing history loss.
 
     Args:
@@ -2490,11 +2491,11 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
     """
     import shutil
 
-    wt_history = worktree_path / "se3" / "history"
+    wt_history = runtime_dir(worktree_path) / "history"
     if not wt_history.exists():
         return
 
-    main_history = main_repo_root / "se3" / "history"
+    main_history = runtime_dir(main_repo_root) / "history"
     main_history.mkdir(parents=True, exist_ok=True)
 
     copied = 0
@@ -2529,7 +2530,7 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
     """Copy history files from main repo into a worktree.
 
     This enables LLMCaller retry context injection in worktrees,
-    which look for history at their own project_root/se3/history/.
+    which look for history at their own project_root/tianluo/history/.
     Only copies history for the given flow_id.
 
     Args:
@@ -2539,11 +2540,11 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
     """
     import shutil
 
-    main_flow_dir = main_repo_root / "se3" / "history" / flow_id
+    main_flow_dir = runtime_dir(main_repo_root) / "history" / flow_id
     if not main_flow_dir.exists():
         return
 
-    wt_flow_dir = worktree_path / "se3" / "history" / flow_id
+    wt_flow_dir = runtime_dir(worktree_path) / "history" / flow_id
     wt_flow_dir.mkdir(parents=True, exist_ok=True)
 
     copied = 0

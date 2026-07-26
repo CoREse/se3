@@ -207,7 +207,7 @@ class TestFromIssueWrapperNoExitCodeFinalize:
             # Model a real run that reached a persisted terminal state carrying
             # the source issue — this is what makes the wrapper defer to
             # run_flow's own finalize rather than reverting.
-            state_dir = tmp_path / "se3" / "state"
+            state_dir = tmp_path / "tianluo" / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
             (state_dir / "engine.json").write_text(
                 json.dumps(
@@ -275,7 +275,7 @@ class TestFromIssueEarlyDispatchFailureReverts:
         issue_id = IssueManager(tmp_path).create(
             description="Fix the thing", type="bug"
         ).id
-        state_dir = tmp_path / "se3" / "state"
+        state_dir = tmp_path / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "engine.json").write_text(
             json.dumps(
@@ -328,7 +328,7 @@ class TestFromIssueEarlyDispatchFailureReverts:
         issue_id = IssueManager(tmp_path).create(
             description="Fix the thing", type="bug"
         ).id
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-1"
 
         # The current dispatch itself persists the worktree engine.json (COMPLETED)
         # and then its trailing merge fails → rc 1. Writing it inside the mocked
@@ -426,7 +426,7 @@ def _write_wt_engine(
 ):
     """Persist a worktree engine.json the way a real ``--worktree`` from-issue
     flow does — carrying ``source_issue_id`` so finalization is process-decoupled."""
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": flow_id,
@@ -506,7 +506,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         # The in-flow merge landed the branch on master (delete_merged=False), so
         # its ref exists and is an ancestor — the state finalize now verifies.
         _create_ancestor_branch(tmp_path, branch)
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-1"
 
         # --- First run PAUSED: only the persisted worktree engine.json survives
         # (the original wrapper process is gone). It carries the source_issue_id.
@@ -558,7 +558,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-2"
         _create_ancestor_branch(tmp_path, branch)
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-2"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-2"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -601,7 +601,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/never-landed-9"
         # Deliberately DO NOT create the branch as an ancestor — it never merged.
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-never-9"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-never-9"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -632,7 +632,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         _init_git_repo(tmp_path)
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-3"
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-3"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-3"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -739,7 +739,7 @@ class TestSyncFromIssueResumeFinalizeE2E:
             lambda f: setattr(f, "status", FlowStatus.COMPLETED)
         )
 
-        # No se3/worktrees under tmp_path → resume_run routes straight to the
+        # No tianluo/worktrees under tmp_path → resume_run routes straight to the
         # synchronous run_flow path (models the daemon's `se3 run --resume`).
         with patch("tianluo.commands.run.PersistenceManager", return_value=mock_pm), \
              patch("tianluo.commands.run.StateMachine", return_value=mock_sm), \

@@ -6,7 +6,7 @@ writes it back to the working tree, commits the fix (preferring a fix-up
 commit on top of the merge commit, with amend as a fallback), and re-runs
 the guardrails check to verify the fix.
 
-All write-back paths are restricted to ``se3/specs/**/spec.md``.
+All write-back paths are restricted to ``tianluo/specs/**/spec.md``.
 
 **Amend safety contract** (defense against the user-accident root cause A1-A4):
 All amend operations MUST save ``pre_amend_sha`` before ``git commit --amend``.
@@ -16,6 +16,7 @@ still a merge commit before amending.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -351,9 +352,9 @@ class GuardrailRepairer:
                 skipped_missing_content.append(path)
                 continue
 
-            # Resolve full path and validate it lies inside se3/specs/
+            # Resolve full path and validate it lies inside tianluo/specs/
             full_path = (self.project_root / path).resolve()
-            specs_dir = (self.project_root / "se3" / "specs").resolve()
+            specs_dir = (runtime_dir(self.project_root) / "specs").resolve()
             try:
                 full_path.relative_to(specs_dir)
             except ValueError:

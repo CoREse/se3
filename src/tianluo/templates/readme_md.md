@@ -22,13 +22,13 @@
 
 ```
 {project_name}/
-├── se3/                    # SE3 runtime directory
+├── tianluo/                    # SE3 runtime directory
 │   └── specs/              # Project specifications
 ├── src/                    # Source code
 ├── tests/                  # Test files
 ├── README.md               # This file
 ├── VERSIONS.md             # Version history
-└── se3.yaml                # SE3 configuration
+└── tianluo.yaml                # SE3 configuration
 ```
 
 ## Documentation
@@ -36,7 +36,7 @@
 | File | Purpose |
 |------|---------|
 | `VERSIONS.md` | Complete version history |
-| `se3/specs/base/spec.md` | Project base specification |
+| `tianluo/specs/base/spec.md` | Project base specification |
 
 See [VERSIONS.md](VERSIONS.md) for the complete version history.
 

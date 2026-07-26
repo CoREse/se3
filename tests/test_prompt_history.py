@@ -16,11 +16,11 @@ from tianluo.engine.prompt_history import (
 
 
 def test_get_prompt_history_creates_directory_and_returns_file_history(tmp_path: Path):
-    """get_prompt_history creates se3/history/ dir and returns FileHistory."""
+    """get_prompt_history creates tianluo/history/ dir and returns FileHistory."""
     history = get_prompt_history(tmp_path)
 
     assert isinstance(history, FileHistory)
-    history_dir = tmp_path / "se3" / HISTORY_DIR
+    history_dir = tmp_path / "tianluo" / HISTORY_DIR
     assert history_dir.is_dir()
     # FileHistory doesn't create the file until an entry is stored;
     # verify the directory is ready for it
@@ -41,7 +41,7 @@ def test_get_prompt_history_idempotent(tmp_path: Path):
 
 def test_get_prompt_history_preserves_existing_entries(tmp_path: Path):
     """Entries written by one FileHistory are readable by a new one."""
-    history_dir = tmp_path / "se3" / HISTORY_DIR
+    history_dir = tmp_path / "tianluo" / HISTORY_DIR
     history_dir.mkdir(parents=True)
     history_file = history_dir / HISTORY_FILENAME
 

@@ -216,22 +216,22 @@ class TestFindVersionScript:
     """Tests for find_version_script."""
 
     def test_find_default_py_path(self, tmp_path):
-        script = tmp_path / "se3" / "scripts" / "version.py"
+        script = tmp_path / "tianluo" / "scripts" / "version.py"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# placeholder")
         result = find_version_script(tmp_path)
         assert result == script
 
     def test_find_default_sh_path(self, tmp_path):
-        script = tmp_path / "se3" / "scripts" / "version.sh"
+        script = tmp_path / "tianluo" / "scripts" / "version.sh"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# placeholder")
         result = find_version_script(tmp_path)
         assert result == script
 
     def test_py_preferred_over_sh(self, tmp_path):
-        py_script = tmp_path / "se3" / "scripts" / "version.py"
-        sh_script = tmp_path / "se3" / "scripts" / "version.sh"
+        py_script = tmp_path / "tianluo" / "scripts" / "version.py"
+        sh_script = tmp_path / "tianluo" / "scripts" / "version.sh"
         py_script.parent.mkdir(parents=True, exist_ok=True)
         py_script.write_text("# py")
         sh_script.write_text("# sh")
@@ -338,7 +338,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_detection(self, tmp_path):
         """When version script exists, VersionBumper uses script mode."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         result = bumper.detect_version_file(tmp_path)
@@ -360,7 +360,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_read_version(self, tmp_path):
         """Script mode read_version delegates to runner."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "3.1.4")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "3.1.4")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -369,7 +369,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_bump_version(self, tmp_path):
         """Script mode bump_version delegates to runner."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -378,7 +378,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_rollback(self, tmp_path):
         """Script mode rollback uses set command to restore version."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "2.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "2.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -392,7 +392,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_clear_backup(self, tmp_path):
         """Clear backup works in script mode."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)

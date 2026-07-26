@@ -58,7 +58,7 @@ STEP_TITLE_KEYS: Dict[StepType, str] = {
 def step_display_title(step_type: StepType) -> str:
     """Localized display title for *step_type*, falling back to its raw value.
 
-    Public so the ``se3 run`` console (which prints its own per-step Rule header,
+    Public so the ``luo run`` console (which prints its own per-step Rule header,
     not a renderer Panel) resolves step titles from the same map — one language
     for every user-visible mention of a step.
     """

@@ -47,7 +47,7 @@ def _make_state_machine(tmp_path, cfg=None):
     with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     if cfg is not None:
-        # Pin the workflow config so tests do not depend on an on-disk se3.yaml.
+        # Pin the workflow config so tests do not depend on an on-disk tianluo.yaml.
         sm._get_workflow_config = lambda: cfg  # type: ignore[assignment]
     return sm
 

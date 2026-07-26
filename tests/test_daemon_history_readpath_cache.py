@@ -1,7 +1,7 @@
 """Regression lock for the daemon *history* read-path disk-JSON cache (#243 / A1-A2).
 
 The daemon history reader (:mod:`tianluo.daemon.history`) re-touches the SAME
-``se3/state/archive/engine_*.json`` and ``se3/history/<flow>/_meta.json`` files
+``tianluo/state/archive/engine_*.json`` and ``tianluo/history/<flow>/_meta.json`` files
 on every historical enumeration. Group G3 routes those reads through the unified
 ``(path, mtime, size)``-keyed :mod:`tianluo.daemon.disk_json_cache`
 (``read_engine_header`` / ``read_json_cached``), superseding the earlier
@@ -106,7 +106,7 @@ def test_oversized_archive_never_fully_parsed_but_project_root_extracted(
     extracted = tmp_path / "the_real_root"
     extracted.mkdir()
 
-    archive_file = root / "se3" / "state" / "archive" / "engine_20260101_000000.json"
+    archive_file = root / "tianluo" / "state" / "archive" / "engine_20260101_000000.json"
     _write_oversized_archive(
         archive_file,
         flow_id="arch-flow",
@@ -133,7 +133,7 @@ def test_oversized_archive_degraded_read_recovers_legacy_tail_key(tmp_path):
     ``is_worktree_mode`` proves the *tail* window (not just the head) is scanned.
     """
     archive_file = (
-        tmp_path / "se3" / "state" / "archive" / "engine_20260101_000000.json"
+        tmp_path / "tianluo" / "state" / "archive" / "engine_20260101_000000.json"
     )
     _write_oversized_archive(
         archive_file,
@@ -163,7 +163,7 @@ def test_unchanged_meta_json_parsed_once_across_enumerations(tmp_path, monkeypat
     other_root = tmp_path / "meta_root"
     other_root.mkdir()
 
-    flow_dir = root / "se3" / "history" / "20260101-000000_flow"
+    flow_dir = root / "tianluo" / "history" / "20260101-000000_flow"
     flow_dir.mkdir(parents=True)
     (flow_dir / "_meta.json").write_text(
         json.dumps({"type": "discovery", "project_root": str(other_root)}),
@@ -193,7 +193,7 @@ def test_degraded_extraction_failure_is_skipped_and_warned(
     and must never fully parse the file.
     """
     root = tmp_path / "proj"
-    archive_file = root / "se3" / "state" / "archive" / "engine_20260101_000000.json"
+    archive_file = root / "tianluo" / "state" / "archive" / "engine_20260101_000000.json"
     archive_file.parent.mkdir(parents=True, exist_ok=True)
     # No ``  "key": value`` top-level lines anywhere → degraded read extracts
     # nothing → read_engine_header returns None.

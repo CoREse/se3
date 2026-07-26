@@ -8,7 +8,7 @@ spec level (the ``<!-- domain: ... -->`` header metadata).
 
 It carries **only normative text and small constants** — no thresholds (those
 live in :class:`tianluo.config.SpecGovernanceConfig`, which is the configurable
-numeric counterpart) and no behaviour. ``update_spec`` / ``se3 sync`` prompts
+numeric counterpart) and no behaviour. ``update_spec`` / ``luo sync`` prompts
 inject these constants so every LLM sub-process shares one description of the
 governance rules, mirroring the way :mod:`tianluo.engine.spec_role` fixes the
 code-first role wording.
@@ -67,8 +67,8 @@ top-level.
 
 `base` MUST NOT carry module-specific detail. Anything that belongs to one
 subsystem — its submodule list, its internal mechanics, its per-step behaviour —
-belongs in that module's own spec, reachable on demand via `se3 spec index` /
-`se3 spec show`, NOT in `base`. When a write would push `base` over its
+belongs in that module's own spec, reachable on demand via `luo spec index` /
+`luo spec show`, NOT in `base`. When a write would push `base` over its
 configured size limit, the new content MUST be routed into the corresponding
 module spec rather than appended to `base`."""
 
@@ -108,7 +108,7 @@ text is navigable:
 # ---------------------------------------------------------------------------
 # How to decide whether an over-sized spec should be split into parallel specs
 # vs left alone — "cohesion first, size second" — plus the responsibility
-# split between update_spec (advisory only) and se3 sync (the only actor that
+# split between update_spec (advisory only) and luo sync (the only actor that
 # may actually split).
 SPLIT_CRITERIA = """\
 ## Spec Split Criteria (cohesion first, size second)
@@ -126,8 +126,8 @@ Responsibility split:
 
 - Splitting into parallel specs is a semantic-level refactor (it produces a new
   spec name and must update logical addresses, cross-spec refs, the index, and
-  domain metadata). It is performed ONLY by `se3 sync`, with the split plan
+  domain metadata). It is performed ONLY by `luo sync`, with the split plan
   confirmed by the user through sync's respond channel.
 - `update_spec` MUST NOT create a parallel spec on its own. When it judges that
   a spec should be split, it only records the recommendation in its output and
-  leaves the split to `se3 sync`."""
+  leaves the split to `luo sync`."""

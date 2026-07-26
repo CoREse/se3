@@ -11,7 +11,7 @@ cached bundle **wholesale**, with no floor under it. Two hops make that fatal:
 
   hop 1 — ``DaemonHistoryReader.read_flow``: when ``_resolve_flow_dirs`` resolves
     to nothing (the authoritative ``project_root`` does not carry a
-    ``se3/history/<flow_id>`` directory) it returns ``FlowRead(mode="full",
+    ``tianluo/history/<flow_id>`` directory) it returns ``FlowRead(mode="full",
     records=[])``. "I could not find the directory" and "this flow genuinely has
     no records" are the same wire frame — see
     ``test_read_flow_unresolvable_root_is_indistinguishable_from_empty``, which
@@ -101,7 +101,7 @@ def _write_engine_json(root, *, status):
     a candidate for ``read_active_flows``); a history directory alone only ever
     yields a history-only row.
     """
-    path = root / "se3" / "state" / "engine.json"
+    path = root / "tianluo" / "state" / "engine.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
@@ -126,12 +126,12 @@ def _build_two_root_history(tmp_path):
     ``(main_root, worktree_root)``.
     """
     main_root = tmp_path / "repo"
-    worktree_root = main_root / "se3" / "worktrees" / "wt-a"
+    worktree_root = main_root / "tianluo" / "worktrees" / "wt-a"
     _write_jsonl(
-        main_root / "se3" / "history" / FLOW_ID / "01_discovery.jsonl", ROUND_1
+        main_root / "tianluo" / "history" / FLOW_ID / "01_discovery.jsonl", ROUND_1
     )
     _write_jsonl(
-        worktree_root / "se3" / "history" / FLOW_ID / "01_discovery.jsonl", ROUND_2
+        worktree_root / "tianluo" / "history" / FLOW_ID / "01_discovery.jsonl", ROUND_2
     )
     return main_root, worktree_root
 
@@ -162,7 +162,7 @@ def test_read_flow_unresolvable_root_falls_back_to_the_registry_walk(
 ):
     """Hop 1 of #287: a resolution failure must not masquerade as an empty flow.
 
-    ``_resolve_flow_dirs`` finds no ``se3/history/<flow_id>`` under the root it
+    ``_resolve_flow_dirs`` finds no ``tianluo/history/<flow_id>`` under the root it
     was handed (a worktree that was pruned, a root recorded before a move, a path
     the daemon cannot see). Before the fix ``read_flow`` reported ``mode="full",
     records=[]`` — byte-identical on the wire to "this flow has no records at
@@ -230,7 +230,7 @@ def test_read_active_flows_keeps_streaming_a_paused_worktree_flow(tmp_path):
     """
     main_root, worktree_root = _build_two_root_history(tmp_path)
     # Only round 1 exists when the flow pauses on the human reply.
-    live = worktree_root / "se3" / "history" / FLOW_ID / "01_discovery.jsonl"
+    live = worktree_root / "tianluo" / "history" / FLOW_ID / "01_discovery.jsonl"
     _write_jsonl(live, ROUND_1)
     _write_engine_json(worktree_root, status="PAUSED")
     reader = DaemonHistoryReader(

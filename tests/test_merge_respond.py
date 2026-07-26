@@ -441,7 +441,7 @@ class TestGuardrailsAfterAccept:
         _init_repo(tmp_path)
         _start_merge_conflict(tmp_path)
         # Set up a spec file that's part of the resolution
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\nThe system SHALL validate all inputs.\n"
@@ -451,7 +451,7 @@ class TestGuardrailsAfterAccept:
             tmp_path,
             files=[
                 {
-                    "path": "se3/specs/base/spec.md",
+                    "path": "tianluo/specs/base/spec.md",
                     "llm_resolution": {
                         "resolved_content": (
                             "## Requirement: Auth\n\n"
@@ -496,7 +496,7 @@ class TestGuardrailsAfterAccept:
         """
         _init_repo(tmp_path)
         _start_merge_conflict(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\nThe system SHALL validate all inputs.\n"
@@ -506,7 +506,7 @@ class TestGuardrailsAfterAccept:
             tmp_path,
             files=[
                 {
-                    "path": "se3/specs/base/spec.md",
+                    "path": "tianluo/specs/base/spec.md",
                     "llm_resolution": {
                         "resolved_content": (
                             "## Requirement: Auth\n\n"
@@ -529,7 +529,7 @@ class TestGuardrailsAfterAccept:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -667,8 +667,8 @@ class TestIsSpecPath:
     def test_forward_slash_path(self) -> None:
         from tianluo.commands.merge_respond import _is_spec_path
 
-        assert _is_spec_path("se3/specs/base/spec.md") is True
-        assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
+        assert _is_spec_path("tianluo/specs/base/spec.md") is True
+        assert _is_spec_path("tianluo/specs/foo/bar/spec.md") is True
 
     def test_backslash_path_normalized(self) -> None:
         """G2: Windows paths with backslashes are normalised before check."""
@@ -681,14 +681,14 @@ class TestIsSpecPath:
         from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("se3\\specs/base/spec.md") is True
-        assert _is_spec_path("se3/specs\\base\\spec.md") is True
+        assert _is_spec_path("tianluo/specs\\base\\spec.md") is True
 
     def test_non_spec_paths_rejected(self) -> None:
         from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("README.md") is False
-        assert _is_spec_path("se3/state/foo.json") is False
-        assert _is_spec_path("se3/specs/base/other.md") is False
+        assert _is_spec_path("tianluo/state/foo.json") is False
+        assert _is_spec_path("tianluo/specs/base/other.md") is False
         assert _is_spec_path("specs/base/spec.md") is False  # missing se3 prefix
         assert _is_spec_path("") is False
 
@@ -743,7 +743,7 @@ class TestPendingGuardrailsStashResetFailure:
         )
         marker_path = Path(str(call_file) + ".pending_guardrails")
         marker_path.write_text(
-            json.dumps({"pre_sha": pre_sha, "spec_paths": ["se3/specs/base/spec.md"]}),
+            json.dumps({"pre_sha": pre_sha, "spec_paths": ["tianluo/specs/base/spec.md"]}),
             encoding="utf-8",
         )
 
@@ -754,7 +754,7 @@ class TestPendingGuardrailsStashResetFailure:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -836,7 +836,7 @@ class TestPendingGuardrailsStashResetFailure:
         )
         marker_path = Path(str(call_file) + ".pending_guardrails")
         marker_path.write_text(
-            json.dumps({"pre_sha": pre_sha, "spec_paths": ["se3/specs/base/spec.md"]}),
+            json.dumps({"pre_sha": pre_sha, "spec_paths": ["tianluo/specs/base/spec.md"]}),
             encoding="utf-8",
         )
 
@@ -846,7 +846,7 @@ class TestPendingGuardrailsStashResetFailure:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -945,7 +945,7 @@ class TestPendingGuardrailsMultiCommitGuard:
         )
         marker_path = Path(str(call_file) + ".pending_guardrails")
         marker_path.write_text(
-            json.dumps({"pre_sha": pre_sha, "spec_paths": ["se3/specs/base/spec.md"]}),
+            json.dumps({"pre_sha": pre_sha, "spec_paths": ["tianluo/specs/base/spec.md"]}),
             encoding="utf-8",
         )
 
@@ -1012,7 +1012,7 @@ class TestPendingGuardrailsMultiCommitGuard:
         )
         marker_path = Path(str(call_file) + ".pending_guardrails")
         marker_path.write_text(
-            json.dumps({"pre_sha": pre_sha, "spec_paths": ["se3/specs/base/spec.md"]}),
+            json.dumps({"pre_sha": pre_sha, "spec_paths": ["tianluo/specs/base/spec.md"]}),
             encoding="utf-8",
         )
 
@@ -1060,7 +1060,7 @@ class TestPendingGuardrailsMultiCommitGuard:
         )
         marker_path = Path(str(call_file) + ".pending_guardrails")
         marker_path.write_text(
-            json.dumps({"pre_sha": pre_sha, "spec_paths": ["se3/specs/base/spec.md"]}),
+            json.dumps({"pre_sha": pre_sha, "spec_paths": ["tianluo/specs/base/spec.md"]}),
             encoding="utf-8",
         )
 

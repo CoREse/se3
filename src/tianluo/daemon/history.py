@@ -1,6 +1,6 @@
 """Historical-session reading for the SE3 daemon.
 
-:class:`DaemonHistoryReader` enumerates the ``se3 history`` artifacts of every
+:class:`DaemonHistoryReader` enumerates the ``luo history`` artifacts of every
 project root the daemon tracks and turns them into:
 
 * a *session index* — one :class:`SessionMeta` per known flow (flow id, task
@@ -12,16 +12,16 @@ project root the daemon tracks and turns them into:
   an ``append`` delta keyed off a per-step *line cursor*.
 
 Like :class:`~tianluo.daemon.aggregator.DaemonAggregator`, the reader is a pure
-reader of the files ``se3 run`` leaves on disk — it never touches a flow's
+reader of the files ``luo run`` leaves on disk — it never touches a flow's
 process. The central server is only an in-memory relay; nothing here writes or
 persists anything server-side.
 
 Sources, per project root:
 
-* ``se3/state/engine.json`` — the *active* flow (status decides whether it is
+* ``tianluo/state/engine.json`` — the *active* flow (status decides whether it is
   still running);
-* ``se3/state/archive/engine_*.json`` — archived, terminated flows;
-* ``se3/history/<flow_id>/`` — history-only flows that may have no surviving
+* ``tianluo/state/archive/engine_*.json`` — archived, terminated flows;
+* ``tianluo/history/<flow_id>/`` — history-only flows that may have no surviving
   ``engine.json`` at all (best-effort metadata is still produced for them).
 
 Cursor model
@@ -35,6 +35,7 @@ way and the remainder is picked up by the next request.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import hashlib
 import json
@@ -340,11 +341,11 @@ BUILD_INDEX_TTL = 60.0
 
 #: Cross-root flow_id de-duplication precedence (lower number = higher priority).
 #: When the SAME flow_id is found under more than one root — the classic
-#: ``se3 run --worktree`` split where the pre-fork discovery dir survives in the
+#: ``luo run --worktree`` split where the pre-fork discovery dir survives in the
 #: main repo as a *history-only* entry while the live ``engine.json`` + later
 #: steps live under the worktree subdir — the higher-precedence source wins
 #: REGARDLESS of which root is enumerated first. ``_iter_roots`` enumerates the
-#: main repo before its ``se3/worktrees/<name>`` subdir (a main root sorts
+#: main repo before its ``tianluo/worktrees/<name>`` subdir (a main root sorts
 #: before a path nested under it), so a plain first-claim-wins dedup would record
 #: the active worktree flow as a non-active ``history`` row under the MAIN root:
 #: it would then neither be recognised as active (so never stream live) nor — for
@@ -503,7 +504,7 @@ class DaemonHistoryReader:
 
         Args:
             project_roots_provider: Zero-arg callable returning the project
-                roots whose ``se3/history`` should be enumerated. Wiring this
+                roots whose ``tianluo/history`` should be enumerated. Wiring this
                 to the aggregator's ``project_roots`` keeps the history view in
                 lock-step with the rest of the daemon's tracked roots.
         """
@@ -525,7 +526,7 @@ class DaemonHistoryReader:
 
         # Dirty-sentinel gate for :meth:`active_flow_signature` (fast tick).
         # Maps a project root to the ``(st_mtime_ns, st_size, st_ino)`` of
-        # its ``se3/state/.dirty`` sentinel observed just before the last
+        # its ``tianluo/state/.dirty`` sentinel observed just before the last
         # deep scan that found NO active flow there. While the sentinel stays at
         # that value, nothing was persisted under the root, so the fast tick
         # skips the root's whole deep scan (engine.json peek/read + jsonl
@@ -604,7 +605,7 @@ class DaemonHistoryReader:
         """Return a cheap stat token over every index *source* location.
 
         One ``stat`` per root of ``engine.json``, the ``archive``/``resumable``
-        dirs and the ``se3/history`` dir — a handful of syscalls versus the
+        dirs and the ``tianluo/history`` dir — a handful of syscalls versus the
         ~17.5k-stat full walk :meth:`_build_index_fresh` costs. A POSIX
         directory's mtime moves whenever an entry is created/removed/renamed
         in it, so the token shifts on exactly the events that change the
@@ -618,12 +619,12 @@ class DaemonHistoryReader:
         """
         parts: List[Any] = []
         for root in self._iter_roots():
-            state_dir = root / "se3" / "state"
+            state_dir = runtime_dir(root) / "state"
             for path in (
                 state_dir / "engine.json",
                 state_dir / "archive",
                 state_dir / "resumable",
-                root / "se3" / "history",
+                runtime_dir(root) / "history",
             ):
                 parts.append((str(path), _stat_token(path)))
         return tuple(parts)
@@ -655,7 +656,7 @@ class DaemonHistoryReader:
 
         WHY: the sentinel only reflects writes routed through
         ``PersistenceManager`` — an out-of-band engine.json rewrite (an old
-        se3 version running in a sentinel-bearing root, a manual edit) moves
+        luo version running in a sentinel-bearing root, a manual edit) moves
         nothing. The daemon client calls this on every status tick, turning
         the status heartbeat into the bounded-staleness backstop: a change
         the gate missed is picked up within one status interval instead of
@@ -668,14 +669,14 @@ class DaemonHistoryReader:
 
         A root is present exactly when the previous ``active_flow_signature``
         pass found NO active flow there and armed its gate on a present
-        ``se3/state/.dirty`` sentinel — i.e. the root whose fast-tick history
+        ``tianluo/state/.dirty`` sentinel — i.e. the root whose fast-tick history
         deep scan is currently being skipped for one sentinel stat.
 
         WHY this exists: the calls-signature scan
         (``aggregator.pending_calls_signature``) reuses this same verdict so an
         idle root's WHOLE fast tick — history AND calls — costs the single
         sentinel stat the history scan already paid, instead of additionally
-        ``iterdir``-ing ``se3/calls/`` on every tick. Zero IO: it reports the
+        ``iterdir``-ing ``tianluo/calls/`` on every tick. Zero IO: it reports the
         membership the last pass computed, so it can lag real disk by one fast
         tick — the identical one-tick bound the sentinel gate itself accepts,
         with the status-tick ``clear_sentinel_gate`` backstop re-scanning
@@ -807,7 +808,7 @@ class DaemonHistoryReader:
             return False
         if meta.source != "active":
             return False
-        engine_json = Path(meta.project_root) / "se3" / "state" / "engine.json"
+        engine_json = runtime_dir(Path(meta.project_root)) / "state" / "engine.json"
         # active=True read: the live-engine cache now hashes the WHOLE content, so
         # a same-(mtime,size) middle rewrite (the #260 dense discovery→analyze
         # window) forces a re-parse rather than serving a stale flow_id/status —
@@ -882,7 +883,7 @@ class DaemonHistoryReader:
         supersedes a lower-precedence claim of the same flow_id (see
         :data:`_SOURCE_PRIORITY`).
         """
-        state_dir = root / "se3" / "state"
+        state_dir = runtime_dir(root) / "state"
 
         # 1. Active flow from engine.json (active=True). A matching
         # (path, mtime, size) is trusted without a re-read; a real per-step
@@ -926,9 +927,9 @@ class DaemonHistoryReader:
                     ),
                 )
 
-        # 3. Resumable per-flow snapshots (se3/state/resumable/<flow_id>.json).
+        # 3. Resumable per-flow snapshots (tianluo/state/resumable/<flow_id>.json).
         # A paused/interrupted/failed flow writes a snapshot here; a later
-        # ``se3 run`` overwrites the single-slot engine.json but leaves the
+        # ``luo run`` overwrites the single-slot engine.json but leaves the
         # snapshot intact, so the flow survives only here (plus possibly a
         # history dir). ``_SOURCE_PRIORITY`` keeps it above the history-only
         # source so such a flow keeps its original status + ``resumable=True``
@@ -975,7 +976,7 @@ class DaemonHistoryReader:
                 )
 
         # 4. History-only flows (may have no engine.json at all).
-        history_root = root / "se3" / "history"
+        history_root = runtime_dir(root) / "history"
         if history_root.is_dir():
             for flow_dir in sorted(history_root.iterdir()):
                 if not flow_dir.is_dir():
@@ -1025,7 +1026,7 @@ class DaemonHistoryReader:
             updated_at=updated,
             active=active,
             source=source,
-            step_count=_count_jsonl(root / "se3" / "history" / flow_id),
+            step_count=_count_jsonl(runtime_dir(root) / "history" / flow_id),
             # "waiting for lock" is a live sub-state of a still-running flow that
             # is queued behind the merge lock (including a --worktree flow that is
             # running its own merge_integrate / version_reconcile steps under the
@@ -1118,7 +1119,7 @@ class DaemonHistoryReader:
     def _resolve_flow_dir(
         self, flow_id: str, project_root: Optional[str]
     ) -> Optional[Path]:
-        """Locate the ``se3/history/<flow_id>`` directory for *flow_id*."""
+        """Locate the ``tianluo/history/<flow_id>`` directory for *flow_id*."""
         if project_root:
             try:
                 roots = [Path(project_root).resolve()]
@@ -1127,7 +1128,7 @@ class DaemonHistoryReader:
         else:
             roots = self._iter_roots()
         for root in roots:
-            candidate = root / "se3" / "history" / flow_id
+            candidate = runtime_dir(root) / "history" / flow_id
             if candidate.is_dir():
                 return candidate
         return None
@@ -1135,15 +1136,15 @@ class DaemonHistoryReader:
     def _resolve_flow_dirs(
         self, flow_id: str, project_root: Optional[str]
     ) -> List[Path]:
-        """Locate *every* ``se3/history/<flow_id>`` directory for *flow_id*.
+        """Locate *every* ``tianluo/history/<flow_id>`` directory for *flow_id*.
 
         Unlike :meth:`_resolve_flow_dir` (which returns a single first-match),
         this returns an ordered, de-duplicated list of candidate directories so
         the reader can merge a flow whose history is split across two roots — the
-        classic ``se3 run --worktree`` case where the discovery step ran in the
-        main repo before the fork (writing ``<main>/se3/history/<flow_id>/``) and
+        classic ``luo run --worktree`` case where the discovery step ran in the
+        main repo before the fork (writing ``<main>/tianluo/history/<flow_id>/``) and
         every later step ran in the worktree (writing
-        ``<worktree>/se3/history/<flow_id>/``, which usually also carries a clone
+        ``<worktree>/tianluo/history/<flow_id>/``, which usually also carries a clone
         of the discovery file).
 
         With an authoritative *project_root* — the flow's recorded
@@ -1155,7 +1156,7 @@ class DaemonHistoryReader:
              main repo, else the one reverse-resolved from a worktree copy by
              :func:`resolve_worktree_main_root`), so a worktree flow still picks
              up the pre-fork discovery written to the main repo;
-          3. **every** ``<main>/se3/worktrees/<name>`` isolation copy under that
+          3. **every** ``<main>/tianluo/worktrees/<name>`` isolation copy under that
              main repo that carries this flow's history — the *forward* (main →
              worktree) expansion. This is what makes the read complete even when
              the authoritative root recorded by the index is the **main** repo
@@ -1185,7 +1186,7 @@ class DaemonHistoryReader:
         def _add(root: Optional[Path]) -> None:
             if root is None:
                 return
-            candidate = root / "se3" / "history" / flow_id
+            candidate = runtime_dir(root) / "history" / flow_id
             try:
                 if not candidate.is_dir():
                     return
@@ -1224,7 +1225,7 @@ class DaemonHistoryReader:
         #    that carries this flow's history (main → worktree direction). Keeps
         #    the merge complete even when the index recorded the *main* root.
         if main_root is not None:
-            worktrees_dir = main_root / "se3" / "worktrees"
+            worktrees_dir = runtime_dir(main_root) / "worktrees"
             try:
                 entries = (
                     sorted(worktrees_dir.iterdir())
@@ -1247,7 +1248,7 @@ class DaemonHistoryReader:
         """Merge the per-step history files across *flow_dirs* into one ordered,
         de-duplicated physical-file list.
 
-        Several candidate ``se3/history/<flow_id>`` directories may hold the
+        Several candidate ``tianluo/history/<flow_id>`` directories may hold the
         *same* logical step — most commonly a worktree flow whose pre-fork
         discovery file was written to the main repo and then cloned into the
         worktree, so the discovery step exists under both roots. The clone may
@@ -1263,7 +1264,7 @@ class DaemonHistoryReader:
         resolve to exactly ONE physical file or two copies of the same step
         would render twice. The chosen copy is, in order of precedence:
 
-          1. the copy under a ``se3/worktrees/<name>`` isolation dir — the
+          1. the copy under a ``tianluo/worktrees/<name>`` isolation dir — the
              *actual write root* of a live ``--worktree`` flow, whose discovery
              runs entirely in the worktree (``run_worktree_mode`` forks, then
              ``run_flow(project_root=<worktree>)``). Its file GROWS every round
@@ -1283,7 +1284,7 @@ class DaemonHistoryReader:
         This loses no records (the worktree copy is the one being written, so it
         is the most complete for a live worktree flow) and keeps the result
         stable across snapshots. Post-merge (single root, no worktree isolation
-        dirs) no copy is under ``se3/worktrees`` so rule 2/3 apply unchanged.
+        dirs) no copy is under ``tianluo/worktrees`` so rule 2/3 apply unchanged.
 
         A logical step unique to a single root is always included, so a split
         history — discovery only in the main repo, later steps only in the
@@ -1298,7 +1299,7 @@ class DaemonHistoryReader:
         """
         # logical-step-key -> (is_worktree, priority, size, path); priority =
         # index in flow_dirs (lower index = higher priority = authoritative root
-        # first). ``is_worktree`` (1 for a copy under a se3/worktrees isolation
+        # first). ``is_worktree`` (1 for a copy under a tianluo/worktrees isolation
         # dir, else 0) is the PRIMARY, size-independent tiebreak so a live
         # worktree flow's growing copy is chosen from the start and never flips.
         chosen: Dict[str, Tuple[int, int, int, Path]] = {}
@@ -1487,7 +1488,7 @@ class DaemonHistoryReader:
         at the end of the file (no trailing ``\\n``) is left for the next round.
 
         Args:
-            flow_id: The flow whose ``se3/history/<flow_id>`` is read.
+            flow_id: The flow whose ``tianluo/history/<flow_id>`` is read.
             project_root: The flow's authoritative ``SessionMeta.project_root``.
                 Used as the single source of truth for locating the history: the
                 authoritative root plus its owning main repo (and any other
@@ -1536,7 +1537,7 @@ class DaemonHistoryReader:
                     "falling back to the registry walk (found %s)",
                     flow_id, project_root, legacy,
                 )
-                # ``legacy`` is ``<root>/se3/history/<flow_id>`` — walk back up to
+                # ``legacy`` is ``<root>/tianluo/history/<flow_id>`` — walk back up to
                 # its owning root so the fallback gets the same main→worktree
                 # expansion an authoritative read would have had.
                 fallback_root = legacy.parent.parent.parent
@@ -2152,7 +2153,7 @@ class DaemonHistoryReader:
         the active ``engine.json`` per root (and that flow's jsonl files),
         skipping the archive / history-only enumeration, so it is safe to call
         on a fast polling cadence. A root whose previous scan found no active
-        flow is additionally gated on the ``se3/state/.dirty`` sentinel (see
+        flow is additionally gated on the ``tianluo/state/.dirty`` sentinel (see
         the loop below): while the sentinel is unmoved, the root's whole scan
         collapses to that single stat. Callers needing an ungated pass (the
         status-tick backstop) call :meth:`clear_sentinel_gate` first.
@@ -2160,7 +2161,7 @@ class DaemonHistoryReader:
         signature: Dict[str, Any] = {}
         for root in self._iter_roots():
             # Dirty-sentinel gate: PersistenceManager bumps
-            # ``se3/state/.dirty`` after every state persist, so for a root
+            # ``tianluo/state/.dirty`` after every state persist, so for a root
             # whose previous deep scan found NO active flow, an unmoved
             # sentinel proves nothing persisted since — the whole root is
             # skipped for the cost of this one stat. The stat is taken BEFORE
@@ -2176,11 +2177,11 @@ class DaemonHistoryReader:
             # degrade web streaming from the fast tick to the status backstop.
             # An active root's deep scan is small (one engine.json + one
             # flow's jsonl dir) and is not the idle hotspot anyway. A missing
-            # sentinel (old se3 version, root never persisted by a
+            # sentinel (old luo version, root never persisted by a
             # sentinel-aware engine) fails open to the ungated deep scan:
             # the sentinel is an optimization signal, never a correctness
             # dependency.
-            sentinel_stat = _sentinel_stat(root / "se3" / "state" / ".dirty")
+            sentinel_stat = _sentinel_stat(runtime_dir(root) / "state" / ".dirty")
             gate = self._sentinel_gate.get(root)
             if (
                 gate is not None
@@ -2203,7 +2204,7 @@ class DaemonHistoryReader:
         Returns whether an active flow was found (its token added), which is
         what decides sentinel-gate eligibility in the caller.
         """
-        engine_json = root / "se3" / "state" / "engine.json"
+        engine_json = runtime_dir(root) / "state" / "engine.json"
         # Cheap pre-pass (stat-keyed peek, zero read/parse): decide whether
         # this root's flow is worth the verify_content read at all. WHY:
         # the verify_content whole-content hash exists to catch a same-
@@ -2256,7 +2257,7 @@ class DaemonHistoryReader:
             ("__engine__", *_safe_stat(engine_json), engine_digest),
             ("__status__", status.strip().lower()),
         ]
-        hist_dir = root / "se3" / "history" / flow_id
+        hist_dir = runtime_dir(root) / "history" / flow_id
         if hist_dir.is_dir():
             # Include ``*.jsonl.from-<branch>`` sidecars so a worktree
             # merge-back that only appends sidecar records still moves the
@@ -2288,7 +2289,7 @@ class DaemonHistoryReader:
         this includes a flow whose status is terminal (FAILED / COMPLETED) as
         long as its ``engine.json`` has not yet been replaced by a new run or
         archived — i.e. a flow that can still flip back to active via
-        ``se3 run --resume``. The daemon client uses this to retain a
+        ``luo run --resume``. The daemon client uses this to retain a
         final-flushed terminal flow's history cursor so a resume continues
         incrementally instead of forcing a full re-read.
 
@@ -2305,7 +2306,7 @@ class DaemonHistoryReader:
             # trusted (no re-read). The caller ``_resumable_flow_ids`` is offloaded
             # off the event loop, so that parse never runs on it.
             data = read_engine_header(
-                root / "se3" / "state" / "engine.json", active=True
+                runtime_dir(root) / "state" / "engine.json", active=True
             )
             if isinstance(data, dict) and data.get("flow_id"):
                 ids.add(str(data["flow_id"]))
@@ -2388,7 +2389,7 @@ def _logical_step_id(filename: str) -> str:
 
     Strips the ``.jsonl`` extension together with any trailing
     ``.from-<branch>`` *sidecar* suffix, so a step's primary file and its
-    sidecars (written by ``se3 merge``'s runtime sync on a --worktree
+    sidecars (written by ``luo merge``'s runtime sync on a --worktree
     merge-back) collapse to the same step id and merge into one step stream::
 
         01_discovery_ab12.jsonl                        -> "01_discovery_ab12"
@@ -2443,7 +2444,7 @@ def _display_step_id(filename: str) -> str:
 def _cross_root_step_key(filename: str) -> str:
     """Return a *cross-root* logical step identity for merge de-duplication.
 
-    When a flow's history is split across two roots (the ``se3 run --worktree``
+    When a flow's history is split across two roots (the ``luo run --worktree``
     case), the SAME logical step can appear under file names that differ only by
     their per-step ``<hash>`` segment — e.g. the discovery step is
     ``01_discovery_ab.jsonl`` in the main repo but cloned into the worktree as
@@ -2498,19 +2499,19 @@ def _cross_root_step_key(filename: str) -> str:
 
 
 def _is_worktree_copy(flow_dir: Path) -> bool:
-    """Return whether *flow_dir* lives inside an ``se3/worktrees/<name>`` sandbox.
+    """Return whether *flow_dir* lives inside an ``tianluo/worktrees/<name>`` sandbox.
 
-    A ``se3 run --worktree`` flow body executes inside
-    ``<main_root>/se3/worktrees/<name>/`` and writes its history to
-    ``…/se3/worktrees/<name>/se3/history/<flow_id>``. That copy is the *actual
+    A ``luo run --worktree`` flow body executes inside
+    ``<main_root>/tianluo/worktrees/<name>/`` and writes its history to
+    ``…/tianluo/worktrees/<name>/tianluo/history/<flow_id>``. That copy is the *actual
     write root* of a live worktree flow, so ``_merge_flow_jsonl`` prefers it as a
     stable, size-independent selection (see there). Detected structurally by an
     adjacent ``se3`` / ``worktrees`` path segment pair, matching
-    :func:`resolve_worktree_main_root`'s ``<main>/se3/worktrees/<name>`` layout.
+    :func:`resolve_worktree_main_root`'s ``<main>/tianluo/worktrees/<name>`` layout.
     """
     parts = flow_dir.parts
     for i in range(1, len(parts)):
-        if parts[i] == "worktrees" and parts[i - 1] == "se3":
+        if parts[i] == "worktrees" and parts[i - 1] in ("tianluo", "se3"):
             return True
     return False
 
@@ -2519,9 +2520,9 @@ def _iter_history_jsonl(flow_dir: Path) -> List[Path]:
     """Return a flow directory's per-step history files, sorted by name.
 
     Includes both the primary ``*.jsonl`` files and the
-    ``*.jsonl.from-<branch>`` *sidecar* files that ``se3 merge``'s runtime sync
+    ``*.jsonl.from-<branch>`` *sidecar* files that ``luo merge``'s runtime sync
     writes when a --worktree flow's per-step history collides with the main
-    project on merge-back (see the ``se3 merge`` *Runtime Data
+    project on merge-back (see the ``luo merge`` *Runtime Data
     Synchronization* requirement). The plain ``glob("*.jsonl")`` never matched
     the sidecars, so a worktree session's conversation after its first record
     was silently dropped — this helper restores it.
@@ -2567,14 +2568,14 @@ def enumerate_historical_project_roots(
 
     Walks each ``search_root`` looking at:
 
-    * ``<root>/se3/state/archive/engine_*.json`` — archived flow state; when
+    * ``<root>/tianluo/state/archive/engine_*.json`` — archived flow state; when
       the file carries a ``project_root`` field that path is included.
-    * ``<root>/se3/history/<flow_id>/_meta.json`` — per-flow history meta;
+    * ``<root>/tianluo/history/<flow_id>/_meta.json`` — per-flow history meta;
       when the file carries a ``project_root`` field that path is included.
 
     The ``search_root`` itself is also included whenever any of the above
-    artifacts are present, since the parent of ``se3/history/`` /
-    ``se3/state/archive/`` is by construction a historical project root —
+    artifacts are present, since the parent of ``tianluo/history/`` /
+    ``tianluo/state/archive/`` is by construction a historical project root —
     even if the on-disk artifact does not (yet) record a ``project_root``
     field.
 
@@ -2607,7 +2608,7 @@ def enumerate_historical_project_roots(
 
         has_artifacts = False
 
-        archive_dir = root / "se3" / "state" / "archive"
+        archive_dir = runtime_dir(root) / "state" / "archive"
         if archive_dir.is_dir():
             for archive_file in sorted(archive_dir.glob("engine_*.json")):
                 has_artifacts = True
@@ -2621,7 +2622,7 @@ def enumerate_historical_project_roots(
                     continue
                 _maybe_add_root(candidates, data.get("project_root"))
 
-        history_root = root / "se3" / "history"
+        history_root = runtime_dir(root) / "history"
         if history_root.is_dir():
             for flow_dir in sorted(history_root.iterdir()):
                 if not flow_dir.is_dir():

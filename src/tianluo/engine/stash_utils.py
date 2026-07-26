@@ -1,13 +1,14 @@
 """Shared helpers for ``git stash pop`` conflict recovery.
 
 These helpers are used by both the DAG implement step (when merging leaf
-branches back into the parent branch's worktree) and the ``se3 merge``
+branches back into the parent branch's worktree) and the ``luo merge``
 robust strategy (when stashing dirty working-tree state around a merge).
 They were originally defined in ``engine.steps.implement`` and extracted
 here verbatim so the two call sites share a single implementation.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_relpath
 
 import logging
 import re
@@ -21,11 +22,13 @@ from .worktree import _run_git, get_conflicting_files
 logger = logging.getLogger(__name__)
 
 # Archive sink for stash content that could not be cleanly popped back into
-# the working tree. It lives under ``se3/worktrees/`` which is already
+# the working tree. It lives under ``tianluo/worktrees/`` which is already
 # ``.gitignore``d, so archived payloads never pollute the tree they were
 # rescued from. Recovery is the highest-priority invariant: nothing is ever
 # ``git stash drop``ped before its content is provably persisted here.
-ARCHIVE_DIR = "se3/worktrees/.archive"
+# Canonical (post-rename) location; root-aware resolution happens in
+# _archive_run_rel(), which honours a legacy tianluo/ layout.
+ARCHIVE_DIR = "tianluo/worktrees/.archive"
 
 
 @dataclass
@@ -161,7 +164,7 @@ def _sanitize_label(label: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", label)
 
 
-def _archive_run_rel(stash_label: str, timestamp: str) -> str:
+def _archive_run_rel(project_root: Path, stash_label: str, timestamp: str) -> str:
     """Project-root-relative *base* dir name for a recovery run's payload.
 
     Both the stashed-side enumeration and the case-a HEAD-side capture must
@@ -170,7 +173,7 @@ def _archive_run_rel(stash_label: str, timestamp: str) -> str:
     by :func:`_prepare_unique_archive_run` (which may add a ``-N`` suffix to
     this base on collision) and threaded into both.
     """
-    return (Path(ARCHIVE_DIR)
+    return (runtime_relpath(project_root, "worktrees", ".archive")
             / f"{timestamp}_{_sanitize_label(stash_label)}").as_posix()
 
 
@@ -191,7 +194,7 @@ def _prepare_unique_archive_run(
     between two concurrent recoveries probing the same name). The first
     recovery for a given second keeps the plain ``<base>`` name.
     """
-    base = _archive_run_rel(stash_label, timestamp)
+    base = _archive_run_rel(project_root, stash_label, timestamp)
     candidate = base
     n = 2
     while True:
@@ -490,7 +493,7 @@ def resolve_stashpop_safely(
 ) -> StashPopOutcome:
     """Recover a stash-pop result without ever losing data.
 
-    Single shared entry point for both merge paths (``se3 merge`` fast
+    Single shared entry point for both merge paths (``luo merge`` fast
     strategy and the implement-step leaf-back merge). The caller has
     already run ``git stash pop``; ``pop_result`` is that completed
     process. The invariant enforced here, in order:
@@ -696,7 +699,7 @@ def resolve_stashpop_safely(
 def format_archived_manifest(entries: list[ArchivedEntry]) -> str:
     """Render an archive manifest as audit-issue body text.
 
-    Shared by both merge paths (``se3 merge`` fast strategy and the
+    Shared by both merge paths (``luo merge`` fast strategy and the
     implement-step leaf-back merge) so the recovery pointer an operator
     reads — archive path, verifiable blob sha, and conflict class — is
     byte-for-byte identical regardless of which path rescued the content.

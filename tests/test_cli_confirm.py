@@ -88,7 +88,7 @@ class TestInteractionCalls:
             step_id="step-y",
         )
         assert call_file.exists()
-        assert call_file.parent == tmp_path / "se3" / "calls"
+        assert call_file.parent == tmp_path / "tianluo" / "calls"
         import json
 
         data = json.loads(call_file.read_text(encoding="utf-8"))
@@ -117,7 +117,7 @@ class TestInteractionCalls:
             return alive_box["alive"]
 
         def responder():
-            calls_dir = tmp_path / "se3" / "calls"
+            calls_dir = tmp_path / "tianluo" / "calls"
             for _ in range(200):
                 if calls_dir.is_dir():
                     files = list(calls_dir.glob("cli_confirm_*.json"))
@@ -134,7 +134,7 @@ class TestInteractionCalls:
         alive_box["alive"] = False
 
         assert result == "ok"
-        call_files = list((tmp_path / "se3" / "calls").glob("cli_confirm_*.json"))
+        call_files = list((tmp_path / "tianluo" / "calls").glob("cli_confirm_*.json"))
         assert len(call_files) == 1
         data = json.loads(call_files[0].read_text(encoding="utf-8"))
         # The fix: flow_id and step_id must live in context, not as a
@@ -198,7 +198,7 @@ class TestOnConfirmWiring:
         )
 
         def responder():
-            calls_dir = tmp_path / "se3" / "calls"
+            calls_dir = tmp_path / "tianluo" / "calls"
             for _ in range(200):
                 if calls_dir.is_dir():
                     files = list(calls_dir.glob("cli_confirm_*.json"))
@@ -218,7 +218,7 @@ class TestOnConfirmWiring:
         assert result.returncode == 0
         assert "CHILD_GOT:1" in result.output
         # The call file was written and is now answered.
-        call_files = list((tmp_path / "se3" / "calls").glob("cli_confirm_*.json"))
+        call_files = list((tmp_path / "tianluo" / "calls").glob("cli_confirm_*.json"))
         assert len(call_files) == 1
 
     def test_child_exits_before_response_does_not_hang(self, tmp_path):

@@ -1,4 +1,4 @@
-"""i18n routing for the UI-framework text in src/se3/engine/display.py.
+"""i18n routing for the UI-framework text in src/tianluo/engine/display.py.
 
 The section labels / usage-column headers / default block titles rendered by
 display.py are UI-framework text and must go through the ``tianluo.i18n`` catalog;

@@ -1,10 +1,11 @@
 """Project context collector for the flow engine.
 
 Collects project-wide context (git status, flow history, backlog, specs)
-into a structured dict. Used by the PROJECT_SUMMARY step and `se3 summary` CLI.
+into a structured dict. Used by the PROJECT_SUMMARY step and `luo summary` CLI.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 from pathlib import Path
@@ -53,11 +54,11 @@ class ProjectContextCollector:
             return None
 
     def _collect_backlog(self) -> List[Dict[str, str]]:
-        """Scan se3/specs/_backlog/*.md for backlog items.
+        """Scan tianluo/specs/_backlog/*.md for backlog items.
 
         Extracts title, Status, and Phase from frontmatter-style headers.
         """
-        backlog_dir = self.project_root / "se3" / "specs" / "_backlog"
+        backlog_dir = runtime_dir(self.project_root) / "specs" / "_backlog"
         if not backlog_dir.exists():
             return []
 

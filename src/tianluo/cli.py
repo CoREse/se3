@@ -1,5 +1,6 @@
-"""SE 3.0 CLI - Main entry point for se3 commands."""
+"""SE 3.0 CLI - Main entry point for luo commands."""
 
+from tianluo.runtime_paths import runtime_dir
 import os
 import re
 import subprocess
@@ -186,11 +187,11 @@ def run_cmd(
     """SE3 Run — Unified entry point for the flow engine.
 
     Examples:
-        se3 run "Implement user authentication"
-        se3 run "Fix login bug" --type=bugfix
-        se3 run --resume
-        se3 run --discover "I want to build something related to authentication"
-        se3 run --worktree "Implement feature X"   # isolated worktree, auto-merged back
+        luo run "Implement user authentication"
+        luo run "Fix login bug" --type=bugfix
+        luo run --resume
+        luo run --discover "I want to build something related to authentication"
+        luo run --worktree "Implement feature X"   # isolated worktree, auto-merged back
     """
     from .commands.run import (
         run_flow,
@@ -218,8 +219,8 @@ def run_cmd(
     # Create shared prompt history for this run session
     prompt_history = get_prompt_history(project_root)
 
-    # Ensure se3 directory exists
-    se3_dir = project_root / SE3_DIR
+    # Ensure luo directory exists
+    se3_dir = runtime_dir(project_root)
     se3_dir.mkdir(exist_ok=True)
     (se3_dir / "state").mkdir(exist_ok=True)
     (se3_dir / "cache").mkdir(exist_ok=True)
@@ -266,7 +267,7 @@ def run_cmd(
             render_full(t("cli.preset.resolve_error", error=exc), title=t("cli.common.error"))
             raise typer.Exit(1)
 
-        # A preset is equivalent to `se3 run --type <preset.type>
+        # A preset is equivalent to `luo run --type <preset.type>
         # --description "<preset prompt full text>"`.
         type = preset_type
         task = preset_prompt
@@ -359,7 +360,7 @@ def run_cmd(
         # daemon/`--resume` continuation, which re-enters via run_flow in a new
         # process without this wrapper. Terminal finalization is instead owned by
         # the flow's true terminal state: run_flow._finalize_sync_source_issue
-        # for synchronous runs, and the trailing se3 merge for --worktree runs
+        # for synchronous runs, and the trailing luo merge for --worktree runs
         # (only a successful merge-back resolves). Both key off the persisted
         # flow.source_issue_id, so they are process-independent.
         #
@@ -477,9 +478,9 @@ def init_cmd(
     """Initialize a new SE3 project.
     
     Creates the standard SE3 directory structure:
-    - se3.yaml - Project configuration
-    - se3/specs/ - Specification directory
-    - se3/specs/base/spec.md - Base project specification
+    - tianluo.yaml - Project configuration
+    - tianluo/specs/ - Specification directory
+    - tianluo/specs/base/spec.md - Base project specification
     """
     bind_project_root(Path(project_root))
     init_command(project_root=project_root, name=name, force=force)
@@ -655,9 +656,9 @@ def _project_root_for_spec(spec_file: Path) -> Path:
     except OSError:
         p = spec_file
     for anc in [p] + list(p.parents):
-        if (anc / "se3" / "specs").is_dir() \
-                or (anc / "se3.yaml").is_file() \
-                or (anc / "se3.local.yaml").is_file():
+        if (runtime_dir(anc) / "specs").is_dir() \
+                or (anc / "tianluo.yaml").is_file() \
+                or (anc / "tianluo.local.yaml").is_file():
             return anc
     return Path.cwd()
 
@@ -670,7 +671,7 @@ app.add_typer(issue_app, name="issue", help=t("cli.help.issue"))
 
 # Register code-index command (structure map navigation: index / show / rebuild
 # / inspect). Named "code-index" — not the ambiguous "code" — and reads the
-# authoritative se3/code-index.md product.
+# authoritative tianluo/code-index.md product.
 app.add_typer(
     code_index_app,
     name="code-index",
@@ -680,13 +681,13 @@ app.add_typer(
 # Register migrate command (registry-based version/format migration channel)
 app.add_typer(migrate_app, name="migrate", help=t("cli.help.migrate"))
 
-# Register worktree command (isolation-worktree operator surface; `se3 worktree
-# gc` reclaims leaked terminal --worktree runs stranded under se3/worktrees/)
+# Register worktree command (isolation-worktree operator surface; `luo worktree
+# gc` reclaims leaked terminal --worktree runs stranded under tianluo/worktrees/)
 app.add_typer(worktree_app, name="worktree", help=t("cli.help.worktree"))
 
 
 # ---------------------------------------------------------------------------
-# se3 daemon — the resident control-plane process
+# luo daemon — the resident control-plane process
 # ---------------------------------------------------------------------------
 daemon_app = typer.Typer(
     name="daemon",
@@ -916,16 +917,16 @@ def merge_cmd(
     The CLI has no confirmation gate: failure is expressed via a non-zero exit
     code and the operator reruns the whole command (integrate is then a no-op —
     the branches are already ancestors — and reconcile idempotently re-attempts
-    only the still-outstanding version decision). No ``se3/calls/`` files are
+    only the still-outstanding version decision). No ``tianluo/calls/`` files are
     written on this path; an escalation surfaces in the rendered output.
 
     Default strategy and delete-merged behaviour can be configured in
-    se3.yaml under the ``merge:`` section.
+    tianluo.yaml under the ``merge:`` section.
 
     Examples:
-        se3 merge feature-x
-        se3 merge feature-x feature-y --strategy=strict
-        se3 merge feature-x --delete-merged
+        luo merge feature-x
+        luo merge feature-x feature-y --strategy=strict
+        luo merge feature-x --delete-merged
     """
     from .commands.merge_cmd import run_merge, validate_branch_names
     from .commands.run import get_project_root
@@ -997,7 +998,7 @@ def merge_respond_cmd(
     to execute the conflict decisions (accept LLM resolution, abort, or manual).
 
     Example:
-        se3 merge-respond se3/calls/merge_20240101_120000_feat-x.json
+        luo merge-respond tianluo/calls/merge_20240101_120000_feat-x.json
     """
     from .commands.merge_respond import process_merge_response
 
@@ -1026,8 +1027,8 @@ def merge_unlock_cmd(
     acquirer recreates it, matching how stale locks are reclaimed.
 
     Examples:
-        se3 merge-unlock          # inspect + clean up a stale lock
-        se3 merge-unlock --force  # force-release even a live holder
+        luo merge-unlock          # inspect + clean up a stale lock
+        luo merge-unlock --force  # force-release even a live holder
     """
     from .commands.merge.merge_lock import release_merge_lock
     from .commands.run import get_project_root
@@ -1090,7 +1091,7 @@ def salvage_cmd(
     5. Archives the session
 
     Use this when a session crashed or was interrupted.
-    After salvage, use 'se3 run --from-issue' to continue work.
+    After salvage, use 'luo run --from-issue' to continue work.
     """
     from .commands.salvage_cmd import salvage
 
@@ -1120,7 +1121,7 @@ def end_session_cmd(
 ):
     """End and archive a session (worktree is cleaned up; uncommitted work is NOT merged).
 
-    Terminates the live ``se3 run`` process (if any) and archives the session.
+    Terminates the live ``luo run`` process (if any) and archives the session.
     A ``--worktree`` session is archived exactly like a normally completed run —
     the worktree is archived, its terminal state is promoted into the main
     project's archive, its history is synced, and the isolation branch +

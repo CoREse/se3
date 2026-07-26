@@ -126,7 +126,7 @@ class FailureReason(IntEnum):
     REPO_SHALLOW = 932
     REPO_UNSUPPORTED_STATE = 933
     # Merge could not even start because the main working tree has dirty
-    # tracked files outside the SE3 self-managed data paths (se3/issues/).
+    # tracked files outside the SE3 self-managed data paths (tianluo/issues/).
     # Same fail-fast family as the REPO_* states above — a pre-merge
     # repository condition the operator must clear before merge can run.
     DIRTY_WORKING_TREE = 934

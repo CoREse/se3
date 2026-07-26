@@ -44,7 +44,7 @@ def _spec_body(spec_name: str, req_name: str, filler: int) -> str:
 def project(tmp_path: Path) -> Path:
     """A project with an oversized base, an oversized spec file, and an
     oversized single Requirement — one of each so all three checks fire."""
-    specs = tmp_path / "se3" / "specs"
+    specs = tmp_path / "tianluo" / "specs"
     # base: large file (also has a small requirement)
     _write_spec(specs, "base", _spec_body("base", "Base R1", 4000))
     # foo: large file AND a single large requirement
@@ -143,7 +143,7 @@ def test_deterministic_output_order(project: Path) -> None:
 
 
 def test_unreadable_or_empty_project_does_not_raise(tmp_path: Path) -> None:
-    # No se3/specs at all — must not raise and returns nothing.
+    # No tianluo/specs at all — must not raise and returns nothing.
     config = SpecGovernanceConfig()
     assert check_spec_sizes(tmp_path, config) == []
 
@@ -152,7 +152,7 @@ def test_unreadable_spec_yields_check_incomplete(tmp_path: Path, monkeypatch) ->
     """An OSError reading a spec must NOT be silently skipped: it yields a
     CHECK_INCOMPLETE violation so enforce mode blocks (its size limits were
     never verified)."""
-    specs = tmp_path / "se3" / "specs"
+    specs = tmp_path / "tianluo" / "specs"
     _write_spec(specs, "base", _spec_body("base", "Base R1", 50))
 
     real_read_bytes = Path.read_bytes
@@ -174,7 +174,7 @@ def test_unreadable_spec_yields_check_incomplete(tmp_path: Path, monkeypatch) ->
 def test_cli_enforce_blocks_on_unreadable_spec(tmp_path: Path, monkeypatch) -> None:
     """Under enforce, an unreadable (un-verifiable) spec fails the CLI rather
     than exiting 0."""
-    specs = tmp_path / "se3" / "specs"
+    specs = tmp_path / "tianluo" / "specs"
     _write_spec(specs, "base", _spec_body("base", "Base R1", 50))
     _write_yaml(tmp_path, "enforce")
 
@@ -198,7 +198,7 @@ def test_cli_enforce_blocks_on_unreadable_spec(tmp_path: Path, monkeypatch) -> N
 # ---------------------------------------------------------------------------
 
 def _write_yaml(root: Path, tier: str) -> None:
-    (root / "se3.yaml").write_text(
+    (root / "tianluo.yaml").write_text(
         "spec_governance:\n"
         "  base_max_bytes: 1000\n"
         "  spec_file_warn_bytes: 2000\n"
@@ -224,14 +224,14 @@ def test_cli_enforce_tier_intercepts(project: Path) -> None:
 
 
 def test_cli_default_tier_is_warn(project: Path) -> None:
-    # No se3.yaml → default tier (warn) → non-blocking even with violations.
+    # No tianluo.yaml → default tier (warn) → non-blocking even with violations.
     runner = CliRunner()
     result = runner.invoke(app, ["guardrails", "--sizes", "-p", str(project)])
     assert result.exit_code == 0
 
 
 def test_cli_passes_when_within_budget(tmp_path: Path) -> None:
-    specs = tmp_path / "se3" / "specs"
+    specs = tmp_path / "tianluo" / "specs"
     _write_spec(specs, "base", _spec_body("base", "R1", 50))
     _write_spec(specs, "foo", _spec_body("foo", "R2", 50))
     runner = CliRunner()

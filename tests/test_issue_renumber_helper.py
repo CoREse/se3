@@ -1,6 +1,6 @@
 """Unit tests for the shared renumber primitives (``issue_renumber``).
 
-These primitives are the geometry both ``se3 merge`` channels (git three-way
+These primitives are the geometry both ``luo merge`` channels (git three-way
 merge of committed issues, and runtime-sync of uncommitted worktree issues)
 reuse to renumber a colliding issue. The two easiest-to-get-wrong parts are
 token-precise reference rewriting (must not clobber ``#1234`` / ``abc#123``,
@@ -49,7 +49,7 @@ def _write_issue(
 
 
 def _read_next_id(project_root: Path) -> int:
-    return int((project_root / "se3" / "issues" / ".next_id").read_text().strip())
+    return int((project_root / "tianluo" / "issues" / ".next_id").read_text().strip())
 
 
 # --------------------------------------------------------------------------
@@ -113,10 +113,10 @@ def test_rewrite_counts_across_open_and_closed(tmp_path: Path) -> None:
 
 
 def test_rewrite_confined_to_issues_dir(tmp_path: Path) -> None:
-    """References outside se3/issues/ are never touched."""
+    """References outside tianluo/issues/ are never touched."""
     mgr = IssueManager(tmp_path)
     _write_issue(mgr, "080", "fix #55")
-    stray = tmp_path / "se3" / "logs"
+    stray = tmp_path / "tianluo" / "logs"
     stray.mkdir(parents=True)
     (stray / "note.txt").write_text("unrelated #55 mention")
 
@@ -202,7 +202,7 @@ def test_advance_from_missing_counter(tmp_path: Path) -> None:
     mgr = IssueManager(tmp_path)
     _write_issue(mgr, "005", "a")
     _write_issue(mgr, "012", "b", status=IssueStatus.RESOLVED)
-    counter = tmp_path / "se3" / "issues" / ".next_id"
+    counter = tmp_path / "tianluo" / "issues" / ".next_id"
     assert not counter.exists()
 
     result = advance_next_id_to_max(tmp_path)
@@ -216,7 +216,7 @@ def test_advance_from_lagging_counter(tmp_path: Path) -> None:
     mgr = IssueManager(tmp_path)
     _write_issue(mgr, "005", "a")
     _write_issue(mgr, "040", "b")
-    counter = tmp_path / "se3" / "issues" / ".next_id"
+    counter = tmp_path / "tianluo" / "issues" / ".next_id"
     counter.write_text("6")  # stale: behind the real max of 40
 
     result = advance_next_id_to_max(tmp_path)
@@ -229,7 +229,7 @@ def test_advance_from_garbage_counter(tmp_path: Path) -> None:
     """A corrupt counter value is discarded and recomputed from the files."""
     mgr = IssueManager(tmp_path)
     _write_issue(mgr, "022", "a")
-    counter = tmp_path / "se3" / "issues" / ".next_id"
+    counter = tmp_path / "tianluo" / "issues" / ".next_id"
     counter.write_text("not-a-number")
 
     result = advance_next_id_to_max(tmp_path)
@@ -311,7 +311,7 @@ def test_advance_never_lowers_ahead_counter(tmp_path: Path) -> None:
     """
     mgr = IssueManager(tmp_path)
     _write_issue(mgr, "010", "a")
-    counter = tmp_path / "se3" / "issues" / ".next_id"
+    counter = tmp_path / "tianluo" / "issues" / ".next_id"
     counter.write_text("100")  # ahead: possibly a live reservation, keep it
 
     result = advance_next_id_to_max(tmp_path)
@@ -460,7 +460,7 @@ def test_trace_contains_old_and_new_ids() -> None:
 
 def test_trace_normalizes_and_zero_pads() -> None:
     """Trace zero-pads both IDs regardless of input padding/type."""
-    assert format_renumber_trace(14, 7) == "旧号 #014 → 新号 #007 (se3 merge)"
+    assert format_renumber_trace(14, 7) == "旧号 #014 → 新号 #007 (luo merge)"
 
 
 def test_trace_appended_preserves_display_title(tmp_path: Path) -> None:
@@ -479,7 +479,7 @@ def test_trace_appended_preserves_display_title(tmp_path: Path) -> None:
 
 def test_ambiguous_note_lists_all_candidates_zero_padded() -> None:
     note = format_ambiguous_reference_note(5, ["011", 12])
-    assert note == "歧义引用 #005 → 候选 #011 / #012 (se3 merge)"
+    assert note == "歧义引用 #005 → 候选 #011 / #012 (luo merge)"
 
 
 def test_strip_removes_traces_and_ambiguity_notes() -> None:

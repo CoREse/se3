@@ -61,8 +61,8 @@ def _make_flow_dict(flow_id: str, task: str = "Test task", status: str = "comple
 @pytest.fixture
 def project(tmp_path):
     """Create a project directory with se3 structure."""
-    (tmp_path / "se3" / "state" / "archive").mkdir(parents=True)
-    (tmp_path / "se3" / "history").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state" / "archive").mkdir(parents=True)
+    (tmp_path / "tianluo" / "history").mkdir(parents=True)
     return tmp_path
 
 
@@ -71,7 +71,7 @@ class TestGetFlowDetailActive:
 
     def test_active_flow_found(self, project):
         flow_data = _make_flow_dict("flow-active-001")
-        state_file = project / "se3" / "state" / "engine.json"
+        state_file = project / "tianluo" / "state" / "engine.json"
         state_file.write_text(json.dumps(flow_data), encoding="utf-8")
 
         detail = get_flow_detail(project, "flow-active-001")
@@ -81,7 +81,7 @@ class TestGetFlowDetailActive:
 
     def test_active_flow_id_mismatch_falls_through(self, project):
         flow_data = _make_flow_dict("flow-active-001")
-        state_file = project / "se3" / "state" / "engine.json"
+        state_file = project / "tianluo" / "state" / "engine.json"
         state_file.write_text(json.dumps(flow_data), encoding="utf-8")
 
         detail = get_flow_detail(project, "flow-other-999")
@@ -93,7 +93,7 @@ class TestGetFlowDetailArchive:
 
     def test_archived_flow_found(self, project):
         flow_data = _make_flow_dict("flow-archived-002", task="Archived task")
-        archive_file = project / "se3" / "state" / "archive" / "engine_20260401_120000.json"
+        archive_file = project / "tianluo" / "state" / "archive" / "engine_20260401_120000.json"
         archive_file.write_text(json.dumps(flow_data), encoding="utf-8")
 
         detail = get_flow_detail(project, "flow-archived-002")
@@ -104,11 +104,11 @@ class TestGetFlowDetailArchive:
     def test_archived_flow_preferred_over_history(self, project):
         """When flow exists in both archive and history, archive is used."""
         flow_data = _make_flow_dict("flow-both-003", task="From archive")
-        archive_file = project / "se3" / "state" / "archive" / "engine_20260401_130000.json"
+        archive_file = project / "tianluo" / "state" / "archive" / "engine_20260401_130000.json"
         archive_file.write_text(json.dumps(flow_data), encoding="utf-8")
 
         # Also create a history dir for the same flow
-        history_dir = project / "se3" / "history" / "flow-both-003"
+        history_dir = project / "tianluo" / "history" / "flow-both-003"
         history_dir.mkdir()
         (history_dir / "_meta.json").write_text(
             json.dumps({"created_at": datetime.now().isoformat()}),
@@ -123,7 +123,7 @@ class TestGetFlowDetailArchive:
         """Correct flow is found even with multiple archive files."""
         flow_a = _make_flow_dict("flow-a", task="Task A")
         flow_b = _make_flow_dict("flow-b", task="Task B")
-        archive_dir = project / "se3" / "state" / "archive"
+        archive_dir = project / "tianluo" / "state" / "archive"
         (archive_dir / "engine_20260401_100000.json").write_text(
             json.dumps(flow_a), encoding="utf-8"
         )
@@ -141,7 +141,7 @@ class TestGetFlowDetailHistory:
 
     def test_history_only_flow(self, project):
         flow_id = "flow-history-004"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir()
 
         # Write a _meta.json
@@ -182,7 +182,7 @@ class TestLoadArchivedFlow:
         assert _load_archived_flow(tmp_path, "any-id") is None
 
     def test_malformed_archive_skipped(self, project):
-        archive_dir = project / "se3" / "state" / "archive"
+        archive_dir = project / "tianluo" / "state" / "archive"
         (archive_dir / "engine_20260401_000000.json").write_text("NOT JSON")
 
         assert _load_archived_flow(project, "any-id") is None
@@ -196,7 +196,7 @@ class TestDetailFromHistory:
 
     def test_empty_history_dir(self, project):
         flow_id = "empty-flow"
-        (project / "se3" / "history" / flow_id).mkdir()
+        (project / "tianluo" / "history" / flow_id).mkdir()
 
         detail = _detail_from_history(project, flow_id)
         assert detail is not None
@@ -207,7 +207,7 @@ class TestDetailFromHistory:
     def test_self_check_pass_index_reconstructed(self, project):
         """History-only flows reconstruct self_check pass indices from session order."""
         flow_id = "flow-sc-passes"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         _write_jsonl(
@@ -249,7 +249,7 @@ class TestDetailFromHistory:
     def test_self_check_pass_index_resets_after_non_self_check(self, project):
         """Consecutive self_check counter resets at non-self_check steps."""
         flow_id = "flow-sc-reset"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         _write_jsonl(
@@ -320,7 +320,7 @@ class TestShowDetailedSessionsInterleaving:
 
     def test_fix_loop_renders_iter_sessions_in_order(self, project, monkeypatch):
         flow_id = "flow-fix-loop"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         # Multi-round implement: 3 iterations, each with a user prompt
@@ -388,7 +388,7 @@ class TestShowDetailedSessionsInterleaving:
         and renders the same set of sessions as before the G2 change.
         """
         flow_id = "flow-single-round"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         _write_jsonl(
@@ -436,7 +436,7 @@ class TestShowDetailedSessionsInterleaving:
         the surviving non-implement sessions render.
         """
         flow_id = "flow-empty-impl"
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         # Empty-but-present implement file (zero messages after strip).
@@ -476,11 +476,11 @@ class TestHistoryShowDetailedCliFixLoop:
         flow_data = _make_flow_dict(
             flow_id, task="Fix something", status="completed"
         )
-        state_file = project / "se3" / "state" / "engine.json"
+        state_file = project / "tianluo" / "state" / "engine.json"
         state_file.write_text(json.dumps(flow_data), encoding="utf-8")
 
         # history dir — 2 implement iterations, interleaved test/self_check.
-        history_dir = project / "se3" / "history" / flow_id
+        history_dir = project / "tianluo" / "history" / flow_id
         history_dir.mkdir(parents=True)
 
         _write_jsonl(

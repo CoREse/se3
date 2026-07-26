@@ -1,23 +1,23 @@
 """SE3 Code Index command — navigate the project's structure map.
 
-Exposes the code-index (``src/se3/engine/code_index.py``) to humans and to the
+Exposes the code-index (``src/tianluo/engine/code_index.py``) to humans and to the
 LLM through a small command family:
 
-    se3 code-index                  # adaptive root view (budgeted zoomable tree)
-    se3 code-index index [<path>]   # literal drill-in — exactly one level
-    se3 code-index show <path>      # one file's full function/method detail
-    se3 code-index search <pattern> # grep the map's item lines (regex; -i/-F/-m)
-    se3 code-index rebuild [--force]# (re)build the map (incremental, or full)
-    se3 code-index inspect          # summary stats of the on-disk map
+    luo code-index                  # adaptive root view (budgeted zoomable tree)
+    luo code-index index [<path>]   # literal drill-in — exactly one level
+    luo code-index show <path>      # one file's full function/method detail
+    luo code-index search <pattern> # grep the map's item lines (regex; -i/-F/-m)
+    luo code-index rebuild [--force]# (re)build the map (incremental, or full)
+    luo code-index inspect          # summary stats of the on-disk map
 
 The **authoritative product** the display commands read is the committed,
-self-sufficient ``se3/code-index.md`` — the map itself (dir → subdir → … → file →
+self-sufficient ``tianluo/code-index.md`` — the map itself (dir → subdir → … → file →
 class → function, each with a one-line summary), where a human correction of a
 mis-summary durably lands and where each node's content fingerprint is embedded.
 There is no separate cache: ``index`` / ``show`` reconstruct a render-only index
 from that md alone (via :func:`code_index_render.load_for_display`).
 
-Bare ``se3 code-index`` renders the **adaptive root view** — a zoomable tree
+Bare ``luo code-index`` renders the **adaptive root view** — a zoomable tree
 expanded to a byte budget (the same map injected on every flow step). ``index``
 is the **literal** navigator: it shows exactly one level at the given path — a
 directory's immediate children, or a file's function/method tree — and ``index``
@@ -27,7 +27,7 @@ function-level reader for a single file.
 ``rebuild`` is the only writing command: it re-enumerates the code tree
 (deterministically, respecting gitignore), re-summarises only the nodes whose
 content fingerprint changed (``--force`` re-summarises everything), and writes
-``se3/code-index.md``. Normal display goes through the lazy-incremental
+``tianluo/code-index.md``. Normal display goes through the lazy-incremental
 ``load_or_build`` path elsewhere; this command surfaces the explicit rebuild.
 """
 
@@ -67,7 +67,7 @@ def get_project_root() -> Path:
 def _render_adaptive_map() -> None:
     """Render the code-index adaptive root view (budgeted zoomable tree).
 
-    This is the bare ``se3 code-index`` invocation — the same orientation map
+    This is the bare ``luo code-index`` invocation — the same orientation map
     injected on every flow step. Primary roots + byte budget come from the
     ``code_index`` config section.
     """
@@ -93,7 +93,7 @@ def _render_adaptive_map() -> None:
 def code_index_main(ctx: typer.Context):
     """Navigate the code-index structure map.
 
-    Bare ``se3 code-index`` (no subcommand) renders the adaptive root view — a
+    Bare ``luo code-index`` (no subcommand) renders the adaptive root view — a
     zoomable directory tree expanded to a byte budget, the primary navigation
     entry point. Subcommands drill in / rebuild / inspect: ``index [<path>]``
     shows exactly one literal level, ``show <path>`` details one file,
@@ -112,7 +112,7 @@ def index_cmd(
 ):
     """Render the literal drill-in view — exactly one level at *path*.
 
-    Reads the authoritative ``se3/code-index.md``. Unlike the bare adaptive root
+    Reads the authoritative ``tianluo/code-index.md``. Unlike the bare adaptive root
     view, this never auto-expands: a directory shows only its immediate children,
     a file shows its full function/method tree, and no argument shows the literal
     root level (top-level directories + root files, one level).
@@ -140,7 +140,7 @@ def show_cmd(
 ):
     """Print one file's full function/method detail from the code-index.
 
-    Reads the authoritative ``se3/code-index.md`` (the single source of truth).
+    Reads the authoritative ``tianluo/code-index.md`` (the single source of truth).
     For an indexed file this prints its file-level summary plus every
     class/function/method (and any degraded chunks) with their one-line
     summaries; for a directory prefix it lists the file one-liners beneath it.
@@ -185,9 +185,9 @@ def search_cmd(
         help=t("cli.help.code_index.search.line_number"),
     ),
 ):
-    """Grep the code-index item lines — a drop-in for `grep se3/code-index.md`.
+    """Grep the code-index item lines — a drop-in for `grep tianluo/code-index.md`.
 
-    Reads the authoritative ``se3/code-index.md`` (render-only; never rebuilds)
+    Reads the authoritative ``tianluo/code-index.md`` (render-only; never rebuilds)
     and matches *pattern* against the rendered single line of every item —
     directory, file, and each in-file symbol. Unlike a raw grep of the md, a
     matched symbol line carries its owning file's full path
@@ -264,7 +264,7 @@ def rebuild_cmd(
         help=t("cli.help.code_index.rebuild.force"),
     ),
 ):
-    """(Re)build the code-index, writing the authoritative se3/code-index.md.
+    """(Re)build the code-index, writing the authoritative tianluo/code-index.md.
 
     Re-enumerates the code tree deterministically (respecting gitignore), then
     summarises the changed nodes via the LLM, flushing the md periodically as a
@@ -299,7 +299,7 @@ def rebuild_cmd(
 def inspect_cmd():
     """Show summary stats of the on-disk code-index map.
 
-    Reads the authoritative ``se3/code-index.md`` only — file/symbol/degraded
+    Reads the authoritative ``tianluo/code-index.md`` only — file/symbol/degraded
     counts and a per-kind file breakdown — for a quick health check without
     dumping the whole map.
     """

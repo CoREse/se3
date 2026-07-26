@@ -100,7 +100,7 @@ class TestLlmReviewDispatch:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
             task_description=TASK_DESCRIPTION,

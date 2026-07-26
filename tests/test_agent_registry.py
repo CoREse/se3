@@ -59,7 +59,7 @@ def _no_global(tmp_path):
 
 class TestDictForm:
     def test_basic_dict_registry(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: {cmd: claude, priority: 10}
   backup: {cmd: claude-dev, priority: 5}
@@ -77,7 +77,7 @@ class TestDictForm:
 
     def test_registry_with_string_entry(self, tmp_path):
         # A bare string entry → treated as cmd.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: claude
 """
@@ -88,7 +88,7 @@ class TestDictForm:
         assert registry["primary"].priority == 0
 
     def test_entry_without_cmd_is_skipped(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   bad: {priority: 10}
   good: {cmd: claude, priority: 5}
@@ -103,7 +103,7 @@ class TestDictForm:
         assert any("no usable 'cmd'" in rec.message for rec in caplog.records)
 
     def test_empty_registry_does_not_raise(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
         with _no_global(tmp_path):
             registry = load_agent_registry(tmp_path)
         assert registry == {}
@@ -128,7 +128,7 @@ class TestEntryLevelMerge:
   shared: {cmd: shared-global, priority: 5}
 """
         )
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: {cmd: project-claude, priority: 10}
   only_project: {cmd: extra, priority: 2}
@@ -148,7 +148,7 @@ class TestEntryLevelMerge:
 
 class TestListFormIgnored:
     def test_list_agents_warned_and_ignored(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   - name: primary
     cmd: claude
@@ -164,7 +164,7 @@ class TestListFormIgnored:
         )
 
     def test_scalar_agents_warned_and_ignored(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text("agents: claude\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: claude\n")
         with _no_global(tmp_path):
             with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
@@ -179,7 +179,7 @@ class TestClaudeCommandsLegacyMigration:
     def test_legacy_migration_creates_registry_and_defaults(
         self, tmp_path, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
     priority: 10
@@ -206,7 +206,7 @@ class TestClaudeCommandsLegacyMigration:
         assert "defaults:" in combined
 
     def test_legacy_cmd_collision_adds_suffix(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
   - cmd: claude
@@ -221,7 +221,7 @@ class TestClaudeCommandsLegacyMigration:
     def test_legacy_defaults_chain_feeds_load_agents(self, tmp_path):
         # When only claude_commands is present, load_agents builds the
         # chain from the migrated names in list order.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
     priority: 1
@@ -236,7 +236,7 @@ class TestClaudeCommandsLegacyMigration:
         assert [a["name"] for a in chain] == ["claude", "claude-dev"]
 
     def test_claude_commands_ignored_when_agents_present(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   real: {cmd: real-claude}
 claude_commands:

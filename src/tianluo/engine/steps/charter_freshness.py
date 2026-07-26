@@ -12,7 +12,7 @@ The overwhelming majority of flows touch none of those classes and pass for
 free. When the diff *does* plausibly touch one, the step no longer stops at a
 dead-letter advisory: sitting **after a COMPLETED ``invariant_check``**, it runs
 a self-contained **propose -> gate -> apply** closed loop that may auto-write
-``se3/charter.md`` itself.
+``tianluo/charter.md`` itself.
 
 Why the handler is allowed to write the constitution: ``invariant_check`` has
 already proven the code diff legal against the *frozen* invariant anchors
@@ -32,7 +32,7 @@ The loop is **fail-safe / prefer-stale-over-degraded**:
   advisory-only behavior (records ``suggested_update``, writes nothing).
 - **propose** — the LLM judges freshness against the **on-disk** charter (NOT
   the frozen invariant anchor: this task may itself be a legitimate
-  constitutional amendment that already edited ``se3/charter.md``, and anchoring
+  constitutional amendment that already edited ``tianluo/charter.md``, and anchoring
   the patch on the frozen text would clobber that edit). When an update is
   needed it emits an **anchored patch** (only ``insert_after`` pure insertions
   and verbatim-quoted ``replace`` rewrites — a full rewrite is a silent-deletion
@@ -61,7 +61,7 @@ frozen anchors would misread "modifying an old rule" as "violating an old rule"
 — it always returns COMPLETED.
 
 It also hosts the charter **admission monitoring trigger**: when the diff itself
-edited ``se3/charter.md`` (a human-initiated amendment), the monitoring-light
+edited ``tianluo/charter.md`` (a human-initiated amendment), the monitoring-light
 altitude check runs against the current charter and its warning is surfaced in
 the step outputs. That, too, never blocks.
 """
@@ -392,7 +392,7 @@ def _apply_patch(text: str, ops: list) -> str:
 # atomic write + diff (task 4)
 # ---------------------------------------------------------------------------
 def _atomic_write_charter(project_root: Path, text: str) -> None:
-    """Write *text* to ``se3/charter.md`` atomically (temp + ``os.replace``).
+    """Write *text* to ``tianluo/charter.md`` atomically (temp + ``os.replace``).
 
     The temp file is created in the charter's own directory so ``os.replace``
     is an atomic same-filesystem rename: any crash leaves disk holding either
@@ -419,8 +419,8 @@ def _unified_charter_diff(old: str, new: str) -> str:
     diff = difflib.unified_diff(
         old.splitlines(keepends=True),
         new.splitlines(keepends=True),
-        fromfile="se3/charter.md (old)",
-        tofile="se3/charter.md (new)",
+        fromfile="charter.md (old)",
+        tofile="charter.md (new)",
     )
     return "".join(diff)
 
@@ -457,7 +457,7 @@ def _run_admission_trigger(
 ) -> None:
     """Run the monitoring-light altitude gate iff the diff edited the charter.
 
-    This is the *human-amendment* path: when ``se3/charter.md`` is among the
+    This is the *human-amendment* path: when ``tianluo/charter.md`` is among the
     changed files (the implement step edited it directly), run
     :func:`check_admission` on the current charter and surface its
     monitoring-light warning. Distinct from the auto-update gate below, which is
@@ -641,7 +641,7 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
     # Base = the ON-DISK charter, NOT the frozen invariant anchor
     # (step.inputs['charter']): this task may itself be a legitimate amendment
-    # that already edited se3/charter.md, and anchoring the patch on the frozen
+    # that already edited tianluo/charter.md, and anchoring the patch on the frozen
     # text would clobber that edit. The frozen version is only for the invariant
     # judgement, which is already over.
     charter_text = load_charter(project_root)
@@ -756,7 +756,7 @@ def charter_freshness_handler(step: Step, flow: FlowInstance) -> StepStatus:
             applied = True
             charter_diff = _unified_charter_diff(charter_text, candidate)
             logger.warning(
-                "charter_freshness: auto-updated se3/charter.md (descriptive, gated). "
+                "charter_freshness: auto-updated tianluo/charter.md (descriptive, gated). "
                 "touched=%s", propose.get("touched_classes"),
             )
             break

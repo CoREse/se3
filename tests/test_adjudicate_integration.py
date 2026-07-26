@@ -724,9 +724,9 @@ CACHE_CLAUSE = (
     "every read of the active engine.json must observe the freshest content on disk"
 )
 # The two homomorphic surfaces (the files whose code embodies each cold artifact).
-SURFACE_STEP_FILES = "src/se3/engine/persistence.py"
-SURFACE_CONTEXT_JSON = "src/se3/engine/context_store.py"
-SURFACE_ENGINE_JSON = "src/se3/engine/engine_state.py"
+SURFACE_STEP_FILES = "src/tianluo/engine/persistence.py"
+SURFACE_CONTEXT_JSON = "src/tianluo/engine/context_store.py"
+SURFACE_ENGINE_JSON = "src/tianluo/engine/engine_state.py"
 
 # The swept ruling: ONE boundary clause whose exception is scoped to "every cold
 # artifact", i.e. to both surfaces at once. The old B2/B3 wording is gone, so no

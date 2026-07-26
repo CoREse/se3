@@ -1,7 +1,7 @@
 """Tests for ``DaemonAggregator._enumerate_calls`` pending-call filtering.
 
 Regression coverage for the bug where an already-answered confirm call (its
-``.json`` request and ``.response`` answer both lingering in ``se3/calls/``)
+``.json`` request and ``.response`` answer both lingering in ``tianluo/calls/``)
 was perpetually reported to the web UI as "needs response".
 """
 
@@ -19,8 +19,8 @@ def _write(path: Path, payload: object) -> None:
 
 
 def _make_calls_dir(tmp_path: Path) -> Path:
-    """Create a project root with a populated ``se3/calls/`` directory."""
-    calls = tmp_path / "se3" / "calls"
+    """Create a project root with a populated ``tianluo/calls/`` directory."""
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
 
     # 1. An unanswered call — no sibling response file.
@@ -72,7 +72,7 @@ def test_enumerate_calls_does_not_emit_response_files(tmp_path: Path) -> None:
 
 
 def test_enumerate_calls_returns_unanswered_calls(tmp_path: Path) -> None:
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     calls_dir.mkdir(parents=True)
     _write(calls_dir / "confirm_a.json", {"step_to_review_id": "a"})
     _write(calls_dir / "confirm_b.json", {"step_to_review_id": "b"})

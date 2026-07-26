@@ -3,10 +3,11 @@
 Provides generic primitives to create git worktrees for isolated execution,
 clean them up resiliently, query repository state, and resolve merge conflicts
 with full task context. Used by both the implement-step DAG parallel path and
-the ``se3 run --worktree`` isolation mode.
+the ``luo run --worktree`` isolation mode.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 import shutil
@@ -114,7 +115,7 @@ def create_worktree(project_root: Path, branch: str) -> Path:
         subprocess.CalledProcessError: If worktree creation fails
     """
     safe_name = _branch_safe_name(branch)
-    worktree_path = project_root / "se3" / "worktrees" / safe_name
+    worktree_path = runtime_dir(project_root) / "worktrees" / safe_name
 
     # Prune stale worktree entries to avoid lock contention
     _run_git(project_root, "worktree", "prune", check=False)
@@ -293,7 +294,7 @@ def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
         branch_name: The branch whose worktree should be cleaned up
     """
     safe_name = _branch_safe_name(branch_name)
-    worktree_path = project_root / "se3" / "worktrees" / safe_name
+    worktree_path = runtime_dir(project_root) / "worktrees" / safe_name
 
     # Step 1: Unlock the worktree if locked (ignore errors if not locked)
     try:

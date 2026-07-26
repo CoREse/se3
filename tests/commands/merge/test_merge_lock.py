@@ -27,8 +27,8 @@ _SRC_ROOT = str(Path(tianluo.__file__).resolve().parent.parent)
 
 @pytest.fixture
 def tmp_project(tmp_path: Path) -> Path:
-    """Return a temporary project root with se3/state/ created."""
-    (tmp_path / "se3" / "state").mkdir(parents=True)
+    """Return a temporary project root with tianluo/state/ created."""
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
     return tmp_path
 
 
@@ -104,7 +104,7 @@ class TestMergeLockStale:
 
     def test_stale_lock_raises_stale(self, tmp_project: Path) -> None:
         # Write a PID that definitely does not exist.
-        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path = tmp_project / "tianluo" / "state" / "merge.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("999999\n", encoding="utf-8")
 
@@ -114,7 +114,7 @@ class TestMergeLockStale:
         assert exc_info.value.holder_pid == 999999
 
     def test_break_stale_removes_and_reacquires(self, tmp_project: Path) -> None:
-        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path = tmp_project / "tianluo" / "state" / "merge.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("999999\n", encoding="utf-8")
 
@@ -129,7 +129,7 @@ class TestMergeLockStale:
         """When the lock file contains an unparseable PID and another process
         holds the flock, MergeLockStale carries holder_pid=None (not the
         ambiguous sentinel 0)."""
-        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path = tmp_project / "tianluo" / "state" / "merge.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("not-a-number\n", encoding="utf-8")
 
@@ -231,7 +231,7 @@ class TestMergeLockBlocking:
         our PID overwrites the stale record — blocking mode does not get
         wedged on a leftover lock file from a crashed process.
         """
-        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path = tmp_project / "tianluo" / "state" / "merge.lock"
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         lock_path.write_text("999999\n", encoding="utf-8")
 

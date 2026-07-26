@@ -2,7 +2,7 @@
 
 Covers:
 - WorkflowConfig.from_dict defaults, validation, and coercion
-- WorkflowConfig.load from se3.yaml
+- WorkflowConfig.load from tianluo.yaml
 - load_workflow_config convenience function
 - get_max_fix_iterations refactored to use WorkflowConfig
 """
@@ -333,7 +333,7 @@ workflow:
   self_check_passes_required: 3
   self_check_convergence_enabled: true
 """
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         cfg = WorkflowConfig.load(tmp_path)
@@ -342,7 +342,7 @@ workflow:
         assert cfg.self_check_convergence_enabled is True
 
     def test_load_no_config_file(self, tmp_path: Path):
-        """When no se3.yaml exists, defaults are returned."""
+        """When no tianluo.yaml exists, defaults are returned."""
         cfg = WorkflowConfig.load(tmp_path)
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
         assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
@@ -354,7 +354,7 @@ workflow:
 workflow:
   self_check_passes_required: 0
 """
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         with pytest.raises(ConfigError, match="must be >= 1"):
@@ -364,7 +364,7 @@ workflow:
         """load() logs which file the resolved max_fix_iterations came from."""
         import logging as _logging
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 42\n", encoding="utf-8"
         )
         with caplog.at_level(_logging.INFO):
@@ -372,17 +372,17 @@ workflow:
         assert cfg.max_fix_iterations == 42
         msgs = "\n".join(r.getMessage() for r in caplog.records)
         assert "max_fix_iterations=42" in msgs
-        assert "se3.yaml" in msgs
+        assert "tianluo.yaml" in msgs
 
     def test_load_logs_local_yaml_as_winning_source(self, tmp_path: Path, caplog):
-        """When se3.local.yaml shadows se3.yaml, the log names the local file."""
+        """When tianluo.local.yaml shadows tianluo.yaml, the log names the local file."""
         import logging as _logging
 
-        # se3.local.yaml shadows se3.yaml as a whole (select-one, not key-merge).
-        (tmp_path / "se3.yaml").write_text(
+        # tianluo.local.yaml shadows tianluo.yaml as a whole (select-one, not key-merge).
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 30\n", encoding="utf-8"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "workflow:\n  max_fix_iterations: 100\n", encoding="utf-8"
         )
         with caplog.at_level(_logging.INFO):
@@ -391,7 +391,7 @@ workflow:
         assert cfg.max_fix_iterations == 100
         msgs = "\n".join(r.getMessage() for r in caplog.records)
         assert "max_fix_iterations=100" in msgs
-        assert "se3.local.yaml" in msgs
+        assert "tianluo.local.yaml" in msgs
 
     def test_load_source_log_deduped_per_path(self, tmp_path: Path, caplog):
         """Repeated load() calls for the same config path log the source once."""
@@ -400,10 +400,10 @@ workflow:
         from tianluo import config as _config
 
         # Isolate the module-level dedup set for this path.
-        key = str((tmp_path / "se3.yaml").resolve())
+        key = str((tmp_path / "tianluo.yaml").resolve())
         _config._logged_workflow_source_for.discard(key)
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 7\n", encoding="utf-8"
         )
         with caplog.at_level(_logging.INFO):
@@ -425,7 +425,7 @@ class TestLoadWorkflowConfig:
 workflow:
   self_check_passes_required: 2
 """
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         cfg = load_workflow_config(tmp_path)
@@ -453,7 +453,7 @@ class TestGetMaxFixIterations:
 workflow:
   max_fix_iterations: 8
 """
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         assert get_max_fix_iterations(tmp_path) == 8
@@ -470,7 +470,7 @@ version:
 workflow:
   max_fix_iterations: 12
 """
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         assert get_max_fix_iterations(tmp_path) == 12

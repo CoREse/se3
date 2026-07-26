@@ -22,7 +22,7 @@ from tianluo.engine.steps.implement import _run_dag_parallel, _salvage_results_h
 
 
 def _read_step_records(project_root: Path, flow_id: str, step_id: str) -> list[dict]:
-    path = project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    path = project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
     if not path.exists():
         return []
     return [
@@ -118,7 +118,7 @@ class TestDagGroupStatusWiring:
             assert (gid, "completed") in seen
 
         # flow_id / step_id were routed correctly: the records landed under the
-        # main repo's se3/history/<flow_id>/<step_id>.jsonl, and every record
+        # main repo's tianluo/history/<flow_id>/<step_id>.jsonl, and every record
         # carries the implement step_type.
         assert all(r["step_type"] == "implement" for r in status_records)
 
@@ -397,13 +397,13 @@ class TestDagAgentModelRelay:
             project_root, flow_id, step_id, "implement", "G1", "completed"
         )
         main_step_file = (
-            project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+            project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
         )
         before = main_step_file.read_text(encoding="utf-8")
 
         # A worktree carries its own group-specific conversation history file.
         worktree = tmp_path / "wt"
-        wt_flow_dir = worktree / "se3" / "history" / flow_id
+        wt_flow_dir = worktree / "tianluo" / "history" / flow_id
         wt_flow_dir.mkdir(parents=True)
         group_history = wt_flow_dir / f"{step_id}_G1.jsonl"
         group_history.write_text(
@@ -425,7 +425,7 @@ class TestDagAgentModelRelay:
 
         # The group conversation file, however, was salvaged into the main repo.
         salvaged = (
-            project_root / "se3" / "history" / flow_id / f"{step_id}_G1.jsonl"
+            project_root / "tianluo" / "history" / flow_id / f"{step_id}_G1.jsonl"
         )
         assert salvaged.exists()
         assert "group work" in salvaged.read_text(encoding="utf-8")

@@ -12,6 +12,7 @@ commit-message decoration and template summary display.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import logging
 import os
@@ -32,12 +33,12 @@ from ..version_bumper import VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
 
-# The finite, known closed set of se3 runtime subtree names that live under
-# the project's sole ignored runtime root ``se3/`` (no leading dot) and are
-# covered by the ``/se3/*`` gitignore rule. Every se3 runtime artifact MUST
-# land inside ``se3/<subtree>/``; a path carrying one of these subtree names
-# but anchored OUTSIDE the top-level ``se3/`` root (e.g. under ``.se3/`` or a
-# nested ``foo/se3/logs/...``) is a runtime leak that should never be
+# The finite, known closed set of luo runtime subtree names that live under
+# the project's sole ignored runtime root ``tianluo/`` (no leading dot) and are
+# covered by the ``/tianluo/*`` gitignore rule. Every luo runtime artifact MUST
+# land inside ``tianluo/<subtree>/``; a path carrying one of these subtree names
+# but anchored OUTSIDE the top-level ``tianluo/`` root (e.g. under ``.tianluo/`` or a
+# nested ``foo/tianluo/logs/...``) is a runtime leak that should never be
 # committed. This is a pure-path signature — no content-based classification.
 _RUNTIME_SUBTREES = frozenset(
     {"cache", "history", "logs", "state", "tmp", "worktrees", "calls", "collab"}
@@ -45,7 +46,7 @@ _RUNTIME_SUBTREES = frozenset(
 
 
 def _detect_runtime_leaks(staged_paths: list[str]) -> list[str]:
-    """Return staged paths that carry an se3 runtime signature outside ``se3/``.
+    """Return staged paths that carry an luo runtime signature outside ``tianluo/``.
 
     Pure path判断, no IO. ``staged_paths`` are repo-root-relative, posix-style
     paths (as emitted by ``git diff --cached --name-only``). A path is a leak
@@ -56,14 +57,14 @@ def _detect_runtime_leaks(staged_paths: list[str]) -> list[str]:
       path under it is a leak; OR
     * (B) some NON-top-level component is ``se3`` or ``.se3`` and its
       immediately following component is one of the closed-set runtime
-      subtree names in :data:`_RUNTIME_SUBTREES` (e.g. ``foo/se3/logs/x`` or
-      ``.se3/archive/<slug>/se3/state/engine.json``).
+      subtree names in :data:`_RUNTIME_SUBTREES` (e.g. ``foo/tianluo/logs/x`` or
+      ``.tianluo/archive/<slug>/tianluo/state/engine.json``).
 
     A path whose top-level component is exactly ``se3`` is always exempt —
-    it is either gitignored (``/se3/*``) or an explicitly whitelist-tracked
-    artifact (``se3/specs/``, ``se3/issues/`` …) and is normal working
+    it is either gitignored (``/tianluo/*``) or an explicitly whitelist-tracked
+    artifact (``tianluo/specs/``, ``tianluo/issues/`` …) and is normal working
     output. Source code where ``se3`` is merely a package directory
-    (``src/se3/engine/...``) is also exempt because the component following
+    (``src/tianluo/engine/...``) is also exempt because the component following
     ``se3`` is not a runtime subtree name.
 
     Args:
@@ -82,24 +83,26 @@ def _detect_runtime_leaks(staged_paths: list[str]) -> list[str]:
         if not parts:
             continue
         top = parts[0]
-        # The legitimate runtime root is the top-level ``se3/`` — exempt.
-        if top == "se3":
+        # The legitimate runtime root is the top-level ``tianluo/`` (or the
+        # legacy ``tianluo/``) — exempt.
+        if top in ("tianluo", "se3"):
             continue
-        # Rule (A): a top-level ``.se3/`` is never legitimate.
-        if top == ".se3":
+        # Rule (A): a top-level ``.tianluo/`` / ``.se3/`` is never legitimate.
+        if top in (".tianluo", ".se3"):
             leaks.append(raw)
             continue
         # Rule (B): a non-top-level ``se3``/``.se3`` immediately followed by a
         # known runtime subtree name.
         for i in range(1, len(parts) - 1):
-            if parts[i] in ("se3", ".se3") and parts[i + 1] in _RUNTIME_SUBTREES:
+            if parts[i] in ("tianluo", ".tianluo", "se3", ".se3") \
+                    and parts[i + 1] in _RUNTIME_SUBTREES:
                 leaks.append(raw)
                 break
     return leaks
 
 
 def _strip_runtime_leaks(project_root: Path) -> bool:
-    """Soft-remove runtime-signature paths leaking outside ``se3/`` (scheme B).
+    """Soft-remove runtime-signature paths leaking outside ``tianluo/`` (scheme B).
 
     Runs between ``git add -A`` and ``git commit``: reads the staged path
     list, identifies leaks via :func:`_detect_runtime_leaks`, unstages them
@@ -148,8 +151,8 @@ def _strip_runtime_leaks(project_root: Path) -> bool:
         return False
 
     logger.warning(
-        "Runtime-leak guard: unstaging %d path(s) carrying an se3 runtime "
-        "signature outside the ignored se3/ root (soft-removed from this "
+        "Runtime-leak guard: unstaging %d path(s) carrying an luo runtime "
+        "signature outside the ignored tianluo/ root (soft-removed from this "
         "commit): %s",
         len(leaks),
         ", ".join(sorted(leaks)),
@@ -217,7 +220,7 @@ def _root_deny_excludes(project_root: Path, path: str) -> bool:
 
     Confirms the matching gitignore rule via ``git check-ignore -v`` and checks
     that the winning pattern is exactly ``/*`` — the root default-deny line. A
-    path ignored by some other rule (e.g. ``/se3/*`` or ``*.pyc``) is NOT a
+    path ignored by some other rule (e.g. ``/tianluo/*`` or ``*.pyc``) is NOT a
     root-whitelist exclusion and is intentionally left out: those are ordinary,
     expected ignores, not the "stray top-level artifact the whitelist swept up"
     case this guard exists to surface.
@@ -547,12 +550,12 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             _update_docs(project_root, new_version, step, commit_message)
 
         # Write-side freshness boundary: regenerate the code-index just before
-        # staging so the committed `se3/code-index.md` folds in the code this
+        # staging so the committed `tianluo/code-index.md` folds in the code this
         # flow's implement step wrote. This is the ONLY refresh point after code
         # changes (the read-side refresh in analyze runs before implement); skip
         # it and every committed map would lag one flow behind. Best-effort — a
         # rebuild hiccup must never block the commit (it only reads + writes the
-        # tracked map under se3/, which `git add -A` then stages).
+        # tracked map under tianluo/, which `git add -A` then stages).
         from ..context_builder import ensure_code_index_fresh
         # Pass the flow/step context so the rebuild streams per-node progress to
         # the running flow's web console (chat_history.record_index_progress);
@@ -586,7 +589,7 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Runtime-leak guard (scheme B, regression backstop): after staging
         # the full tree, soft-remove any staged path that carries an se3
         # runtime signature but lives OUTSIDE the sole ignored runtime root
-        # ``se3/`` (e.g. a stray ``.se3/archive/...``). Such paths are
+        # ``tianluo/`` (e.g. a stray ``.tianluo/archive/...``). Such paths are
         # unstaged and a WARNING is logged; the commit then proceeds with the
         # remaining (legitimate) staged content. Entirely fault-tolerant — it
         # never blocks or fails the commit.
@@ -601,7 +604,7 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         _detect_root_whitelist_exclusions(project_root)
 
         # If stripping leaks emptied the index (the only working-tree change
-        # was a runtime leak outside se3/), there is nothing legitimate left
+        # was a runtime leak outside tianluo/), there is nothing legitimate left
         # to commit. The leak guard is a soft backstop — it must never turn a
         # commit into a failure. Treat this exactly like the upfront "No
         # changes to commit" no-op path rather than letting ``git commit`` fail
@@ -609,7 +612,7 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if stripped_leaks and not _index_has_staged_changes(project_root):
             logger.info(
                 "Runtime-leak guard: all staged changes were runtime leaks "
-                "outside se3/; nothing left to commit (treating as no-op "
+                "outside tianluo/; nothing left to commit (treating as no-op "
                 "success)"
             )
             # Roll back any version bump that was applied/staged — it will not
@@ -834,7 +837,7 @@ def _resolve_target_version(step: Step, flow: FlowInstance) -> str:
             f"version_analyze step failed; cannot determine target version "
             f"(current_version='{current_version}'). "
             "Provide a version via human intervention: rerun the version_analyze "
-            "step, or create a human call under se3/calls/ to supply the version "
+            "step, or create a human call under tianluo/calls/ to supply the version "
             "manually."
         )
 
@@ -844,7 +847,7 @@ def _resolve_target_version(step: Step, flow: FlowInstance) -> str:
             f"(current_version='{current_version}'). "
             "The commit step requires an explicit target version. "
             "Provide one via human intervention: rerun the version_analyze "
-            "step, or create a human call under se3/calls/ to supply the "
+            "step, or create a human call under tianluo/calls/ to supply the "
             "version manually."
         )
 
@@ -1333,7 +1336,7 @@ def _reanalyze_version_with_baseline(
     Locates the flow's version_analyze step, overrides its
     ``pre_session_version`` input with the drifted disk version, and re-invokes
     ``version_analyze_handler`` so the new number is derived against the version
-    a concurrent flow just wrote (honouring any ``se3/version-rules.md``, which a
+    a concurrent flow just wrote (honouring any ``tianluo/version-rules.md``, which a
     mechanical SemVer bump could not). The refreshed artifacts (bump_type,
     commit_message, versions_changes, reasoning, is_tag) are forwarded back onto
     the commit step's inputs so the commit message, VERSIONS.md entry and tag
@@ -1765,8 +1768,8 @@ def _generate_template_summary(flow: FlowInstance, step: Step) -> None:
 
     summary_text = "\n".join(lines)
 
-    # Save to se3/state/summary-{flow_id}.md
-    summary_dir = project_root / "se3" / "state"
+    # Save to tianluo/state/summary-{flow_id}.md
+    summary_dir = runtime_dir(project_root) / "state"
     summary_dir.mkdir(parents=True, exist_ok=True)
     summary_file = summary_dir / f"summary-{flow.flow_id}.md"
 

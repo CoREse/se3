@@ -21,7 +21,7 @@ from ..worktree import _run_git, get_conflicting_files
 logger = logging.getLogger(__name__)
 
 
-_SPEC_PATH_RE = re.compile(r"^se3/specs/.+/spec\.md$")
+_SPEC_PATH_RE = re.compile(r"^(?:tianluo|se3)/specs/.+/spec\.md$")
 
 _DEFAULT_LOG_LIMIT = 20
 
@@ -359,7 +359,7 @@ def _path_matches_binary_pattern(rel_path: str, patterns: list[str]) -> bool:
 
 
 def _is_spec_path(path: str) -> bool:
-    """Return True when ``path`` matches ``se3/specs/**/spec.md``."""
+    """Return True when ``path`` matches ``tianluo/specs/**/spec.md``."""
     normalized = path.replace("\\", "/")
     return bool(_SPEC_PATH_RE.match(normalized))
 

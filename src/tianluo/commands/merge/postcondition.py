@@ -432,7 +432,7 @@ def assert_head_is_merge_commit(
     **Octopus limitation (documented, not active bug)**: The
     parent-count assertion is shape-only — it confirms HEAD has
     ``>= min_parents`` parents but does NOT verify the parent *set*
-    matches an expected list of branch SHAs.  ``se3 merge`` today
+    matches an expected list of branch SHAs.  ``luo merge`` today
     runs strictly pairwise (one ``git merge`` per branch in the
     argument list), so every commit produced has exactly 2 parents
     and the shape check is sufficient.  If a future change ever

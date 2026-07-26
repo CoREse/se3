@@ -34,17 +34,17 @@ _SRC = Path(__file__).resolve().parents[2] / "src"
 
 # Every module migrated in group G2 (tasks 5 & 6).
 MIGRATED_MODULES = [
-    "se3/cli.py",
-    "se3/commands/end_session_cmd.py",
-    "se3/commands/salvage_cmd.py",
-    "se3/commands/migrate_cmd.py",
-    "se3/commands/merge_respond.py",
-    "se3/commands/merge_cmd.py",
-    "se3/commands/history_cmd.py",
-    "se3/commands/issue_cmd.py",
-    "se3/commands/init_cmd.py",
-    "se3/commands/code_index_cmd.py",
-    "se3/commands/worktree_cmd.py",
+    "tianluo/cli.py",
+    "tianluo/commands/end_session_cmd.py",
+    "tianluo/commands/salvage_cmd.py",
+    "tianluo/commands/migrate_cmd.py",
+    "tianluo/commands/merge_respond.py",
+    "tianluo/commands/merge_cmd.py",
+    "tianluo/commands/history_cmd.py",
+    "tianluo/commands/issue_cmd.py",
+    "tianluo/commands/init_cmd.py",
+    "tianluo/commands/code_index_cmd.py",
+    "tianluo/commands/worktree_cmd.py",
 ]
 
 
@@ -110,7 +110,7 @@ def test_missing_zh_key_falls_back_to_en_per_key():
         # command binds the project root).
         (["merge"], "At least one branch name is required", "至少需要提供一个分支名称"),
         # cli.version.
-        (["--version"], "se3 version", "se3 版本"),
+        (["--version"], "luo version", "luo 版本"),
     ],
 )
 def test_command_output_switches_language(args, en_substr, zh_substr, monkeypatch):

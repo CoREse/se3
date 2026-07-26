@@ -279,8 +279,8 @@ class TestBugC_AlreadyConfirmedDetection:
         # Configure 'plan' for LLM review so resolve_confirm_inputs returns a
         # real entry (reviewer=None → defaults chain) rather than None, which
         # would force the human defensive fallback regardless of this fix.
-        (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3.yaml").write_text(
+        (self.project_root / "tianluo" / "specs").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {}\n"
@@ -369,8 +369,8 @@ class TestBoundedCrossRevisionReview:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "specs").mkdir(parents=True, exist_ok=True)
         self.persistence = PersistenceManager(self.project_root)
         self.sm = StateMachine(self.project_root, self.persistence)
 
@@ -436,7 +436,7 @@ class TestBoundedCrossRevisionReview:
         from tianluo.engine.steps.confirm import confirm_handler
 
         max_iters = 2
-        (self.project_root / "se3.yaml").write_text(
+        (self.project_root / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             f"    plan: {{max_iterations: {max_iters}}}\n"

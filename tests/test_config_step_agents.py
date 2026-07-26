@@ -64,7 +64,7 @@ class TestLoadStepAgentsNoConfig:
             assert load_step_agents(tmp_path, "implement") is None
 
     def test_returns_none_when_step_not_declared(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: [opus, primary]
@@ -83,7 +83,7 @@ class TestLoadStepAgentsNoConfig:
 
 class TestLoadStepAgentsLegalDeclaration:
     def test_name_list_preserves_written_order(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: [small, opus, primary]
@@ -98,7 +98,7 @@ class TestLoadStepAgentsLegalDeclaration:
         assert all(a["type"] == "claude-code" for a in agents)
 
     def test_single_name_reference(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     summarize: [small]
@@ -127,7 +127,7 @@ llm_caller:
 """
         )
         # Project also declares an override for implement using its own agents.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   project_agent: {cmd: project-claude, priority: 5}
 llm_caller:
@@ -154,7 +154,7 @@ llm_caller:
 """
         )
         # Project declares nothing under llm_caller.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   foo: {cmd: claude}
 """
@@ -168,7 +168,7 @@ llm_caller:
 
 class TestInvalidDeclarations:
     def test_empty_list_returns_none(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: []
@@ -185,7 +185,7 @@ class TestInvalidDeclarations:
 
     def test_non_list_returns_none(self, tmp_path, caplog):
         # A bare string instead of a list.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: "claude"
@@ -201,7 +201,7 @@ class TestInvalidDeclarations:
 
     def test_non_string_entries_filtered(self, tmp_path, caplog):
         # Mixed list: one valid name, one integer (junk).
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
@@ -228,7 +228,7 @@ class TestInlineDictEntriesDeprecated:
     """
 
     def test_inline_dict_entry_is_tolerated_with_warning(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
@@ -248,7 +248,7 @@ class TestInlineDictEntriesDeprecated:
 
     def test_mixed_inline_dict_and_name(self, tmp_path, caplog):
         # Inline dict skipped + warned; valid name survives.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
@@ -271,7 +271,7 @@ class TestInlineDictEntriesDeprecated:
 
 class TestUnknownAgentNameFailsFast:
     def test_unknown_name_raises_value_error(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: [primary, doesnotexist]
@@ -291,7 +291,7 @@ class TestUnknownAgentNameFailsFast:
 
 class TestOtherStepsUnaffected:
     def test_other_steps_return_none(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: [opus]
@@ -313,7 +313,7 @@ class TestMalformedTopLevelLlmCaller:
     """
 
     def test_string_llm_caller_returns_none_with_warning(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text("llm_caller: claude\n")
+        (tmp_path / "tianluo.yaml").write_text("llm_caller: claude\n")
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="tianluo.config"):
@@ -326,7 +326,7 @@ class TestMalformedTopLevelLlmCaller:
         )
 
     def test_list_llm_caller_returns_none_with_warning(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text("llm_caller:\n  - cmd: foo\n")
+        (tmp_path / "tianluo.yaml").write_text("llm_caller:\n  - cmd: foo\n")
         with patch("tianluo.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="tianluo.config"):
@@ -344,7 +344,7 @@ class TestMalformedTopLevelLlmCaller:
         # Even with malformed llm_caller at top level, resolve_agents
         # must not raise; it should return the default chain and set the
         # override flag to False.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "llm_caller: claude\n"
             "claude_commands:\n"
             "  - cmd: my-claude\n"
@@ -372,7 +372,7 @@ class TestUnknownStepKey:
         # step returns None (no declaration), and a warning is logged so
         # the user can debug their yaml rather than silently get the
         # default chain.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     inplement: [opus]
@@ -396,7 +396,7 @@ class TestUnknownStepKey:
         # silently falls back to None — same as the "no declaration"
         # path. This codifies that LLMCaller's unknown step_type behaves
         # identically to a declared-but-different step.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement: [opus]
@@ -415,7 +415,7 @@ class TestSelfCheckFlatSchema:
     """A flat self_check list is one chain reused for every pass."""
 
     def test_flat_list_single_chain_all_passes(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check: [opus, primary]
@@ -432,7 +432,7 @@ class TestSelfCheckFlatSchema:
         assert [a["name"] for a in res.chain_for_pass(2)] == ["opus", "primary"]
 
     def test_flat_resolve_agents_is_override_for_all_passes(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check: [opus]
@@ -453,7 +453,7 @@ class TestSelfCheckNestedSchema:
     """A nested self_check list selects a chain by 1-based pass index."""
 
     def test_nested_chains_per_pass(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check:
@@ -470,7 +470,7 @@ class TestSelfCheckNestedSchema:
         assert [a["name"] for a in res.chain_for_pass(2)] == ["opus", "backup"]
 
     def test_nested_pass_beyond_count_reuses_last_chain(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check:
@@ -490,7 +490,7 @@ class TestSelfCheckNestedSchema:
         assert [a["name"] for a in agents3] == ["opus", "backup"]
 
     def test_nested_resolve_agents_selects_per_pass(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check:
@@ -507,7 +507,7 @@ class TestSelfCheckNestedSchema:
         assert [a["name"] for a in a2] == ["opus"]
 
     def test_nested_unknown_name_fails_fast(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     self_check:
@@ -526,7 +526,7 @@ class TestSelfCheckMixedSchema:
 
     def test_mixed_warns_and_falls_back(self, tmp_path, caplog):
         import logging
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   defaults: [backup]
   steps:
@@ -554,7 +554,7 @@ class TestSelfCheckNestedOnlyForSelfCheck:
 
     def test_nested_for_other_step_is_no_override(self, tmp_path, caplog):
         import logging
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             _REGISTRY_YAML + """llm_caller:
   steps:
     implement:

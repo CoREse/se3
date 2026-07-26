@@ -28,7 +28,7 @@ def _write_issue(
     title: str = "an issue",
     description: str = "body",
 ) -> Path:
-    issues_dir = root / "se3" / "issues" / subdir
+    issues_dir = root / "tianluo" / "issues" / subdir
     issues_dir.mkdir(parents=True, exist_ok=True)
     path = issues_dir / f"{issue_id}_x.yaml"
     path.write_text(
@@ -141,9 +141,9 @@ def test_open_to_closed_move_reflected(tmp_path):
 def test_worktree_copy_root_empty_and_uncached(tmp_path):
     """A worktree copy root yields no issues and never enters the cache."""
     main = tmp_path / "main"
-    (main / "se3" / "state").mkdir(parents=True)
-    wt = main / "se3" / "worktrees" / "wt-1"
-    (wt / "se3" / "state").mkdir(parents=True)
+    (main / "tianluo" / "state").mkdir(parents=True)
+    wt = main / "tianluo" / "worktrees" / "wt-1"
+    (wt / "tianluo" / "state").mkdir(parents=True)
     _write_issue(main, "001")
     _write_issue(wt, "001")  # the worktree's clone of the same issue
 
@@ -162,7 +162,7 @@ def test_missing_issues_dir_returns_empty_and_drops_cache(tmp_path):
 
     import shutil
 
-    shutil.rmtree(tmp_path / "se3" / "issues")
+    shutil.rmtree(tmp_path / "tianluo" / "issues")
     assert agg._collect_issues(tmp_path) == []
     assert str(tmp_path) not in agg._issue_cache
 
@@ -188,7 +188,7 @@ def test_safeloader_fallback_behaves_identically(tmp_path, monkeypatch, parse_ca
 
 def test_malformed_file_tolerated_and_cached(tmp_path, parse_calls):
     """A corrupt file is skipped, and the skip result is cached like any other."""
-    bad_dir = tmp_path / "se3" / "issues" / "open"
+    bad_dir = tmp_path / "tianluo" / "issues" / "open"
     bad_dir.mkdir(parents=True)
     (bad_dir / "bad.yaml").write_text("not: [valid: yaml: {", encoding="utf-8")
     _write_issue(tmp_path, "001")

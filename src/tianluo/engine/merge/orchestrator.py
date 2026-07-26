@@ -6,6 +6,7 @@ aggregate results.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir, runtime_dir_name, runtime_relpath
 
 import json
 import logging
@@ -91,9 +92,9 @@ MergeResult = MergeReport
 # running session to mutate in the MAIN working tree between commit steps.
 # Two classes of such committed data exist and BOTH must be here, or a merge
 # git could complete is blocked with a spurious dirty_working_tree:
-#   * se3/issues/ — issue open/close writes files under it and bumps
-#     se3/issues/.next_id (divergence routed to NextIdResolver);
-#   * se3/code-index.md — flow steps rewrite it incrementally, so it is
+#   * tianluo/issues/ — issue open/close writes files under it and bumps
+#     tianluo/issues/.next_id (divergence routed to NextIdResolver);
+#   * tianluo/code-index.md — flow steps rewrite it incrementally, so it is
 #     routinely dirty between commit steps (the repo is in exactly this state
 #     right now); its divergence has its own deterministic code-index resolver
 #     (#280, same class as NextIdResolver).
@@ -106,13 +107,16 @@ MergeResult = MergeReport
 # change to the matching tuple):
 #   * _SELF_MANAGED_DIRTY_PREFIXES — directory-prefix entries (trailing slash),
 #     matched by path prefix so a match is confined to paths INSIDE the dir
-#     (never a sibling like se3/issuesX);
+#     (never a sibling like tianluo/issuesX);
 #   * _SELF_MANAGED_DIRTY_FILES — exact-file entries, matched by full-path
 #     equality ONLY — NOT a prefix, so a tracked sibling like
-#     se3/code-index.md.bak / .orig is treated as an outside file, not silently
+#     tianluo/code-index.md.bak / .orig is treated as an outside file, not silently
 #     swallowed by the whitelist.
-_SELF_MANAGED_DIRTY_PREFIXES: tuple[str, ...] = ("se3/issues/",)
-_SELF_MANAGED_DIRTY_FILES: tuple[str, ...] = ("se3/code-index.md",)
+_SELF_MANAGED_DIRTY_PREFIXES: tuple[str, ...] = ("tianluo/issues/", "se3/issues/")
+_SELF_MANAGED_DIRTY_FILES: tuple[str, ...] = (
+    "tianluo/code-index.md",
+    "se3/code-index.md",
+)
 
 
 def _is_self_managed_dirty_path(path: str) -> bool:
@@ -122,7 +126,7 @@ def _is_self_managed_dirty_path(path: str) -> bool:
     matches any path strictly inside it; a :data:`_SELF_MANAGED_DIRTY_FILES`
     entry is a FILE and matches only that exact path. Using exact equality for
     file entries (rather than ``str.startswith``) is what keeps siblings such
-    as ``se3/code-index.md.bak`` OUT of the whitelist — otherwise their dirty
+    as ``tianluo/code-index.md.bak`` OUT of the whitelist — otherwise their dirty
     state would be misclassified as self-managed while the sync commit's
     pathspec never actually stages them.
     """
@@ -236,7 +240,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
 _DEFAULT_MAX_REPAIR_ITERATIONS = 2
 # Upper bound for user-configured max_iterations.  Values above this are
 # capped to prevent runaway LLM loops.  The cap is a safety guardrail,
-# not a tunable parameter — it is intentionally not exposed in se3.yaml.
+# not a tunable parameter — it is intentionally not exposed in tianluo.yaml.
 _MAX_REPAIR_ITERATIONS_HARD_CAP = 20
 
 if _DEFAULT_MAX_REPAIR_ITERATIONS < 1:
@@ -247,7 +251,7 @@ if _DEFAULT_MAX_REPAIR_ITERATIONS < 1:
 
 
 def _load_max_repair_iterations(project_root: Path) -> int:
-    """Read max repair iterations from se3.yaml, with safe fallback.
+    """Read max repair iterations from tianluo.yaml, with safe fallback.
 
     Looks under ``merge.guardrail_repair.max_iterations``.
     Invalid or missing values fall back to the default.
@@ -305,7 +309,7 @@ def _load_max_repair_iterations(project_root: Path) -> int:
             "of %d (safety guardrail to prevent runaway LLM loops); "
             "capping at %d.  To raise the cap, modify "
             "_MAX_REPAIR_ITERATIONS_HARD_CAP in orchestrator.py — it is "
-            "intentionally NOT exposed in se3.yaml.",
+            "intentionally NOT exposed in tianluo.yaml.",
             val, _MAX_REPAIR_ITERATIONS_HARD_CAP, _MAX_REPAIR_ITERATIONS_HARD_CAP,
         )
         return _MAX_REPAIR_ITERATIONS_HARD_CAP
@@ -318,7 +322,7 @@ _DEFAULT_GIT_MERGE_TIMEOUT = 60
 
 
 def _load_git_merge_timeout(project_root: Path) -> int:
-    """Read git merge timeout from se3.yaml, with safe fallback.
+    """Read git merge timeout from tianluo.yaml, with safe fallback.
 
     Looks under ``merge.git_merge_timeout``.  Invalid or missing values
     fall back to the default.
@@ -527,7 +531,7 @@ def _check_repo_state(project_root: Path) -> None:
     )
     if result.returncode == 0 and result.stdout.strip() == "true":
         raise ShallowRepoError(
-            "Shallow clone is not supported for se3 merge."
+            "Shallow clone is not supported for luo merge."
         )
 
     # Submodule check: active submodules can produce silent runtime-sync
@@ -544,26 +548,26 @@ def _check_repo_state(project_root: Path) -> None:
             "or use --force to proceed at your own risk."
         )
 
-    # Sparse-checkout check: if se3/specs/** is excluded, guardrails
+    # Sparse-checkout check: if tianluo/specs/** is excluded, guardrails
     # would silently pass because _get_changed_spec_files returns empty.
     # We do a *targeted* check (not just "is sparse-checkout active?")
-    # so a user with sparse-checkout that DOES include se3/specs/** is
+    # so a user with sparse-checkout that DOES include tianluo/specs/** is
     # not unnecessarily blocked.  The detection has two phases:
     #   1. ``git sparse-checkout list`` returns active patterns (cone or
     #      non-cone).  An empty list => sparse-checkout inactive.
     #   2. When patterns are present, we treat sparse-checkout as
-    #      *active* and ask git directly whether ``se3/specs`` is part
+    #      *active* and ask git directly whether ``tianluo/specs`` is part
     #      of the working tree.  ``git ls-files --error-unmatch
-    #      se3/specs`` returns rc=0 only when at least one file under
-    #      se3/specs is currently checked out — i.e., the path is part
+    #      tianluo/specs`` returns rc=0 only when at least one file under
+    #      tianluo/specs is currently checked out — i.e., the path is part
     #      of the active sparse cone.  When rc != 0 (typically code
     #      1 with "did not match any file" or similar), we raise.
-    # Edge case: a brand-new repo without any se3/specs file would
+    # Edge case: a brand-new repo without any tianluo/specs file would
     # falsely flag as excluded even when the cone permits it.  In
     # practice se3-managed repos always have at least one spec file
     # committed, but to keep the check fail-closed without breaking
     # bootstrapping we additionally consult the cone patterns: when the
-    # patterns explicitly mention "se3/specs" we treat it as included
+    # patterns explicitly mention "tianluo/specs" we treat it as included
     # regardless of ls-files results.
     result = _run_git(
         project_root, "sparse-checkout", "list",
@@ -572,14 +576,14 @@ def _check_repo_state(project_root: Path) -> None:
     if result.returncode == 0:
         patterns_text = result.stdout.strip()
         if patterns_text:
-            # Sparse-checkout is active.  Decide whether se3/specs is in
+            # Sparse-checkout is active.  Decide whether tianluo/specs is in
             # the active set.  Two signals (either is sufficient):
-            #   (a) explicit pattern mentions ``se3/specs`` (safe for
+            #   (a) explicit pattern mentions ``tianluo/specs`` (safe for
             #       both cone and non-cone modes — e.g. a cone-mode user
-            #       listing "se3" or "se3/specs" both include it; a
-            #       non-cone-mode user with pattern "/se3/specs/**"
+            #       listing "se3" or "tianluo/specs" both include it; a
+            #       non-cone-mode user with pattern "/tianluo/specs/**"
             #       similarly).
-            #   (b) ``git ls-files se3/specs`` returns at least one
+            #   (b) ``git ls-files tianluo/specs`` returns at least one
             #       checked-out file under that path.
             patterns = [
                 line.strip().lstrip("/")
@@ -587,35 +591,37 @@ def _check_repo_state(project_root: Path) -> None:
                 if line.strip()
             ]
             # In cone mode, a directory pattern includes all descendants
-            # so any pattern that is se3/specs or a parent (se3, "" for
+            # so any pattern that is tianluo/specs or a parent (se3, "" for
             # root cone, "*") is sufficient.  Be conservative: accept
             # the obvious matches.
+            runtime_name = runtime_dir_name(project_root)
+            specs_rel = f"{runtime_name}/specs"
             included_by_pattern = False
             for p in patterns:
                 normalised = p.rstrip("/")
-                if normalised in ("", "*", "se3", "se3/specs") or \
-                        normalised.startswith("se3/specs"):
+                if normalised in ("", "*", runtime_name, specs_rel) or \
+                        normalised.startswith(specs_rel):
                     included_by_pattern = True
                     break
-                # Cone mode descendant: pattern is se3/specs/foo etc.
-                # That doesn't include se3/specs itself but a sibling.
+                # Cone mode descendant: pattern is tianluo/specs/foo etc.
+                # That doesn't include tianluo/specs itself but a sibling.
                 # In that case ls-files will tell us the truth.
 
             included_by_lsfiles = False
             if not included_by_pattern:
                 ls_result = _run_git(
                     project_root, "ls-files",
-                    "--error-unmatch", "se3/specs",
+                    "--error-unmatch", specs_rel,
                     check=False, timeout=15,
                 )
                 included_by_lsfiles = (ls_result.returncode == 0)
 
             if not (included_by_pattern or included_by_lsfiles):
                 raise UnsupportedRepoStateError(
-                    "Sparse-checkout is active and excludes se3/specs/**. "
-                    "Spec guardrails would be silently bypassed. Re-include "
-                    "se3/specs in your sparse-checkout patterns or use "
-                    "--force to proceed at your own risk."
+                    f"Sparse-checkout is active and excludes {specs_rel}/**. "
+                    f"Spec guardrails would be silently bypassed. Re-include "
+                    f"{specs_rel} in your sparse-checkout patterns or use "
+                    f"--force to proceed at your own risk."
                 )
 
 
@@ -639,11 +645,11 @@ class _RecordingNullHumanCallWriter(HumanCallWriter):
     library caller (:func:`integrate`) wants an escalation surfaced on the
     returned :class:`MergeResult` (``pending_human=True`` plus the recorded
     payload) and decides the flow-control itself — a flow step drives
-    PAUSED/confirm/resume, the ``se3 merge`` CLI uses exit codes. So in library
-    mode nothing lands in ``se3/calls/``.
+    PAUSED/confirm/resume, the ``luo merge`` CLI uses exit codes. So in library
+    mode nothing lands in ``tianluo/calls/``.
 
     The write methods keep :class:`HumanCallWriter`'s return contract (a
-    ``Path`` under ``se3/calls/``) so the orchestrator's existing
+    ``Path`` under ``tianluo/calls/``) so the orchestrator's existing
     ``if report.human_call_file:`` truthiness checks and exception plumbing are
     unchanged — the path is simply never created on disk. ``print_instructions``
     becomes a no-op (no terminal side effects in library mode).
@@ -668,7 +674,7 @@ class _RecordingNullHumanCallWriter(HumanCallWriter):
     ) -> Path:
         branch = getattr(context, "theirs_branch", "") or ""
         name = call_file_name or _generate_call_filename("merge", branch)
-        call_file = self.project_root / "se3" / "calls" / name
+        call_file = runtime_dir(self.project_root) / "calls" / name
         self.recorded_calls.append(
             {"type": "conflict", "branch": branch, "call_file": call_file}
         )
@@ -682,7 +688,7 @@ class _RecordingNullHumanCallWriter(HumanCallWriter):
         call_type="guardrail_violation",
         iteration_count=None,
     ) -> Path:
-        call_file = self.project_root / "se3" / "calls" / _generate_call_filename(
+        call_file = runtime_dir(self.project_root) / "calls" / _generate_call_filename(
             "merge", f"{branch}_guardrail",
         )
         self.recorded_calls.append(
@@ -782,7 +788,7 @@ class MergeOrchestrator:
         # K2: per-LLM-call trace shared across ConflictResolver and
         # GuardrailRepairer so every LLM invocation issued during this
         # merge run lands in a single jsonl trace under
-        # ``se3/logs/llm/``.  Started lazily by subcomponents.
+        # ``tianluo/logs/llm/``.  Started lazily by subcomponents.
         from ...commands.merge.llm_trace import LLMTrace
 
         self._llm_trace = LLMTrace(project_root)
@@ -802,7 +808,7 @@ class MergeOrchestrator:
         self._decider = StrategyDecider()
         # Library mode (``suppress_human_call``) swaps in a recording writer so
         # escalations surface on the returned MergeResult rather than as files
-        # under se3/calls/. Default False keeps the legacy CLI/step behaviour —
+        # under tianluo/calls/. Default False keeps the legacy CLI/step behaviour —
         # and every existing test — byte-for-byte unchanged.
         self.suppress_human_call = suppress_human_call
         self._human_writer = (
@@ -818,7 +824,7 @@ class MergeOrchestrator:
         )
         self._git_merge_timeout = _load_git_merge_timeout(project_root)
         self._last_stall_iteration_count: Optional[int] = None
-        # A10: load max repair iterations from se3.yaml so users can
+        # A10: load max repair iterations from tianluo.yaml so users can
         # tune ``merge.guardrail_repair.max_iterations`` without
         # re-deploying the orchestrator.  Falls back to the module
         # default on any read or parse failure (logged inside the
@@ -892,7 +898,7 @@ class MergeOrchestrator:
         Change C retires the orchestrator's self-written flow management: in
         library mode (``suppress_human_call=True``) the human-call writer is a
         :class:`_RecordingNullHumanCallWriter` that *records* each escalation
-        (conflict / guardrail) rather than writing an ``se3/calls/`` file or
+        (conflict / guardrail) rather than writing an ``tianluo/calls/`` file or
         printing terminal instructions. The caller owns flow-control and reads
         the escalation off the returned :class:`MergeResult` (the CLI turns it
         into an exit code; a flow step drives PAUSED/confirm/resume). In the
@@ -934,8 +940,8 @@ class MergeOrchestrator:
         logger.log(level, message, exc_info=exc_info)
 
     def _write_log(self) -> None:
-        """Flush the log buffer to se3/logs/merge_<ts>.log with fsync."""
-        logs_dir = self.project_root / "se3" / "logs"
+        """Flush the log buffer to tianluo/logs/merge_<ts>.log with fsync."""
+        logs_dir = runtime_dir(self.project_root) / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.log_file = logs_dir / f"merge_{ts}.log"
@@ -1350,7 +1356,7 @@ class MergeOrchestrator:
         finished ``merge_integrate`` but has not yet run ``version_reconcile``)
         is NOT contributed by the branches this merge is bringing in. Counting it
         would wrongly stand aggregation down for a concurrent pure-legacy
-        ``se3 merge``, so the legacy branch would land with no bump. Only intents
+        ``luo merge``, so the legacy branch would land with no bump. Only intents
         absent from master's pre-merge tree (i.e. introduced by these branches)
         are counted. Any read fault degrades to ``False`` (fall back to the
         legacy path) rather than aborting the merge.
@@ -1539,7 +1545,7 @@ class MergeOrchestrator:
             report.success = False
             report.failure_reason = FailureReason.NO_BRANCHES.legacy_string
             report.failure_detail = (
-                "se3 merge invoked with no branches; nothing to do."
+                "luo merge invoked with no branches; nothing to do."
             )
             self._write_log()
             report.log_file = self.log_file
@@ -1616,7 +1622,7 @@ class MergeOrchestrator:
 
         # Dirty pre-flight (lock held, repo-state validated, BEFORE the
         # pre_merge_sha capture below): auto-commit self-managed issue state so
-        # a branch that also touched se3/issues/.next_id can actually START its
+        # a branch that also touched tianluo/issues/.next_id can actually START its
         # merge and route the divergence through NextIdResolver. Placing this
         # ahead of the pre_merge_sha capture makes the "chore: sync issue state"
         # commit part of the rollback baseline — _rollback_to can never discard
@@ -2917,7 +2923,7 @@ class MergeOrchestrator:
         #     summary said "merge failed";
         #   * yet ``--delete-merged`` had still run, so the source
         #     branches were already gone and the operator could not
-        #     re-run ``se3 merge`` to investigate the version anomaly
+        #     re-run ``luo merge`` to investigate the version anomaly
         #     against the original branches.
         #
         # The fix is to skip cleanup whenever ``report.success`` is
@@ -3200,7 +3206,7 @@ class MergeOrchestrator:
         return base_ref, merged_commit
 
     def _sync_runtime(self, branch: str, report: MergeReport) -> Optional[str]:
-        """Sync runtime data from *branch*'s bound worktree into current se3/.
+        """Sync runtime data from *branch*'s bound worktree into current tianluo/.
 
         Returns ``None`` on success, when the source worktree is missing,
         or when collisions are bypassed in lenient mode.
@@ -3350,7 +3356,7 @@ class MergeOrchestrator:
         """Repo-relative paths of every issue YAML *committed* at *ref*.
 
         The committed-issue channel must decide authorship from the git trees,
-        never from the dirty working directory: globbing ``se3/issues`` sweeps
+        never from the dirty working directory: globbing ``tianluo/issues`` sweeps
         in the user's UNTRACKED issue drafts and their uncommitted edits, which
         belong to the runtime-sync / uncommitted domain, not to this merge.
         Renumbering or committing them here would rewrite a kept-side reference
@@ -3370,6 +3376,8 @@ class MergeOrchestrator:
                 "--name-only",
                 ref,
                 "--",
+                "tianluo/issues/open",
+                "tianluo/issues/closed",
                 "se3/issues/open",
                 "se3/issues/closed",
                 check=False,
@@ -3413,6 +3421,8 @@ class MergeOrchestrator:
                 pre_merge_sha,
                 "HEAD",
                 "--",
+                "tianluo/issues/open",
+                "tianluo/issues/closed",
                 "se3/issues/open",
                 "se3/issues/closed",
                 check=False,
@@ -3589,14 +3599,14 @@ class MergeOrchestrator:
         return res.returncode == 0
 
     def _current_max_issue_id(self) -> int:
-        """Highest numeric issue ID across ``se3/issues/{open,closed}``.
+        """Highest numeric issue ID across ``tianluo/issues/{open,closed}``.
 
         Takes the max over BOTH the filename prefix and the parsed ``id``
         field of every file: a fresh number must clear whichever is higher,
         or the renumber itself would mint a new collision (e.g. a record
         whose ``id`` exceeds every filename prefix).
         """
-        issues_root = self.project_root / "se3" / "issues"
+        issues_root = runtime_dir(self.project_root) / "issues"
         max_id = 0
         for sub in ("open", "closed"):
             directory = issues_root / sub
@@ -3642,10 +3652,10 @@ class MergeOrchestrator:
 
         The replacement number is reserved through the SHARED
         :func:`reserve_next_id` primitive — the same fcntl-locked allocator
-        ``se3 issue create`` / ``adopt_issue`` use — rather than a bare
+        ``luo issue create`` / ``adopt_issue`` use — rather than a bare
         working-tree ``max(ID)+1`` scan. None of the concurrent creators
         contend on the merge lock, so scanning the max alone could re-mint a
-        number a concurrent ``se3 issue create`` had just reserved (its counter
+        number a concurrent ``luo issue create`` had just reserved (its counter
         bump lands before its ``N_*.yaml`` file exists). Reserving under the
         counter lock both honours that reservation and advances the counter, so
         each renumber in a reconcile also gets a distinct fresh number without
@@ -3769,7 +3779,7 @@ class MergeOrchestrator:
 
         Stages ONLY the exact paths this reconcile wrote — the renamed losers,
         the files whose references it rewrote, and ``.next_id`` — never
-        ``git add -A -- se3/issues``. A blanket add would sweep pre-existing
+        ``git add -A -- tianluo/issues``. A blanket add would sweep pre-existing
         untracked issue files (issues the user is still drafting) into the
         renumber fix-up commit, silently publishing unrelated work.
         """
@@ -3795,7 +3805,7 @@ class MergeOrchestrator:
         commit = _run_git(
             self.project_root, "commit", "--no-edit",
             "-m",
-            f"se3 merge: renumber colliding issue ID(s) after merging "
+            f"luo merge: renumber colliding issue ID(s) after merging "
             f"'{branch}' ({summary})",
             check=False, timeout=30,
         )
@@ -3816,8 +3826,8 @@ class MergeOrchestrator:
         Reconciliation runs on top of the already-committed merge, so an abort
         (fix-up commit failed, or an exception escaped) must roll back ONLY the
         paths this run wrote. The old blanket ``git reset``/``git checkout``/
-        ``git clean -fdq`` over ``se3/issues`` was destructive: ``git clean``
-        irrecoverably deletes EVERY untracked file under ``se3/issues`` —
+        ``git clean -fdq`` over ``tianluo/issues`` was destructive: ``git clean``
+        irrecoverably deletes EVERY untracked file under ``tianluo/issues`` —
         including pre-existing uncommitted issue YAMLs the reconciliation never
         touched — and ``git checkout`` discards unrelated uncommitted edits to
         tracked issue files. That is the very "never lose an issue" guarantee
@@ -3825,7 +3835,7 @@ class MergeOrchestrator:
         created files (the renamed losers, absent at HEAD, which ``git
         checkout`` cannot restore-by-removal) are unlinked directly, and every
         tracked path this run modified or renamed away from is restored to HEAD
-        one exact path at a time. Confined to ``se3/issues`` throughout.
+        one exact path at a time. Confined to ``tianluo/issues`` throughout.
         """
         created_relpaths = {self._issue_relpath(p) for p in created_paths}
         # Unstage exactly the paths this reconcile wrote (a prior failed fix-up
@@ -3840,7 +3850,7 @@ class MergeOrchestrator:
                 )
             except subprocess.TimeoutExpired as exc:
                 self._log(
-                    f"Timed out unstaging se3/issues during reconcile "
+                    f"Timed out unstaging tianluo/issues during reconcile "
                     f"rollback: {exc}",
                     level=logging.ERROR,
                 )
@@ -3870,8 +3880,11 @@ class MergeOrchestrator:
         # Its advanced value is harmless (number-range holes are fine); leaving
         # it in place is the safe rollback. Unstaging it above is still correct
         # — that only clears the failed fix-up's index entry, not the value.
+        next_id_rel = runtime_relpath(
+            self.project_root, "issues", ".next_id"
+        ).as_posix()
         for relpath in sorted(
-            restore_relpaths - created_relpaths - {"se3/issues/.next_id"}
+            restore_relpaths - created_relpaths - {next_id_rel}
         ):
             try:
                 _run_git(
@@ -3895,8 +3908,8 @@ class MergeOrchestrator:
         filename prefix) already names a *different* issue on the current
         branch. Left alone that is a silent duplicate ID. Detection and repair
         are confined to
-        ``se3/issues/{open,closed}`` (the issue files plus the ``.next_id``
-        counter) and never touch other ``se3/`` runtime state.
+        ``tianluo/issues/{open,closed}`` (the issue files plus the ``.next_id``
+        counter) and never touch other ``tianluo/`` runtime state.
 
         The side that already existed at *pre_merge_sha* is kept; the
         merge-introduced side is renumbered to ``max(ID)+1`` via the shared G1
@@ -3914,24 +3927,26 @@ class MergeOrchestrator:
         repointed at a guess.
 
         Best-effort: any failure is logged, the working tree is restored to
-        the merge commit's ``se3/issues`` state, and the already-successful
+        the merge commit's ``tianluo/issues`` state, and the already-successful
         git merge is never rolled back. Always returns ``None`` — the merge's
         success never depends on reconciliation.
         """
         self._last_branch_reconcile_left_fixup = False
-        issues_root = self.project_root / "se3" / "issues"
+        issues_root = runtime_dir(self.project_root) / "issues"
         if not issues_root.exists():
             return None
 
         # Exactly what THIS reconcile writes, so both the fix-up commit's
         # staging and any rollback touch only these paths — never a blanket
-        # sweep of se3/issues, which would delete pre-existing untracked issue
+        # sweep of tianluo/issues, which would delete pre-existing untracked issue
         # files or discard unrelated uncommitted edits. ``created_paths`` are
         # the renamed losers (absent at HEAD, removed by unlink on rollback);
         # ``restore_relpaths`` are tracked paths modified or renamed away from
         # (restored to HEAD). ``.next_id`` is always included — it is advanced.
         created_paths: list[Path] = []
-        restore_relpaths: set[str] = {"se3/issues/.next_id"}
+        restore_relpaths: set[str] = {
+            runtime_relpath(self.project_root, "issues", ".next_id").as_posix()
+        }
 
         try:
             # Authorship for BOTH detection and reference-scope classification
@@ -6392,7 +6407,7 @@ class MergeOrchestrator:
         """Ensure the main working tree is clean enough for merge to START.
 
         A running session opens/closes issues in the MAIN repository between
-        commit steps, leaving se3/issues/ files and se3/issues/.next_id dirty.
+        commit steps, leaving tianluo/issues/ files and tianluo/issues/.next_id dirty.
         When a branch being merged touched the same file (typically .next_id),
         git refuses to even begin the merge ("Your local changes would be
         overwritten by merge") — and an UNCOMMITTED change is not a merge side,
@@ -6541,7 +6556,7 @@ class MergeOrchestrator:
 
         # All dirty tracked files are self-managed: auto-commit them so the
         # divergence enters the three-way merge as a real "ours" side. Use
-        # ``git add -A -- se3/issues`` so newly-opened (untracked) issue yaml
+        # ``git add -A -- tianluo/issues`` so newly-opened (untracked) issue yaml
         # files — which always accompany a .next_id bump — are swept in too,
         # making the sync commit semantically complete.
         self._log(
@@ -6552,9 +6567,9 @@ class MergeOrchestrator:
         # need committing, NOT from a whitelist entry merely existing on disk.
         # Two ways the on-disk-existence heuristic went wrong:
         #   * a whitelist FILE that exists but is gitignored-untracked (e.g.
-        #     se3/code-index.md on a pre-migrate .gitignore that never
+        #     tianluo/code-index.md on a pre-migrate .gitignore that never
         #     whitelisted it) makes `git add` fatal with "paths are ignored",
-        #     aborting a sync whose every dirty file was under se3/issues/;
+        #     aborting a sync whose every dirty file was under tianluo/issues/;
         #   * an ABSENT file entry makes `git add` fatal with "did not match".
         # Including a whitelist entry only when a dirty tracked path matches it
         # sidesteps both. Directory entries add the dir pathspec so newly-opened
@@ -6754,7 +6769,7 @@ def integrate(
     files or print terminal instructions. An escalation is surfaced on the
     returned report instead (``pending_human=True``; the recorded payloads live
     on the orchestrator's ``_RecordingNullHumanCallWriter``), so the caller — a
-    flow step (PAUSED/confirm/resume) or the ``se3 merge`` CLI (exit codes) —
+    flow step (PAUSED/confirm/resume) or the ``luo merge`` CLI (exit codes) —
     decides what happens next.
 
     Failure is expressed in the returned :class:`MergeResult`
@@ -6773,7 +6788,7 @@ def integrate(
         acquire_lock: Acquire the process-wide merge lock inside ``execute``.
             Pass ``False`` when the caller already holds it.
         suppress_human_call: Run in library mode (default) — record escalations
-            on the result instead of writing ``se3/calls/`` files or printing
+            on the result instead of writing ``tianluo/calls/`` files or printing
             terminal instructions. Passed through so the CLI adapter can keep
             the worktree merge-back's legacy call-file behaviour by supplying
             ``False``.
@@ -6791,8 +6806,8 @@ def integrate(
     )
     report = orchestrator.execute(branches)
     # Expose the recorded escalations on the result so both entry points (the
-    # ``se3 merge`` CLI, a flow step) can consume what would have been written
-    # to ``se3/calls/`` without any file having been created — the caller owns
+    # ``luo merge`` CLI, a flow step) can consume what would have been written
+    # to ``tianluo/calls/`` without any file having been created — the caller owns
     # flow-control. Best-effort: a MergeReport is a plain dataclass so the
     # dynamic attribute is always settable; only skip on the theoretical case
     # of a slotted/immutable report substituted by a test double.

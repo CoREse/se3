@@ -1,6 +1,6 @@
 """Pytest bridge for the web console's code-index update-progress markers (G3).
 
-The commit step rebuilds ``se3/code-index.md`` before staging, re-summarising
+The commit step rebuilds ``tianluo/code-index.md`` before staging, re-summarising
 every touched source node; that rebuild emits one ``type:'index_progress'``
 NDJSON line per file/dir node via ``chat_history.record_index_progress``. The
 running-flow console renders these as a single live "更新 code-index：<path>
@@ -27,7 +27,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STATIC_DIR = REPO_ROOT / "src" / "se3" / "server" / "static"
+STATIC_DIR = REPO_ROOT / "src" / "tianluo" / "server" / "static"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "style.css"
 FRONTEND_TEST = REPO_ROOT / "tests" / "frontend" / "test_app_pure.mjs"

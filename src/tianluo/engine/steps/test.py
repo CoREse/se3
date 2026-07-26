@@ -5,8 +5,8 @@ This is a non-LLM step that executes test commands.
 
 Supports:
 - Auto-detection of project type (Python/Node/Rust/Go)
-- Custom test command via se3.yaml test.command
-- Multi-phase test execution via se3.yaml test.phases
+- Custom test command via tianluo.yaml test.command
+- Multi-phase test execution via tianluo.yaml test.phases
 - Result classification into new_tests vs regression
 - Fix-loop aware phase filtering
 - Dot progress indicator during test execution
@@ -873,7 +873,7 @@ Error output:
                 f"\nNote: the following test phase(s) timed out: {phase_list}. "
                 "Dynamic timeout applies only to the primary test command; "
                 "investigate whether these phases are hanging or need their "
-                "phase-level `timeout` raised in se3.yaml.\n"
+                "phase-level `timeout` raised in tianluo.yaml.\n"
             )
 
             # When a *required* phase persistently timed out and the run is NOT
@@ -915,7 +915,7 @@ Error output:
                     f"phase did not finish within its configured time budget."
                     f"{retried_note} Dynamic timeout applies only to the primary "
                     f"test command, so raising estimated_test_duration will not "
-                    f"help; raise the phase-level `timeout` in se3.yaml or "
+                    f"help; raise the phase-level `timeout` in tianluo.yaml or "
                     f"investigate whether the phase is hanging.",
                 )
 
@@ -952,7 +952,7 @@ def _build_baseline_fix_section(active_baseline: List[str]) -> str:
     Lists the active baseline (inherited) failures the fix loop is also expected
     to repair, with a tightly-scoped relaxation of the user-prompt focus limits
     that applies ONLY to these annotated ids — never to introduced failures and
-    never past the se3 guardrails' SHALL/MUST contracts.
+    never past the luo guardrails' SHALL/MUST contracts.
     """
     bullet_ids = "\n".join(f"  - {tid}" for tid in active_baseline)
     return (
@@ -969,7 +969,7 @@ def _build_baseline_fix_section(active_baseline: List[str]) -> str:
         "boundaries.\n"
         "  - You MAY step beyond the user-prompt's stated scope / focus limits, "
         "but ONLY as far as needed to fix these listed baseline failures.\n"
-        "  - You MUST NOT cross any se3 guardrail: do not delete, weaken, or "
+        "  - You MUST NOT cross any luo guardrail: do not delete, weaken, or "
         "modify the SHALL / MUST contracts of any spec. The spec guardrails "
         "apply in full.\n"
         "  - Code-first: do NOT revert a legitimate spec/code change merely to "
@@ -1119,7 +1119,7 @@ def _run_command(
     cmd_str = " ".join(command)
 
     try:
-        # Guard against recursive test invocation: if a test spawns se3 run
+        # Guard against recursive test invocation: if a test spawns luo run
         # which spawns test_handler which spawns pytest again, the inner
         # pytest would run the same tests forever.  Set a sentinel env var
         # so nested invocations can be detected.
@@ -1479,7 +1479,7 @@ def _record_test_history(
 ) -> None:
     """Record test execution results in the chat history system.
 
-    This ensures test step results are preserved in se3/history/
+    This ensures test step results are preserved in tianluo/history/
     alongside LLM step histories, enabling continuity across
     worktree isolation and fix loop iterations.
 

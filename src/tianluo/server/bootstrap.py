@@ -15,7 +15,7 @@ models multiple trust domains.
 
 This module is deliberately dependency-light: it pulls in only the persistence
 layer (stdlib ``sqlite3``) and the crypto helpers, never FastAPI / uvicorn.
-That keeps ``se3-server bootstrap-token`` off the heavy web import chain so it
+That keeps ``tianluo-server bootstrap-token`` off the heavy web import chain so it
 works even on a core-only install, and is why ``tianluo.server.__init__.main``
 intercepts the subcommand *before* importing the ``[server]`` extra.
 
@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Optional, TextIO, Tuple
 
 #: Default on-disk location of the server's sqlite store. The running server
-#: (``se3-server``) defaults to the same path, so a token minted here is
+#: (``tianluo-server``) defaults to the same path, so a token minted here is
 #: consumable by that server's ``POST /api/auth/breakglass``.
 DEFAULT_DB_PATH = "~/.se3/server.db"
 
@@ -90,7 +90,7 @@ def _print_banner(
     lines = [
         "",
         rule,
-        "  se3-server break-glass admin token (shown ONCE — copy it now)",
+        "  tianluo-server break-glass admin token (shown ONCE — copy it now)",
         rule,
         f"  token:  {plaintext}",
         f"  id:     {token_id}",
@@ -109,13 +109,13 @@ def _print_banner(
 
 
 def main(argv: Optional[list] = None) -> int:
-    """``se3-server bootstrap-token`` subcommand entry point.
+    """``tianluo-server bootstrap-token`` subcommand entry point.
 
     Dependency-light by design: it never imports FastAPI / uvicorn, so it works
     on a core-only install as well as on the server host.
     """
     parser = argparse.ArgumentParser(
-        prog="se3-server bootstrap-token",
+        prog="tianluo-server bootstrap-token",
         description="Mint a one-time break-glass admin token (printed once).",
     )
     parser.add_argument(

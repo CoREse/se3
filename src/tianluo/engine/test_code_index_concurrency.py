@@ -295,7 +295,7 @@ def project(tmp_path: Path) -> Path:
     _git(root, "init", "-q")
     _git(root, "config", "user.email", "t@example.com")
     _git(root, "config", "user.name", "Tester")
-    (root / ".gitignore").write_text("/se3/*\n", encoding="utf-8")
+    (root / ".gitignore").write_text("/tianluo/*\n", encoding="utf-8")
     (root / "pkg").mkdir()
     # Several files so a batch of size < file-count exercises multi-batch flushing.
     for i in range(7):
@@ -407,7 +407,7 @@ class TestIncrementalConcurrency:
         _git(root, "init", "-q")
         _git(root, "config", "user.email", "t@example.com")
         _git(root, "config", "user.name", "Tester")
-        (root / ".gitignore").write_text("/se3/*\n", encoding="utf-8")
+        (root / ".gitignore").write_text("/tianluo/*\n", encoding="utf-8")
         # 15 root files: edits at f00/f07/f14 are >max_concurrency apart in sort
         # order, so positional batches of 4 would hold at most ONE stale file each.
         for i in range(15):
@@ -573,7 +573,7 @@ class TestRecordIndexProgress:
         assert retry is None or "pkg/m0.py" not in retry
 
         # The raw jsonl carries well-formed index_progress records.
-        jf = tmp_path / "se3" / "history" / "f1" / "s1.jsonl"
+        jf = tmp_path / "tianluo" / "history" / "f1" / "s1.jsonl"
         recs = [json.loads(ln) for ln in jf.read_text().splitlines() if ln.strip()]
         ip = [r for r in recs if r.get("type") == "index_progress"]
         assert len(ip) == 2
@@ -589,14 +589,14 @@ class TestRecordIndexProgress:
             tmp_path, "", "", "commit",
             path="a.py", kind="python", done=1, total=1, phase="file",
         )
-        assert not (tmp_path / "se3" / "history").exists()
+        assert not (tmp_path / "tianluo" / "history").exists()
 
     def test_oserror_is_swallowed(self, tmp_path: Path):
         from tianluo.engine.chat_history import record_index_progress
 
         # Make the flow "dir" a plain file so mkdir raises OSError; the write
         # must warn-and-swallow, never propagate.
-        hist = tmp_path / "se3" / "history"
+        hist = tmp_path / "tianluo" / "history"
         hist.mkdir(parents=True)
         (hist / "f1").write_text("x", encoding="utf-8")
         record_index_progress(
@@ -625,7 +625,7 @@ class TestEnsureCodeIndexFreshProgress:
         self._build_with_echo(project)
         # No flow/step context → silent refresh, writes no history, never raises.
         _REAL_ENSURE_CODE_INDEX_FRESH(project)
-        assert not (project / "se3" / "history").exists()
+        assert not (project / "tianluo" / "history").exists()
 
     def test_commit_context_writes_progress(self, project: Path):
         import json
@@ -648,7 +648,7 @@ class TestEnsureCodeIndexFreshProgress:
         finally:
             llm_mod.LLMCaller = orig
 
-        jf = project / "se3" / "history" / "f1" / "s1.jsonl"
+        jf = project / "tianluo" / "history" / "f1" / "s1.jsonl"
         assert jf.exists()
         recs = [json.loads(ln) for ln in jf.read_text().splitlines() if ln.strip()]
         ip = [r for r in recs if r.get("type") == "index_progress"]

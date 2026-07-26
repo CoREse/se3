@@ -7,7 +7,7 @@ and run as a standalone hook subprocess (``python -m tianluo.engine.spec_write_h
 1. :func:`main` — the PreToolUse hook entry point. It reads the hook payload JSON
    from stdin, resolves the target file path, and *denies* any
    ``Write`` / ``Edit`` / ``NotebookEdit`` that targets a spec file under
-   ``<cwd>/se3/specs/``. Every other write is allowed. The hook is deliberately
+   ``<cwd>/tianluo/specs/``. Every other write is allowed. The hook is deliberately
    **step-agnostic**: it always rejects spec writes and never inspects the step
    exemption set. Whether the hook is installed at all for a given step is decided
    upstream in ``llm_caller`` (only non-exempt steps receive the guard plugin via
@@ -38,6 +38,7 @@ catch spec writes that slipped past the hook via a ``Bash`` redirect.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import hashlib
 import json
@@ -51,10 +52,10 @@ from typing import Dict, List, Optional
 # Relative location (under the project root) of the committed spec corpus that the
 # guard protects. Kept as a tuple so it composes cleanly with both ``Path`` joins
 # and the settings-file location below.
-_SPECS_RELPATH = ("se3", "specs")
+_SPECS_SUBPATH = ("specs",)
 
-# The controlled guard plugin is written under se3/tmp/ (gitignored runtime dir).
-_GUARD_PLUGIN_RELPATH = ("se3", "tmp", "spec_write_guard_plugin")
+# The controlled guard plugin is written under tianluo/tmp/ (gitignored runtime dir).
+_GUARD_PLUGIN_SUBPATH = ("tmp", "spec_write_guard_plugin")
 
 # Tool-input keys that carry the target path for the write tools we match.
 _FILE_PATH_KEYS = ("file_path", "notebook_path")
@@ -65,9 +66,9 @@ _FILE_PATH_KEYS = ("file_path", "notebook_path")
 # ---------------------------------------------------------------------------
 
 def _specs_dir(cwd: str) -> Path:
-    """Return the absolute ``se3/specs`` directory for *cwd* (no existence check)."""
+    """Return the absolute ``tianluo/specs`` directory for *cwd* (no existence check)."""
     base = Path(cwd) if cwd else Path.cwd()
-    return Path(os.path.normpath(str(base.joinpath(*_SPECS_RELPATH))))
+    return Path(os.path.normpath(str(runtime_dir(base).joinpath(*_SPECS_SUBPATH))))
 
 
 def _resolve_target(file_path: str, cwd: str) -> Optional[Path]:
@@ -85,7 +86,7 @@ def _resolve_target(file_path: str, cwd: str) -> Optional[Path]:
 
 
 def _is_spec_target(file_path: str, cwd: str) -> bool:
-    """Return True when *file_path* resolves to a file under ``<cwd>/se3/specs/``."""
+    """Return True when *file_path* resolves to a file under ``<cwd>/tianluo/specs/``."""
     target = _resolve_target(file_path, cwd)
     if target is None:
         return False
@@ -106,10 +107,10 @@ def _emit_deny(tool_name: str, file_path: str) -> None:
     so the write is rejected regardless of which mechanism Claude CLI honors.
     """
     reason = (
-        f"Spec files under se3/specs/ are read-only for this step. "
+        f"Spec files under tianluo/specs/ are read-only for this step. "
         f"{tool_name or 'This tool'} writing to '{file_path}' is denied. "
         f"Recording code into spec files is the dedicated responsibility of the "
-        f"update_spec step and `se3 sync`, not of this step. You ARE free to change "
+        f"update_spec step and `luo sync`, not of this step. You ARE free to change "
         f"existing code behavior; if your change alters behavior or you believe a "
         f"spec needs updating, note it in your summary and let the plan spec_changes "
         f"-> verify_spec -> update_spec channel handle the spec write."
@@ -189,7 +190,7 @@ def _guard_plugin_manifest() -> dict:
         "version": "1.0.0",
         "description": (
             "SE3 spec-write protection: a PreToolUse hook that denies "
-            "Write/Edit/NotebookEdit targeting se3/specs/."
+            "Write/Edit/NotebookEdit targeting tianluo/specs/."
         ),
     }
 
@@ -237,7 +238,7 @@ def ensure_guard_plugin(project_root) -> Path:
     """Generate/cache the controlled guard plugin and return its directory.
 
     Materializes a minimal Claude plugin under
-    ``<project_root>/se3/tmp/spec_write_guard_plugin/``::
+    ``<project_root>/tianluo/tmp/spec_write_guard_plugin/``::
 
         .claude-plugin/plugin.json   # minimal manifest (name/version/description)
         hooks/hooks.json             # PreToolUse spec-write hook, no permissions
@@ -258,7 +259,7 @@ def ensure_guard_plugin(project_root) -> Path:
         Absolute path to the plugin directory.
     """
     root = Path(project_root)
-    plugin_dir = root.joinpath(*_GUARD_PLUGIN_RELPATH)
+    plugin_dir = runtime_dir(root).joinpath(*_GUARD_PLUGIN_SUBPATH)
 
     manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
     hooks_path = plugin_dir / "hooks" / "hooks.json"
@@ -284,13 +285,13 @@ def ensure_guard_plugin(project_root) -> Path:
 def snapshot_spec_files(project_root) -> Dict[str, str]:
     """Return a ``{project-relative path: sha256-hex}`` map of every spec file.
 
-    Walks ``<project_root>/se3/specs/`` recursively, hashing each regular file's
+    Walks ``<project_root>/tianluo/specs/`` recursively, hashing each regular file's
     content. Used to snapshot spec state before/after a step so the fallback guard
     can detect any spec write (including ones a ``Bash`` redirect slipped past the
     PreToolUse hook). Returns an empty map when the specs directory is absent.
     """
     root = Path(project_root)
-    specs_dir = root.joinpath(*_SPECS_RELPATH)
+    specs_dir = runtime_dir(root).joinpath(*_SPECS_SUBPATH)
     snapshot: Dict[str, str] = {}
     if not specs_dir.is_dir():
         return snapshot
@@ -332,12 +333,12 @@ def capture_spec_contents(project_root) -> Dict[str, bytes]:
     illegal spec write, it can *revert* each touched file to its pre-step content
     (or delete a newly-created one) — not merely fail the step. Reverting is
     essential: a left-on-disk illegal write would otherwise survive a later
-    ``se3 run --resume`` (the resumed run's fresh pre-step snapshot already
+    ``luo run --resume`` (the resumed run's fresh pre-step snapshot already
     contains the tampered content, so the re-run sees no diff and the change
     leaks through to commit). Returns an empty map when the specs dir is absent.
     """
     root = Path(project_root)
-    specs_dir = root.joinpath(*_SPECS_RELPATH)
+    specs_dir = runtime_dir(root).joinpath(*_SPECS_SUBPATH)
     contents: Dict[str, bytes] = {}
     if not specs_dir.is_dir():
         return contents

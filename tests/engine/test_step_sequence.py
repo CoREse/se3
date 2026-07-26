@@ -112,14 +112,14 @@ class TestCharterStepsInDefaults:
 
 
 class TestStepConfig:
-    """StepConfig loading from se3.yaml."""
+    """StepConfig loading from tianluo.yaml."""
 
     def test_default_config_has_no_append_steps(self):
         config = StepConfig()
         assert config.append_steps == []
 
     def test_load_from_yaml(self, tmp_path):
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": ["summarize"]}}))
         config = StepConfig.load(tmp_path)
         assert config.append_steps == ["summarize"]
@@ -129,26 +129,26 @@ class TestStepConfig:
         assert config.append_steps == []
 
     def test_load_empty_steps_section(self, tmp_path):
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {}}))
         config = StepConfig.load(tmp_path)
         assert config.append_steps == []
 
     def test_load_invalid_append_type(self, tmp_path):
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": "not-a-list"}}))
         config = StepConfig.load(tmp_path)
         assert config.append_steps == []
 
 
 class TestApplyStepConfig:
-    """apply_step_config appends valid steps from se3.yaml."""
+    """apply_step_config appends valid steps from tianluo.yaml."""
 
     @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
     def test_append_summarize_is_noop(self, task_type, tmp_path, caplog):
         """`steps.append: [summarize]` is a no-op now that SUMMARIZE is a
         default step: no duplication, no warning, position preserved."""
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": ["summarize"]}}))
 
         steps = get_default_step_sequence(task_type)
@@ -169,7 +169,7 @@ class TestApplyStepConfig:
         )
 
     def test_no_duplicate_if_already_present(self, tmp_path):
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": ["commit"]}}))
 
         steps = get_default_step_sequence("feature")
@@ -180,7 +180,7 @@ class TestApplyStepConfig:
         assert len(result) == original_len
 
     def test_ignores_invalid_step_names(self, tmp_path):
-        config_path = tmp_path / "se3.yaml"
+        config_path = tmp_path / "tianluo.yaml"
         config_path.write_text(yaml.dump({"steps": {"append": ["nonexistent_step"]}}))
 
         steps = get_default_step_sequence("feature")

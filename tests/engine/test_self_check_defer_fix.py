@@ -553,7 +553,7 @@ def _write_nested_project(tmp_path, *, explicit_passes=None):
     }
     if explicit_passes is not None:
         cfg["workflow"]["self_check_passes_required"] = explicit_passes
-    (tmp_path / "se3.yaml").write_text(yaml.safe_dump(cfg))
+    (tmp_path / "tianluo.yaml").write_text(yaml.safe_dump(cfg))
     return tmp_path
 
 
@@ -575,7 +575,7 @@ class TestNestedChainPassesRequiredRecording:
 
     def test_flat_or_default_unchanged(self, tmp_path):
         # No self_check override → falls back to the configured count (1).
-        (tmp_path / "se3.yaml").write_text(yaml.safe_dump({"workflow": {}}))
+        (tmp_path / "tianluo.yaml").write_text(yaml.safe_dump({"workflow": {}}))
         assert resolve_self_check_passes_required(tmp_path) == 1
 
     def test_state_machine_injects_chain_count(self, tmp_path):

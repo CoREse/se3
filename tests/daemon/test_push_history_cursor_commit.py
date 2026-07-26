@@ -47,8 +47,8 @@ from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 def _append_records(root, flow_id: str, step: str, messages: List[dict]) -> None:
-    """Append *messages* as jsonl lines to ``<root>/se3/history/<flow>/<step>``."""
-    path = root / "se3" / "history" / flow_id / step
+    """Append *messages* as jsonl lines to ``<root>/tianluo/history/<flow>/<step>``."""
+    path = root / "tianluo" / "history" / flow_id / step
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         for message in messages:

@@ -442,9 +442,9 @@ class TestLLMReviewerConfigPropagation:
         from tianluo.engine.state_machine import StateMachine
         from tianluo.engine.persistence import PersistenceManager
 
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
-        config_path = self.project_root / "se3.yaml"
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "specs").mkdir(parents=True, exist_ok=True)
+        config_path = self.project_root / "tianluo.yaml"
         config_path.write_text(
             "agents:\n"
             "  reviewer_bot: {type: claude-code, cmd: claude-sonnet}\n"
@@ -490,9 +490,9 @@ class TestLLMReviewerConfigPropagation:
         from tianluo.engine.state_machine import StateMachine
         from tianluo.engine.persistence import PersistenceManager
 
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
-        config_path = self.project_root / "se3.yaml"
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "specs").mkdir(parents=True, exist_ok=True)
+        config_path = self.project_root / "tianluo.yaml"
         config_path.write_text(
             "confirmation:\n"
             "  steps:\n"

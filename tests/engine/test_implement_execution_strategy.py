@@ -105,7 +105,7 @@ def _make_step_flow(tmp_path, groups):
     flow = FlowInstance(
         flow_id="test-flow",
         task_description="test",
-        change_path=tmp_path / "se3",
+        change_path=tmp_path / "tianluo",
     )
     return step, flow
 

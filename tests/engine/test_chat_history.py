@@ -239,7 +239,7 @@ class TestRecordUserInterjection:
             attempt=2,
             source="webui",
         )
-        path = tmp_path / "se3" / "history" / "flow-1" / "01_implement_abc.jsonl"
+        path = tmp_path / "tianluo" / "history" / "flow-1" / "01_implement_abc.jsonl"
         assert path.exists()
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1
@@ -263,7 +263,7 @@ class TestRecordUserInterjection:
                 "test",
                 f"interjection {i}",
             )
-        path = tmp_path / "se3" / "history" / "flow-2" / "02_test_def.jsonl"
+        path = tmp_path / "tianluo" / "history" / "flow-2" / "02_test_def.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 5
         for i, line in enumerate(lines):
@@ -278,8 +278,8 @@ class TestRecordUserInterjection:
         with caplog.at_level(logging.WARNING, logger="tianluo.engine.chat_history"):
             record_user_interjection(tmp_path, "", "step-id", "implement", "hi")
         # No history dir / file should have been created
-        assert not (tmp_path / "se3" / "history").exists() or not list(
-            (tmp_path / "se3" / "history").iterdir()
+        assert not (tmp_path / "tianluo" / "history").exists() or not list(
+            (tmp_path / "tianluo" / "history").iterdir()
         )
         assert any("missing flow_id" in rec.message for rec in caplog.records)
 
@@ -288,7 +288,7 @@ class TestRecordUserInterjection:
 
         with caplog.at_level(logging.WARNING, logger="tianluo.engine.chat_history"):
             record_user_interjection(tmp_path, "flow", "", "implement", "hi")
-        assert not (tmp_path / "se3" / "history" / "flow").exists()
+        assert not (tmp_path / "tianluo" / "history" / "flow").exists()
         assert any("missing flow_id" in rec.message or "step_id" in rec.message
                    for rec in caplog.records)
 

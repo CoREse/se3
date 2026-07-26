@@ -113,7 +113,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)
@@ -156,7 +156,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)
@@ -196,7 +196,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)

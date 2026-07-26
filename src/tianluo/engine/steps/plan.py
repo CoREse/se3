@@ -43,10 +43,10 @@ The project charter (project-level conventions) and the code-index (a zoomable
 structural orientation map) are injected below — plan against the task, the
 charter, and the code-index. Before reading source, consult the code-index map
 to locate the relevant modules / symbols; open a collapsed directory one more
-level with `se3 code-index index <path>` and pull a file's function/method
-detail on demand with `se3 code-index show <path>`. To find items by keyword or
-regex, use `se3 code-index search <pattern>` instead of `grep 'pattern'
-se3/code-index.md` — each hit carries the item's full locating path (a symbol
+level with `luo code-index index <path>` and pull a file's function/method
+detail on demand with `luo code-index show <path>`. To find items by keyword or
+regex, use `luo code-index search <pattern>` instead of `grep 'pattern'
+tianluo/code-index.md` — each hit carries the item's full locating path (a symbol
 renders as `relpath::local_id`, which a raw grep line cannot show); its syntax
 matches grep (regex `pattern` by default, `-i`/`-F`/`-m`).
 
@@ -419,7 +419,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Inject the project charter (full text) + the code-index top map. These
     # replace the retired spec-name list: the charter carries project-level
     # conventions and the code-index top map is the structural orientation map
-    # (function-level detail pulled on demand via `se3 code-index show`).
+    # (function-level detail pulled on demand via `luo code-index show`).
     prompt += get_charter_injection(project_root)
     # No code-index refresh here: analyze already refreshed the read-side map
     # before any code changed (see analyze.py / commit.py two-point rationale).

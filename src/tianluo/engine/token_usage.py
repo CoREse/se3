@@ -1,4 +1,4 @@
-"""Token-usage accounting for se3 flow execution.
+"""Token-usage accounting for luo flow execution.
 
 Single source of truth for the token / cost data structure shared by the
 collection layer (``StreamJSONTracker``), the aggregation layer

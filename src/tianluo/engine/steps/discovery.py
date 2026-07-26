@@ -10,6 +10,7 @@ The discovery step uses the PAUSED status to handle multi-turn conversation.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -112,8 +113,8 @@ You MUST NOT:
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
-- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
-- To find code-index items by keyword or regex, use `se3 code-index search <pattern>` instead of `grep 'pattern' se3/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
+- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `luo code-index index <path>` and pull a file's function/method detail on demand with `luo code-index show <path>`.
+- To find code-index items by keyword or regex, use `luo code-index search <pattern>` instead of `grep 'pattern' tianluo/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
@@ -150,7 +151,7 @@ Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
 - `action: "delete"` — delete an issue. The `id` MUST likewise be one created earlier within THIS discovery session.
 - update/delete MUST NEVER target any pre-existing / historical / in-progress issue, or one from another session — those are out of scope and will be rejected.
 - These operations NEVER include status transitions such as close / reopen / reset.
-- Do NOT attempt issue writes via Bash (e.g. `se3 issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
+- Do NOT attempt issue writes via Bash (e.g. `luo issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
 
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
@@ -228,8 +229,8 @@ You MUST NOT:
 - Do anything beyond asking questions, synthesizing understanding, and producing the Proposed Task Description
 
 Discovery is a read-only step. To ask better, more informed questions you MAY consult the code-index map and source code:
-- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `se3 code-index index <path>` and pull a file's function/method detail on demand with `se3 code-index show <path>`.
-- To find code-index items by keyword or regex, use `se3 code-index search <pattern>` instead of `grep 'pattern' se3/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
+- Before reading source, consult the code-index map (the project charter + the code-index — a zoomable directory tree — are injected below) to locate relevant modules / symbols; open a collapsed directory one more level with `luo code-index index <path>` and pull a file's function/method detail on demand with `luo code-index show <path>`.
+- To find code-index items by keyword or regex, use `luo code-index search <pattern>` instead of `grep 'pattern' tianluo/code-index.md` — each hit carries the item's full locating path (a symbol renders as `relpath::local_id`, which a raw grep line cannot show). Its syntax matches grep: regex `pattern` by default, `-i` for case-insensitive, `-F` for literal substrings, `-m N` to cap matches.
 - For source code, use Read / Grep / Glob as usual.
 
 ## Project Context
@@ -268,7 +269,7 @@ Issue Operations (`issue_operations`) — strictly user-directed, scope-limited:
 - `action: "delete"` — delete an issue. The `id` MUST likewise be one created earlier within THIS discovery session.
 - update/delete MUST NEVER target any pre-existing / historical / in-progress issue, or one from another session — those are out of scope and will be rejected.
 - These operations NEVER include status transitions such as close / reopen / reset.
-- Do NOT attempt issue writes via Bash (e.g. `se3 issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
+- Do NOT attempt issue writes via Bash (e.g. `luo issue create/edit`); discovery remains read-only for the shell and the engine performs these operations from `issue_operations`.
 
 HARD INVARIANT — `refined_description` must be clean, final, and zero open items:
 - `refined_description` MUST be a clean, finalized, directly-executable task description with ZERO open items.
@@ -432,7 +433,7 @@ def _summary_recency_key(path: Path) -> float:
 def _collect_session_summaries(project_root: Path, limit: int = 3) -> List[str]:
     """Collect structured excerpts from the most recent session summaries.
 
-    Reads ``se3/state/summary-*.md`` (only ``.md`` — JSON siblings are ignored),
+    Reads ``tianluo/state/summary-*.md`` (only ``.md`` — JSON siblings are ignored),
     most-recent-first, and for each of the latest *limit* files extracts a
     compact excerpt: the frontmatter ``**Task:**`` line (truncated to
     :data:`_RECENCY_TASK_MAX_CHARS`) plus the first paragraph of the report body
@@ -451,7 +452,7 @@ def _collect_session_summaries(project_root: Path, limit: int = 3) -> List[str]:
     Returns:
         A list of formatted excerpt strings (0..limit entries).
     """
-    state_dir = project_root / "se3" / "state"
+    state_dir = runtime_dir(project_root) / "state"
     try:
         files = list(state_dir.glob("summary-*.md"))
     except Exception:
@@ -1196,10 +1197,10 @@ def _extract_narrative_from_raw(raw_text: Optional[str]) -> str:
 
 
 def _proposed_description_block(refined_description: str) -> list:
-    """Build a nested se3 reverse-color block wrapping the refined description.
+    """Build a nested luo reverse-color block wrapping the refined description.
 
     The block uses ``cyan`` (distinct from the outer blue Discovery block) and
-    follows the standard se3 block layout: a reverse-color title row, a blank
+    follows the standard luo block layout: a reverse-color title row, a blank
     line, the refined description rendered as Markdown, a blank line, a
     fixed-width reverse-color footer block, and a trailing blank line.
 
@@ -1281,7 +1282,7 @@ def _display_discovery_message(
 
     if refined_description and is_confirmation:
         # Final confirmation - show LLM content as markdown, then refined
-        # description wrapped in a nested cyan se3 block with clear boundaries.
+        # description wrapped in a nested cyan luo block with clear boundaries.
         if content:
             renderables.append(Markdown(content))
             renderables.append(Text(""))

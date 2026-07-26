@@ -109,7 +109,7 @@ def _make_feature_with_intent(
     """Create *branch* off *base_ref* (default HEAD) carrying a committed intent.
 
     Mirrors a de-versioned worktree session's commit: a code change plus a
-    ``se3/version-intents/<flow>.json`` intent (a changelog bullet + a bump
+    ``tianluo/version-intents/<flow>.json`` intent (a changelog bullet + a bump
     hint, NO version number), committed on the flow branch so the merge side
     reads it from master after the merge. Passing an explicit *base_ref* is how
     the two "concurrent" sessions are forced to diverge from the SAME baseline
@@ -740,7 +740,7 @@ class TestNonWorktreeCommitHandlerDriftGuard:
             flow_id="direct-flow",
             task_description="Fix a bug",
             task_type="fix",
-            change_path=root / "se3.yaml",
+            change_path=root / "tianluo.yaml",
         )
         flow.is_worktree_mode = False
 

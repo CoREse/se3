@@ -55,7 +55,7 @@ STDOUT_NEW_FAIL = (
 
 def _make_flow(tmp_path, *, attempts=0) -> FlowInstance:
     flow = FlowInstance(task_description="scoped task")
-    flow.change_path = tmp_path / "se3.yaml"
+    flow.change_path = tmp_path / "tianluo.yaml"
     if attempts:
         flow.state.context["baseline_fix_attempts"] = attempts
     return flow

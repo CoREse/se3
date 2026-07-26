@@ -45,7 +45,7 @@ def _make_flow(
     if worktree:
         flow.is_worktree_mode = True
         flow.worktree_branch = "impl/x/G1"
-        flow.worktree_path = "/repo/se3/worktrees/g1"
+        flow.worktree_path = "/repo/tianluo/worktrees/g1"
     blob = "Q" * payload_size
     for i in range(n_steps):
         step = Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED)
@@ -67,7 +67,7 @@ def test_new_format_save_load_roundtrip_equal(tmp_path):
     flow = _make_flow()
     pm.save_flow(flow)
 
-    header = json.loads((tmp_path / "se3" / "state" / "engine.json").read_text())
+    header = json.loads((tmp_path / "tianluo" / "state" / "engine.json").read_text())
     assert header["engine_format"] == ENGINE_FORMAT_HOTCOLD
     # The header must NOT carry per-step inputs/outputs nor the shared context;
     # both are externalized to cold files and referenced by hash from the header.
@@ -98,7 +98,7 @@ def test_resumable_snapshot_roundtrip_equal(tmp_path):
 
 def test_legacy_inline_engine_json_loads(tmp_path):
     pm = PersistenceManager(tmp_path)
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     flow = _make_flow(n_steps=4)
     # Legacy format: full inline dict, no engine_format marker, no cold files.
@@ -113,7 +113,7 @@ def test_legacy_inline_engine_json_loads(tmp_path):
 
 def test_legacy_inline_resumable_snapshot_loads(tmp_path):
     pm = PersistenceManager(tmp_path)
-    resumable = tmp_path / "se3" / "state" / "resumable"
+    resumable = tmp_path / "tianluo" / "state" / "resumable"
     resumable.mkdir(parents=True)
     flow = _make_flow(n_steps=3, status=FlowStatus.FAILED)
     (resumable / f"{flow.flow_id}.json").write_text(
@@ -131,7 +131,7 @@ def test_header_bounded_under_100kb(tmp_path):
     # KB-scale regardless.
     flow = _make_flow(n_steps=31, payload_size=700_000)
     pm.save_flow(flow)
-    header_path = tmp_path / "se3" / "state" / "engine.json"
+    header_path = tmp_path / "tianluo" / "state" / "engine.json"
     assert header_path.stat().st_size < 100 * 1024
 
 
@@ -177,7 +177,7 @@ def test_missing_cold_step_file_degrades_gracefully(tmp_path):
     flow = _make_flow(n_steps=4)
     pm.save_flow(flow)
 
-    cold_dir = tmp_path / "se3" / "state" / "steps" / flow.flow_id
+    cold_dir = tmp_path / "tianluo" / "state" / "steps" / flow.flow_id
     victim = flow.state.step_history[1]
     (cold_dir / f"{victim}.json").unlink()  # simulate loss
     # Corrupt another step's cold file.
@@ -198,7 +198,7 @@ def test_missing_cold_context_degrades_gracefully(tmp_path):
     pm = PersistenceManager(tmp_path)
     flow = _make_flow(n_steps=2)
     pm.save_flow(flow)
-    cold_dir = tmp_path / "se3" / "state" / "steps" / flow.flow_id
+    cold_dir = tmp_path / "tianluo" / "state" / "steps" / flow.flow_id
     (cold_dir / "_context.json").unlink()
 
     loaded = pm.load_flow()
@@ -225,7 +225,7 @@ def test_resume_partial_flow_reloads_full_fidelity(tmp_path):
     assert resumed == flow
     # Re-saving continues to write the new split format (never re-inlines).
     PersistenceManager(tmp_path).save_flow(resumed)
-    header = json.loads((tmp_path / "se3" / "state" / "engine.json").read_text())
+    header = json.loads((tmp_path / "tianluo" / "state" / "engine.json").read_text())
     assert header["engine_format"] == ENGINE_FORMAT_HOTCOLD
 
 
@@ -280,7 +280,7 @@ def test_hydrate_step_loads_only_requested_cold_file(tmp_path):
     # cold_ref retained): the generic from_dict marks steps cold_loaded=True with
     # empty bodies, which hydrate_step now correctly treats as already-loaded and
     # refuses to clobber (public B4 API must never destroy materialized data).
-    data = json.loads((tmp_path / "se3" / "state" / "engine.json").read_text())
+    data = json.loads((tmp_path / "tianluo" / "state" / "engine.json").read_text())
     header_flow = FlowInstance.from_header_dict(data)
     assert all(s.inputs == {} for s in header_flow.state.steps.values())
     assert all(not s.cold_loaded for s in header_flow.state.steps.values())
@@ -309,12 +309,12 @@ def test_clear_state_archives_header_and_cold_files(tmp_path):
     pm = PersistenceManager(tmp_path)
     flow = _make_flow(n_steps=4, status=FlowStatus.COMPLETED, worktree=True)
     pm.save_flow(flow)
-    cold_dir = tmp_path / "se3" / "state" / "steps" / flow.flow_id
+    cold_dir = tmp_path / "tianluo" / "state" / "steps" / flow.flow_id
     assert cold_dir.is_dir()
 
     pm.clear_state()
 
-    archive = tmp_path / "se3" / "state" / "archive"
+    archive = tmp_path / "tianluo" / "state" / "archive"
     headers = list(archive.glob("engine_*.json"))
     assert len(headers) == 1
     # Header preserves format + identity; cold files followed it, full fidelity.
@@ -371,7 +371,7 @@ def test_clear_state_same_second_archives_do_not_collide(tmp_path, monkeypatch):
     assert flow_b.flow_id != flow_a.flow_id
     _archive(flow_b)
 
-    archive = tmp_path / "se3" / "state" / "archive"
+    archive = tmp_path / "tianluo" / "state" / "archive"
     headers = sorted(archive.glob("engine_*.json"))
     # Both headers preserved (no clobber), and both flows recoverable.
     assert len(headers) == 2
@@ -460,13 +460,13 @@ def test_clear_state_archive_collision_stays_reference_consistent(tmp_path):
     pm.save_flow(flow)
 
     # Simulate a prior archive of the same flow_id already owning the cold dir.
-    archive_steps = tmp_path / "se3" / "state" / "archive" / "steps"
+    archive_steps = tmp_path / "tianluo" / "state" / "archive" / "steps"
     (archive_steps / flow.flow_id).mkdir(parents=True)
     (archive_steps / flow.flow_id / "_sentinel.txt").write_text("old archive data")
 
     pm.clear_state()
 
-    headers = sorted((tmp_path / "se3" / "state" / "archive").glob("engine_*.json"))
+    headers = sorted((tmp_path / "tianluo" / "state" / "archive").glob("engine_*.json"))
     assert len(headers) == 1
     header = json.loads(headers[0].read_text())
     partition = header["state"]["cold_partition"]
@@ -513,7 +513,7 @@ def test_clear_state_archive_double_collision_does_not_abort(tmp_path, monkeypat
             return frozen
 
     ts = frozen.strftime("%Y%m%d_%H%M%S")
-    archive_steps = tmp_path / "se3" / "state" / "archive" / "steps"
+    archive_steps = tmp_path / "tianluo" / "state" / "archive" / "steps"
     # Prior archive owns both the primary and the first timestamp-suffixed name.
     (archive_steps / flow.flow_id).mkdir(parents=True)
     (archive_steps / flow.flow_id / "_sentinel.txt").write_text("primary")
@@ -526,7 +526,7 @@ def test_clear_state_archive_double_collision_does_not_abort(tmp_path, monkeypat
 
     pm.clear_state()  # must not raise
 
-    headers = sorted((tmp_path / "se3" / "state" / "archive").glob("engine_*.json"))
+    headers = sorted((tmp_path / "tianluo" / "state" / "archive").glob("engine_*.json"))
     assert len(headers) == 1
     header = json.loads(headers[0].read_text())
     partition = header["state"]["cold_partition"]
@@ -551,7 +551,7 @@ def test_list_all_flows_mixed_formats(tmp_path):
     pm.save_flow(new_flow)
     pm.clear_state()
     # Drop a legacy inline archive snapshot beside it.
-    archive = tmp_path / "se3" / "state" / "archive"
+    archive = tmp_path / "tianluo" / "state" / "archive"
     legacy = _make_flow(n_steps=2, status=FlowStatus.COMPLETED)
     (archive / "engine_20200101_000000.json").write_text(
         json.dumps(legacy.to_dict(), indent=2, ensure_ascii=False, default=str)
@@ -634,7 +634,7 @@ def test_clear_state_preserves_surviving_resumable_snapshot_fidelity(tmp_path):
     flow = _make_flow(n_steps=4, status=FlowStatus.PAUSED)
     pm.save_flow(flow)  # non-completed → resumable snapshot written
 
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     live_cold = state_dir / "steps" / flow.flow_id
     snapshot = state_dir / "resumable" / f"{flow.flow_id}.json"
     assert live_cold.is_dir() and snapshot.is_file()
@@ -672,7 +672,7 @@ def test_load_flow_tolerant_recovers_truncated_hotcold_header(tmp_path):
     pm = PersistenceManager(tmp_path)
     flow = _make_flow(n_steps=3, status=FlowStatus.RUNNING)
     pm.save_flow(flow)
-    state_file = tmp_path / "se3" / "state" / "engine.json"
+    state_file = tmp_path / "tianluo" / "state" / "engine.json"
     full = state_file.read_text()
 
     # The format marker must lead the header, so a head-truncated file still

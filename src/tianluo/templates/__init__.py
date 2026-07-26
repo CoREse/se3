@@ -1,10 +1,10 @@
 """SE3 templates for project initialization.
 
-Template files in this package (rendered by `se3 init` / `se3 migrate`):
+Template files in this package (rendered by `luo init` / `luo migrate`):
 
 - ``charter.md`` — the project **charter** template; a shrunk rename of the
-  retired ``base_spec.md``. Written to ``se3/charter.md`` and injected in full
-  into every `se3 run` step. Carries only code-inexpressible, whole-project
+  retired ``base_spec.md``. Written to ``tianluo/charter.md`` and injected in full
+  into every `luo run` step. Carries only code-inexpressible, whole-project
   high-altitude content (project identity, top-level architecture, project-wide
   conventions, version management); per-module/per-symbol locators are dropped
   in favour of code-index.

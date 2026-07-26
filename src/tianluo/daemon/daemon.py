@@ -5,7 +5,7 @@
 :class:`DaemonAggregator` (on-disk state aggregation) — into a single resident
 process driven by an ``asyncio`` event loop.
 
-The daemon is intentionally long-lived: it outlives any individual ``se3 run``
+The daemon is intentionally long-lived: it outlives any individual ``luo run``
 and is the only component that keeps aggregating state and offering a stable
 endpoint after the CLI has exited. A future WebSocket client to the central
 server (see ``DaemonConfig.server_url``) shares this same event loop.
@@ -20,6 +20,7 @@ Lifecycle:
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import asyncio
 import json
@@ -56,7 +57,7 @@ LOG_FILENAME = "daemon.log"
 #: flow through this daemon. Lives next to the pidfile / status file under
 #: ``pid_dir`` so it inherits the same ``SE3_DAEMON_DIR`` / ``DaemonConfig``
 #: overrides (and test isolation). Persisting roots here lets the history index
-#: and the New Task project dropdown stay populated even when no ``se3 run``
+#: and the New Task project dropdown stay populated even when no ``luo run``
 #: process is currently live — and across daemon restarts.
 PROJECT_ROOTS_FILENAME = "project_roots.json"
 
@@ -78,7 +79,7 @@ _REGISTRY_LOCK = threading.Lock()
 #: nobody is watching, so the aggregator scan behind each tick buys nothing at
 #: 2 s. Kept fast enough (30 s) that the daemon still discovers CLI-started
 #: flows reasonably promptly even while idle-geared — the poll loop must never
-#: fully stop, or external ``se3 run`` processes would go unsupervised.
+#: fully stop, or external ``luo run`` processes would go unsupervised.
 #: Module-level (looked up at call time) so tests can shrink it.
 _IDLE_POLL_INTERVAL = 30.0
 
@@ -150,7 +151,7 @@ class DaemonConfig:
             history pushes off real ``engine.json`` / jsonl changes instead of
             only the 5 s status tick.
         gc_interval: Low-frequency cadence (seconds) at which the daemon sweeps
-            leaked ``se3 run --worktree`` runs (see
+            leaked ``luo run --worktree`` runs (see
             :func:`tianluo.engine.merge.worktree_gc.gc_worktree_runs`). Deliberately
             decoupled from ``poll_interval`` (2 s): GC is heavy IO and reclaiming
             stranded worktrees needs no high frequency. ``<= 0`` disables it.
@@ -224,7 +225,7 @@ class Daemon:
         # a flow through this daemon. Wiring the load/persist callbacks makes
         # aggregator.add_project_root write through to ``project_roots_file`` so
         # the history index and New Task dropdown stay populated with no live
-        # ``se3 run`` process and across daemon restarts.
+        # ``luo run`` process and across daemon restarts.
         registry_file = self.config.project_roots_file
         # One-time cleanup of any worktree-copy entry that a pre-normalization
         # daemon may have persisted into the registry, so historical pollution
@@ -250,12 +251,12 @@ class Daemon:
         )
         for root in self.config.project_roots:
             self.aggregator.add_project_root(root)
-        # Reads se3/history of every root the aggregator tracks; injected into
+        # Reads tianluo/history of every root the aggregator tracks; injected into
         # the outbound DaemonClient as its history_provider. Uses the
         # worktree-inclusive root view (active ∪ registry ∪ disk-history ∪
         # active ``--worktree`` run subdirs) so build_index / active_flow_signature
         # see the registry roots even with no live flow AND surface a
-        # ``se3 run --worktree`` flow's engine.json / history live during its
+        # ``luo run --worktree`` flow's engine.json / history live during its
         # flow body, not only after the trailing merge syncs history back.
         self.history_reader = DaemonHistoryReader(
             project_roots_provider=lambda: self.aggregator.all_observable_roots()
@@ -263,7 +264,7 @@ class Daemon:
         # Share the reader's dirty-sentinel gate with the aggregator's calls
         # scan so an idle root's fast tick collapses to a single sentinel stat:
         # the reader skips its history deep scan AND the aggregator skips the
-        # ``se3/calls/`` iterdir for the same gated root. Wired after both exist
+        # ``tianluo/calls/`` iterdir for the same gated root. Wired after both exist
         # (the reader is constructed just above).
         self.aggregator.set_calls_gate_source(self.history_reader.gated_roots)
         self._stop_event: Optional[asyncio.Event] = None
@@ -289,14 +290,14 @@ class Daemon:
         worktree: bool = False,
         from_issue_id: str = "",
     ) -> SpawnedProcess:
-        """Spawn a new ``se3 run`` flow (entry point for remote requests).
+        """Spawn a new ``luo run`` flow (entry point for remote requests).
 
         The spawned flow's project root is registered with the aggregator so
         the next poll picks up its state. When *discover* is true the flow
         starts from the discovery step. When *worktree* is true the flow runs
-        in an isolated worktree (``se3 run --worktree``) and auto-merges back
+        in an isolated worktree (``luo run --worktree``) and auto-merges back
         on success. When *from_issue_id* is non-empty the flow is started from
-        that issue (``se3 run --from-issue <id>``), in which case the CLI
+        that issue (``luo run --from-issue <id>``), in which case the CLI
         sources the task from the issue and drives its status lifecycle.
         """
         spawned = self.spawner.spawn(
@@ -319,10 +320,10 @@ class Daemon:
         """Resume a paused/interrupted flow (entry point for remote requests).
 
         The daemon locates the requested *flow_id* by the same per-flow lookup
-        the CLI ``se3 run --resume --flow-id`` path uses: it prefers the active
+        the CLI ``luo run --resume --flow-id`` path uses: it prefers the active
         ``engine.json`` when it still describes the flow, and otherwise falls
         back to the per-flow resumable snapshot
-        (``se3/state/resumable/<flow_id>.json``), which survives a later run
+        (``tianluo/state/resumable/<flow_id>.json``), which survives a later run
         overwriting the single-slot ``engine.json``. Any flow that did not
         finish normally is resumable — COMPLETED is the only terminal status
         that is rejected; FAILED / PAUSED / RUNNING-interrupted / RECOVERING /
@@ -335,7 +336,7 @@ class Daemon:
         caller surfaces the message as a protocol error).
         """
         root = Path(project_root).resolve() if project_root else Path.cwd()
-        state_dir = root / "se3" / "state"
+        state_dir = runtime_dir(root) / "state"
         engine_json = state_dir / "engine.json"
 
         # Locate the flow by id. Prefer the active engine.json when it holds
@@ -389,8 +390,8 @@ class Daemon:
             )
 
         # Guard against double-spawn: refuse to resume into a project root that
-        # already has ANY live ``se3 run`` process. The flow engine persists to
-        # a single-slot ``se3/state/engine.json`` per project, so resuming flow
+        # already has ANY live ``luo run`` process. The flow engine persists to
+        # a single-slot ``tianluo/state/engine.json`` per project, so resuming flow
         # A while a different live process B is writing that file would race two
         # writers on the same engine.json (B's archival/attribution would read
         # A's data). Matching by project_root — not flow_id — mirrors the
@@ -422,8 +423,8 @@ class Daemon:
 
         Locates *flow_id* among the supervisor's tracked flows, takes its live
         pid and the main project root it is attributed to, and off-loads the
-        heavy work to an ``se3 end-session`` subprocess: the subprocess
-        gracefully terminates the live ``se3 run`` process (SIGTERM → grace →
+        heavy work to an ``luo end-session`` subprocess: the subprocess
+        gracefully terminates the live ``luo run`` process (SIGTERM → grace →
         SIGKILL) and, for a worktree session, archives it the way a
         normally-completed run is cleaned up. The grace wait and the on-disk
         archival are therefore never performed on the daemon's event loop.
@@ -440,7 +441,7 @@ class Daemon:
                 break
         # A flow that is NOT among the supervised (live) flows can still be a
         # dangling worktree session left by a PAUSED / FAILED / interrupted run
-        # whose ``se3 run`` process already exited — the ``se3 end-session`` CLI
+        # whose ``luo run`` process already exited — the ``luo end-session`` CLI
         # archives those without a live process, so as long as the caller (the
         # server) supplied the project root, we still dispatch the subprocess
         # with no pid hint. We only refuse when neither a tracked flow nor a
@@ -454,9 +455,9 @@ class Daemon:
         # worktree-copy root resolves to its main project), matching the
         # attribution every other registration path uses so the subprocess
         # archives under the right root. The server reports a worktree session's
-        # ``project_root`` as the ``<main>/se3/worktrees/<name>`` sandbox itself
+        # ``project_root`` as the ``<main>/tianluo/worktrees/<name>`` sandbox itself
         # (that is the root its engine.json lives under), so a caller-supplied
-        # root must be normalized too — otherwise ``se3 end-session -p`` would
+        # root must be normalized too — otherwise ``luo end-session -p`` would
         # run against the worktree dir and never locate/archive the worktree.
         raw_root = project_root if project_root else record.project_root
         resolved = resolve_worktree_main_root(raw_root)
@@ -485,7 +486,7 @@ class Daemon:
         registry write-through all apply unchanged. Returns the normalized path
         that was actually registered, for the caller's receipt.
 
-        The target need not already be an se3 project: starting a task there
+        The target need not already be an luo project: starting a task there
         goes through the existing ensure/init chain, which initializes it.
 
         The filesystem-root refusal is a foot-gun guard, not a permission check:
@@ -523,11 +524,11 @@ class Daemon:
         """Deregister *project_root* (entry point for remote requests).
 
         Removal touches the registration only — nothing under the project
-        directory (``se3/`` history, state, issues) is ever deleted — and
+        directory (``tianluo/`` history, state, issues) is ever deleted — and
         establishes no blacklist: a later flow in that directory, or a manual
         re-add, registers it again as normal.
 
-        A root with a live ``se3 run`` process is refused (``live_flow``). WHY:
+        A root with a live ``luo run`` process is refused (``live_flow``). WHY:
         the poll loop re-registers every discovered flow's root within seconds,
         so deleting it here would appear to succeed and then silently undo
         itself. ``_live_project_roots`` is the same supervisor + ``is_alive``
@@ -581,7 +582,7 @@ class Daemon:
         return resolved
 
     def _live_project_roots(self) -> Set[str]:
-        """Return the set of project roots with a live ``se3 run`` process.
+        """Return the set of project roots with a live ``luo run`` process.
 
         Injected into :class:`DaemonAggregator` as its ``live_roots_provider``
         so the aggregator can gate the ``resumable`` flag of a ``RUNNING`` flow
@@ -749,7 +750,7 @@ class Daemon:
         )
 
     def _handle_ensure_request(self, project_root: str) -> Any:
-        """Pre-spawn hook: run ``se3 init`` in *project_root* if needed.
+        """Pre-spawn hook: run ``luo init`` in *project_root* if needed.
 
         Lets the web *New Task* form target a directory that is not yet an
         SE3 project (the user may have just typed a fresh absolute path into
@@ -774,11 +775,11 @@ class Daemon:
     ) -> None:
         """Adapt a server RESPOND_CALL: write the response file, then resume.
 
-        Writing ``<call_id>.response.json`` into ``se3/calls/`` is only half the
-        job. A daemon-spawned flow (``se3 run --output-format json``) exits its
+        Writing ``<call_id>.response.json`` into ``tianluo/calls/`` is only half the
+        job. A daemon-spawned flow (``luo run --output-format json``) exits its
         process when it pauses for a human call — e.g. a discovery
         clarification — so after the response file is written nothing would
-        re-run ``se3 run``: the flow would stay PAUSED forever and a
+        re-run ``luo run``: the flow would stay PAUSED forever and a
         web-published discovery task would never advance past its first
         question. So once the answer is durably on disk we re-spawn the paused
         flow with ``--resume`` to carry the conversation forward.
@@ -792,10 +793,10 @@ class Daemon:
         """Re-spawn the project's flow with ``--resume`` when it is PAUSED.
 
         Best-effort: a missing/unreadable ``engine.json``, a non-PAUSED flow,
-        or a flow that already has a live ``se3 run`` process is left alone.
+        or a flow that already has a live ``luo run`` process is left alone.
         """
         root = Path(project_root).resolve() if project_root else Path.cwd()
-        engine_json = root / "se3" / "state" / "engine.json"
+        engine_json = runtime_dir(root) / "state" / "engine.json"
         # Only flow_id/status are needed, so read the size-guarded header rather
         # than fully parsing a possibly tens-of-MB legacy engine.json (issue
         # #243 A2). The caller dispatches this via asyncio.to_thread, so the
@@ -813,7 +814,7 @@ class Daemon:
             # re-run. Only a PAUSED flow needs (and is safe for) a resume.
             logger.debug("Flow %s is %s, not PAUSED; skipping resume", flow_id, status)
             return
-        # Guard against a double-spawn: if a se3 run process is already alive
+        # Guard against a double-spawn: if a luo run process is already alive
         # for this project (e.g. an interactive run), resuming would race two
         # writers on the same engine.json.
         for record in self.supervisor.flows:
@@ -903,7 +904,7 @@ class Daemon:
         Discovery, root registration, and the snapshot build can each parse
         engine.json / project_roots.json off disk, so all three are offloaded to
         worker threads and nothing on this loop touches ``json.loads``.
-        ``discover_flows`` reaps dead pids then scans for external ``se3 run``
+        ``discover_flows`` reaps dead pids then scans for external ``luo run``
         processes; registering a newly-discovered external flow calls
         ``_read_flow_id`` -> ``read_engine_header``, which parses an
         at-or-under-guard engine.json synchronously (issue #243 A3 — no disk
@@ -913,7 +914,7 @@ class Daemon:
         project_roots.json, which must not run on the loop either. The snapshot
         build fans out through ``get_snapshot`` -> ``_merge_project_roots`` ->
         ``all_project_roots`` -> ``enumerate_historical_project_roots`` into a
-        full ``se3/history`` walk (reading every ``_meta.json``) whenever the
+        full ``tianluo/history`` walk (reading every ``_meta.json``) whenever the
         aggregator's historical-root TTL cache is cold, expired, or freshly
         invalidated — and ``add_project_root`` invalidates that cache exactly
         when a brand-new project root is registered. Running any of these on the
@@ -935,7 +936,7 @@ class Daemon:
         ``registry_persist`` (issue #243 A3 — no disk JSON parse on the loop).
         """
         for record in flows:
-            # Defense in depth: a flow whose root is a ``se3/worktrees/`` copy
+            # Defense in depth: a flow whose root is a ``tianluo/worktrees/`` copy
             # is attributed back to its main project root, so an isolation
             # worktree never registers as a standalone project (which would
             # double the WebUI project list / issue counts). ``_scan_external``
@@ -1063,10 +1064,10 @@ class Daemon:
     def _write_status(
         self, snapshot: MachineStatus, flows: List["object"]
     ) -> None:
-        """Persist the latest snapshot so ``se3 daemon status`` can read it.
+        """Persist the latest snapshot so ``luo daemon status`` can read it.
 
         The outbound :class:`~tianluo.daemon.client.DaemonClient`'s live
-        ``connected`` / ``last_error`` are written here so ``se3 daemon
+        ``connected`` / ``last_error`` are written here so ``luo daemon
         status`` reflects the *real* connection state rather than merely
         echoing the configured URL. When no client exists (no ``server_url``
         configured) the connection fields mark an unconfigured outbound link
@@ -1234,7 +1235,7 @@ def _append_project_root(path: Path, root: object) -> None:
     :func:`_sanitize_project_roots` pass — the very resurfacing the existence
     self-heal exists to prevent.
 
-    A worktree isolation copy (``<main>/se3/worktrees/<name>``) is folded back
+    A worktree isolation copy (``<main>/tianluo/worktrees/<name>``) is folded back
     to its owning ``<main>`` here as a defence-in-depth backstop: the primary
     normalization seam is :meth:`DaemonAggregator.add_project_root` (which feeds
     this callback already-normalized), but normalizing again at the disk write
@@ -1271,7 +1272,7 @@ def _remove_project_root(path: Path, root: object) -> bool:
     """Delete *root* from the registry file at *path*; the inverse of append.
 
     Shares :func:`_append_project_root`'s normalization exactly — a worktree
-    isolation copy (``<main>/se3/worktrees/<name>``) folds back to its owning
+    isolation copy (``<main>/tianluo/worktrees/<name>``) folds back to its owning
     ``<main>``, then ``realpath`` canonicalizes symlinked / relative spellings —
     so a root can be removed through any spelling it could have been added
     through. Persisted entries are compared the same way, so an alias entry left
@@ -1324,7 +1325,7 @@ def _sanitize_project_roots(path: Path) -> None:
       registration entry point (see :meth:`DaemonAggregator.add_project_root`
       and :func:`_append_project_root`) prevents *new* pollution, but a registry
       written before the normalization existed may already hold persisted
-      ``<main>/se3/worktrees/<name>`` entries.
+      ``<main>/tianluo/worktrees/<name>`` entries.
     * **Deleted roots.** A project root that no longer exists on disk — most
       commonly a pytest tempdir that a live test run registered and then tore
       down — would otherwise keep surfacing a dead project in the WebUI list.
@@ -1458,7 +1459,7 @@ def _detach_streams(config: DaemonConfig) -> None:
 
 def _start_detached_subprocess(config: DaemonConfig) -> Dict[str, object]:  # pragma: no cover - win32
     """Fallback detach path for platforms without ``os.fork`` (e.g. Windows)."""
-    args = [sys.executable, "-m", "se3", "daemon", "start", "--foreground"]
+    args = [sys.executable, "-m", "tianluo", "daemon", "start", "--foreground"]
     if config.server_url:
         args += ["--server-url", config.server_url]
     child_env = os.environ.copy()

@@ -40,7 +40,7 @@ from tianluo.engine.persistence import PersistenceManager
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    (tmp_path / "se3" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
     return tmp_path
 
 
@@ -54,7 +54,7 @@ def _make_flow(step_type: StepType) -> tuple[FlowInstance, Step]:
 
 
 def _jsonl_path(project: Path, flow_id: str, step_id: str) -> Path:
-    return project / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    return project / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
 
 
 def _read_records(project: Path, flow_id: str, step_id: str) -> list[dict]:
@@ -65,7 +65,7 @@ def _read_records(project: Path, flow_id: str, step_id: str) -> list[dict]:
 
 
 def _read_engine(project: Path) -> dict:
-    return json.loads((project / "se3" / "state" / "engine.json").read_text())
+    return json.loads((project / "tianluo" / "state" / "engine.json").read_text())
 
 
 # --------------------------------------------------------------------------
@@ -165,7 +165,7 @@ def test_stale_reclaim_writes_no_clear_event(project: Path) -> None:
     flow, step = _make_flow(StepType.ANALYZE)
 
     # Stale lock recording a dead PID — reclaimed silently, no wait surfaced.
-    lock_file = project / "se3" / "state" / "merge.lock"
+    lock_file = project / "tianluo" / "state" / "merge.lock"
     dead_pid = 2 ** 22 - 1
     lock_file.write_text(f"{dead_pid:016d}\n")
 

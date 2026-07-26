@@ -59,7 +59,7 @@ def generate_project_summary(
     """Generate a project summary using ProjectContextCollector + LLM.
 
     This is the shared core logic used by both the PROJECT_SUMMARY step
-    and the `se3 summary` CLI command.
+    and the `luo summary` CLI command.
 
     Args:
         project_root: Project root directory

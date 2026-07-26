@@ -126,7 +126,7 @@ _MAX_CACHE_ENTRIES = 512
 #: so the memory ceiling the size guard exists for is preserved).
 #:
 #: WHY stat-keyed is enough here: the oversized population is dominated by
-#: archive snapshots (``se3/state/archive/engine_*.json``) whose content is
+#: archive snapshots (``tianluo/state/archive/engine_*.json``) whose content is
 #: immutable after archival — their mtime only moves when the file is replaced —
 #: so a ``(mtime_ns, size)`` hit is authoritative, exactly like the
 #: immutable-snapshot path of :func:`read_json_cached`. An oversized *live*

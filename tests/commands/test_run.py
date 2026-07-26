@@ -37,8 +37,8 @@ class TestResumeDetection:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/state directory structure
-        state_dir = self.project_root / "se3" / "state"
+        # Create tianluo/state directory structure
+        state_dir = self.project_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with an IMPLEMENT step in RUNNING state
@@ -181,7 +181,7 @@ class TestResumeDetection:
         # engine.json no longer holds this flow (overwritten by a later run).
         mock_pm.load_flow.return_value = None
         mock_pm._peek_active_flow_id.return_value = None
-        # ...but a stale completed snapshot survives under se3/state/resumable/.
+        # ...but a stale completed snapshot survives under tianluo/state/resumable/.
         mock_pm.load_resumable_snapshot.return_value = self.flow
         # load_flow_by_id resolves the snapshot when engine.json lacks the flow.
         mock_pm.load_flow_by_id.return_value = self.flow
@@ -397,8 +397,8 @@ class TestResumeFailedFlow:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/state directory structure
-        state_dir = self.project_root / "se3" / "state"
+        # Create tianluo/state directory structure
+        state_dir = self.project_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a FAILED step
@@ -875,7 +875,7 @@ class TestOutputFormatEventStream:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
             flow_id="evt-flow-001",

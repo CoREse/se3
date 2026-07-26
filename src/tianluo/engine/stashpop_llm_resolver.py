@@ -6,7 +6,7 @@ LLM-free — it archives every stash payload before any disposition and only eve
 *invokes* an injected ``conflict_resolver``; it never constructs one. This
 module builds that resolver, so the LLM stack coupling (``LLMCaller``) lives
 here, at the merge/implement integration boundary, and both merge paths
-(``se3 merge`` fast strategy and the implement-step leaf-back merge) import the
+(``luo merge`` fast strategy and the implement-step leaf-back merge) import the
 same factory from one place rather than each wiring their own.
 """
 

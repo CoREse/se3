@@ -9,7 +9,7 @@ Two concrete sinks ship here:
 
 * :class:`CliSink` — hangs the existing Rich rendering chain
   (``display.py`` / ``step_renderers.py``). It produces the same visual output
-  ``se3 run`` produces today; it is a thin dispatch over those renderers and
+  ``luo run`` produces today; it is a thin dispatch over those renderers and
   does NOT reimplement any rendering logic.
 * :class:`JsonSink` — serializes each event to a single line of JSON (NDJSON
   style), for daemon consumption.
@@ -45,7 +45,7 @@ class CliSink(Sink):
 
     ``CliSink`` delegates entirely to the pre-existing rendering functions in
     ``step_renderers.py``; it adds no rendering logic of its own. This is what
-    keeps CLI output byte-for-byte identical to today's ``se3 run``: the same
+    keeps CLI output byte-for-byte identical to today's ``luo run``: the same
     renderers, called with the same step objects.
 
     Step-scoped completion/failure events whose ``data`` carries a ``"step"``
@@ -65,7 +65,7 @@ class CliSink(Sink):
     Flow-level lifecycle events (``FLOW_STARTED`` / ``FLOW_COMPLETED`` /
     ``FLOW_FAILED`` / ``FLOW_PAUSED`` / ``INTERJECTION_NEEDED`` /
     ``CALL_NEEDED``) are intentionally a **no-op** here: in CLI mode the
-    ``se3 run`` orchestrator already renders the human-facing "New Flow"
+    ``luo run`` orchestrator already renders the human-facing "New Flow"
     panel, the per-step ``✓ completed`` line, and the closing
     ``display_success`` / ``display_error`` summary directly. Having the sink
     also render these would double the output and regress the CLI. The sink's
@@ -332,7 +332,7 @@ class HistorySink(Sink):
 
     ``STEP_COMPLETED`` and ``STEP_FAILED`` events carry the step's full
     structured output (the same data the CLI's ``step_renderers`` Panel
-    renders). Writing them into ``se3/history/<flow_id>/<step_id>.jsonl``
+    renders). Writing them into ``tianluo/history/<flow_id>/<step_id>.jsonl``
     makes them flow naturally to the web console: the daemon's
     ``DaemonHistoryReader`` already streams every line in those files to the
     server via the ``history_data`` channel, and the frontend's

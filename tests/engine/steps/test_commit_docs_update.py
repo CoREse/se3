@@ -38,7 +38,7 @@ def _make_flow(tmp_path: Path, **kwargs) -> FlowInstance:
         "task_description": "Add a shiny feature",
         "task_type": "feature",
         # project_root == flow.change_path.parent == tmp_path
-        "change_path": tmp_path / "se3.yaml",
+        "change_path": tmp_path / "tianluo.yaml",
         "baseline_commit": None,
         # Mirror the real FlowInstance default: a MagicMock(spec=…) otherwise
         # reads is_worktree_mode as a truthy MagicMock and diverts the commit
@@ -96,7 +96,7 @@ def _bumper(tmp_path: Path, new_version: str = "0.2.0") -> VersionBumper:
 def _docs_config():
     """A DocsConfig-like stub feeding a deterministic versions_entry template.
 
-    Keeps the integration tests hermetic (no real se3.yaml / git probing) and
+    Keeps the integration tests hermetic (no real tianluo.yaml / git probing) and
     independent of the packaged ``versions_md.md`` content, while still
     exercising the real wiring path: ``load_docs_config(...).to_updater_config()``
     is forwarded verbatim into ``DocumentationUpdater(config=...)``. The badge

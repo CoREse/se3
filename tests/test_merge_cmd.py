@@ -1,4 +1,4 @@
-"""Tests for se3 merge command entry point (merge_cmd.py)."""
+"""Tests for luo merge command entry point (merge_cmd.py)."""
 
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ class TestRunMergeValidation:
 class TestMergeConfig:
     def test_merge_config_from_se3_yaml(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
@@ -203,7 +203,7 @@ class TestMergeConfig:
 
     def test_merge_config_invalid_strategy_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: invalid_strategy\n"
@@ -215,7 +215,7 @@ class TestMergeConfig:
 
     def test_merge_config_legacy_robust_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: robust\n"
@@ -228,7 +228,7 @@ class TestMergeConfig:
 
     def test_merge_config_legacy_default_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: default\n"
@@ -252,7 +252,7 @@ class TestMergeConfig:
 
     def test_merge_config_max_conflict_resolve_iterations(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  max_conflict_resolve_iterations: 25\n"
@@ -264,7 +264,7 @@ class TestMergeConfig:
 
     def test_merge_config_max_conflict_resolve_iterations_zero_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  max_conflict_resolve_iterations: 0\n"
@@ -276,7 +276,7 @@ class TestMergeConfig:
 
     def test_merge_config_strict_runtime_sync_true(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strict_runtime_sync: true\n"
@@ -288,7 +288,7 @@ class TestMergeConfig:
 
     def test_merge_config_strict_runtime_sync_string_true(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strict_runtime_sync: 'true'\n"
@@ -303,13 +303,13 @@ class TestMergeConfigFromSubdirectory:
     """Verify config is found when cwd is a subdirectory of the project."""
 
     def test_load_merge_config_from_subdirectory(self, tmp_path: Path) -> None:
-        """load_merge_config(project_root) finds se3.yaml even when cwd
+        """load_merge_config(project_root) finds tianluo.yaml even when cwd
         is a subdirectory — mirrors the fix in cli.py:merge_cmd.
         """
         _init_repo(tmp_path)
         subdir = tmp_path / "src"
         subdir.mkdir()
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
@@ -335,14 +335,14 @@ class TestMergeCliFromSubdirectory:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """When invoked from a subdirectory, ``merge_cmd`` resolves the
-        project root (via ``get_project_root``) and loads ``se3.yaml``
+        project root (via ``get_project_root``) and loads ``tianluo.yaml``
         merge configuration so that strategy/delete-merged values flow
         through to ``run_merge``.
         """
         import os
 
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
@@ -390,7 +390,7 @@ class TestMergeCliFromSubdirectory:
             # project_root is not passed explicitly — run_merge calls
             # get_project_root() internally when None. The key assertion
             # is that strategy/delete_merged/strict_runtime_sync from
-            # se3.yaml were read.
+            # tianluo.yaml were read.
         finally:
             os.chdir(old_cwd)
 
@@ -555,7 +555,7 @@ class TestMergeDeleteMergedTristate:
     def _run_cli_tristate(
         self, tmp_path: Path, monkeypatch, extra_args: list[str]
     ) -> dict:
-        """Run se3 merge CLI and return the captured delete_merged value."""
+        """Run luo merge CLI and return the captured delete_merged value."""
         import os
 
         _init_repo(tmp_path)
@@ -594,21 +594,21 @@ class TestMergeDeleteMergedTristate:
         return captured
 
     def test_omit_flag_uses_config_true(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: true\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, [])
         assert captured["exit_code"] == 0, captured.get("output")
         assert captured["delete_merged"] is True
 
     def test_no_delete_overrides_config_true(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: true\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, ["--no-delete-merged"])
         assert captured["exit_code"] == 0
         assert captured["delete_merged"] is False
 
     def test_delete_overrides_config_false(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: false\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, ["--delete-merged"])
         assert captured["exit_code"] == 0
@@ -1094,14 +1094,14 @@ class TestFailureReasonRendering:
             failed_branch="feature",
             failure_reason="guardrail_repair_stalled",
             rollback_failed=True,
-            human_call_file="se3/calls/merge_20260101_000000_feature.json",
+            human_call_file="tianluo/calls/merge_20260101_000000_feature.json",
         )
         captured = self._mock_orchestrator_report(monkeypatch, report)
         exit_code = run_merge(["feature"], project_root=tmp_path)
         assert exit_code == 1
         assert len(captured) == 1
         assert "CRITICAL" in captured[0]["content"]
-        assert "Call file: se3/calls/merge_20260101_000000_feature.json" in captured[0]["content"]
+        assert "Call file: tianluo/calls/merge_20260101_000000_feature.json" in captured[0]["content"]
 
     def test_fast_binary_file_conflict_rendering(
         self, tmp_path: Path, monkeypatch
@@ -1289,7 +1289,7 @@ class TestFailureReasonRendering:
         assert exit_code == 1
         assert len(captured) == 1
         assert "Failed branch: feature-b" in captured[0]["content"]
-        assert "Colliding path: se3/history/run-007.json" in captured[0]["content"]
+        assert "Colliding path: tianluo/history/run-007.json" in captured[0]["content"]
 
     def test_audit_only_collision_renders_distinct_section(
         self, tmp_path: Path, monkeypatch
@@ -1453,8 +1453,8 @@ class TestFailureReasonRendering:
 
 class TestAppendHumanCallLines:
     """Fix (iteration 4): in suppress mode the CLI must NOT print a phantom
-    ``se3/calls/`` file (never created by _RecordingNullHumanCallWriter); it
-    renders the recorded escalation payload and the rerun-`se3 merge` recovery
+    ``tianluo/calls/`` file (never created by _RecordingNullHumanCallWriter); it
+    renders the recorded escalation payload and the rerun-`luo merge` recovery
     instead. In non-suppress mode the real call-file path is still printed.
     """
 
@@ -1467,22 +1467,22 @@ class TestAppendHumanCallLines:
         from tianluo.commands.merge_cmd import _append_human_call_lines
 
         lines: list[str] = []
-        report = self._Report(human_call_file="se3/calls/merge_x.json")
+        report = self._Report(human_call_file="tianluo/calls/merge_x.json")
         _append_human_call_lines(lines, report, suppress_human_call=False)
-        assert lines == ["Call file: se3/calls/merge_x.json"]
+        assert lines == ["Call file: tianluo/calls/merge_x.json"]
 
     def test_suppress_renders_escalations_not_phantom_path(self):
         from tianluo.commands.merge_cmd import _append_human_call_lines
 
         lines: list[str] = []
         report = self._Report(
-            human_call_file="se3/calls/merge_never_written.json",
+            human_call_file="tianluo/calls/merge_never_written.json",
             recorded_escalations=[
                 {"type": "conflict", "branch": "feature/x"},
                 {
                     "type": "guardrail_violation",
                     "branch": "feature/y",
-                    "violations": ["touched se3/specs"],
+                    "violations": ["touched tianluo/specs"],
                 },
             ],
         )
@@ -1495,8 +1495,8 @@ class TestAppendHumanCallLines:
         # The escalation payload and the rerun recovery ARE surfaced.
         assert "conflict: feature/x" in rendered
         assert "guardrail_violation: feature/y" in rendered
-        assert "touched se3/specs" in rendered
-        assert "rerun `se3 merge`" in rendered
+        assert "touched tianluo/specs" in rendered
+        assert "rerun `luo merge`" in rendered
 
     def test_suppress_no_escalation_renders_nothing(self):
         # A non-escalation failure (postcondition / runtime-sync / branch

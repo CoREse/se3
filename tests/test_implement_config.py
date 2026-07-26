@@ -30,7 +30,7 @@ class TestImplementConfigDefaults:
 
 
 class TestImplementConfigLoad:
-    """Tests for ImplementConfig.load() from se3.yaml."""
+    """Tests for ImplementConfig.load() from tianluo.yaml."""
 
     def test_defaults_when_no_file(self, tmp_path):
         config = ImplementConfig.load(tmp_path)
@@ -38,26 +38,26 @@ class TestImplementConfigLoad:
         assert config.use_worktree is True
 
     def test_defaults_when_no_implement_section(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         config = ImplementConfig.load(tmp_path)
         assert config.group_loc_threshold == 300
         assert config.use_worktree is True
 
     def test_custom_threshold(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  group_loc_threshold: 500\n"
         )
         config = ImplementConfig.load(tmp_path)
         assert config.group_loc_threshold == 500
 
     def test_handles_invalid_yaml(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("{{invalid yaml")
+        (tmp_path / "tianluo.yaml").write_text("{{invalid yaml")
         config = ImplementConfig.load(tmp_path)
         assert config.group_loc_threshold == 300
         assert config.use_worktree is True
 
     def test_handles_non_dict_implement_section(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("implement: true\n")
+        (tmp_path / "tianluo.yaml").write_text("implement: true\n")
         config = ImplementConfig.load(tmp_path)
         assert config.group_loc_threshold == 300
         assert config.use_worktree is True
@@ -108,28 +108,28 @@ class TestImplementConfigUseWorktree:
         assert config.use_worktree is True
 
     def test_load_yaml_false(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  use_worktree: false\n"
         )
         config = ImplementConfig.load(tmp_path)
         assert config.use_worktree is False
 
     def test_load_yaml_true(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  use_worktree: true\n"
         )
         config = ImplementConfig.load(tmp_path)
         assert config.use_worktree is True
 
     def test_load_yaml_string_false(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             'implement:\n  use_worktree: "false"\n'
         )
         config = ImplementConfig.load(tmp_path)
         assert config.use_worktree is False
 
     def test_load_unset_preserves_default(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  group_loc_threshold: 500\n"
         )
         config = ImplementConfig.load(tmp_path)
@@ -142,7 +142,7 @@ class TestImplementConfigUseWorktree:
         assert config.use_worktree is False
 
     def test_env_var_overrides_yaml_true(self, tmp_path, monkeypatch):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  use_worktree: true\n"
         )
         monkeypatch.setenv("SE3_IMPLEMENT_USE_WORKTREE", "0")
@@ -150,7 +150,7 @@ class TestImplementConfigUseWorktree:
         assert config.use_worktree is False
 
     def test_env_var_overrides_yaml_false(self, tmp_path, monkeypatch):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  use_worktree: false\n"
         )
         monkeypatch.setenv("SE3_IMPLEMENT_USE_WORKTREE", "1")
@@ -163,7 +163,7 @@ class TestImplementConfigUseWorktree:
         assert config.use_worktree is False
 
     def test_env_var_invalid_falls_back_to_yaml(self, tmp_path, monkeypatch):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  use_worktree: false\n"
         )
         monkeypatch.setenv("SE3_IMPLEMENT_USE_WORKTREE", "garbage")

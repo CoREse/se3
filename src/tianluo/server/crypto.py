@@ -1,4 +1,4 @@
-"""Credential cryptography for the se3 multi-tenant server.
+"""Credential cryptography for the luo multi-tenant server.
 
 Slow password hashing (argon2id preferred, bcrypt fallback), high-entropy
 token generation + hashed storage (daemon keys / break-glass tokens /

@@ -3,7 +3,7 @@
 This module owns the canonical "what files does the project contain" enumeration
 that the code-index builds its structure map from. It relocates the three git
 helpers (``_git_ls_files_paths`` / ``_git_ls_files_other`` / ``_is_se3_path``)
-that previously lived in ``sync_state.py`` so they survive after the ``se3 sync``
+that previously lived in ``sync_state.py`` so they survive after the ``luo sync``
 machinery is retired — ``sync_state`` now re-exports them from here for backward
 compatibility while it still exists.
 
@@ -13,7 +13,7 @@ the project's ``.gitignore`` the primary inclusion filter for free — nested
 ``.gitignore`` files, ``.git/info/exclude`` and the global exclude are all
 honoured, caches and generated artefacts drop out automatically, and a brand-new
 non-ignored file is picked up on its first re-build without any registration. The
-``se3/`` runtime directory is always excluded.
+``tianluo/`` runtime directory is always excluded.
 
 On top of the gitignore filter, two secondary guards backstop the cases git
 cannot express: an explicit ``code_index.exclude`` pattern list (project-specific
@@ -38,13 +38,15 @@ _BINARY_SNIFF_BYTES = 8192
 
 
 # ---------------------------------------------------------------------------
-# se3/ exclusion + git enumeration (relocated from sync_state.py)
+# tianluo/ exclusion + git enumeration (relocated from sync_state.py)
 # ---------------------------------------------------------------------------
 
 def _is_se3_path(rel_path: str) -> bool:
-    """True when *rel_path* is inside the ``se3/`` runtime directory."""
+    """True when *rel_path* is inside the runtime directory (either name)."""
     normalized = rel_path.replace("\\", "/")
-    return normalized == "se3" or normalized.startswith("se3/")
+    return normalized in ("tianluo", "se3") or normalized.startswith(
+        ("tianluo/", "se3/")
+    )
 
 
 def _git_ls_files_paths(root: Path) -> List[str]:
@@ -191,7 +193,7 @@ def enumerate_index_files(
     The set is ``git ls-files`` (tracked) ∪ ``git ls-files --others
     --exclude-standard`` (untracked, non-ignored), minus:
 
-    - anything under the ``se3/`` runtime directory,
+    - anything under the ``tianluo/`` runtime directory,
     - paths matched by the explicit ``exclude_list`` (``code_index.exclude``),
     - paths that no longer exist on disk (tracked-but-deleted ghosts).
 

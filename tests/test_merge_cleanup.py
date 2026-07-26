@@ -505,7 +505,7 @@ def _write_worktree_engine_json(
     wt_path: Path, flow_id: str, status: str = "completed"
 ) -> Path:
     """Write a worktree-mode ``engine.json`` under *wt_path*."""
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = state_dir / "engine.json"
     engine.write_text(
@@ -542,7 +542,7 @@ class TestPromoteCompletedEngineState:
 
         assert promoted is not None
         assert promoted.name == "engine_flow-abc.json"
-        archive = project_root / "se3" / "state" / "archive" / "engine_flow-abc.json"
+        archive = project_root / "tianluo" / "state" / "archive" / "engine_flow-abc.json"
         assert archive.exists()
         data = json.loads(archive.read_text(encoding="utf-8"))
         assert data["flow_id"] == "flow-abc"
@@ -564,7 +564,7 @@ class TestPromoteCompletedEngineState:
         promoted = _promote_completed_engine_state(project_root, wt_path)
 
         assert promoted is None
-        assert not (project_root / "se3" / "state" / "archive").exists()
+        assert not (project_root / "tianluo" / "state" / "archive").exists()
 
     def test_skips_missing_engine_json(self, tmp_path: Path) -> None:
         from tianluo.engine.merge.cleanup import _promote_completed_engine_state
@@ -582,7 +582,7 @@ class TestPromoteCompletedEngineState:
         project_root = tmp_path / "main"
         project_root.mkdir()
         wt_path = tmp_path / "wt"
-        state_dir = wt_path / "se3" / "state"
+        state_dir = wt_path / "tianluo" / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "engine.json").write_text(
             json.dumps({"status": "completed"}), encoding="utf-8"
@@ -596,8 +596,8 @@ class TestPromoteCompletedEngineState:
         """``delete_merged_branches`` promotes the COMPLETED state, then deletes
         the worktree, recording the promotion in the report."""
         _init_repo(tmp_path)
-        # Gitignore se3/ so the worktree's engine.json does not count as dirty.
-        (tmp_path / ".gitignore").write_text("se3/\n")
+        # Gitignore tianluo/ so the worktree's engine.json does not count as dirty.
+        (tmp_path / ".gitignore").write_text("tianluo/\n")
         subprocess.run(
             ["git", "-C", str(tmp_path), "add", ".gitignore"],
             check=True, capture_output=True,
@@ -629,7 +629,7 @@ class TestPromoteCompletedEngineState:
         # Worktree is gone, but the promoted completed-state snapshot survives
         # in the MAIN project's archive.
         assert not wt_dir.exists()
-        archive = tmp_path / "se3" / "state" / "archive" / "engine_flow-xyz.json"
+        archive = tmp_path / "tianluo" / "state" / "archive" / "engine_flow-xyz.json"
         assert archive.exists()
         data = json.loads(archive.read_text(encoding="utf-8"))
         assert data["status"] == "completed"
@@ -688,7 +688,7 @@ class TestPromoteColdPartition:
         # The cold partition (per-step inputs/outputs + _context.json) is copied
         # into the MAIN project's archive/steps/<flow_id>/, mirroring clear_state.
         archive_steps = (
-            project_root / "se3" / "state" / "archive" / "steps" / flow_id
+            project_root / "tianluo" / "state" / "archive" / "steps" / flow_id
         )
         assert archive_steps.is_dir()
         assert (archive_steps / "_context.json").exists()
@@ -720,7 +720,7 @@ class TestPromoteColdPartition:
         wt_path = tmp_path / "wt"
         wt_path.mkdir()
         flow_id = self._save_new_format_completed_flow(wt_path)
-        prior = project_root / "se3" / "state" / "archive" / "steps" / flow_id
+        prior = project_root / "tianluo" / "state" / "archive" / "steps" / flow_id
         prior.mkdir(parents=True)
         (prior / "sentinel.json").write_text("{}", encoding="utf-8")
 
@@ -735,7 +735,7 @@ class TestPromoteColdPartition:
         partition = data["state"]["cold_partition"]
         assert partition != flow_id and partition.startswith(flow_id)
         suffixed = (
-            project_root / "se3" / "state" / "archive" / "steps" / partition
+            project_root / "tianluo" / "state" / "archive" / "steps" / partition
         )
         assert suffixed.is_dir()
 
@@ -762,7 +762,7 @@ class TestPromoteColdPartition:
         promoted = _promote_completed_engine_state(project_root, wt_path)
         assert promoted is not None
         assert not (
-            project_root / "se3" / "state" / "archive" / "steps"
+            project_root / "tianluo" / "state" / "archive" / "steps"
         ).exists()
 
 

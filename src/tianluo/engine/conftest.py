@@ -1,8 +1,8 @@
-"""Shared fixtures for the co-located engine tests (``src/se3/engine/test_*``).
+"""Shared fixtures for the co-located engine tests (``src/tianluo/engine/test_*``).
 
 The project's ``tests/`` suite is guarded by ``tests/conftest.py``, but pytest
 only applies a ``conftest.py`` to its own directory subtree. The engine's
-co-located test modules live under ``src/se3/engine/`` (a deliberate charter
+co-located test modules live under ``src/tianluo/engine/`` (a deliberate charter
 exception for testing tightly-coupled engine internals), so they are OUTSIDE
 ``tests/`` and never saw that guard. This conftest restores the one guard those
 tests need — see ``_no_real_code_index_refresh`` below.
@@ -14,7 +14,7 @@ import pytest
 
 
 # Roots a co-located engine test must never write chat history into. The engine
-# test module lives at ``src/se3/engine/`` so the repo root is four parents up;
+# test module lives at ``src/tianluo/engine/`` so the repo root is four parents up;
 # ``Path.cwd()`` is the fallback ``project_root`` for a flow with no
 # ``change_path`` (as in ``test_steps.py``'s test-step cases), so include it too.
 def _real_history_roots() -> set:
@@ -40,7 +40,7 @@ def _no_chat_history_leak_to_real_repo(tmp_path, monkeypatch):
     ``test_test_success`` / ``test_test_failure`` — which run ``run_test_step``
     against a flow with no ``change_path``, so ``project_root`` falls back to
     ``Path.cwd()`` (the live repo) — leak a fake test-history jsonl pair into the
-    committed ``se3/history/`` on every suite run.
+    committed ``tianluo/history/`` on every suite run.
 
     Every ``record_*`` writer resolves its target path through the module-global
     ``chat_history._history_dir`` (via ``_history_file``): ``record_prompt`` /
@@ -85,9 +85,9 @@ def _no_real_code_index_refresh(monkeypatch):
     Twin of the fixture in ``tests/conftest.py`` (kept in sync with it). Step
     handlers ``analyze`` (read-side) and ``commit`` (write-side) call
     ``context_builder.ensure_code_index_fresh(project_root)`` to lazily rebuild
-    ``se3/code-index.md``. A test ``FlowInstance`` usually has no
+    ``tianluo/code-index.md``. A test ``FlowInstance`` usually has no
     ``change_path``, so ``project_root`` falls back to ``Path.cwd()`` — the real
-    se3 repo, which ships a committed ``se3/code-index.md``. The hook's
+    luo repo, which ships a committed ``tianluo/code-index.md``. The hook's
     "no map yet → skip" guard then no longer fires, so it runs a *real*
     incremental build against the live repo: it takes an exclusive ``flock``
     (concurrent test processes deadlock on it) and spawns a real LLM summariser
@@ -113,7 +113,7 @@ def _force_en_us_ui_language(monkeypatch):
 
     Twin of the fixture in ``tests/conftest.py`` (kept in sync). ``tianluo.i18n``
     resolves the UI language lazily from ``Path.cwd()`` — the repo root, whose
-    ``se3.yaml`` sets ``language: zh-CN`` — so a ``t()``-rendered display string
+    ``tianluo.yaml`` sets ``language: zh-CN`` — so a ``t()``-rendered display string
     (e.g. ``render_usage_block``) would render Chinese and break an English
     assertion. ``SE3_LANG=en-US`` (highest precedence) plus a singleton reset
     keeps rendered text the stable en-US reference for these tests too.

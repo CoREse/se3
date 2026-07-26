@@ -82,7 +82,7 @@ def _run_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
     HistorySink is the real one wired up inside ``_run_flow_impl`` and writes
     to ``project_root``.
     """
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
     with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
         "tianluo.commands.run.StateMachine"
@@ -93,7 +93,7 @@ def _run_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
         # a clean pause so the run returns without prompting. The terminal
         # STEP_FAILED event has already been emitted by then.
         "tianluo.commands.run._resolve_step_failure_action",
-        return_value=("pause", str(project_root / "se3" / "calls" / "x.json")),
+        return_value=("pause", str(project_root / "tianluo" / "calls" / "x.json")),
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
@@ -117,7 +117,7 @@ def _run_step(project_root: Path, flow: FlowInstance, run_result: StepStatus):
 
 def _history_path(project_root: Path, flow: FlowInstance) -> Path:
     step_id = flow.state.current_step_id
-    return project_root / "se3" / "history" / flow.flow_id / f"{step_id}.jsonl"
+    return project_root / "tianluo" / "history" / flow.flow_id / f"{step_id}.jsonl"
 
 
 def _read_event_records(path: Path) -> list[dict]:
@@ -301,7 +301,7 @@ def test_record_step_event_shape_is_stable_and_serializable():
                 "outputs": {"task_groups": [], "nested": {"k": [1, 2, 3]}},
             },
         )
-        path = project_root / "se3" / "history" / "flow-z" / "03_plan_x.jsonl"
+        path = project_root / "tianluo" / "history" / "flow-z" / "03_plan_x.jsonl"
         rec = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
 
         # Stable top-level shape the frontend's normalizeRecord depends on.
@@ -323,7 +323,7 @@ def test_get_step_history_skips_step_event_records():
 
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
-        flow_dir = project_root / "se3" / "history" / "flow-y"
+        flow_dir = project_root / "tianluo" / "history" / "flow-y"
         flow_dir.mkdir(parents=True)
         jsonl = flow_dir / "01_discovery_x.jsonl"
         msg = ChatMessage(
@@ -378,7 +378,7 @@ def _seed_active_flow(project_root: Path, flow_id: str, step_id: str, *, lines):
     how ``HistorySink`` appends a ``step_completed`` line when the step
     finishes mid-flow.
     """
-    state_dir = project_root / "se3" / "state"
+    state_dir = project_root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -392,7 +392,7 @@ def _seed_active_flow(project_root: Path, flow_id: str, step_id: str, *, lines):
         ),
         encoding="utf-8",
     )
-    hist_dir = project_root / "se3" / "history" / flow_id
+    hist_dir = project_root / "tianluo" / "history" / flow_id
     hist_dir.mkdir(parents=True, exist_ok=True)
     jsonl = hist_dir / f"{step_id}.jsonl"
     with jsonl.open("w", encoding="utf-8") as f:
@@ -537,7 +537,7 @@ def test_active_flow_incremental_does_not_duplicate_step_completed():
         assert reads[0].mode == daemon_protocol.HISTORY_MODE_APPEND
 
         # A new step finishes -> a new per-step jsonl with its own card line.
-        new_jsonl = project_root / "se3" / "history" / "F2" / "03_plan_def.jsonl"
+        new_jsonl = project_root / "tianluo" / "history" / "F2" / "03_plan_def.jsonl"
         new_jsonl.write_text(
             json.dumps(_step_completed_line("03_plan_def", "plan", {"task_groups": []}))
             + "\n",
@@ -678,7 +678,7 @@ def test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options():
     with tempfile.TemporaryDirectory() as td:
         project_root = Path(td)
         # engine.json so the snapshot has a flow_id to scope against.
-        state_dir = project_root / "se3" / "state"
+        state_dir = project_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "engine.json").write_text(
             json.dumps(
@@ -781,7 +781,7 @@ def test_discovery_confirm_submission_gates_on_one():
 # These pin the summarize-specific leg of the chain:
 #
 # * Task 1 — the summarize step's USER prompt AND ASSISTANT markdown result
-#   must land in se3/history/{flow_id}/{step_id}.jsonl via the *real* LLMCaller
+#   must land in tianluo/history/{flow_id}/{step_id}.jsonl via the *real* LLMCaller
 #   record_prompt/record_response path. ``summarize_handler`` calls
 #   ``caller.call(json_mode="off")`` with ``flow_id`` / ``step_id`` /
 #   ``step_type`` wired through, so the recording is not bypassed and the IDs
@@ -861,7 +861,7 @@ def test_summarize_records_user_and_assistant_to_jsonl():
 
         jsonl = (
             project_root
-            / "se3"
+            / "tianluo"
             / "history"
             / "sum-flow-1"
             / "12_summarize_abc12345.jsonl"
@@ -966,7 +966,7 @@ def _seed_engine_with_steps(
     status: str = "RUNNING",
 ) -> None:
     """Write an engine.json whose ``state`` carries a steps map + current step."""
-    state_dir = project_root / "se3" / "state"
+    state_dir = project_root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -999,7 +999,7 @@ def _write_flow_call(
     prompt: str = "Need a human?",
 ) -> Path:
     """Write a flow-scoped call file (kind-tagged, with context.flow_id/step_id)."""
-    calls_dir = project_root / "se3" / "calls"
+    calls_dir = project_root / "tianluo" / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
     path = calls_dir / f"{call_id}.json"
     path.write_text(

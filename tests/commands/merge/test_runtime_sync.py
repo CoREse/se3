@@ -80,7 +80,7 @@ class TestSymlinkDestinationRejected:
         external = tmp_path / "external.txt"
         external.write_text("ORIGINAL")
 
-        dest_dir = tmp_path / "se3" / "history"
+        dest_dir = tmp_path / "tianluo" / "history"
         dest_dir.mkdir(parents=True)
         dest = dest_dir / "victim.log"
         os.symlink(str(external), str(dest))
@@ -97,11 +97,11 @@ class TestSymlinkDestinationRejected:
         self, tmp_path: Path,
     ) -> None:
         """Even an in-tree symlink is rejected — the policy is uniform."""
-        in_tree_target = tmp_path / "se3" / "logs" / "real.log"
+        in_tree_target = tmp_path / "tianluo" / "logs" / "real.log"
         in_tree_target.parent.mkdir(parents=True)
         in_tree_target.write_text("real content")
 
-        dest_dir = tmp_path / "se3" / "history"
+        dest_dir = tmp_path / "tianluo" / "history"
         dest_dir.mkdir(parents=True)
         dest = dest_dir / "victim.log"
         os.symlink(str(in_tree_target), str(dest))
@@ -115,7 +115,7 @@ class TestSymlinkDestinationRejected:
 
     def test_normal_write_still_works(self, tmp_path: Path) -> None:
         """Regression: the symlink guard does not break normal writes."""
-        dest_dir = tmp_path / "se3" / "history"
+        dest_dir = tmp_path / "tianluo" / "history"
         dest_dir.mkdir(parents=True)
         dest = dest_dir / "flow.log"
 
@@ -125,7 +125,7 @@ class TestSymlinkDestinationRejected:
 
     def test_write_overwrite_regular_file_still_works(self, tmp_path: Path) -> None:
         """Regression: the symlink guard does not break regular overwrites."""
-        dest_dir = tmp_path / "se3" / "history"
+        dest_dir = tmp_path / "tianluo" / "history"
         dest_dir.mkdir(parents=True)
         dest = dest_dir / "flow.log"
         dest.write_text("old")
@@ -142,7 +142,7 @@ class TestSymlinkDestinationRejected:
         external = tmp_path / "external.txt"
         external.write_text("ORIGINAL")
 
-        dest_dir = tmp_path / "se3" / "history"
+        dest_dir = tmp_path / "tianluo" / "history"
         dest_dir.mkdir(parents=True)
         dest = dest_dir / "race.log"
         # No symlink at lstat time.
@@ -201,8 +201,8 @@ class TestLenientModePreservesSuccess:
         mode preserves the first."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "a.log").write_text("alpha content")
@@ -234,7 +234,7 @@ class TestLenientModePreservesSuccess:
         # have rolled it back via the outer except's blanket loop.
         assert (target_se3 / "history" / "a.log").exists()
         assert (target_se3 / "history" / "a.log").read_text() == "alpha content"
-        # se3/ root must not be removed either (lenient mode preserves).
+        # tianluo/ root must not be removed either (lenient mode preserves).
         assert target_se3.exists()
 
     def test_strict_mode_still_rolls_back(
@@ -244,8 +244,8 @@ class TestLenientModePreservesSuccess:
         propagated failure rolls back every file copied this invocation."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "a.log").write_text("alpha")
@@ -274,7 +274,7 @@ class TestLenientModePreservesSuccess:
 
         # Strict mode rolled back the first file.
         assert not (target_se3 / "history" / "a.log").exists()
-        # And the se3/ root, since we created it.
+        # And the tianluo/ root, since we created it.
         assert not target_se3.exists()
 
     def test_lenient_mode_preserves_already_written_sidecars(
@@ -283,8 +283,8 @@ class TestLenientModePreservesSuccess:
         """Sidecars written before the exception fires must also be preserved."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Two source files, both will collide in the bypass loop.
         (source_se3 / "history").mkdir(parents=True)
@@ -366,8 +366,8 @@ class TestSidecarSelfCollisionFiltered:
         merge does NOT propagate them to the destination."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "real.log").write_text("real data")
@@ -399,8 +399,8 @@ class TestSidecarSelfCollisionFiltered:
         target never creates ``.from-A.from-A`` chains."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "x.log").write_text("source content")
@@ -429,8 +429,8 @@ class TestSidecarSelfCollisionFiltered:
         also filtered."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "summary-flow.md").write_text("real summary")
@@ -581,7 +581,7 @@ class TestBoundedReadAndWrite:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         # A real file larger than the cap.
@@ -606,7 +606,7 @@ class TestIdempotentEndToEnd:
     def test_repeated_clean_sync_is_no_op(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "x.log").write_text("payload")
@@ -629,8 +629,8 @@ class TestIdempotentEndToEnd:
         """
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "x.log").write_text("source")

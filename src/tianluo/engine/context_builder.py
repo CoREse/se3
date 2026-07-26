@@ -5,6 +5,7 @@ project state, and code for LLM calls.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir, runtime_dir_name
 
 import logging
 from pathlib import Path
@@ -88,7 +89,7 @@ def get_spec_language_instruction(project_root: Path) -> str:
 
     spec_language governs the *knowledge-asset language*. The ``sync_*`` modules
     (``sync_engine`` / ``sync_discovery`` / ``sync_analyzer``) write or regenerate
-    spec files but are NOT ``se3 run`` state-machine steps, so they cannot route
+    spec files but are NOT ``luo run`` state-machine steps, so they cannot route
     through :func:`get_step_language_instruction`. This helper gives them the same
     spec-flavored instruction ``update_spec`` receives, driven by
     ``language.spec_language``. (The two live knowledge-asset writers —
@@ -112,7 +113,7 @@ ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 # Default steps that receive B-class issue discovery prompt injection.
 #
 # Empty by default: no step receives B-class issue-discovery injection unless a
-# project explicitly opts a step in via ``issue_discovery.steps`` in se3.yaml.
+# project explicitly opts a step in via ``issue_discovery.steps`` in tianluo.yaml.
 # The whitelist mechanism itself is retained so steps that can surface
 # ``discovered_issues`` from their own output (e.g. verify_spec via its JSON
 # response) can still be enabled through config.
@@ -142,7 +143,7 @@ SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
 ]
 
 # Steps explicitly forbidden from runtime environment injection.
-# These are mechanical steps where awareness of read-only se3 history/issue
+# These are mechanical steps where awareness of read-only luo history/issue
 # commands adds no value (and just inflates the prompt).
 RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS = frozenset({"commit", "version_analyze"})
 
@@ -206,13 +207,13 @@ def _reset_runtime_environment_cache() -> None:
 
 
 def get_runtime_environment_injection(step_type: str, project_root: Path) -> str:
-    """Get the se3 runtime environment prompt injection for a step.
+    """Get the luo runtime environment prompt injection for a step.
 
-    Loads ``src/se3/engine/runtime_environment.md`` and returns its content
+    Loads ``src/tianluo/engine/runtime_environment.md`` and returns its content
     (prefixed with ``\\n\\n``) for whitelisted steps. The whitelist is the
     union of:
       * default list :data:`RUNTIME_ENV_INJECTION_DEFAULT_STEPS`, OR
-      * ``runtime_environment_injection.steps`` from ``se3.yaml`` when present
+      * ``runtime_environment_injection.steps`` from ``tianluo.yaml`` when present
         and a list,
     minus :data:`RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS` which always wins.
 
@@ -248,13 +249,18 @@ def get_runtime_environment_injection(step_type: str, project_root: Path) -> str
     body = _load_runtime_environment_markdown()
     if not body:
         return ""
+    # Legacy-layout projects still keep their runtime content under tianluo/ —
+    # rewrite the canonical path references so the injected instructions
+    # point at directories that actually exist (12.x transition only).
+    if runtime_dir_name(project_root) == "se3":
+        body = body.replace("tianluo/", "se3/")
     return "\n\n" + body
 
 
 def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     """Get the issue discovery prompt injection for a step.
 
-    Checks if the step is in the whitelist (from se3.yaml config or defaults)
+    Checks if the step is in the whitelist (from tianluo.yaml config or defaults)
     and not in the forbidden list, then returns the injection prompt.
 
     Args:
@@ -268,8 +274,8 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     if step_type in ISSUE_DISCOVERY_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from the active project YAML (se3.local.yaml when
-    # present, otherwise se3.yaml). Routing through load_project_yaml
+    # Read whitelist from the active project YAML (tianluo.local.yaml when
+    # present, otherwise tianluo.yaml). Routing through load_project_yaml
     # keeps malformed-local-shadow warnings firing here too instead of
     # relying on some other loader having run first.
     whitelist = ISSUE_DISCOVERY_DEFAULT_STEPS
@@ -302,10 +308,10 @@ def get_spec_names_injection(
 ) -> str:
     """Get the available-specs names prompt injection for a step.
 
-    Lists all available specs under ``se3/specs/`` and declares which are already
+    Lists all available specs under ``tianluo/specs/`` and declares which are already
     loaded into the prompt (from ``relevant_specs``), so the LLM can optionally
-    consult additional specs on demand via the read-only ``se3 spec`` index
-    commands (``se3 spec index`` / ``se3 spec show``) if the analyze step missed
+    consult additional specs on demand via the read-only ``luo spec`` index
+    commands (``luo spec index`` / ``luo spec show``) if the analyze step missed
     them — never by reading a whole ``spec.md`` file.
 
     Args:
@@ -324,8 +330,8 @@ def get_spec_names_injection(
     if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from the active project YAML (se3.local.yaml when
-    # present, otherwise se3.yaml). Routing through load_project_yaml
+    # Read whitelist from the active project YAML (tianluo.local.yaml when
+    # present, otherwise tianluo.yaml). Routing through load_project_yaml
     # ensures malformed-local-shadow warnings surface here too rather
     # than depending on some other loader having run first.
     whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
@@ -350,7 +356,7 @@ def get_spec_names_injection(
     if step_type not in whitelist:
         return ""
 
-    # Scan the resolved specs dir (se3/specs preferred, specs/ fallback,
+    # Scan the resolved specs dir (tianluo/specs preferred, specs/ fallback,
     # openspec/specs legacy) so projects using the fallback layout get the
     # correct listing.
     specs_dir = ContextBuilder._resolve_specs_dir(project_root)
@@ -379,17 +385,17 @@ def get_spec_names_injection(
         f"Specs already loaded above: {loaded_display}.\n\n"
         "If a spec above is not yet included but you believe it is relevant to "
         "the current task, you MAY consult it on demand through the read-only "
-        "`se3 spec` index commands (run them via Bash):\n"
-        "- `se3 spec index` — root view: every spec's name, a one-sentence "
+        "`luo spec` index commands (run them via Bash):\n"
+        "- `luo spec index` — root view: every spec's name, a one-sentence "
         "locator, and item count. Start here.\n"
-        "- `se3 spec index <spec> [<group>...]` — drill into one spec's "
+        "- `luo spec index <spec> [<group>...]` — drill into one spec's "
         "Requirement index; trailing group-path components open a folded domain "
         "group or a `pN` page.\n"
-        "- `se3 spec show <spec>::<requirement>` — read the authoritative body of "
+        "- `luo spec show <spec>::<requirement>` — read the authoritative body of "
         "ONE Requirement (plus its physical location).\n"
         "Do NOT read an entire `spec.md` file with the Read tool (large specs "
-        "exceed the Read size limit); navigate with `se3 spec index` and fetch "
-        "only the specific Requirement bodies you need with `se3 spec show`. "
+        "exceed the Read size limit); navigate with `luo spec index` and fetch "
+        "only the specific Requirement bodies you need with `luo spec show`. "
         "Only consult specs that directly help the task — avoid reading broadly."
     )
 
@@ -397,11 +403,11 @@ def get_spec_names_injection(
 def get_charter_injection(project_root: Path) -> str:
     """Get the full-charter prompt injection.
 
-    The charter (``se3/charter.md``) is the shrunk rename of the retired base
+    The charter (``tianluo/charter.md``) is the shrunk rename of the retired base
     spec and plays exactly one runtime role: it is injected **in full, into
     every step, unconditionally**, doubling as the conventions channel for the
     sandboxed LLM sub-process (which cannot read CLAUDE.md and obtains
-    project-level conventions only through what se3 injects). This helper is the
+    project-level conventions only through what luo injects). This helper is the
     charter half of the injection-surface switch that replaces the retired
     ``get_spec_names_injection`` (spec-name list) path.
 
@@ -436,11 +442,11 @@ def get_code_index_injection(project_root: Path) -> str:
     **adaptive root view** — a zoomable directory tree expanded to a byte budget
     (``code_index.view_budget_bytes``) — is injected on every step, so the map is
     bounded no matter how large the project. The agent drills deeper **on
-    demand**: ``se3 code-index index <path>`` shows exactly one more literal
-    level, and ``se3 code-index show <path>`` shows a file's full
+    demand**: ``luo code-index index <path>`` shows exactly one more literal
+    level, and ``luo code-index show <path>`` shows a file's full
     function/method detail.
 
-    The map is read **only** from the authoritative ``se3/code-index.md``, and
+    The map is read **only** from the authoritative ``tianluo/code-index.md``, and
     this helper never triggers a (re)build (regeneration is the lazy/incremental
     ``load_or_build`` job the CLI / consuming steps own). When the md has not been
     built yet the helper still injects the drill-down protocol plus a one-line
@@ -463,12 +469,12 @@ def get_code_index_injection(project_root: Path) -> str:
         "**Before reading source code, FIRST consult the code-index to locate "
         "the relevant symbols.** Scan this map to find the directory / file(s) "
         "that matter. A collapsed directory shown as a single line can be opened "
-        "one more level with `se3 code-index index <path>`; a file's "
-        "function/method-level detail is pulled with `se3 code-index show <path>` "
+        "one more level with `luo code-index index <path>`; a file's "
+        "function/method-level detail is pulled with `luo code-index show <path>` "
         "(both run via Bash) — instead of reading whole source files blindly, the "
         "map points you at the few symbols worth reading.\n\n"
-        "To find items by keyword or regex, use `se3 code-index search <pattern>` "
-        "**instead of** `grep 'pattern' se3/code-index.md`: each hit carries the "
+        "To find items by keyword or regex, use `luo code-index search <pattern>` "
+        "**instead of** `grep 'pattern' tianluo/code-index.md`: each hit carries the "
         "item's full locating path (a symbol renders as `relpath::local_id`, so "
         "you see the file it lives in — which a raw grep line cannot give you). "
         "Its syntax matches grep — `pattern` is a regex by default; `-i` for "
@@ -480,9 +486,9 @@ def get_code_index_injection(project_root: Path) -> str:
     if index is None or not index.files:
         return header + (
             "_(The code-index has not been built yet. Run "
-            "`se3 code-index rebuild` to generate `se3/code-index.md`; the "
-            "display commands `se3 code-index index <path>` / "
-            "`se3 code-index show <path>` read that map and report it is not "
+            "`luo code-index rebuild` to generate `tianluo/code-index.md`; the "
+            "display commands `luo code-index index <path>` / "
+            "`luo code-index show <path>` read that map and report it is not "
             "built until you do.)_\n"
         )
 
@@ -515,15 +521,15 @@ def ensure_code_index_fresh(
 
     A flow step that injects the code-index (analyze / plan / implement / …)
     calls this immediately before :func:`get_code_index_injection`, so the
-    authoritative ``se3/code-index.md`` is re-enumerated and only the symbols
+    authoritative ``tianluo/code-index.md`` is re-enumerated and only the symbols
     whose content fingerprint changed are re-summarised (unchanged symbols reuse
     their md summary, preserving human corrections). Without this, source files
     edited since the last build — e.g. by a prior flow's commits — would leave a
-    stale map injected into every step until a human ran ``se3 code-index
+    stale map injected into every step until a human ran ``luo code-index
     rebuild`` manually.
 
     Gated on the md already existing: the **initial** build is owned by
-    ``se3 migrate`` / the explicit ``se3 code-index rebuild`` command (the
+    ``luo migrate`` / the explicit ``luo code-index rebuild`` command (the
     injection itself surfaces a build note when no map exists), so a project that
     has never built the index does not pay a full LLM build mid-flow. Once a map
     exists, every consuming step keeps it fresh incrementally.
@@ -565,15 +571,15 @@ def ensure_code_index_fresh(
 
 
 # Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
-# `se3 run` state-machine steps (so they are absent from STEP_POOL / StepType),
+# `luo run` state-machine steps (so they are absent from STEP_POOL / StepType),
 # but their sub-agents must only read code and return spec text — never write
 # to disk. ``sync_resolve`` is deliberately excluded: its Way-A update path
-# edits ``se3/specs/<name>/spec.md`` in place via the Edit tool and therefore
+# edits ``tianluo/specs/<name>/spec.md`` in place via the Edit tool and therefore
 # must remain writable.
 _READ_ONLY_SYNC_STEPS = frozenset({"sync_scan", "sync_analyze"})
 
 # Sync-engine pseudo-steps that legitimately WRITE spec files via the LLM
-# (the Way-A in-place ``Edit`` of ``se3/specs/<name>/spec.md``). Listed here
+# (the Way-A in-place ``Edit`` of ``tianluo/specs/<name>/spec.md``). Listed here
 # in parallel with the read-only sync steps above so the two sync write paths
 # are registered side by side:
 #   - ``sync_resolve``  — drift resolution write-back (sync_engine.py:669)
@@ -589,26 +595,26 @@ _WRITABLE_SYNC_STEPS = frozenset({"sync_resolve", "sync_respond"})
 # authoritative sets above.
 _ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
 
-# Internal LLMCaller step types that are NOT `se3 run` state-machine steps (so
+# Internal LLMCaller step types that are NOT `luo run` state-machine steps (so
 # they are absent from STEP_POOL) but whose sub-agents are *pure functions*:
 # they only read code and RETURN structured text/JSON, while SE3's own code does
 # every disk write. They MUST run read-only so the sub-agent cannot write stray
 # files into the project (which would otherwise be picked up by the gitignore-
 # respecting enumerator and pollute the index / working tree):
 #   - ``code_index`` — the per-node summariser (returns {id: summary}; SE3 writes
-#     se3/code-index.md itself via code_index._write_md).
+#     tianluo/code-index.md itself via code_index._write_md).
 #   - ``migrate``    — the spec-salvage LLM (returns charter text + colocations;
-#     SE3 writes se3/charter.md and the why-comments itself).
+#     SE3 writes tianluo/charter.md and the why-comments itself).
 _READ_ONLY_INTERNAL_STEPS = frozenset({"code_index", "migrate"})
 
-# The single authoritative set of steps allowed to write ``se3/specs/`` and
+# The single authoritative set of steps allowed to write ``tianluo/specs/`` and
 # therefore exempted from the three-layer spec-write protection (soft
 # prompt injection, the PreToolUse hook, and the post-step diff fallback).
 # Derived — never hand-enumerated — so registering a new writable sync step in
 # ``_WRITABLE_SYNC_STEPS`` automatically propagates the exemption everywhere and
 # the set cannot silently drift (e.g. forgetting ``sync_respond``). Writing spec
 # files is the sole responsibility of ``update_spec`` (which consumes plan's
-# ``spec_changes`` declaration) and ``se3 sync``.
+# ``spec_changes`` declaration) and ``luo sync``.
 SPEC_WRITE_ALLOWED_STEPS = frozenset({"update_spec"}) | _ALL_SYNC_STEPS
 
 
@@ -616,7 +622,7 @@ def is_step_read_only(step_type: str) -> bool:
     """Return True if ``step_type`` runs under read-only constraints.
 
     Resolution order:
-      1. ``se3 run`` state-machine steps — looked up in STEP_POOL by name,
+      1. ``luo run`` state-machine steps — looked up in STEP_POOL by name,
          honoring each step's ``read_only`` attribute.
       2. Sync-engine read-only pseudo-steps (``sync_scan`` / ``sync_analyze``).
       3. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
@@ -694,9 +700,9 @@ def _is_spec_write_protected_step(step_type: str) -> bool:
 
     WHY (charter_freshness connateral effect): flipping charter_freshness to
     read_only=False makes it match here, so its LLM call now also receives the
-    se3/specs/ write-protection injection. This is harmless and directionally
-    correct — the charter_freshness handler writes se3/charter.md, never
-    se3/specs/, so forbidding spec-file writes constrains nothing it needs.
+    tianluo/specs/ write-protection injection. This is harmless and directionally
+    correct — the charter_freshness handler writes tianluo/charter.md, never
+    tianluo/specs/, so forbidding spec-file writes constrains nothing it needs.
 
     The sync pseudo-steps are exempt without needing the explicit
     ``SPEC_WRITE_ALLOWED_STEPS`` check, because they are absent from STEP_POOL
@@ -723,12 +729,12 @@ def get_spec_write_protection_injection(step_type: str) -> str:
     Returns a prompt fragment, for every non-read-only LLM step except those in
     :data:`SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all sync steps), that
     forbids the step from creating/modifying/deleting any spec file under
-    ``se3/specs/`` while explicitly leaving it free to change existing code
+    ``tianluo/specs/`` while explicitly leaving it free to change existing code
     behavior. Writing spec files is the dedicated responsibility of
-    ``update_spec`` / ``se3 sync``; a step that changes behavior or believes a
+    ``update_spec`` / ``luo sync``; a step that changes behavior or believes a
     project convention/architecture shift should be recorded notes that in its
     summary, and the durable records of the charter refactor capture it — the
-    charter (``se3/charter.md``) and colocated why-comments, kept current by
+    charter (``tianluo/charter.md``) and colocated why-comments, kept current by
     their own mechanisms (the ``charter_freshness`` step and the implement
     step's why-comment convention) — not this step writing a spec file.
 
@@ -741,19 +747,19 @@ def get_spec_write_protection_injection(step_type: str) -> str:
         "\n\n## SPEC FILE WRITE PROTECTION\n"
         "You are free to change existing code behavior as the task requires — "
         "this constraint does NOT restrict what behavior you may implement.\n\n"
-        "It restricts only one thing: the spec files under `se3/specs/**` are "
+        "It restricts only one thing: the spec files under `tianluo/specs/**` are "
         "read-only for this step. Recording code into spec files is the "
-        "dedicated job of the `update_spec` step and `se3 sync`, not of this "
+        "dedicated job of the `update_spec` step and `luo sync`, not of this "
         "step.\n\n"
         "Forbidden actions:\n"
         "- Do NOT use Write, Edit, or NotebookEdit to create, modify, or delete "
-        "any file under `se3/specs/`\n"
+        "any file under `tianluo/specs/`\n"
         "- Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, "
-        "`sed -i`, `tee`, `cp`/`mv` into `se3/specs/`)\n\n"
+        "`sed -i`, `tee`, `cp`/`mv` into `tianluo/specs/`)\n\n"
         "If your change alters existing behavior or you believe a project "
         "convention should be recorded, do NOT edit any spec file yourself — "
         "just note it in your summary. Durable records live in the charter "
-        "(`se3/charter.md`, high-level conventions/architecture) and in "
+        "(`tianluo/charter.md`, high-level conventions/architecture) and in "
         "colocated why-comments (code-level intent); they are kept current by "
         "their own dedicated mechanisms (the `charter_freshness` step and the "
         "implement step's why-comment convention), not by writing a spec file "
@@ -785,7 +791,7 @@ def get_runtime_context_injection(project_root: Path, main_repo_root: Path | Non
     if main_repo_root is None or main_repo_root.resolve() == project_root.resolve():
         return ""
 
-    main_se3 = main_repo_root / "se3"
+    main_se3 = runtime_dir(main_repo_root)
     if not main_se3.exists():
         return ""
 
@@ -800,7 +806,7 @@ def get_runtime_context_injection(project_root: Path, main_repo_root: Path | Non
         if issue_files:
             context_parts.append(f"### Open Issues ({len(issue_files)})")
             for name in issue_files[:10]:
-                context_parts.append(f"- `se3/issues/open/{name}`")
+                context_parts.append(f"- `tianluo/issues/open/{name}`")
 
     # Active flow state
     state_dir = main_se3 / "state"
@@ -809,7 +815,7 @@ def get_runtime_context_injection(project_root: Path, main_repo_root: Path | Non
         if state_files:
             context_parts.append(f"\n### Flow State")
             for name in state_files[:5]:
-                context_parts.append(f"- `se3/state/{name}`")
+                context_parts.append(f"- `tianluo/state/{name}`")
 
     # History summary
     history_dir = main_se3 / "history"
@@ -855,7 +861,7 @@ def _detect_main_repo_root(worktree_path: Path) -> Path | None:
                 common_dir = (worktree_path / common_dir).resolve()
             # common_dir is the .git directory of the main repo
             main_root = common_dir.parent
-            if main_root != worktree_path and (main_root / "se3").exists():
+            if main_root != worktree_path and (runtime_dir(main_root)).exists():
                 return main_root
     except Exception:
         pass
@@ -880,8 +886,8 @@ class ContextBuilder:
 
     @staticmethod
     def _resolve_specs_dir(project_root: Path) -> Path:
-        """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
-        primary = project_root / "se3" / "specs"
+        """Resolve specs directory: tianluo/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
+        primary = runtime_dir(project_root) / "specs"
         fallback = project_root / "specs"
         legacy = project_root / "openspec" / "specs"
         if primary.exists():

@@ -61,7 +61,7 @@ def _spawn_sleeper(seconds: float = 30.0) -> subprocess.Popen:
 
 def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
     """Write a minimal engine.json under a fake project root."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -81,8 +81,8 @@ def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
 
 
 def _make_resumable_snapshot(root, *, flow_id, status="running", index=2):
-    """Write a per-flow resumable snapshot under se3/state/resumable/."""
-    snap_dir = root / "se3" / "state" / "resumable"
+    """Write a per-flow resumable snapshot under tianluo/state/resumable/."""
+    snap_dir = root / "tianluo" / "state" / "resumable"
     snap_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -208,7 +208,7 @@ def _write_fake_se3(directory, body: str):
     The basename is ``se3`` so psutil observes ``[interpreter, /path/se3, ...]``
     (se3 at argv[1]) — the real shebang-rewritten console-script shape.
     """
-    path = directory / "se3"
+    path = directory / "tianluo"
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -219,7 +219,7 @@ class TestCmdlineIsSe3Run:
     must reject inline-code stubs that carry ``se3``/``run`` as script argv."""
 
     def test_inline_code_form_is_not_se3_run(self):
-        # ``python -c <code> se3 run``: se3/run are the inline script's argv,
+        # ``python -c <code> se3 run``: tianluo/run are the inline script's argv,
         # not an se3 subcommand — this is the ghost-session false positive.
         assert _cmdline_is_se3_run(["python3", "-c", "<code>", "se3", "run"]) is False
 
@@ -257,7 +257,7 @@ class TestCmdlineIsSe3Run:
         ) is False
 
     def test_se3_run_as_script_arguments_only(self):
-        # se3/run at argv[2]+ with no -m se3 and no se3 program token.
+        # tianluo/run at argv[2]+ with no -m se3 and no se3 program token.
         assert _cmdline_is_se3_run(["python3", "script.py", "se3", "run"]) is False
 
     def test_other_se3_subcommand_with_trailing_run_is_not_se3_run(self):
@@ -400,7 +400,7 @@ class TestResolveSe3Command:
         # resolve to it (same-prefix rule beats the module-form fallback).
         fake_python = tmp_path / "python"
         fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
-        fake_se3 = tmp_path / "se3"
+        fake_se3 = tmp_path / "tianluo"
         fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
 
         monkeypatch.setattr(spawner_mod.sys, "executable", str(fake_python))
@@ -620,8 +620,8 @@ class TestEnsureSe3Project:
     """Pre-spawn auto-init hook used by the web `New Task` form."""
 
     def test_skips_init_when_already_se3_project(self, tmp_path, monkeypatch):
-        """Directory containing se3/charter.md must not re-run init."""
-        spec = tmp_path / "se3" / "charter.md"
+        """Directory containing tianluo/charter.md must not re-run init."""
+        spec = tmp_path / "tianluo" / "charter.md"
         spec.parent.mkdir(parents=True)
         spec.write_text("# existing\n", encoding="utf-8")
 
@@ -651,7 +651,7 @@ class TestEnsureSe3Project:
             captured["args"] = args
             captured["cwd"] = kwargs.get("cwd")
             # Simulate init writing the marker file.
-            spec = tmp_path / "se3" / "charter.md"
+            spec = tmp_path / "tianluo" / "charter.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
             spec.write_text("# initialized\n", encoding="utf-8")
             return _FakeCompleted()
@@ -733,7 +733,7 @@ class TestAggregator:
 
     def test_pending_calls_detected(self, tmp_path):
         _make_engine_json(tmp_path)
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         calls_dir.mkdir(parents=True)
         (calls_dir / "call_001.json").write_text("{}", encoding="utf-8")
         agg = DaemonAggregator()
@@ -750,7 +750,7 @@ class TestAggregator:
         assert agg.has_changes() is False  # unchanged
         time.sleep(0.01)
         _make_engine_json(tmp_path, status="completed")
-        os.utime(tmp_path / "se3" / "state" / "engine.json", None)
+        os.utime(tmp_path / "tianluo" / "state" / "engine.json", None)
         assert agg.has_changes() is True
 
     def test_set_project_roots(self, tmp_path):
@@ -982,7 +982,7 @@ class TestDaemonLifecycle:
             "discovery_step_123", str(proj), "1"
         )
         response_file = (
-            proj / "se3" / "calls" / "discovery_step_123.response.json"
+            proj / "tianluo" / "calls" / "discovery_step_123.response.json"
         )
         assert response_file.exists()
         procs = daemon.spawner.processes
@@ -1006,7 +1006,7 @@ class TestDaemonLifecycle:
     def test_poll_once_offloads_snapshot_build(self, tmp_path):
         """The heavy snapshot build must not block the event loop.
 
-        ``get_snapshot`` can fan out into a full ``se3/history`` walk; running it
+        ``get_snapshot`` can fan out into a full ``tianluo/history`` walk; running it
         synchronously on the loop stalls heartbeats and inbound SPAWN_FLOW. This
         test installs a deliberately blocking ``get_snapshot`` and asserts a
         concurrent coroutine (standing in for the heartbeat / receive loop)
@@ -1366,7 +1366,7 @@ class TestDaemonStartWarnings:
         out = capsys.readouterr().out
         assert "websockets" in out
         assert "local-only" in out.lower()
-        assert "pip install 'se3[server]'" in out
+        assert "pip install 'tianluo[server]'" in out
 
     def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
         """A fresh status file still showing a last_error at the deadline warns."""
@@ -1486,7 +1486,7 @@ class TestDaemonStartWarnings:
 
 
 def _make_history_flow(root, *, flow_id="flow-hist", project_root=None):
-    """Create a history-only flow under *root* (``se3/history/<flow_id>``).
+    """Create a history-only flow under *root* (``tianluo/history/<flow_id>``).
 
     Writes a ``_meta.json`` carrying ``project_root`` and one per-step ``jsonl``
     file so the flow is enumerable by both
@@ -1494,7 +1494,7 @@ def _make_history_flow(root, *, flow_id="flow-hist", project_root=None):
     :meth:`DaemonHistoryReader.build_index`.
     """
     project_root = project_root if project_root is not None else str(root)
-    flow_dir = root / "se3" / "history" / flow_id
+    flow_dir = root / "tianluo" / "history" / flow_id
     flow_dir.mkdir(parents=True, exist_ok=True)
     (flow_dir / "_meta.json").write_text(
         json.dumps(

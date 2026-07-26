@@ -37,7 +37,7 @@ def _make_flow(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-va-sc",
         "task_description": "Fix something small",
         "task_type": "bugfix",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
         # Mirror the real FlowInstance default so a MagicMock(spec=…) flow does
         # not read is_worktree_mode as a truthy MagicMock and divert the handler
         # into the worktree intent-only branch. See test_version_analyze.py.
@@ -92,7 +92,7 @@ class TestFormatSessionCommitsHelper:
             {
                 "sha": "1122334455667788",
                 "subject": "fix typo in helper",
-                "files": ["src/se3/foo.py"],
+                "files": ["src/tianluo/foo.py"],
             },
         ]
         text = _format_session_commits(commits)
@@ -150,7 +150,7 @@ class TestPromptIncludesSessionCommitsAndPreSession:
                     {
                         "sha": "bbbbbbbb33334444",
                         "subject": "implement group G2 feature",
-                        "files": ["src/se3/foo.py"],
+                        "files": ["src/tianluo/foo.py"],
                     },
                 ],
             }
@@ -302,7 +302,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
         flow = _make_flow(
             is_worktree_mode=True,
             flow_id="flow-persist-ok",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
         )
         step = _make_step(
             {"task_description": "Add a feature", "pre_session_version": "5.1.0"}
@@ -312,7 +312,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
 
         assert result == StepStatus.COMPLETED
         # The intent file was actually written under the project root.
-        assert (tmp_path / "se3" / "version-intents" / "flow-persist-ok.json").exists()
+        assert (tmp_path / "tianluo" / "version-intents" / "flow-persist-ok.json").exists()
         assert step.outputs["version_intent"]["bump_type"] == "minor"
 
     @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
@@ -336,7 +336,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
         flow = _make_flow(
             is_worktree_mode=True,
             flow_id="flow-disabled",
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
         )
         step = _make_step(
             {"task_description": "Add a feature", "pre_session_version": "5.1.0"}
@@ -353,7 +353,7 @@ class TestWorktreeIntentPersistenceIsMandatory:
         assert "version_intent" not in step.outputs
         assert "suggested_version" not in step.outputs
         # Nothing was written to the intents directory.
-        assert not (tmp_path / "se3" / "version-intents").exists()
+        assert not (tmp_path / "tianluo" / "version-intents").exists()
 
 
 class TestEndToEndDoubleBumpReplay:
@@ -385,7 +385,7 @@ class TestEndToEndDoubleBumpReplay:
             step_id="01_implement_aaaaaaaa",
         )
         step.outputs = {
-            "files_changed": ["src/se3/foo.py"],
+            "files_changed": ["src/tianluo/foo.py"],
             "implemented_groups": ["G1", "G2"],
             "summary": "Implement group G2 plus an inadvertent version bump.",
             "completion_status": "complete",
@@ -405,7 +405,7 @@ class TestEndToEndDoubleBumpReplay:
                 {
                     "sha": "bbbbbbbb33334444",
                     "subject": "implement group G2 feature",
-                    "files": ["src/se3/foo.py"],
+                    "files": ["src/tianluo/foo.py"],
                 },
             ],
         }
@@ -417,7 +417,7 @@ class TestEndToEndDoubleBumpReplay:
             task_description="Fix small thing in foo",
             task_type="bugfix",
             state=State(),
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
         )
         flow.state.selected_steps = [
             StepType.IMPLEMENT,
@@ -576,7 +576,7 @@ class TestGuardVersionRaceOwnReplay:
     """
 
     def _guard_flow(self, tmp_path):
-        flow = _make_flow(change_path=tmp_path / "se3.yaml", flow_id="flow-own")
+        flow = _make_flow(change_path=tmp_path / "tianluo.yaml", flow_id="flow-own")
         flow.state = State()
         return flow
 

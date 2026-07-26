@@ -5,23 +5,23 @@ recurring, standardized tasks (e.g. ``doc-sync``) need not be retyped
 each time. Presets come from two layers:
 
 - **Built-in layer** — markdown files under
-  ``src/se3/templates/prompts/*.md``, shipped as package data and read
+  ``src/tianluo/templates/prompts/*.md``, shipped as package data and read
   at *runtime* from the installed package. They are NEVER copied into a
-  project by ``se3 init`` (which would re-introduce the copy-drift
+  project by ``luo init`` (which would re-introduce the copy-drift
   problem that plagued the legacy base-spec template); any project with
-  se3 installed gets the latest built-in presets with zero
+  luo installed gets the latest built-in presets with zero
   configuration. Their metadata (task type, etc.) is declared inside
   this module (:data:`_BUILTIN_PRESET_METADATA`).
 
 - **Project layer** — markdown files under
-  ``<project_root>/se3/prompts/*.md`` (committed with the project).
+  ``<project_root>/tianluo/prompts/*.md`` (committed with the project).
   Their metadata may be supplied / overridden via the ``presets:``
-  section of ``se3.yaml``::
+  section of ``tianluo.yaml``::
 
       presets:
         doc-sync:
           type: feature
-          prompt_file: se3/prompts/doc-sync.md
+          prompt_file: tianluo/prompts/doc-sync.md
 
 The two layers are merged into a single registry. When the same preset
 name exists in both layers, the **project layer overrides the built-in
@@ -33,6 +33,7 @@ that does not exist raises rather than being swallowed.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,7 +43,7 @@ from typing import Dict, List, Union
 DEFAULT_PRESET_TYPE = "feature"
 
 # Built-in preset metadata, keyed by preset name. The prompt *text* lives
-# in ``src/se3/templates/prompts/<name>.md`` and is read at runtime; this
+# in ``src/tianluo/templates/prompts/<name>.md`` and is read at runtime; this
 # dict only declares per-preset metadata (currently just the task type).
 # A built-in markdown file with no entry here falls back to
 # :data:`DEFAULT_PRESET_TYPE`.
@@ -60,7 +61,7 @@ LAYER_PROJECT = "project"
 _BUILTIN_PROMPTS_DIR = Path(__file__).parent / "templates" / "prompts"
 
 # Project-local prompts live under this path, relative to project_root.
-_PROJECT_PROMPTS_RELDIR = Path("se3") / "prompts"
+_PROJECT_PROMPTS_SUBDIR = "prompts"
 
 
 class PresetError(Exception):
@@ -111,17 +112,17 @@ def _load_project_presets(project_root: Path) -> List[PresetEntry]:
 
     Built from two sources, in order:
 
-    1. Markdown files under ``<project_root>/se3/prompts/*.md`` (the
+    1. Markdown files under ``<project_root>/tianluo/prompts/*.md`` (the
        zero-config path — file stem is the preset name, default type).
-    2. The ``presets:`` section of ``se3.yaml``, which overlays metadata
+    2. The ``presets:`` section of ``tianluo.yaml``, which overlays metadata
        (``type``) and may redirect a preset to a specific
        ``prompt_file`` path (relative to ``project_root``).
     """
     project_root = Path(project_root)
     entries: Dict[str, PresetEntry] = {}
 
-    # 1. Scan se3/prompts/*.md for zero-config project presets.
-    prompts_dir = project_root / _PROJECT_PROMPTS_RELDIR
+    # 1. Scan tianluo/prompts/*.md for zero-config project presets.
+    prompts_dir = runtime_dir(project_root) / _PROJECT_PROMPTS_SUBDIR
     if prompts_dir.is_dir():
         for md in sorted(prompts_dir.glob("*.md")):
             name = md.stem
@@ -132,7 +133,7 @@ def _load_project_presets(project_root: Path) -> List[PresetEntry]:
                 layer=LAYER_PROJECT,
             )
 
-    # 2. Overlay se3.yaml presets: metadata.
+    # 2. Overlay tianluo.yaml presets: metadata.
     from .config import load_project_yaml
 
     data, _ = load_project_yaml(project_root)
@@ -150,8 +151,8 @@ def _load_project_presets(project_root: Path) -> List[PresetEntry]:
             elif existing is not None:
                 prompt_file = existing.prompt_file
             else:
-                # Declared in se3.yaml with no prompt_file and no matching
-                # se3/prompts/ file. Assume the conventional location;
+                # Declared in tianluo.yaml with no prompt_file and no matching
+                # tianluo/prompts/ file. Assume the conventional location;
                 # resolve() will raise if it genuinely does not exist.
                 prompt_file = prompts_dir / f"{name}.md"
 

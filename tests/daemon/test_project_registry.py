@@ -36,13 +36,13 @@ def _write_registry(path: Path, roots: list) -> None:
 
 def _make_project(base: Path, name: str) -> Path:
     proj = base / name
-    (proj / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (proj / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     return proj
 
 
 def _make_worktree_dir(main_root: Path, wt_name: str = "wt-1") -> Path:
-    wt = main_root / "se3" / "worktrees" / wt_name
-    (wt / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    wt = main_root / "tianluo" / "worktrees" / wt_name
+    (wt / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     return wt
 
 
@@ -312,7 +312,7 @@ def test_request_remove_project_leaves_project_data_untouched(
     """Deregistration is registry-only: nothing under the project is deleted."""
     daemon = _daemon(tmp_path)
     proj = _make_project(tmp_path, "proj")
-    marker = proj / "se3" / "state" / "engine.json"
+    marker = proj / "tianluo" / "state" / "engine.json"
     marker.write_text('{"flow_id": "f1"}', encoding="utf-8")
     daemon.request_add_project(str(proj))
 

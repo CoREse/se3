@@ -536,7 +536,7 @@ _TASK_GROUPS_TRIM_NOTE = (
     "EVERY planned task above is still listed (by id/description). Before "
     "concluding the per-task audit, retrieve the full, untruncated task_groups "
     "(complete descriptions + acceptance_criteria) via your worktree tools "
-    "(e.g. read the plan output, or `se3 history show <flow_id>`)."
+    "(e.g. read the plan output, or `luo history show <flow_id>`)."
 )
 
 

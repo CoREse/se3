@@ -3,11 +3,12 @@
 Records prompts and responses for each flow step, enables retry context
 injection, and provides human-readable browsing of conversation history.
 
-Storage format: se3/history/{flow_id}/{step_id}.jsonl
+Storage format: tianluo/history/{flow_id}/{step_id}.jsonl
 Each line is a JSON-serialized ChatMessage.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
@@ -33,7 +34,6 @@ from .token_usage import UsageTotals
 
 
 # Default project root for history storage
-_SE3_DIR = "se3"
 
 _HISTORY_DIR = "history"
 
@@ -61,7 +61,7 @@ class ChatMessage:
     fix_iteration: int = 0
     # Optional record kind tag. Empty for normal LLM user/assistant turns;
     # set to ``"interjection"`` by :func:`record_user_interjection` to mark
-    # mid-flow user inserts that ``se3 history show`` keeps visible as user
+    # mid-flow user inserts that ``luo history show`` keeps visible as user
     # bubbles but ``format_history_for_retry`` skips so they are not
     # re-fed to the LLM as part of the retry prompt.
     kind: str = ""
@@ -122,7 +122,7 @@ class ChatSession:
 
 def _history_dir(project_root: Path, flow_id: str) -> Path:
     """Get the history directory for a flow."""
-    return project_root / _SE3_DIR / _HISTORY_DIR / flow_id
+    return runtime_dir(project_root) / _HISTORY_DIR / flow_id
 
 
 def _history_file(project_root: Path, flow_id: str, step_id: str) -> Path:
@@ -235,10 +235,10 @@ def record_user_interjection(
     """Record a user interjection (mid-flow inserted instruction).
 
     Appends a single ``{role: 'user', kind: 'interjection', ...}`` JSON line
-    to ``se3/history/{flow_id}/{step_id}.jsonl``. Schema-wise the line is a
+    to ``tianluo/history/{flow_id}/{step_id}.jsonl``. Schema-wise the line is a
     superset of :class:`ChatMessage` plus the extra ``source`` field, so
     :func:`get_step_history` deserializes it back into a regular user
-    ChatMessage (with ``kind == "interjection"``) and ``se3 history show``
+    ChatMessage (with ``kind == "interjection"``) and ``luo history show``
     renders it as a user bubble; :func:`format_history_for_retry` explicitly
     skips ``kind == "interjection"`` records so the LLM retry prompt does
     not re-ingest user interjections as additional `[User Prompt]:` turns.
@@ -297,7 +297,7 @@ def record_step_event(
 ) -> None:
     """Record a step-lifecycle event (``step_completed`` / ``step_failed``).
 
-    Writes a single JSON line into ``se3/history/{flow_id}/{step_id}.jsonl``
+    Writes a single JSON line into ``tianluo/history/{flow_id}/{step_id}.jsonl``
     alongside the LLM user/assistant messages. The line is intentionally NOT
     a :class:`ChatMessage` — it carries the engine's structured step output
     in the shape the web frontend's ``normalizeRecord`` expects, so the same
@@ -340,7 +340,7 @@ def record_step_started(
 
     Writes a single ``{type: 'step_started', step_id, step_type,
     status: 'running', timestamp}`` line into
-    ``se3/history/{flow_id}/{step_id}.jsonl`` the moment a step enters the
+    ``tianluo/history/{flow_id}/{step_id}.jsonl`` the moment a step enters the
     RUNNING state. This lets the web console show the step's region (with a
     "进行中" status) immediately — including non-LLM steps (TEST / COMMIT /
     SPEC_GATE) that produce no conversation records and would otherwise leave
@@ -488,7 +488,7 @@ def record_step_status(
     """Record a non-terminal ``step_status`` lifecycle event into the jsonl.
 
     Writes a single ``{type: 'step_status', step_id, step_type, status,
-    timestamp}`` line into ``se3/history/{flow_id}/{step_id}.jsonl`` when a step
+    timestamp}`` line into ``tianluo/history/{flow_id}/{step_id}.jsonl`` when a step
     settles into a non-terminal but *displayed* state — ``paused`` or
     ``retrying``. It lets the web console replace the step region's stale
     "进行中" running anchor (written by :func:`record_step_started`) with the
@@ -854,7 +854,7 @@ def record_group_status(
     emits coarse per-group status transitions (``queued`` → ``running`` →
     ``completed`` / ``failed`` / ``skipped``); each one is written here as a
     self-contained NDJSON line into the **main repo's**
-    ``se3/history/{flow_id}/{step_id}.jsonl``.
+    ``tianluo/history/{flow_id}/{step_id}.jsonl``.
 
     Because the daemon's ``DaemonHistoryReader.active_flow_signature`` already
     fingerprints the history directory's ``*.jsonl`` by ``(name, mtime,
@@ -928,7 +928,7 @@ def record_index_progress(
 ) -> None:
     """Append a single code-index update-progress line to the step jsonl.
 
-    The commit step regenerates ``se3/code-index.md`` before staging, re-
+    The commit step regenerates ``tianluo/code-index.md`` before staging, re-
     summarising every source node this flow touched. That rebuild can take a
     while and is otherwise invisible in the web console. To surface live
     progress, the build's per-node progress callback emits one of these lines as
@@ -1082,7 +1082,7 @@ def get_flow_history(project_root: Path, flow_id: str) -> List[ChatSession]:
 
 def list_flows(project_root: Path) -> List[str]:
     """List all flow IDs that have history."""
-    history_root = project_root / _SE3_DIR / _HISTORY_DIR
+    history_root = runtime_dir(project_root) / _HISTORY_DIR
     if not history_root.exists():
         return []
     return sorted(
@@ -1487,7 +1487,7 @@ def format_history_for_retry(
     # Also skip user-interjection records (``kind == "interjection"``):
     # these are mid-flow user inserts written by
     # :func:`record_user_interjection`. They are kept in the on-disk jsonl
-    # so ``se3 history show`` and the web console can render them as user
+    # so ``luo history show`` and the web console can render them as user
     # bubbles, but they MUST NOT be re-fed into the LLM as additional
     # ``[User Prompt]:`` turns in the retry context — the interjection
     # has already been composed into the current step's effective

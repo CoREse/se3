@@ -93,7 +93,7 @@ class TestBuiltinDefaultChain:
 class TestProbeAppliesToBuiltinBranchOnly:
     def test_no_config_falls_through_to_probed_builtin(self, tmp_path):
         """No defaults and no legacy claude_commands -> level 4, probe applies."""
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("codex"):
             agents = load_agents(tmp_path)
@@ -111,7 +111,7 @@ class TestProbeAppliesToBuiltinBranchOnly:
         raising) would let se3 quietly run a different agent than the one
         the user asked for, the worst possible failure mode.
         """
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   mine: {cmd: some-cmd}
 llm_caller:
   defaults: [mine]
@@ -133,7 +133,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
     """
 
     def test_builtin_codex_only_yields_no_claude_command(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("codex"):
             assert load_claude_commands(tmp_path) == []
@@ -141,7 +141,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
             assert [a["name"] for a in load_agents(tmp_path)] == ["codex"]
 
     def test_builtin_both_available_yields_claude_only(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("claude", "codex"):
             commands = load_claude_commands(tmp_path)
@@ -150,7 +150,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
 
     def test_explicit_codex_default_still_passes_through(self, tmp_path):
         """Level 1-3 are verbatim: a named agent must not be swallowed."""
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   my-codex: {type: codex, cmd: codex}
 llm_caller:
   defaults: [my-codex]

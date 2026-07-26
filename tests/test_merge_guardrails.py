@@ -116,8 +116,8 @@ class TestCheckSpecDiff:
         assert types.count("WEAKENING") == 4
 
     def test_file_path_passed_through(self) -> None:
-        violations = check_spec_diff("SHALL x", "SHOULD x", file_path="se3/specs/test/spec.md")
-        assert violations[0].file_path == "se3/specs/test/spec.md"
+        violations = check_spec_diff("SHALL x", "SHOULD x", file_path="tianluo/specs/test/spec.md")
+        assert violations[0].file_path == "tianluo/specs/test/spec.md"
 
     def test_no_false_positive_when_both_present(self) -> None:
         """If both strong and weak are in new text, it's not a weakening."""
@@ -797,12 +797,12 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import violation_set_hash
 
         v1 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         )
         v2 = GuardrailViolation(
-            file_path="se3/specs/b/spec.md",
+            file_path="tianluo/specs/b/spec.md",
             violation_type="DELETE",
             message="Scenarios deleted: 1 WHEN clause(s) removed",
         )
@@ -815,12 +815,12 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import violation_set_hash
 
         v1 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         )
         v2 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="MUST weakened to MAY",
         )
@@ -831,12 +831,12 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import violation_set_hash
 
         v3 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Scenarios deleted: 3 WHEN clause(s) removed",
         )
         v4 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Scenarios deleted: 4 WHEN clause(s) removed",
         )
@@ -847,12 +847,12 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import violation_set_hash
 
         v5 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD at line 42",
         )
         v6 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD at line 99",
         )
@@ -915,7 +915,7 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD at line 42",
             evidence={
@@ -925,7 +925,7 @@ class TestViolationSetHash:
             },
         )
         v2 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD at line 99 (attempt 2)",
             evidence={
@@ -942,12 +942,12 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Scenarios deleted: 3 WHEN clause(s) removed",
         )
         v2 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Scenarios deleted: 4 WHEN clause(s) removed",
         )
@@ -959,7 +959,7 @@ class TestViolationSetHash:
         from tianluo.engine.merge.guardrails import GuardrailViolation, violation_set_hash
 
         v1 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Requirement deleted: SHALL line removed",
             evidence={
@@ -968,7 +968,7 @@ class TestViolationSetHash:
             },
         )
         v2 = GuardrailViolation(
-            file_path="se3/specs/a/spec.md",
+            file_path="tianluo/specs/a/spec.md",
             violation_type="DELETE",
             message="Requirement deleted: SHALL line removed (attempt 2)",
             evidence={
@@ -993,7 +993,7 @@ class TestViolationSetHash:
         # Round 1: violation on line A
         round1 = [
             GuardrailViolation(
-                file_path="se3/specs/a/spec.md",
+                file_path="tianluo/specs/a/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
                 evidence={
@@ -1006,7 +1006,7 @@ class TestViolationSetHash:
         # Round 2: violation on line B (different strong line)
         round2 = [
             GuardrailViolation(
-                file_path="se3/specs/a/spec.md",
+                file_path="tianluo/specs/a/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
                 evidence={
@@ -1228,7 +1228,7 @@ class TestMergeGuardrailsCheck:
 
     def test_spec_weakening_detected(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: X\n\nThe system SHALL validate all inputs.\n")
         _commit(tmp_path, "initial with spec")
@@ -1252,7 +1252,7 @@ class TestMergeGuardrailsCheck:
         _commit(tmp_path, "initial")
         base_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-        spec_dir = tmp_path / "se3" / "specs" / "new"
+        spec_dir = tmp_path / "tianluo" / "specs" / "new"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: Y\n\nThe system SHALL do Y.\n")
         _commit(tmp_path, "add new spec")
@@ -1264,7 +1264,7 @@ class TestMergeGuardrailsCheck:
 
     def test_when_deletion_detected(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Z\n\n"
@@ -1288,7 +1288,7 @@ class TestMergeGuardrailsCheck:
 
     def test_quantifier_weakening_detected(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: Q\n\nValidate all inputs.\n")
         _commit(tmp_path, "initial")
@@ -1306,7 +1306,7 @@ class TestMergeGuardrailsCheck:
     def test_capitalized_quantifier_weakening_detected(self, tmp_path: Path) -> None:
         """Capitalized quantifiers at sentence start are detected (case-insensitive)."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: Q\n\nAll inputs SHALL be valid.\n")
         _commit(tmp_path, "initial")
@@ -1324,7 +1324,7 @@ class TestMergeGuardrailsCheck:
     def test_capitalized_every_quantifier_weakening_detected(self, tmp_path: Path) -> None:
         """Capitalized 'Every' quantifier at sentence start is detected."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("## Requirement: Q\n\nEvery field MUST be checked.\n")
         _commit(tmp_path, "initial")
@@ -1348,7 +1348,7 @@ class TestMergeGuardrailsCheck:
         ref-fetching pipeline would not be caught by pure-function unit tests.
         """
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -1381,7 +1381,7 @@ class TestMergeGuardrailsCheck:
     ) -> None:
         """Quantifier variant of the scn incident through check_merge_result."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Data\n\n"
@@ -1419,7 +1419,7 @@ class TestOrchestratorGuardrailsIntegration:
     def _setup_repo_with_spec(self, tmp_path: Path) -> str:
         """Create repo with a spec file. Returns default branch name."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -1445,7 +1445,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Create feature branch that weakens SHALL → SHOULD in spec
         _git(tmp_path, "checkout", "-b", "feature-weaken")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1480,7 +1480,7 @@ class TestOrchestratorGuardrailsIntegration:
         assert "SHOULD" not in spec_path.read_text()
 
         # Human call file should exist
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         call_files = list(calls_dir.glob("merge_*_guardrail.json"))
         assert len(call_files) == 1
         data = json.loads(call_files[0].read_text())
@@ -1494,7 +1494,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Set up a conflict on the spec file
         _git(tmp_path, "checkout", "-b", "feature-conflict")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"  # weakened
@@ -1526,7 +1526,7 @@ class TestOrchestratorGuardrailsIntegration:
             return LLMResolution(
                 files=[
                     FileResolution(
-                        path="se3/specs/base/spec.md",
+                        path="tianluo/specs/base/spec.md",
                         resolved_content=spec_path.read_text().replace("SHALL", "SHOULD"),
                         hunks=[HunkResolution(1, 10, Confidence.HIGH, "merged")],
                         overall_confidence=Confidence.HIGH,
@@ -1559,7 +1559,7 @@ class TestOrchestratorGuardrailsIntegration:
         assert self._is_working_tree_clean(tmp_path) is True
 
         # Human call file should exist
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         call_files = list(calls_dir.glob("merge_*_guardrail.json"))
         assert len(call_files) == 1
 
@@ -1573,7 +1573,7 @@ class TestOrchestratorGuardrailsIntegration:
         default_branch = self._setup_repo_with_spec(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-fast")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1592,7 +1592,7 @@ class TestOrchestratorGuardrailsIntegration:
             return {
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n\n"
@@ -1634,7 +1634,7 @@ class TestOrchestratorGuardrailsIntegration:
         default_branch = self._setup_repo_with_spec(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1684,7 +1684,7 @@ class TestOrchestratorGuardrailsIntegration:
         default_branch = self._setup_repo_with_spec(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1737,7 +1737,7 @@ class TestOrchestratorGuardrailsIntegration:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1771,7 +1771,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # Create feature that changes both a regular file and weakens spec
         _git(tmp_path, "checkout", "-b", "feature-mixed")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1812,7 +1812,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         # feature-b: weakens spec
         _git(tmp_path, "checkout", "-b", "feature-b")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1874,7 +1874,7 @@ class TestOrchestratorGuardrailsIntegration:
         # modify the SAME line.  Feature weakens SHALL→SHOULD on line 3.
         # Main also modifies line 3 (adds text) and adds a new scenario at the end.
         _git(tmp_path, "checkout", "-b", "feature-delete-when")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1907,7 +1907,7 @@ class TestOrchestratorGuardrailsIntegration:
             return LLMResolution(
                 files=[
                     FileResolution(
-                        path="se3/specs/base/spec.md",
+                        path="tianluo/specs/base/spec.md",
                         resolved_content=(
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n\n"
@@ -1962,7 +1962,7 @@ class TestOrchestratorGuardrailsIntegration:
         default_branch = self._setup_repo_with_spec(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-weaken-shall")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n\n"
@@ -1994,7 +1994,7 @@ class TestOrchestratorGuardrailsIntegration:
             return LLMResolution(
                 files=[
                     FileResolution(
-                        path="se3/specs/base/spec.md",
+                        path="tianluo/specs/base/spec.md",
                         resolved_content=(
                             "## Requirement: Auth\n\n"
                             "The system SHOULD validate all user inputs.\n\n"
@@ -2036,7 +2036,7 @@ class TestOrchestratorGuardrailsIntegration:
     def test_guardrail_check_uses_ref_not_worktree(self, tmp_path: Path) -> None:
         """Verify check_merge_result reads from git refs, not working tree."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("The system SHALL do X.\n")
         _commit(tmp_path, "initial")
@@ -2073,7 +2073,7 @@ class TestOrchestratorGuardrailsIntegration:
         # Rewrite the spec to match the exact scn scenario:
         #   Original: SHALL A, SHOULD B (pre-existing weak), SHALL C
         #   Feature:  SHALL A. (extended), SHOULD B (unchanged), SHALL C, MUST D (new strong)
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHALL validate inputs.\n\n"
@@ -2122,7 +2122,7 @@ class TestOrchestratorGuardrailsIntegration:
         """
         default_branch = self._setup_repo_with_spec(tmp_path)
 
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Data\n\n"
             "Validate all inputs.\n\n"
@@ -2166,7 +2166,7 @@ class TestRunGuardrailsFastBranch:
     def _setup_spec_repo(self, tmp_path: Path) -> str:
         """Init repo with a spec file. Returns default branch name."""
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text(
             "## Requirement: Auth\n\n"
@@ -2182,7 +2182,7 @@ class TestRunGuardrailsFastBranch:
 
         # Create feature branch that weakens spec
         _git(tmp_path, "checkout", "-b", "feature-fast")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -2208,7 +2208,7 @@ class TestRunGuardrailsFastBranch:
                 "violation_count": len(violations),
             })
             from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
 
         monkeypatch.setattr(
             "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
@@ -2235,7 +2235,7 @@ class TestRunGuardrailsFastBranch:
         default_branch = self._setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-amend")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -2259,14 +2259,14 @@ class TestRunGuardrailsFastBranch:
             content = content.replace("SHOULD", "SHALL")
             spec_path.write_text(content)
             # Stage and create fix-up commit
-            _git(self.project_root, "add", "se3/specs/base/spec.md")
+            _git(self.project_root, "add", "tianluo/specs/base/spec.md")
             fixup_result = _git(
                 self.project_root, "commit", "-m", "fix(specs): repair guardrail violations", check=False,
             )
             if fixup_result.returncode != 0:
                 raise RuntimeError(f"git fix-up commit failed: {fixup_result.stderr}")
             from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
 
         monkeypatch.setattr(
             "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
@@ -2302,7 +2302,7 @@ class TestRunGuardrailsFastBranch:
         default_branch = self._setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -2365,7 +2365,7 @@ class TestRunGuardrailsFastBranch:
         default_branch = self._setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -2420,7 +2420,7 @@ class TestRunGuardrailsFastBranch:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -2776,7 +2776,7 @@ class TestSpecIterationExceptionHandling:
         from tianluo.engine.merge import guardrails as guardrails_mod
 
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("The system SHALL X.\n")
         _commit(tmp_path, "initial")
@@ -2819,8 +2819,8 @@ class TestMergeRespondSpecPath:
     def test_forward_slash_path_detected(self) -> None:
         from tianluo.commands.merge_respond import _is_spec_path
 
-        assert _is_spec_path("se3/specs/base/spec.md") is True
-        assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
+        assert _is_spec_path("tianluo/specs/base/spec.md") is True
+        assert _is_spec_path("tianluo/specs/foo/bar/spec.md") is True
 
     def test_backslash_path_detected(self) -> None:
         """Windows-style backslash paths are normalized and detected."""
@@ -2833,8 +2833,8 @@ class TestMergeRespondSpecPath:
         from tianluo.commands.merge_respond import _is_spec_path
 
         assert _is_spec_path("README.md") is False
-        assert _is_spec_path("se3/state/foo.json") is False
-        assert _is_spec_path("se3/specs/base/other.md") is False
+        assert _is_spec_path("tianluo/state/foo.json") is False
+        assert _is_spec_path("tianluo/specs/base/other.md") is False
         assert _is_spec_path("") is False
 
 
@@ -2910,7 +2910,7 @@ class TestGuardrailReportIncomplete:
         from tianluo.engine.merge import guardrails as guardrails_mod
 
         _init_repo(tmp_path)
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("The system SHALL X.\n")
         _commit(tmp_path, "initial")

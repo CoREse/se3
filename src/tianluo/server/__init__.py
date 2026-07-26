@@ -1,7 +1,7 @@
 """SE3 central server — the multi-machine control-plane backend.
 
 The central server accepts outbound WebSocket connections from any number of
-SE3 daemons (``se3 daemon``), aggregates their state, and re-exposes it through
+SE3 daemons (``luo daemon``), aggregates their state, and re-exposes it through
 a REST API plus a bundled web frontend. Daemons dial *out* to the server, so
 SE3 machines never need an inbound port — the architecture is NAT-friendly.
 
@@ -9,7 +9,7 @@ This is a deliberately *separate* package from the core ``se3`` CLI. Its heavy
 web dependencies (``fastapi``, ``uvicorn``) live in the ``se3[server]`` optional
 extra. The core ``se3`` command never imports this package, so a core-only
 install stays dependency-clean. The server is reached only through the
-standalone ``se3-server`` console script, whose :func:`main` is the single
+standalone ``tianluo-server`` console script, whose :func:`main` is the single
 entry point: it verifies the extra is installed *before* importing the FastAPI
 app, so a user without the extra gets a clear install hint instead of an
 ``ImportError`` traceback.
@@ -30,14 +30,14 @@ _MISSING_EXTRA_HINT = (
 
 
 def legacy_main(argv: Optional[list] = None) -> None:
-    """Entry point for the deprecated ``se3-server`` console script.
+    """Entry point for the deprecated ``tianluo-server`` console script.
 
     Prints a one-line migration notice on stderr, then runs the normal
     server entry point. The alias — and this wrapper — are removed in 13.0.0.
     """
     print(
         "se3-server: this command was renamed in 12.0.0 — use `tianluo-server`. "
-        "The `se3-server` alias will be removed in 13.0.0.",
+        "The `tianluo-server` alias will be removed in 13.0.0.",
         file=sys.stderr,
     )
     main(argv)

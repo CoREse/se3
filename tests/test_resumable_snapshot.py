@@ -4,7 +4,7 @@ Covers the engine-side half of the "any flow that *should* be resumable
 actually can be resumed" guarantee (design problem 2, group G2):
 
 * ``save_flow`` mirrors every non-COMPLETED save into
-  ``se3/state/resumable/<flow_id>.json`` and removes it on COMPLETED.
+  ``tianluo/state/resumable/<flow_id>.json`` and removes it on COMPLETED.
 * ``load_flow_by_id`` falls back to that snapshot after engine.json is
   overwritten by a later run, covering paused / interrupted (RUNNING) /
   recoverable-FAILED flows.

@@ -20,7 +20,7 @@ Key design properties honoured here:
     there are no outstanding intents it is a clean no-op, but that is decided by
     *what intents exist*, not by a merge-shape heuristic.
 
-  * **Two channels.** Without ``se3/version-rules.md`` the deterministic channel
+  * **Two channels.** Without ``tianluo/version-rules.md`` the deterministic channel
     takes ``max(bump_type)`` across the merged-in intents and mechanically
     applies it to master's current version (reusing ``version_aggregator``'s
     ``max_bump`` / ``Version`` primitives — no LLM). With a rules file the LLM
@@ -58,19 +58,21 @@ from ..git_tags import (
 from ..version_bumper import BumpType, Version
 from ..version_intent import (
     RECONCILE_TRAILER,
-    VERSION_INTENT_DIR_RELPATH,
+    intent_dir_relpath,
     VersionIntent,
     collect_intents,
     mark_consumed,
     reconcile_commit_exists,
 )
 from ..worktree import _run_git
+from ...runtime_paths import runtime_dir
 from .version_aggregator import max_bump
 
 logger = logging.getLogger(__name__)
 
 
-VERSION_RULES_FILE_RELPATH = "se3/version-rules.md"
+# Root-aware: resolved against the project's runtime dir name at use time.
+VERSION_RULES_FILE_SUBPATH = "version-rules.md"
 
 # Cap on the version-rules file injected into the LLM prompt (mirrors
 # version_analyze's guard) so a pathological rules file can't blow up the call.
@@ -349,7 +351,7 @@ def _read_version_rules(project_root: Path) -> Optional[str]:
     existing-but-unreadable rules file is therefore a typed reconcile failure;
     only genuine absence returns ``None``.
     """
-    rules_path = Path(project_root) / VERSION_RULES_FILE_RELPATH
+    rules_path = runtime_dir(Path(project_root)) / VERSION_RULES_FILE_SUBPATH
     try:
         exists = rules_path.is_file()
     except OSError as exc:
@@ -390,7 +392,7 @@ derive the single final version string. The inputs are:
   bump-type label, is the substance you decide from):
 {intents_block}
 
-- **Project version rules** (`se3/version-rules.md`, authoritative — overrides
+- **Project version rules** (`tianluo/version-rules.md`, authoritative — overrides
   default SemVer on conflict):
 {rules_text}
 
@@ -618,7 +620,7 @@ def _dirty_tracked_relpaths(project_root: Path) -> set[str]:
     # `-z` yields NUL-separated, VERBATIM paths: with git's default
     # core.quotePath=true, a plain `git diff --name-only` renders a non-ASCII or
     # quote/backslash-bearing filename as a quoted octal-escaped string (e.g.
-    # `"se3/\347\211\210.txt"`, quotes included). That literal is not a real
+    # `"tianluo/\347\211\210.txt"`, quotes included). That literal is not a real
     # repo-relative path, so it would silently fail the commit pathspec's
     # existence filter (the bump never gets staged) AND match nothing in the
     # `git status --porcelain -- <written_set>` fail-loud check (vacuous pass) —
@@ -842,7 +844,7 @@ def _commit_reconcile(
             reconcile_paths.append(str(Path(version_file).relative_to(project_root)))
         except ValueError:
             reconcile_paths.append(str(version_file))
-    reconcile_paths += ["VERSIONS.md", "README.md", "se3/version-intents"]
+    reconcile_paths += ["VERSIONS.md", "README.md", intent_dir_relpath(project_root)]
     if extra_version_paths:
         reconcile_paths += list(extra_version_paths)
     # De-duplicate while preserving order: version_file and a script-written path
@@ -943,7 +945,7 @@ def _assert_version_bump_committed(
     so the deterministic hole this whole change closes — a version bump written to
     disk but never staged into the reconcile commit (the worktree + script-mode
     combination) — can never be reported as a silent success. Neither check needs
-    se3 to know up front WHICH file carries the version, so both hold identically in
+    luo to know up front WHICH file carries the version, so both hold identically in
     script and file mode.
 
     Primary (git layer): every file the version write actually touched
@@ -1764,7 +1766,7 @@ def _restore_reconcile_paths(project_root: Path) -> None:
     reverts to its committed ``consumed=False`` as a side effect of restoring the
     intents directory, so the intent is picked up as outstanding again on retry.
     """
-    paths = ["VERSIONS.md", "README.md", VERSION_INTENT_DIR_RELPATH]
+    paths = ["VERSIONS.md", "README.md", intent_dir_relpath(project_root)]
     try:
         version_file = _version_bumper(project_root).detect_version_file(
             Path(project_root)
@@ -2078,7 +2080,7 @@ def reconcile(
     Args:
         project_root: The main-checkout project root (the merge target).
         flow_ids: Optional restriction to specific flows; default is every
-            outstanding intent in ``se3/version-intents/``.
+            outstanding intent in ``tianluo/version-intents/``.
         llm_call: Optional ``prompt -> response`` override for the custom-rules
             channel (tests stub it; production builds an LLMCaller when absent).
         commit: When ``True`` (default), stage + commit the reconcile. Set
@@ -2143,7 +2145,7 @@ def reconcile(
         intents = [i for i in intents if i.flow_id in wanted]
 
         # A SCOPED reconcile (flow_ids given) is an explicit claim by the caller
-        # — the ``se3 merge`` CLI / merge_integrate step compute the scope from
+        # — the ``luo merge`` CLI / merge_integrate step compute the scope from
         # the integrated branches' committed intent filenames — that EACH of
         # these flows was introduced by the branch just merged and MUST
         # contribute its version decision. ``collect_intents`` silently drops an
@@ -2323,7 +2325,7 @@ def reconcile(
         # outstanding intent whose ``consumed`` flag is set with no reconcile commit
         # (a signal an operator never produces) means a prior reconcile marked-then-
         # died. Its content half is already neutralized by the detach above; only
-        # the consumed-flag directory is left. Reset ONLY ``se3/version-intents`` to
+        # the consumed-flag directory is left. Reset ONLY the version-intents dir to
         # HEAD — a path the operator never edits, so this loses no operator work — so
         # the intent re-registers as outstanding and its flag flip lands atomically
         # inside the fresh reconcile commit rather than as pre-existing dirt. Skipped
@@ -2336,7 +2338,7 @@ def reconcile(
             )
             _run_git(
                 project_root, "checkout", "HEAD", "--",
-                VERSION_INTENT_DIR_RELPATH, check=False, timeout=15,
+                intent_dir_relpath(project_root), check=False, timeout=15,
             )
             intents = collect_intents(project_root, include_consumed=True)
             if wanted is not None:

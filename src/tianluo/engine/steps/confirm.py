@@ -1,5 +1,6 @@
 """Confirm step handler for human and LLM review."""
 
+from tianluo.runtime_paths import runtime_dir
 import json
 import logging
 import time
@@ -106,7 +107,7 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
     Returns:
         Path to created call file
     """
-    calls_dir = project_root / "se3" / "calls"
+    calls_dir = runtime_dir(project_root) / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
 
     # Use timestamp and step name for unique filename
@@ -331,7 +332,7 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Human reviewer path
     project_root = resolve_flow_project_root(flow)
-    calls_dir = project_root / "se3" / "calls"
+    calls_dir = runtime_dir(project_root) / "calls"
 
     change_id = flow.change_name or flow.flow_id
 

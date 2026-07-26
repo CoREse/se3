@@ -53,7 +53,7 @@ def _current_branch(path: Path) -> str:
 def _setup_spec_repo(tmp_path: Path) -> str:
     """Init repo with a spec file. Returns default branch name."""
     _init_repo(tmp_path)
-    spec_dir = tmp_path / "se3" / "specs" / "base"
+    spec_dir = tmp_path / "tianluo" / "specs" / "base"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.md").write_text(
         "## Requirement: Auth\n\n"
@@ -78,7 +78,7 @@ class TestRunGuardrailsFastRepairLoop:
 
         # Create feature branch that weakens spec
         _git(tmp_path, "checkout", "-b", "feature-stall")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -111,7 +111,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -175,7 +175,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -222,7 +222,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -284,7 +284,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -339,7 +339,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -375,7 +375,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-fix")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -402,7 +402,7 @@ class TestRunGuardrailsFastRepairLoop:
                 )
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
             )
 
         monkeypatch.setattr(
@@ -423,7 +423,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -434,7 +434,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="MUST weakened to SHOULD",
                         ),
@@ -472,7 +472,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-side-effect")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -511,7 +511,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -543,7 +543,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-rollback")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -572,7 +572,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -612,7 +612,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-rollback")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -649,7 +649,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -696,7 +696,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-type")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -730,7 +730,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -777,7 +777,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-topo")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -825,7 +825,7 @@ class TestRunGuardrailsFastRepairLoop:
                     ),
                     # Plus a normal spec violation
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -863,7 +863,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-incomplete")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -896,7 +896,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="CHECK_INCOMPLETE",
                         message="Spec file iteration error: OSError",
                         evidence={"exception_type": "OSError"},
@@ -939,7 +939,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -969,7 +969,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1017,7 +1017,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1069,7 +1069,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1175,7 +1175,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-success-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1191,7 +1191,7 @@ class TestExecuteFastStalledEscalation:
             from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
             )
 
         monkeypatch.setattr(
@@ -1209,7 +1209,7 @@ class TestExecuteFastStalledEscalation:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -1242,7 +1242,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-call-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1272,7 +1272,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1323,7 +1323,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-keyboard")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1353,7 +1353,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1397,7 +1397,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1436,7 +1436,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1478,7 +1478,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-call-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1517,7 +1517,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1577,7 +1577,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-rollback-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1607,7 +1607,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -1667,7 +1667,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-rollback-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1706,7 +1706,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,

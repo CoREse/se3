@@ -41,7 +41,7 @@ def _make_success_result(output="ok"):
 
 
 def _write_override(tmp_path, step, agents_yaml, registry=None):
-    """Helper to write se3.yaml with a registry + step override.
+    """Helper to write tianluo.yaml with a registry + step override.
 
     ``agents_yaml`` is the YAML body below the step key (a list of
     agent name references). ``registry`` defines the top-level agents
@@ -55,7 +55,7 @@ def _write_override(tmp_path, step, agents_yaml, registry=None):
             "  override-b: {cmd: claude-b, priority: 5}\n"
             "  solo-override: {cmd: override-claude, priority: 10}\n"
         )
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         f"{registry}llm_caller:\n  steps:\n    {step}:\n{agents_yaml}"
     )
 

@@ -114,7 +114,7 @@ class TestRunWorktreeMode:
     @patch("tianluo.commands.run._worktree_flow_status", return_value="completed")
     @patch("tianluo.commands.run._finalize_worktree_cleanup", return_value=0)
     @patch("tianluo.commands.run.run_flow", return_value=0)
-    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/worktree-x"))
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/tianluo/worktrees/worktree-x"))
     @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_success_merges_back(
@@ -136,7 +136,7 @@ class TestRunWorktreeMode:
         assert wt_branch.startswith("worktree/")
         # run_flow runs IN the worktree, lock-free, in worktree mode
         _, kwargs = mock_run_flow.call_args
-        assert kwargs["project_root"] == Path("/repo/se3/worktrees/worktree-x")
+        assert kwargs["project_root"] == Path("/repo/tianluo/worktrees/worktree-x")
         assert kwargs["acquire_main_lock"] is False
         assert kwargs["is_worktree_mode"] is True
         assert kwargs["worktree_branch"] == wt_branch
@@ -145,12 +145,12 @@ class TestRunWorktreeMode:
         # (merge_integrate + version_reconcile steps), so completion only triggers
         # post-merge housekeeping + source-issue resolve via _finalize_worktree_cleanup.
         mock_cleanup.assert_called_once_with(
-            Path("/repo"), wt_branch, "main", Path("/repo/se3/worktrees/worktree-x")
+            Path("/repo"), wt_branch, "main", Path("/repo/tianluo/worktrees/worktree-x")
         )
 
     @patch("tianluo.commands.merge_cmd.run_merge")
     @patch("tianluo.commands.run.run_flow", return_value=2)
-    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/tianluo/worktrees/wt"))
     @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_failure_preserves_and_skips_merge(
@@ -163,7 +163,7 @@ class TestRunWorktreeMode:
     @patch("tianluo.commands.run._worktree_flow_status", return_value="PAUSED")
     @patch("tianluo.commands.merge_cmd.run_merge")
     @patch("tianluo.commands.run.run_flow", return_value=0)
-    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/se3/worktrees/wt"))
+    @patch("tianluo.engine.worktree.fork_worktree", return_value=Path("/repo/tianluo/worktrees/wt"))
     @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_paused_json_flow_skips_merge(
@@ -196,9 +196,9 @@ class TestRunWorktreeMode:
         worktree mid-merge. The caller must own the marker across the flow body
         AND the trailing merge; it may only vanish after the run fully returns.
         """
-        wt_path = tmp_path / "se3" / "worktrees" / "wt"
-        (wt_path / "se3" / "state").mkdir(parents=True)
-        pid_file = wt_path / "se3" / "state" / "run.pid"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "wt"
+        (wt_path / "tianluo" / "state").mkdir(parents=True)
+        pid_file = wt_path / "tianluo" / "state" / "run.pid"
 
         seen = {}
 
@@ -237,7 +237,7 @@ class TestRunWorktreeMode:
 # --------------------------------------------------------------------------
 def _write_worktree_engine_json(root: Path, *, flow_id, status, is_worktree_mode=True,
                                 branch="worktree/x-1", original="main"):
-    state_dir = root / "se3" / "worktrees" / "worktree-x-1" / "se3" / "state"
+    state_dir = root / "tianluo" / "worktrees" / "worktree-x-1" / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": flow_id,
@@ -246,7 +246,7 @@ def _write_worktree_engine_json(root: Path, *, flow_id, status, is_worktree_mode
         "is_worktree_mode": is_worktree_mode,
         "worktree_branch": branch,
         "worktree_original_branch": original,
-        "worktree_path": str(root / "se3" / "worktrees" / "worktree-x-1"),
+        "worktree_path": str(root / "tianluo" / "worktrees" / "worktree-x-1"),
         "state": {"current_step_id": "implement"},
     }
     (state_dir / "engine.json").write_text(json.dumps(data))
@@ -310,7 +310,7 @@ class TestResumeRun:
             tmp_path,
             "worktree/x-1",
             "main",
-            tmp_path / "se3" / "worktrees" / "worktree-x-1",
+            tmp_path / "tianluo" / "worktrees" / "worktree-x-1",
         )
 
     @patch("tianluo.commands.run._finalize_worktree_cleanup")
@@ -351,8 +351,8 @@ class TestResumeRun:
         """
         # The worktree dir IS the project_root here; its own engine.json is the
         # worktree-mode flow (one level deeper than find_resumable scans).
-        wt_root = tmp_path / "se3" / "worktrees" / "worktree-x-1"
-        state_dir = wt_root / "se3" / "state"
+        wt_root = tmp_path / "tianluo" / "worktrees" / "worktree-x-1"
+        state_dir = wt_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "engine.json").write_text(
             json.dumps(
@@ -385,8 +385,8 @@ class TestResumeRun:
     @patch("tianluo.commands.run.run_flow", return_value=0)
     def test_self_worktree_run_ignores_completed(self, mock_run_flow, tmp_path):
         """A COMPLETED worktree engine.json at project_root is not self-resumed."""
-        wt_root = tmp_path / "se3" / "worktrees" / "worktree-x-1"
-        state_dir = wt_root / "se3" / "state"
+        wt_root = tmp_path / "tianluo" / "worktrees" / "worktree-x-1"
+        state_dir = wt_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "engine.json").write_text(
             json.dumps(
@@ -423,7 +423,7 @@ def _write_wt_engine_with_source_issue(
     wt_path: Path, *, status, source_issue_id, branch="worktree/x-1", original="main"
 ):
     """Write a worktree engine.json carrying a persisted ``source_issue_id``."""
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": "wt-1",
@@ -524,7 +524,7 @@ class TestRunWorktreeModeSourceIssue:
     resolve; a FAILED flow (which includes an unmergeable branch) reopens it."""
 
     def _run(self, tmp_path, *, flow_exit, wt_status, issue_id, cleanup=None):
-        wt = tmp_path / "se3" / "worktrees" / "wt"
+        wt = tmp_path / "tianluo" / "worktrees" / "wt"
 
         def fake_run_flow(*_a, **kwargs):
             # Persist the worktree engine.json exactly as a real flow would,
@@ -582,7 +582,7 @@ class TestFinalizeWorktreeCleanup:
 
     def test_resolves_source_issue_after_inflight_merge(self, tmp_path):
         issue_id = _make_in_progress_issue(tmp_path)
-        wt = tmp_path / "se3" / "worktrees" / "wt"
+        wt = tmp_path / "tianluo" / "worktrees" / "wt"
         _write_wt_engine_with_source_issue(
             wt, status="completed", source_issue_id=issue_id, branch="worktree/x"
         )
@@ -611,7 +611,7 @@ class TestResumeWorktreeSourceIssue:
     the persisted status, decoupled from the original wrapper process."""
 
     def _resume(self, tmp_path, *, flow_exit, wt_status, issue_id, cleanup=None):
-        wt = tmp_path / "se3" / "worktrees" / "worktree-x-1"
+        wt = tmp_path / "tianluo" / "worktrees" / "worktree-x-1"
 
         def fake_run_flow(*_a, **kwargs):
             _write_wt_engine_with_source_issue(

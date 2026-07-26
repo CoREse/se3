@@ -2,7 +2,7 @@
 
 The idle hotspot being closed: the daemon's 1s fast tick deep-scanned every
 tracked root (engine.json peek/read + jsonl enumeration) even when nothing had
-persisted for hours. ``PersistenceManager`` now bumps ``se3/state/.dirty``
+persisted for hours. ``PersistenceManager`` now bumps ``tianluo/state/.dirty``
 ({"seq": N}, atomic rename) after every successful state persist, and
 ``DaemonHistoryReader.active_flow_signature`` gates a root whose previous deep
 scan found NO active flow on that one file's ``(mtime_ns, size)`` — an idle
@@ -79,7 +79,7 @@ def _make_flow(flow_id: str, status: FlowStatus) -> FlowInstance:
 
 
 def _sentinel_path(root: Path) -> Path:
-    return root / "se3" / "state" / ".dirty"
+    return root / "tianluo" / "state" / ".dirty"
 
 
 def _read_seq(root: Path) -> int:
@@ -90,7 +90,7 @@ def _read_seq(root: Path) -> int:
 
 def _write_engine_raw(root: Path, payload: Dict[str, Any]) -> Path:
     """Write engine.json WITHOUT PersistenceManager (no sentinel bump)."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = state_dir / "engine.json"
     engine.write_text(json.dumps(payload), encoding="utf-8")
@@ -317,7 +317,7 @@ def test_active_flow_root_is_never_gated(tmp_path, deep_scans):
     """
     _write_engine_raw(tmp_path, {"flow_id": "live", "status": "RUNNING"})
     _bump_sentinel_raw(tmp_path, 1)
-    hist_dir = tmp_path / "se3" / "history" / "live"
+    hist_dir = tmp_path / "tianluo" / "history" / "live"
     hist_dir.mkdir(parents=True)
     jsonl = hist_dir / "01_discovery.jsonl"
     jsonl.write_text("{}\n", encoding="utf-8")
@@ -550,7 +550,7 @@ def _build_idle_estate(tmp_path: Path) -> tuple:
     pm = PersistenceManager(root_a)
     pm.save_flow(_make_flow("flow-term", FlowStatus.COMPLETED))
 
-    issues = root_a / "se3" / "issues" / "open"
+    issues = root_a / "tianluo" / "issues" / "open"
     issues.mkdir(parents=True)
     for i in range(_ISSUE_FARM_SIZE):
         (issues / f"{i:03d}_idle.yaml").write_text(
@@ -564,7 +564,7 @@ def _build_idle_estate(tmp_path: Path) -> tuple:
     # Oversized archive snapshot (> MAX_PARSE_BYTES): only its bounded
     # degraded head+tail header may ever be read — and only once, thanks to
     # the stat-keyed _DEGRADED_CACHE (this was the residual ~1.1 MB/s read).
-    archive = root_a / "se3" / "state" / "archive"
+    archive = root_a / "tianluo" / "state" / "archive"
     archive.mkdir(parents=True, exist_ok=True)
     big = {
         "flow_id": "flow-big-archive",
@@ -579,12 +579,12 @@ def _build_idle_estate(tmp_path: Path) -> tuple:
 
     # History-only root: no engine.json at all, one flow dir, plus a sentinel
     # so the fast tick can gate it too.
-    hist = root_b / "se3" / "history" / "flow-hist"
+    hist = root_b / "tianluo" / "history" / "flow-hist"
     hist.mkdir(parents=True)
     (hist / "01_discovery.jsonl").write_text(
         '{"type": "prompt", "content": "hello"}\n', encoding="utf-8"
     )
-    (root_b / "se3" / "state").mkdir(parents=True)
+    (root_b / "tianluo" / "state").mkdir(parents=True)
     _bump_sentinel_raw(root_b, 1)
 
     return root_a, root_b
@@ -725,14 +725,14 @@ def test_idle_status_ticks_reuse_every_cache(tmp_path, io_counters):
 # task 12 — the calls-signature scan reuses the SAME sentinel gate
 #
 # The reader's dirty-sentinel gate must also elide the aggregator's
-# ``pending_calls_signature`` ``se3/calls/`` iterdir for a gated idle root, so
+# ``pending_calls_signature`` ``tianluo/calls/`` iterdir for a gated idle root, so
 # the WHOLE idle fast tick (history + calls) collapses to the single sentinel
 # stat the history scan already pays — not "1 stat + 1 calls enumeration".
 # --------------------------------------------------------------------------
 
 
 def _count_calls_iterdir(monkeypatch):
-    """Count ``iterdir`` calls that touch any ``se3/calls`` directory."""
+    """Count ``iterdir`` calls that touch any ``tianluo/calls`` directory."""
     import pathlib
 
     real = pathlib.Path.iterdir
@@ -750,7 +750,7 @@ def _count_calls_iterdir(monkeypatch):
 def test_calls_signature_skips_gated_idle_root(tmp_path, monkeypatch):
     """A gated root's calls dir is NOT enumerated and its fingerprint reused."""
     root = tmp_path / "proj"
-    calls_dir = root / "se3" / "calls"
+    calls_dir = root / "tianluo" / "calls"
     calls_dir.mkdir(parents=True)
     (calls_dir / "interjection_1.json").write_text("{}", encoding="utf-8")
 
@@ -785,7 +785,7 @@ def test_calls_signature_gate_source_failure_scans_all(tmp_path, monkeypatch):
     """A raising gate source fails open to a full scan (optimization, not a
     correctness dependency)."""
     root = tmp_path / "proj"
-    calls_dir = root / "se3" / "calls"
+    calls_dir = root / "tianluo" / "calls"
     calls_dir.mkdir(parents=True)
     (calls_dir / "interjection_1.json").write_text("{}", encoding="utf-8")
 

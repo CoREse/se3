@@ -55,13 +55,13 @@ def _isolated_global_home(tmp_path_factory, monkeypatch):
 
 
 def _write_project_language(project_root: Path, *, language=None, spec_language=None) -> None:
-    """Write an ``se3.yaml`` with a ``language:`` section under ``project_root``."""
+    """Write an ``tianluo.yaml`` with a ``language:`` section under ``project_root``."""
     lines = ["language:"]
     lines.append(f"  language: {language}" if language else "  language: null")
     lines.append(
         f"  spec_language: {spec_language}" if spec_language else "  spec_language: null"
     )
-    (project_root / "se3.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (project_root / "tianluo.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # --- charter_freshness -----------------------------------------------------

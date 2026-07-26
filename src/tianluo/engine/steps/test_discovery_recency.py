@@ -3,7 +3,7 @@
 Colocated engine test (allowed by the charter's testing convention) covering the
 read-only helpers added for round-0 recency injection:
 ``_collect_session_summaries`` / ``_collect_recent_commits`` /
-``_gather_recency_context``. Fixtures build fake ``se3/state/summary-*.md`` files
+``_gather_recency_context``. Fixtures build fake ``tianluo/state/summary-*.md`` files
 and a throwaway git repo under ``tmp_path``.
 """
 
@@ -25,7 +25,7 @@ from tianluo.engine.steps.discovery import (
 
 
 def _write_summary(project_root, flow_id: str, task: str, body: str) -> None:
-    state_dir = project_root / "se3" / "state"
+    state_dir = project_root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     content = (
         "# Work Summary\n\n"
@@ -137,7 +137,7 @@ def test_collect_summaries_timestamped_outranks_nonconforming_name(tmp_path):
     # oddly-named file ahead of the recent summary-2026*.md. The oddly-named
     # file's mtime is pinned to an old epoch so the timestamped file is, by
     # actual recency, the newer of the two — the recency key must reflect that.
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     _write_summary(
         tmp_path, "20260630-120000_x", "recent timestamped task", "recent body"
@@ -163,7 +163,7 @@ def test_collect_summaries_recent_nonconforming_outranks_old_timestamped(tmp_pat
     # NOT be forced behind older timestamped summaries. Before the fix, a packed
     # 14-digit filename integer dwarfed any 10-digit mtime, so the new file was
     # always dropped from the top-N regardless of its real recency.
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     for day in (1, 2, 3):
         _write_summary(
@@ -197,7 +197,7 @@ def test_collect_summaries_fewer_than_three(tmp_path):
 
 
 def test_collect_summaries_ignores_json_siblings(tmp_path):
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "summary-20260101-000000_a.json").write_text("{}", encoding="utf-8")
 
@@ -207,7 +207,7 @@ def test_collect_summaries_ignores_json_siblings(tmp_path):
 
 
 def test_collect_summaries_no_files_returns_empty(tmp_path):
-    # No se3/state dir at all — must not raise.
+    # No tianluo/state dir at all — must not raise.
     assert _collect_session_summaries(tmp_path) == []
 
 

@@ -1,4 +1,4 @@
-"""Tests for the git three-way-merge channel of ``se3 merge`` issue-ID
+"""Tests for the git three-way-merge channel of ``luo merge`` issue-ID
 reconciliation (G3).
 
 When two branches independently commit *different* issue files that parse to
@@ -44,14 +44,14 @@ def _git(path: Path, *args: str) -> subprocess.CompletedProcess:
 
 
 def _init_repo(path: Path) -> None:
-    """Init a repo whose se3/issues store is tracked but other se3/ runtime is not."""
+    """Init a repo whose tianluo/issues store is tracked but other tianluo/ runtime is not."""
     path.mkdir(parents=True, exist_ok=True)
     _git(path, "init")
     _git(path, "config", "user.email", "test@test.com")
     _git(path, "config", "user.name", "Test")
     (path / "README.md").write_text("# Test\n")
-    # Track the issue store; ignore the rest of se3/ runtime (locks, logs).
-    (path / ".gitignore").write_text("/se3/*\n!/se3/specs/\n!/se3/issues/\n")
+    # Track the issue store; ignore the rest of tianluo/ runtime (locks, logs).
+    (path / ".gitignore").write_text("/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n")
     _git(path, "add", ".")
     _git(path, "commit", "-m", "initial")
 
@@ -79,8 +79,8 @@ def _working_tree_clean(path: Path) -> bool:
 def _write_issue_file(
     root: Path, status: str, issue_id: str, slug: str, description: str,
 ) -> Path:
-    """Write a minimal valid issue YAML at se3/issues/<status>/<id>_<slug>.yaml."""
-    directory = root / "se3" / "issues" / status
+    """Write a minimal valid issue YAML at tianluo/issues/<status>/<id>_<slug>.yaml."""
+    directory = root / "tianluo" / "issues" / status
     directory.mkdir(parents=True, exist_ok=True)
     data = {
         "id": issue_id,
@@ -99,15 +99,15 @@ def _write_issue_file(
 
 
 def _set_next_id(root: Path, value: str) -> None:
-    (root / "se3" / "issues" / ".next_id").write_text(value)
+    (root / "tianluo" / "issues" / ".next_id").write_text(value)
 
 
 def _read_next_id(root: Path) -> int:
-    return int((root / "se3" / "issues" / ".next_id").read_text().strip())
+    return int((root / "tianluo" / "issues" / ".next_id").read_text().strip())
 
 
 def _open_issue_ids(root: Path) -> list[int]:
-    directory = root / "se3" / "issues" / "open"
+    directory = root / "tianluo" / "issues" / "open"
     ids: list[int] = []
     for f in directory.glob("*.yaml"):
         ids.append(int(f.name.split("_", 1)[0]))
@@ -115,7 +115,7 @@ def _open_issue_ids(root: Path) -> list[int]:
 
 
 def _find_issue_by_slug(root: Path, status: str, slug: str) -> Path | None:
-    directory = root / "se3" / "issues" / status
+    directory = root / "tianluo" / "issues" / status
     for f in directory.glob(f"*_{slug}.yaml"):
         return f
     return None
@@ -140,7 +140,7 @@ def test_committed_id_collision_is_renumbered_and_committed(tmp_path: Path) -> N
         "Ref holder\n\nBlocked by #005 until it lands.",
     )
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
 
     # Branch feature from the shared baseline (before main gains its 005).
@@ -148,7 +148,7 @@ def test_committed_id_collision_is_renumbered_and_committed(tmp_path: Path) -> N
 
     # main creates its own issue 005.
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature independently creates a *different* issue 005 whose body carries
@@ -158,7 +158,7 @@ def test_committed_id_collision_is_renumbered_and_committed(tmp_path: Path) -> N
         root, "open", "005", "feature-issue",
         "Feature issue five\n\nSee #005 for context.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005")
 
     # Back on main, capture pre-merge HEAD and run the real git merge.
@@ -246,7 +246,7 @@ def test_references_added_to_preexisting_files_follow_the_renumber(
     counter sitting AHEAD of the store (100, with the store's max at 010) is the
     next free number, so the renumber takes 100 and the counter advances to 101.
     Routing through the shared primitive is what stops the collision-repair
-    machinery from re-minting a number a concurrent ``se3 issue create`` (which
+    machinery from re-minting a number a concurrent ``luo issue create`` (which
     does not contend on the merge lock) has just reserved.
     """
     root = tmp_path / "repo"
@@ -262,13 +262,13 @@ def test_references_added_to_preexisting_files_follow_the_renumber(
         "Ref holder\n\nLegacy pointer #005.",
     )
     _set_next_id(root, "100")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # main creates its own issue 005 (the keeper).
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature creates a colliding 005 AND edits the pre-existing ref-holder,
@@ -279,7 +279,7 @@ def test_references_added_to_preexisting_files_follow_the_renumber(
         root, "open", "010", "refholder",
         "Ref holder\n\nLegacy pointer #005.\nBlocked by #005 until it lands.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005 and edits refholder")
 
     _git(root, "checkout", main_branch)
@@ -331,7 +331,7 @@ def _write_issue_file_with_id(
     slug: str, description: str,
 ) -> Path:
     """Write an issue whose filename prefix and stored ``id`` field differ."""
-    directory = root / "se3" / "issues" / status
+    directory = root / "tianluo" / "issues" / status
     directory.mkdir(parents=True, exist_ok=True)
     data = {
         "id": record_id,
@@ -361,7 +361,7 @@ def test_collision_detected_by_parsed_id_not_filename_prefix(
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "2")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
@@ -370,7 +370,7 @@ def test_collision_detected_by_parsed_id_not_filename_prefix(
     _write_issue_file_with_id(
         root, "open", "005", "007", "main-mismatch", "Main issue seven",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds id-007 record")
 
     # feature independently commits a DIFFERENT record that also parses to
@@ -379,7 +379,7 @@ def test_collision_detected_by_parsed_id_not_filename_prefix(
     _write_issue_file_with_id(
         root, "open", "006", "007", "feature-mismatch", "Feature issue seven",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds id-007 record")
 
     _git(root, "checkout", main_branch)
@@ -409,7 +409,7 @@ def test_collision_detected_by_parsed_id_not_filename_prefix(
     # No two records share a parsed numeric id anymore.
     parsed_ids = [
         yaml.safe_load(f.read_text(encoding="utf-8"))["id"]
-        for f in (root / "se3" / "issues" / "open").glob("*.yaml")
+        for f in (root / "tianluo" / "issues" / "open").glob("*.yaml")
     ]
     assert len(parsed_ids) == len(set(parsed_ids))
 
@@ -446,13 +446,13 @@ def test_multiple_incoming_files_sharing_old_id_keep_ambiguous_references(
         "Ref holder\n\nBlocked by #005 until it lands.",
     )
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # main creates the keeper 005.
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature commits TWO different files that both parse to id 005, each
@@ -466,7 +466,7 @@ def test_multiple_incoming_files_sharing_old_id_keep_ambiguous_references(
         root, "open", "005", "feature-b",
         "Feature issue B\n\nSee #005 for context.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds two 005 files")
 
     _git(root, "checkout", main_branch)
@@ -498,7 +498,7 @@ def test_multiple_incoming_files_sharing_old_id_keep_ambiguous_references(
     assert "See #005 for context." in data_a["description"]
     assert "See #011 for context." not in data_a["description"]
     assert "See #012 for context." not in data_a["description"]
-    assert "歧义引用 #005 → 候选 #011 / #012 (se3 merge)" in data_a["description"]
+    assert "歧义引用 #005 → 候选 #011 / #012 (luo merge)" in data_a["description"]
     assert "旧号 #005 → 新号 #011" in data_a["description"]
 
     issue_b = _find_issue_by_slug(root, "open", "feature-b")
@@ -508,7 +508,7 @@ def test_multiple_incoming_files_sharing_old_id_keep_ambiguous_references(
     assert "See #005 for context." in data_b["description"]
     assert "See #011 for context." not in data_b["description"]
     assert "See #012 for context." not in data_b["description"]
-    assert "歧义引用 #005 → 候选 #011 / #012 (se3 merge)" in data_b["description"]
+    assert "歧义引用 #005 → 候选 #011 / #012 (luo merge)" in data_b["description"]
     assert "旧号 #005 → 新号 #012" in data_b["description"]
 
     # The pre-existing #005 reference still names the kept issue: it was on
@@ -526,8 +526,8 @@ def test_multiple_incoming_files_sharing_old_id_keep_ambiguous_references(
         (e["file"], e["old_id"], tuple(e["candidates"]))
         for e in report.ambiguous_issue_references
     ) == [
-        ("se3/issues/open/011_feature-a.yaml", "005", ("011", "012")),
-        ("se3/issues/open/012_feature-b.yaml", "005", ("011", "012")),
+        ("tianluo/issues/open/011_feature-a.yaml", "005", ("011", "012")),
+        ("tianluo/issues/open/012_feature-b.yaml", "005", ("011", "012")),
     ]
 
     assert _read_next_id(root) == 13
@@ -558,7 +558,7 @@ def test_incoming_keeper_keeps_group_ambiguous(tmp_path: Path) -> None:
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _write_issue_file(root, "open", "010", "highest", "Highest issue ten")
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
@@ -579,7 +579,7 @@ def test_incoming_keeper_keeps_group_ambiguous(tmp_path: Path) -> None:
         root, "open", "005", "feature-b",
         "Feature issue B\n\nSee #005 for context.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds two 005 files")
 
     _git(root, "checkout", main_branch)
@@ -610,14 +610,14 @@ def test_incoming_keeper_keeps_group_ambiguous(tmp_path: Path) -> None:
     assert data_kept["id"] == "005"
     assert "See #005 for context." in data_kept["description"]
     assert "See #011 for context." not in data_kept["description"]
-    assert "歧义引用 #005 → 候选 #005 / #011 (se3 merge)" in data_kept["description"]
+    assert "歧义引用 #005 → 候选 #005 / #011 (luo merge)" in data_kept["description"]
     assert "旧号" not in data_kept["description"]  # the keeper kept its number
 
     data_ren = yaml.safe_load(renumbered.read_text(encoding="utf-8"))
     assert data_ren["id"] == "011"
     assert "See #005 for context." in data_ren["description"]
     assert "See #011 for context." not in data_ren["description"]
-    assert "歧义引用 #005 → 候选 #005 / #011 (se3 merge)" in data_ren["description"]
+    assert "歧义引用 #005 → 候选 #005 / #011 (luo merge)" in data_ren["description"]
     assert "旧号 #005 → 新号 #011" in data_ren["description"]
 
     # Both ambiguous holders surface in the report with the kept number on
@@ -626,8 +626,8 @@ def test_incoming_keeper_keeps_group_ambiguous(tmp_path: Path) -> None:
         (e["file"], e["old_id"], tuple(e["candidates"]))
         for e in report.ambiguous_issue_references
     ) == [
-        ("se3/issues/open/005_feature-a.yaml", "005", ("005", "011")),
-        ("se3/issues/open/011_feature-b.yaml", "005", ("005", "011")),
+        ("tianluo/issues/open/005_feature-a.yaml", "005", ("005", "011")),
+        ("tianluo/issues/open/011_feature-b.yaml", "005", ("005", "011")),
     ]
 
     assert _read_next_id(root) == 12
@@ -661,7 +661,7 @@ def test_preexisting_keeper_on_branch_keeps_references_ambiguous(
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
     _write_issue_file(root, "open", "010", "highest", "Highest issue ten")
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues incl. keeper 005")
     _git(root, "branch", "feature")
 
@@ -681,7 +681,7 @@ def test_preexisting_keeper_on_branch_keeps_references_ambiguous(
         root, "open", "006", "dep",
         "Dependent feature issue\n\nBlocked by #005 until it lands.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds colliding 005 and a dependent")
 
     _git(root, "checkout", main_branch)
@@ -711,7 +711,7 @@ def test_preexisting_keeper_on_branch_keeps_references_ambiguous(
     dep_body = yaml.safe_load(dep.read_text(encoding="utf-8"))["description"]
     assert "Blocked by #005 until it lands." in dep_body
     assert "Blocked by #011" not in dep_body
-    assert "歧义引用 #005 → 候选 #005 / #011 (se3 merge)" in dep_body
+    assert "歧义引用 #005 → 候选 #005 / #011 (luo merge)" in dep_body
 
     # The renumbered file's own #005 is equally undecidable (keeper or self):
     # not repointed, same note, plus its old->new trace.
@@ -719,7 +719,7 @@ def test_preexisting_keeper_on_branch_keeps_references_ambiguous(
     assert data_ren["id"] == "011"
     assert "See #005 for context." in data_ren["description"]
     assert "See #011 for context." not in data_ren["description"]
-    assert "歧义引用 #005 → 候选 #005 / #011 (se3 merge)" in data_ren["description"]
+    assert "歧义引用 #005 → 候选 #005 / #011 (luo merge)" in data_ren["description"]
     assert "旧号 #005 → 新号 #011" in data_ren["description"]
 
     # The keeper itself is untouched — no note, no rewrite.
@@ -732,8 +732,8 @@ def test_preexisting_keeper_on_branch_keeps_references_ambiguous(
         (e["file"], e["old_id"], tuple(e["candidates"]))
         for e in report.ambiguous_issue_references
     ) == [
-        ("se3/issues/open/006_dep.yaml", "005", ("005", "011")),
-        ("se3/issues/open/011_feature-issue.yaml", "005", ("005", "011")),
+        ("tianluo/issues/open/006_dep.yaml", "005", ("005", "011")),
+        ("tianluo/issues/open/011_feature-issue.yaml", "005", ("005", "011")),
     ]
 
     assert _read_next_id(root) == 12
@@ -762,13 +762,13 @@ def test_ambiguous_incoming_reference_is_recorded_not_guessed(
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "2")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # main creates the keeper 005.
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature commits two different 005 files plus a third issue whose body
@@ -786,7 +786,7 @@ def test_ambiguous_incoming_reference_is_recorded_not_guessed(
         root, "open", "006", "dep",
         "Dependent feature issue\n\nBlocked by #005 until it lands.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds colliding 005s and a dependent")
 
     _git(root, "checkout", main_branch)
@@ -813,7 +813,7 @@ def test_ambiguous_incoming_reference_is_recorded_not_guessed(
     assert "Blocked by #005 until it lands." in data["description"]
     assert "Blocked by #007" not in data["description"]
     assert "Blocked by #008" not in data["description"]
-    assert "歧义引用 #005 → 候选 #007 / #008 (se3 merge)" in data["description"]
+    assert "歧义引用 #005 → 候选 #007 / #008 (luo merge)" in data["description"]
 
     # ... and the report surfaces every ambiguous holder for operators — the
     # dependent issue AND the two colliding files themselves, whose own #005
@@ -822,9 +822,9 @@ def test_ambiguous_incoming_reference_is_recorded_not_guessed(
         (e["file"], e["old_id"], tuple(e["candidates"]))
         for e in report.ambiguous_issue_references
     ) == [
-        ("se3/issues/open/006_dep.yaml", "005", ("007", "008")),
-        ("se3/issues/open/007_feature-a.yaml", "005", ("007", "008")),
-        ("se3/issues/open/008_feature-b.yaml", "005", ("007", "008")),
+        ("tianluo/issues/open/006_dep.yaml", "005", ("007", "008")),
+        ("tianluo/issues/open/007_feature-a.yaml", "005", ("007", "008")),
+        ("tianluo/issues/open/008_feature-b.yaml", "005", ("007", "008")),
     ]
 
     # Renumbered files' own #005 tokens keep their digits (they may have
@@ -835,7 +835,7 @@ def test_ambiguous_incoming_reference_is_recorded_not_guessed(
         body = yaml.safe_load(f.read_text(encoding="utf-8"))["description"]
         assert "See #005 for context." in body
         assert f"See #{new_id} for context." not in body
-        assert "歧义引用 #005 → 候选 #007 / #008 (se3 merge)" in body
+        assert "歧义引用 #005 → 候选 #007 / #008 (luo merge)" in body
 
     assert _read_next_id(root) == 9
     assert len(report.committed_issue_renumbers) == 2
@@ -857,7 +857,7 @@ def test_identical_issue_same_path_is_not_renumbered(tmp_path: Path) -> None:
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "6")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
@@ -865,13 +865,13 @@ def test_identical_issue_same_path_is_not_renumbered(tmp_path: Path) -> None:
 
     # main adds 005 with content X.
     _write_issue_file(root, "open", "005", "shared", identical)
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds shared 005")
 
     # feature adds the byte-identical 005 at the same path.
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "005", "shared", identical)
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds shared 005")
 
     _git(root, "checkout", main_branch)
@@ -881,7 +881,7 @@ def test_identical_issue_same_path_is_not_renumbered(tmp_path: Path) -> None:
     merge_sha = _head(root)
 
     # Only one 005 file exists — git already folded the two identical adds.
-    assert len(list((root / "se3" / "issues" / "open").glob("005_*.yaml"))) == 1
+    assert len(list((root / "tianluo" / "issues" / "open").glob("005_*.yaml"))) == 1
 
     orch = MergeOrchestrator(
         project_root=root, delete_merged=False, acquire_lock=False,
@@ -1028,22 +1028,22 @@ def test_non_mapping_colliding_file_is_still_renumbered(
     main_branch = _default_branch(root)
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # main creates a valid issue 005 (the keeper).
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature commits a corrupted 005 whose body parses to a YAML *list*.
     _git(root, "checkout", "feature")
     corrupt_body = "- not\n- an\n- issue mapping\n"
-    corrupt = root / "se3" / "issues" / "open" / "005_corrupt.yaml"
+    corrupt = root / "tianluo" / "issues" / "open" / "005_corrupt.yaml"
     corrupt.parent.mkdir(parents=True, exist_ok=True)
     corrupt.write_text(corrupt_body, encoding="utf-8")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds corrupt 005")
 
     _git(root, "checkout", main_branch)
@@ -1063,7 +1063,7 @@ def test_non_mapping_colliding_file_is_still_renumbered(
     kept = _find_issue_by_slug(root, "open", "main-issue")
     assert kept is not None and kept.name == "005_main-issue.yaml"
     assert not corrupt.exists()
-    renamed = root / "se3" / "issues" / "open" / "006_corrupt.yaml"
+    renamed = root / "tianluo" / "issues" / "open" / "006_corrupt.yaml"
     assert renamed.exists()
     assert renamed.read_text(encoding="utf-8") == corrupt_body
 
@@ -1104,7 +1104,7 @@ def test_keeper_chosen_among_preexisting_survivors(tmp_path: Path) -> None:
     main_branch = _default_branch(root)
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
@@ -1112,13 +1112,13 @@ def test_keeper_chosen_among_preexisting_survivors(tmp_path: Path) -> None:
     _write_issue_file(root, "open", "010", "b", "Main issue ten (b)")
     _write_issue_file(root, "open", "010", "z", "Main issue ten (z)")
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds duplicate 010s")
 
     # feature adds a third #010 whose path sorts BEFORE both of main's.
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "010", "a", "Feature issue ten (a)")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 010")
 
     _git(root, "checkout", main_branch)
@@ -1162,7 +1162,7 @@ def test_reconcile_rollback_preserves_unrelated_uncommitted_issues(
 
     The reconcile runs on top of the already-committed merge, so a rollback
     must undo ONLY what this run wrote. The former blanket ``git clean -fdq``
-    over ``se3/issues`` would delete EVERY untracked file under the issue
+    over ``tianluo/issues`` would delete EVERY untracked file under the issue
     store — including pre-existing uncommitted issue YAMLs the user is still
     drafting (the repo routinely holds such files) that the reconciliation
     never created or touched. That is data loss by the very machinery whose
@@ -1175,17 +1175,17 @@ def test_reconcile_rollback_preserves_unrelated_uncommitted_issues(
     main_branch = _default_branch(root)
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "005", "feature-issue", "Feature issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005")
 
     _git(root, "checkout", main_branch)
@@ -1230,7 +1230,7 @@ def test_reconcile_rollback_preserves_unrelated_uncommitted_issues(
     # No renumber fix-up commit landed on top of the merge.
     assert _commits_since(root, merge_sha) == 0
     # The rollback left no renumbered-loser file behind anywhere.
-    open_dir = root / "se3" / "issues" / "open"
+    open_dir = root / "tianluo" / "issues" / "open"
     assert not list(open_dir.glob("006_feature-issue.yaml"))
 
 
@@ -1241,10 +1241,10 @@ def test_reconcile_rollback_never_pulls_next_id_backwards(
     strictly monotonic.
 
     ``.next_id`` is a TRACKED file in the real repo, so a naive
-    ``git checkout HEAD -- se3/issues/.next_id`` on rollback would overwrite the
+    ``git checkout HEAD -- tianluo/issues/.next_id`` on rollback would overwrite the
     live counter with the merge commit's committed value, pulling it BACKWARDS
     past any advance made since — including a reservation written by a
-    concurrent ``se3 issue create`` that does not hold the merge lock. The next
+    concurrent ``luo issue create`` that does not hold the merge lock. The next
     allocation would then re-mint the reserved number and two distinct issues
     would share it, violating the never-duplicate hard guarantee. This pins
     that the counter stays at its advanced (live) value while the reconcile's
@@ -1256,17 +1256,17 @@ def test_reconcile_rollback_never_pulls_next_id_backwards(
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "6")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues + tracked .next_id")
     _git(root, "branch", "feature")
 
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "005", "feature-issue", "Feature issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005")
 
     _git(root, "checkout", main_branch)
@@ -1276,10 +1276,10 @@ def test_reconcile_rollback_never_pulls_next_id_backwards(
     # The merge commit's committed ``.next_id`` is 6 (both sides). This is what
     # a rollback checkout would wrongly restore.
     assert int(
-        _git(root, "show", "HEAD:se3/issues/.next_id").stdout.strip()
+        _git(root, "show", "HEAD:tianluo/issues/.next_id").stdout.strip()
     ) == 6
 
-    # A concurrent ``se3 issue create`` (no merge lock) reserved #250 after the
+    # A concurrent ``luo issue create`` (no merge lock) reserved #250 after the
     # merge: it wrote 251 to the working-tree ``.next_id`` but its 250_*.yaml is
     # not yet on disk. This live reservation must survive the rollback.
     _set_next_id(root, "251")
@@ -1303,7 +1303,7 @@ def test_reconcile_rollback_never_pulls_next_id_backwards(
     loser = _find_issue_by_slug(root, "open", "feature-issue")
     assert loser is not None and loser.name == "005_feature-issue.yaml"
     assert _commits_since(root, merge_sha) == 0
-    open_dir = root / "se3" / "issues" / "open"
+    open_dir = root / "tianluo" / "issues" / "open"
     assert not list(open_dir.glob("006_feature-issue.yaml"))
 
 
@@ -1326,19 +1326,19 @@ def test_untracked_draft_reference_to_keeper_is_not_corrupted(
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "6")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # main creates the keeper #005.
     _write_issue_file(root, "open", "005", "main-issue", "Main issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "main adds 005")
 
     # feature creates a colliding, DIFFERENT #005 (single unambiguous loser).
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "005", "feature-issue", "Feature issue five")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005")
 
     _git(root, "checkout", main_branch)
@@ -1377,7 +1377,7 @@ def test_untracked_draft_reference_to_keeper_is_not_corrupted(
     # ... and the draft was NOT committed into the renumber fix-up commit — it
     # is still an untracked working-tree file.
     tracked = _git(
-        root, "ls-files", "--", "se3/issues/open/250_draft.yaml",
+        root, "ls-files", "--", "tianluo/issues/open/250_draft.yaml",
     ).stdout.strip()
     assert tracked == "", "the user's private draft must not be committed"
     # Exactly one fix-up commit (the renumber) landed; the draft is not in it.
@@ -1403,14 +1403,14 @@ def test_untracked_draft_sharing_id_is_not_a_collision_loser(
 
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _set_next_id(root, "2")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
     # feature commits a real issue #250.
     _git(root, "checkout", "feature")
     _write_issue_file(root, "open", "250", "committed", "Committed two five zero")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 250")
 
     _git(root, "checkout", main_branch)
@@ -1470,7 +1470,7 @@ def test_dirty_tracked_id_edit_does_not_fabricate_a_collision(
     _write_issue_file(root, "open", "001", "base", "Base issue one")
     _write_issue_file(root, "open", "010", "main", "Main issue ten")
     _set_next_id(root, "11")
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "seed issues")
     _git(root, "branch", "feature")
 
@@ -1480,7 +1480,7 @@ def test_dirty_tracked_id_edit_does_not_fabricate_a_collision(
         root, "open", "005", "feature",
         "Feature issue five\n\nSee #005 for context.",
     )
-    _git(root, "add", "-A", "--", "se3/issues")
+    _git(root, "add", "-A", "--", "tianluo/issues")
     _git(root, "commit", "-m", "feature adds 005")
 
     _git(root, "checkout", main_branch)

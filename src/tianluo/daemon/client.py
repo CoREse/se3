@@ -1,7 +1,7 @@
 """The daemon's outbound WebSocket client to the central server.
 
 :class:`DaemonClient` maintains a single outbound WebSocket connection from a
-resident ``se3 daemon`` to the central server. The connection is *outbound*
+resident ``luo daemon`` to the central server. The connection is *outbound*
 (the daemon dials the server) so SE3 machines never have to expose an inbound
 port — this is the NAT-friendly half of the daemon↔server architecture.
 
@@ -27,6 +27,7 @@ local-only operation rather than crashing.
 """
 
 from __future__ import annotations
+from tianluo.runtime_paths import runtime_dir
 
 import asyncio
 import hashlib
@@ -82,7 +83,7 @@ EnsureHandler = Callable[[str], Any]
 ResumeHandler = Callable[[str, str], Any]
 #: Type of the end-session handler — called with (flow_id, project_root, reason)
 #: when an END_SESSION arrives. The handler terminates the flow's live process
-#: and archives a worktree session (delegated to ``se3 end-session``).
+#: and archives a worktree session (delegated to ``luo end-session``).
 EndSessionHandler = Callable[[str, str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
@@ -98,7 +99,7 @@ ProjectHandler = Callable[[str, str], str]
 #: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
 HistoryProvider = Any
 #: Type of the pending-calls signature provider — zero-arg callable returning a
-#: cheap stat-based fingerprint dict of every ``se3/calls/`` file under every
+#: cheap stat-based fingerprint dict of every ``tianluo/calls/`` file under every
 #: tracked project root. Used by the push loop to fast-push a STATUS_UPDATE the
 #: moment a call file appears or disappears (e.g. when an interjection file is
 #: written or drained), without waiting for the steady 5 s status tick.
@@ -112,7 +113,7 @@ def _format_exc(exc: BaseException) -> str:
     :class:`asyncio.TimeoutError`, raised by ``websockets.connect(open_timeout=…)``
     when a ``wss://`` URL is dialed against the wrong port (the classic
     "TLS to :8080 instead of :443" misconfiguration). A bare ``str(exc)`` then
-    left :attr:`DaemonClient.last_error` blank and ``se3 daemon status`` rendered
+    left :attr:`DaemonClient.last_error` blank and ``luo daemon status`` rendered
     ``Connection: not connected ()`` — an empty, uninformative reason. Falling
     back to the exception's type name guarantees the recorded reason is always
     non-empty and usable for diagnosis.
@@ -179,17 +180,17 @@ def _normalize_ws_url(server_url: str) -> str:
     Accepts bare hosts (``host`` or ``host:8080``), ``http(s)://`` and
     ``ws(s)://`` URLs, and appends the ``/ws`` daemon endpoint path when none
     is present. When the host carries no explicit port, a *scheme-aware*
-    default is filled in so the daemon and ``se3-server`` agree on the same
+    default is filled in so the daemon and ``tianluo-server`` agree on the same
     default (a bare ``ws://host`` would otherwise fall back to the
     WebSocket-standard port 80):
 
     - ``ws://`` (and ``http://`` normalized to ``ws://``) → the plaintext
       :data:`~tianluo.daemon.protocol.DEFAULT_SERVER_PORT` (8080, the
-      ``se3-server --port`` default).
+      ``tianluo-server --port`` default).
     - ``wss://`` (and ``https://`` normalized to ``wss://``) →
       :data:`~tianluo.daemon.protocol.DEFAULT_SERVER_TLS_PORT` (443), because a
       TLS connection terminates at the reverse proxy's HTTPS port, not at
-      se3-server's plaintext default.
+      tianluo-server's plaintext default.
 
     An explicit port in the URL is always preserved, including IPv6 literals
     (``[::1]``) and custom paths (``/daemon``, an already-supplied ``/ws``).
@@ -266,14 +267,14 @@ class DaemonClient:
             spawn_handler: Callable invoked for an incoming SPAWN_FLOW.
             ensure_handler: Optional pre-spawn hook called with the resolved
                 ``project_root`` *before* the spawn handler. Used by the
-                daemon to auto-run ``se3 init`` on a brand-new target
+                daemon to auto-run ``luo init`` on a brand-new target
                 directory (and to register the root with the aggregator).
                 When the returned object has a truthy ``.error`` attribute,
                 the SPAWN_FLOW is aborted with that error logged.
             end_session_handler: Callable invoked for an incoming END_SESSION
                 with ``(flow_id, project_root, reason)``. It terminates the
-                flow's live ``se3 run`` process and archives a worktree session
-                (the daemon delegates this to an ``se3 end-session``
+                flow's live ``luo run`` process and archives a worktree session
+                (the daemon delegates this to an ``luo end-session``
                 subprocess). When ``None`` an END_SESSION is logged and ignored.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
@@ -288,7 +289,7 @@ class DaemonClient:
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
                 is disabled and the client behaves as before.
             calls_signature_provider: Zero-arg callable returning a cheap
-                stat-based fingerprint dict of every ``se3/calls/`` file under
+                stat-based fingerprint dict of every ``tianluo/calls/`` file under
                 every tracked project root. When provided, the push loop checks
                 it on the fast tick and fires an immediate STATUS_UPDATE the
                 moment the signature changes — so an interjection file being
@@ -400,7 +401,7 @@ class DaemonClient:
         # Last active-flow disk signature seen by the push loop; an unchanged
         # signature means there is nothing new to push (debounce).
         self._last_history_signature: Dict[str, Any] = {}
-        # Last ``se3/calls/`` file signature seen by the push loop. An unchanged
+        # Last ``tianluo/calls/`` file signature seen by the push loop. An unchanged
         # signature means no call file appeared or disappeared since the previous
         # tick (debounce); a change drives an immediate STATUS_UPDATE so the web
         # console sees pending / consumed interjection chips within ~1 s.
@@ -415,7 +416,7 @@ class DaemonClient:
         # on every successful :meth:`_push_status`. ``_handle_issue_command``
         # validates an incoming ``project_root`` against this cache so a webui
         # issue write no longer has to re-run the heavy snapshot provider (which
-        # walks the whole ``se3/history`` tree) on the issue-command hot path —
+        # walks the whole ``tianluo/history`` tree) on the issue-command hot path —
         # the periodic STATUS_UPDATE loop already keeps it fresh. ``None`` means
         # "no snapshot built yet"; the issue handler then falls back to building
         # one snapshot to validate against.
@@ -511,7 +512,7 @@ class DaemonClient:
                 # The server rejected our HELLO credential. Retrying would just
                 # replay the same rejected key in a tight loop, so we stop the
                 # reconnect storm and stay local-only. The reason is preserved
-                # in ``last_error`` for ``se3 daemon status`` to surface.
+                # in ``last_error`` for ``luo daemon status`` to surface.
                 logger.error(
                     "Central server rejected this daemon's credential (%s); "
                     "not reconnecting. The daemon continues in local-only mode. "
@@ -687,7 +688,7 @@ class DaemonClient:
         ``_fast_push_event`` (set the moment a server-delivered interjection
         hits disk), or on shutdown — whichever fires first. A STATUS_UPDATE is
         sent on the steady ``status_interval`` heartbeat AND whenever the
-        ``se3/calls/`` directory signature changed since the previous tick (so
+        ``tianluo/calls/`` directory signature changed since the previous tick (so
         a freshly-written interjection or a freshly-drained call surfaces on
         the web within one fast tick instead of waiting the full status
         interval). A HISTORY push fires whenever the active-flow disk
@@ -854,7 +855,7 @@ class DaemonClient:
         return woke_for_fast_push
 
     def _calls_changed(self) -> bool:
-        """Return whether the ``se3/calls/`` directory signature changed.
+        """Return whether the ``tianluo/calls/`` directory signature changed.
 
         Updates :attr:`_last_calls_signature` as a side effect. Returns
         ``False`` when no calls-signature provider is configured, so a client
@@ -862,7 +863,7 @@ class DaemonClient:
         conservatively reports a change so the next push still runs.
 
         The provider's signature is intentionally kind-agnostic — it captures
-        every file under ``se3/calls/`` so that both an interjection file
+        every file under ``tianluo/calls/`` so that both an interjection file
         landing on disk (new chip → ``pending``) and any call file disappearing
         from disk (drain → ``consumed``) flip the signature. The downstream
         diff that classifies the chip kind happens in the server's WS layer.
@@ -1050,7 +1051,7 @@ class DaemonClient:
         When an ``ensure_handler`` is configured (fresh-spawn path only), it
         runs first against the target ``project_root`` — that is what lets
         the web *New Task* form send a brand-new empty directory: the daemon
-        auto-runs ``se3 init`` there and registers it before the spawn
+        auto-runs ``luo init`` there and registers it before the spawn
         proceeds. A truthy ``.error`` on the returned object aborts the spawn
         and is logged; nothing half-initialized leaks downstream.
 
@@ -1132,7 +1133,7 @@ class DaemonClient:
             return
         if self._ensure_handler is not None and project_root:
             try:
-                # The ensure hook may run ``se3 init`` (a blocking subprocess,
+                # The ensure hook may run ``luo init`` (a blocking subprocess,
                 # up to a 120s timeout) for a not-yet-SE3 directory, then
                 # register the root via ``add_project_root`` -> registry persist
                 # -> a project_roots.json json.loads. All of that is blocking
@@ -1214,7 +1215,7 @@ class DaemonClient:
             # session's ``.response`` lands under the root whose history is
             # being read and pushed, rather than falling back to the daemon's
             # own cwd (``_default_respond_handler``), which would never reach
-            # the running ``se3 run`` process. build_index parses engine.json /
+            # the running ``luo run`` process. build_index parses engine.json /
             # snapshots / _meta.json, so it must not run on the loop.
             flow_id = str(payload.get("flow_id") or "").strip()
             if flow_id:
@@ -1321,7 +1322,7 @@ class DaemonClient:
         ``--worktree`` / discovery session to — mirroring the RESPOND_CALL /
         INTERJECT_FLOW resolution. That reverse-resolution parses disk JSON
         (``build_index``), so it runs in a worker thread (issue #243 A3). The
-        injected handler itself can spawn ``se3 end-session`` and inspect
+        injected handler itself can spawn ``luo end-session`` and inspect
         supervisor / engine state, so it is dispatched via ``asyncio.to_thread``
         too — mirroring RESPOND_CALL — keeping the websocket receive loop,
         heartbeats, and push processing responsive instead of blocking on a
@@ -1411,7 +1412,7 @@ class DaemonClient:
         # persistent) so it is an actual SE3 project on this machine. Prefer the
         # cache refreshed by the periodic STATUS_UPDATE loop so the issue-command
         # hot path does not re-run the heavy snapshot provider (which walks the
-        # whole se3/history tree) — that repeated heavyweight call is what
+        # whole tianluo/history tree) — that repeated heavyweight call is what
         # delayed the ack past the server's ISSUE_COMMAND_TIMEOUT. Only fall back
         # to building one snapshot when no cache exists yet (e.g. an issue
         # command arrives before the first STATUS_UPDATE).
@@ -1928,12 +1929,12 @@ class DaemonClient:
     ) -> Optional[Dict[str, Any]]:
         """Read a pending call's full file body (untruncated prompt).
 
-        Locates the ``se3/calls/`` file whose stem is *call_id* (ignoring its
+        Locates the ``tianluo/calls/`` file whose stem is *call_id* (ignoring its
         ``.response`` answer siblings) under each candidate root and returns its
         parsed JSON body with the ``call_id`` folded in, or ``None``.
         """
         for root in self._detail_root_candidates(project_root):
-            calls_dir = Path(root) / "se3" / "calls"
+            calls_dir = runtime_dir(Path(root)) / "calls"
             try:
                 entries = sorted(calls_dir.iterdir())
             except OSError:
@@ -2009,9 +2010,9 @@ class DaemonClient:
         deliver real state regardless of the gate.
         """
         try:
-            # Building the snapshot walks ``se3/state`` and (via the aggregator's
+            # Building the snapshot walks ``tianluo/state`` and (via the aggregator's
             # all_project_roots → enumerate_historical_project_roots) the whole
-            # ``se3/history`` tree, reading every ``_meta.json``. On a large
+            # ``tianluo/history`` tree, reading every ``_meta.json``. On a large
             # history this synchronous walk is heavy enough to stall the event
             # loop for seconds each tick, which makes the daemon miss heartbeats
             # (server marks it offline → machine greys out) and stops it from
@@ -2115,7 +2116,7 @@ class DaemonClient:
         candidates = {read.flow_id: read.cursor for read in reads}
         # Retain the cursor of a terminal flow that produced no records this
         # round but is still the live engine.json flow (e.g. a FAILED flow
-        # awaiting `se3 run --resume`). Without this it would drop out the round
+        # awaiting `luo run --resume`). Without this it would drop out the round
         # after its final flush; a later resume would then find no cursor, force
         # a full re-read, and the web console would stay frozen on the failure
         # snapshot instead of receiving incremental appends. Bounded by the live
@@ -2376,7 +2377,7 @@ class DaemonClient:
 
         Delegates to the provider's ``live_flow_ids`` when available so the
         cursor rebuild in :meth:`_push_history` can retain a final-flushed
-        terminal flow's cursor (a FAILED flow awaiting ``se3 run --resume``).
+        terminal flow's cursor (a FAILED flow awaiting ``luo run --resume``).
         A provider without the method (older reader, test stub) yields an empty
         set, which preserves the prior prune-on-drain behavior. Failures are
         logged and swallowed — a degraded lookup must never break the push.
@@ -2418,14 +2419,14 @@ def _status_signature(snapshot: Dict[str, Any]) -> str:
 
 
 def _default_respond_handler(call_id: str, project_root: str, response: Any) -> None:
-    """Write a human-call response file under ``<project_root>/se3/calls/``.
+    """Write a human-call response file under ``<project_root>/tianluo/calls/``.
 
-    SE3's ``se3/calls/`` directory is the human-call queue; writing a
+    SE3's ``tianluo/calls/`` directory is the human-call queue; writing a
     ``<call_id>.response.json`` file there is how a server-delivered response
     re-enters a paused flow. The file is written atomically (temp + rename).
     """
     root = Path(project_root).resolve() if project_root else Path.cwd()
-    calls_dir = root / "se3" / "calls"
+    calls_dir = runtime_dir(root) / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
     target = calls_dir / f"{call_id}.response.json"
     payload = {
@@ -2443,10 +2444,10 @@ def _default_respond_handler(call_id: str, project_root: str, response: Any) -> 
 
 
 def _default_interject_handler(flow_id: str, project_root: str, text: str) -> None:
-    """Write a mid-flow interjection request file under ``se3/calls/``.
+    """Write a mid-flow interjection request file under ``tianluo/calls/``.
 
     A server-delivered :data:`~tianluo.daemon.protocol.MSG_INTERJECT_FLOW` becomes
-    an ``interjection``-kind call file; the running ``se3 run`` process drains
+    an ``interjection``-kind call file; the running ``luo run`` process drains
     it at the next step boundary and folds it into ``user_interjections``.
     """
     from ..engine.interaction_calls import calls_dir_for, write_interjection_request

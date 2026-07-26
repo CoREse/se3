@@ -97,7 +97,7 @@ def _add_adjudicate_step(
 @pytest.fixture
 def tmp_project():
     d = Path(tempfile.mkdtemp())
-    (d / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+    (d / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
     yield d
     shutil.rmtree(d, ignore_errors=True)
 

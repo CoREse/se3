@@ -34,7 +34,7 @@ def _make_daemon(tmp_path, *, gc_interval=3600.0, gc_max_age_seconds=86400.0,
     root = None
     if with_root:
         root = tmp_path / "proj"
-        (root / "se3").mkdir(parents=True)
+        (root / "tianluo").mkdir(parents=True)
         roots = [str(root)]
     config = DaemonConfig(
         pid_dir=pid_dir,
@@ -141,7 +141,7 @@ def test_retained_unmerged_branch_warns(tmp_path, monkeypatch, caplog):
     report = WorktreeGCReport(
         archived=[("wt-run", None, 100)],
         retained_unmerged=[
-            ("se3/worktrees/webui-discovery", "master", "branch has commits not in HEAD (unmerged)"),
+            ("tianluo/worktrees/webui-discovery", "master", "branch has commits not in HEAD (unmerged)"),
         ],
         reclaimed_bytes=100,
     )

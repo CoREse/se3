@@ -1,7 +1,7 @@
 """Pytest-side checks for the web console's running-flow rendering rules.
 
 Most of the running-flow rendering logic lives in DOM-free helpers inside
-``src/se3/server/static/app.js``; the deeper behavioural assertions for those
+``src/tianluo/server/static/app.js``; the deeper behavioural assertions for those
 helpers live in ``tests/frontend/test_app_pure.mjs`` (a Node assertion
 suite). This pytest module pulls those checks into the pytest run as well,
 and supplements them with three static-source guardrails that codify the
@@ -30,7 +30,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STATIC_DIR = REPO_ROOT / "src" / "se3" / "server" / "static"
+STATIC_DIR = REPO_ROOT / "src" / "tianluo" / "server" / "static"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "style.css"
 FRONTEND_TEST = REPO_ROOT / "tests" / "frontend" / "test_app_pure.mjs"

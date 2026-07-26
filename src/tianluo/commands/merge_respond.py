@@ -1,7 +1,7 @@
 """SE3 Merge-Respond command — Process MCP call response files for merge conflicts.
 
 Usage:
-    se3 merge-respond <call-file-path>
+    luo merge-respond <call-file-path>
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ _STRICT_SENTINEL = "[__SE3_STRICT_PLACEHOLDER__:"
 
 
 def _is_spec_path(path: str) -> bool:
-    """Return True when *path* points to a se3 spec file.
+    """Return True when *path* points to a luo spec file.
 
     Delegates to the canonical implementation in
     :mod:`tianluo.engine.merge.guardrails` so the merge subsystem shares
@@ -219,7 +219,7 @@ def process_merge_response(
         project_root = get_project_root()
 
     # K1 fix: acquire the merge lock around the git-touching critical
-    # section so a concurrent ``se3 merge <branch>`` started by another
+    # section so a concurrent ``luo merge <branch>`` started by another
     # shell cannot race with us over the working tree, the index,
     # ``git commit --no-edit``, ``git reset --hard``, and the spec-files
     # guardrails check. Use the context-manager form so an exception
@@ -230,10 +230,10 @@ def process_merge_response(
     #
     # The lock is the project-wide "main-worktree mutex" shared by every
     # merge-completing path (``run_merge``, the orchestrator, and the
-    # synchronous ``se3 run`` flow), so acquire it in BLOCKING mode
+    # synchronous ``luo run`` flow), so acquire it in BLOCKING mode
     # (``blocking=True``): an operator answering a paused merge with
-    # ``se3 merge-respond`` must QUEUE behind a running synchronous
-    # ``se3 run`` or another ``se3 merge`` and complete once that holder
+    # ``luo merge-respond`` must QUEUE behind a running synchronous
+    # ``luo run`` or another ``luo merge`` and complete once that holder
     # releases, rather than fail fast with MergeLockBusy. Blocking mode
     # relies on the kernel releasing an flock when the holder process
     # exits, so a crashed holder cannot wedge the queue and no PID
@@ -252,9 +252,9 @@ def process_merge_response(
         return 1
 
     # Resolve the lock target back to the main repository so that a
-    # ``se3 merge-respond`` invoked with cwd inside a linked worktree still
-    # contends on the single project-wide ``<main_repo>/se3/state/merge.lock``
-    # — the same lock a synchronous ``se3 run`` and ``se3 merge`` acquire.
+    # ``luo merge-respond`` invoked with cwd inside a linked worktree still
+    # contends on the single project-wide ``<main_repo>/tianluo/state/merge.lock``
+    # — the same lock a synchronous ``luo run`` and ``luo merge`` acquire.
     lock_root = _resolve_main_lock_root(project_root)
 
     try:
@@ -690,7 +690,7 @@ def _process_merge_response_locked(
             # LLM-resolved and human-resolved merge paths.
             #
             # Per the spec contract (Mandatory guardrails after every
-            # `se3 merge` commit), spec-touching merge commits with
+            # `luo merge` commit), spec-touching merge commits with
             # violations MUST be rolled back and escalated to a human
             # call file — they cannot be silently downgraded to a
             # warning + exit 0.
@@ -867,7 +867,7 @@ def _process_merge_response_locked(
     # (or pre-resolution content).  When the merge touches spec files,
     # exit 0 here would let a SHALL→SHOULD rewrite slip past the spec
     # contract, so we *park* the call file by writing a sidecar marker
-    # and ask the user to re-invoke ``se3 merge-respond`` after their
+    # and ask the user to re-invoke ``luo merge-respond`` after their
     # commit.  The re-entry path (``_verify_pending_guardrails`` above)
     # then runs ``MergeGuardrailsCheck`` against the new commit and
     # rolls back HEAD on violation.

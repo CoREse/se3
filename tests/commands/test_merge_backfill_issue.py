@@ -66,12 +66,12 @@ def _write_worktree_engine_json(
     """Write a worktree engine.json under live or archived worktree state.
 
     Returns the engine.json path. ``archived`` places it under
-    ``se3/worktrees/.archive/<name>/...`` to mimic a GC'd / delete-merged run.
+    ``tianluo/worktrees/.archive/<name>/...`` to mimic a GC'd / delete-merged run.
     """
-    base = root / "se3" / "worktrees"
+    base = root / "tianluo" / "worktrees"
     if archived:
         base = base / ".archive"
-    state_dir = base / name / "se3" / "state"
+    state_dir = base / name / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": name,
@@ -232,7 +232,7 @@ class TestFindWorktreeSourceIssueByBranch:
     def test_corrupt_engine_json_skipped(self, tmp_path):
         # A corrupt file must not raise; a valid sibling still resolves.
         bad = (
-            tmp_path / "se3" / "worktrees" / "wt-bad" / "se3" / "state"
+            tmp_path / "tianluo" / "worktrees" / "wt-bad" / "tianluo" / "state"
         )
         bad.mkdir(parents=True, exist_ok=True)
         (bad / "engine.json").write_text("{ not valid json")
@@ -284,7 +284,7 @@ class TestMapBranchesToSourceIssues:
         # Now the worktree is gone (post-merge cleanup); scanner would miss it.
         import shutil
 
-        shutil.rmtree(tmp_path / "se3" / "worktrees" / "wt-1")
+        shutil.rmtree(tmp_path / "tianluo" / "worktrees" / "wt-1")
         assert run.find_worktree_source_issue_by_branch(tmp_path, "feat-1") is None
 
         # But the pre-captured map still resolves the issue.
