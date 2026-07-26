@@ -1,4 +1,4 @@
-<p align="center"><img src="docs/assets/tianluo-icon.png" width="128" alt="tianluo icon"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/CoREse/tianluo/master/docs/assets/tianluo-icon.png" width="128" alt="tianluo icon"></p>
 
 # tianluo（田螺）— Software Engineering 3.0 流程引擎
 

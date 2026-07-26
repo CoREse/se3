@@ -6,6 +6,31 @@ build-backend = "hatchling.build"
 name = "tianluo"
 version = "12.0.0"
 description = "tianluo (田螺) - autonomous SE 3.0 flow engine: prompt once, walk away, come back to a finished deliverable"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [
+    { name = "Zhendong Zhang (CRE)", email = "zzdzhangzzd@hotmail.com" },
+]
+keywords = [
+    "ai",
+    "agent",
+    "autonomous",
+    "flow-engine",
+    "llm",
+    "software-engineering",
+    "claude",
+    "developer-tools",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+    "Topic :: Software Development :: Build Tools",
+]
 requires-python = ">=3.8"
 dependencies = [
     "typer>=0.9.0",
@@ -55,6 +80,12 @@ browser = [
     "playwright>=1.40.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/CoREse/tianluo"
+Repository = "https://github.com/CoREse/tianluo"
+Changelog = "https://github.com/CoREse/tianluo/blob/master/VERSIONS.md"
+Issues = "https://github.com/CoREse/tianluo/issues"
+
 [project.scripts]
 # `luo` is the primary command ("call it by its short name"), `tianluo` the
 # full-name entry for docs and discoverability. `se3` / `se3-server` are
@@ -65,6 +96,22 @@ tianluo = "tianluo.cli:app"
 se3 = "tianluo.cli:legacy_app"
 tianluo-server = "tianluo.server:main"
 se3-server = "tianluo.server:legacy_main"
+
+[tool.hatch.build.targets.sdist]
+# Explicit allow-list: the repo root also hosts the (gitignored) runtime
+# directory with worktrees/history/logs — without this the sdist build
+# crawls gigabytes of runtime content.
+only-include = [
+    "src/tianluo",
+    "src/se3",
+    "docs",
+    "README.md",
+    "README.zh.md",
+    "LICENSE",
+    "NOTICE",
+    "VERSIONS.md",
+    "tianluo.example.yaml",
+]
 
 [tool.hatch.build.targets.wheel]
 # `src/se3` is the 12.x compatibility shim (aliases `import se3` and
