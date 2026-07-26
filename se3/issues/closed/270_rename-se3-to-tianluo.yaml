@@ -1,6 +1,6 @@
 id: '270'
 title: 项目改名 se3 → tianluo(田螺):命令 luo、目录/配置 tianluo、12.0.0 落地
-status: open
+status: closed
 priority: high
 type: feature
 tags:
@@ -10,7 +10,7 @@ tags:
 - source:human
 source: human
 created_at: '2026-07-07T17:04:06.743164'
-updated_at: '2026-07-07T17:04:06.743164'
+updated_at: '2026-07-26T20:55:00.000000'
 description: |
   ## 决策来源
 
@@ -163,3 +163,9 @@ description: |
   - [ ] 全测试通过(注意:改名会触碰大量测试里的 se3 引用与路径)
   - [ ] pyproject.toml 版本 = 12.0.0,VERSIONS.md 有改名记录
   - [ ] README 三处版本号统一,origin story 就位
+resolution: |
+  2026-07-26 人工 Claude 会话落地(分支 rename/tianluo-12.0.0,6 个阶段 commit)。
+  A-F 清单全部完成:包/入口/回落/迁移器/文档/示例配置;额外按 CRE 指示以
+  tianluo.example.yaml 取代跟踪的实配。全量测试 8572 通过。剩余人工步骤:
+  GitHub 仓库改名 + remote 更新、PyPI 注册与 12.0.0 首发、本仓库自身择机
+  `luo migrate run rename-to-tianluo`(首秀)。

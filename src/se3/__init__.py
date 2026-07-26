@@ -41,6 +41,12 @@ class _AliasFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
         if not fullname.startswith("se3."):
             return None
+        # ``python -m se3`` needs runpy to *execute* ``se3.__main__`` (via
+        # ``get_code``), which the aliasing loader cannot provide — decline so
+        # the normal path finder resolves it through the aliased package's
+        # ``__path__`` (tianluo/) and executes tianluo/__main__.py afresh.
+        if fullname == "se3.__main__":
+            return None
         real_name = _REAL_PACKAGE + fullname[len("se3"):]
         try:
             if importlib.util.find_spec(real_name) is None:

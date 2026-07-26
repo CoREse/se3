@@ -37,7 +37,7 @@ def legacy_main(argv: Optional[list] = None) -> None:
     """
     print(
         "se3-server: this command was renamed in 12.0.0 — use `tianluo-server`. "
-        "The `tianluo-server` alias will be removed in 13.0.0.",
+        "The `se3-server` alias will be removed in 13.0.0.",
         file=sys.stderr,
     )
     main(argv)
