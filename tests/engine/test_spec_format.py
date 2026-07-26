@@ -6,7 +6,7 @@ validate issue detection, and snapshot tests against real spec files.
 
 from __future__ import annotations
 
-from se3.engine.spec_format import (
+from tianluo.engine.spec_format import (
     SPEC_FORMAT_VERSION_MARKER,
     Issue,
     ParsedSpec,
@@ -366,7 +366,7 @@ class TestValidateIssues:
 
     def test_deep_heading_line_number_with_v1_marker(self):
         """Line numbers remain accurate even when a v1 marker shifts the text."""
-        from se3.engine.spec_format import SPEC_FORMAT_VERSION_MARKER
+        from tianluo.engine.spec_format import SPEC_FORMAT_VERSION_MARKER
         # Line 1: v1 marker, line 2: empty, then the rest starts at line 3
         text = (
             f"{SPEC_FORMAT_VERSION_MARKER}\n\n"

@@ -25,10 +25,10 @@ from unittest.mock import MagicMock, patch
 import pytest
 from typer.testing import CliRunner
 
-import se3.commands.run as run
-from se3.cli import app
-from se3.engine.issue_manager import IssueManager, IssueStatus
-from se3.engine.models import (
+import tianluo.commands.run as run
+from tianluo.cli import app
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -163,9 +163,9 @@ class TestFromIssueWrapperNoExitCodeFinalize:
     def _invoke(self, project_root, return_code):
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=project_root
+            "tianluo.commands.run.get_project_root", return_value=project_root
         ), patch(
-            "se3.commands.run.run_flow", return_value=return_code
+            "tianluo.commands.run.run_flow", return_value=return_code
         ) as mock_run_flow:
             result = runner.invoke(
                 app, ["run", "--from-issue", "1"], catch_exceptions=False
@@ -207,7 +207,7 @@ class TestFromIssueWrapperNoExitCodeFinalize:
             # Model a real run that reached a persisted terminal state carrying
             # the source issue — this is what makes the wrapper defer to
             # run_flow's own finalize rather than reverting.
-            state_dir = tmp_path / "se3" / "state"
+            state_dir = tmp_path / "tianluo" / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
             (state_dir / "engine.json").write_text(
                 json.dumps(
@@ -223,8 +223,8 @@ class TestFromIssueWrapperNoExitCodeFinalize:
 
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=tmp_path
-        ), patch("se3.commands.run.run_flow", side_effect=fake_run_flow):
+            "tianluo.commands.run.get_project_root", return_value=tmp_path
+        ), patch("tianluo.commands.run.run_flow", side_effect=fake_run_flow):
             result = runner.invoke(
                 app, ["run", "--from-issue", "1"], catch_exceptions=False
             )
@@ -252,8 +252,8 @@ class TestFromIssueEarlyDispatchFailureReverts:
 
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=tmp_path
-        ), patch("se3.commands.run.run_flow", return_value=2):
+            "tianluo.commands.run.get_project_root", return_value=tmp_path
+        ), patch("tianluo.commands.run.run_flow", return_value=2):
             result = runner.invoke(
                 app, ["run", "--from-issue", "1"], catch_exceptions=False
             )
@@ -275,7 +275,7 @@ class TestFromIssueEarlyDispatchFailureReverts:
         issue_id = IssueManager(tmp_path).create(
             description="Fix the thing", type="bug"
         ).id
-        state_dir = tmp_path / "se3" / "state"
+        state_dir = tmp_path / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
         (state_dir / "engine.json").write_text(
             json.dumps(
@@ -290,8 +290,8 @@ class TestFromIssueEarlyDispatchFailureReverts:
 
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=tmp_path
-        ), patch("se3.commands.run.run_flow", return_value=2):
+            "tianluo.commands.run.get_project_root", return_value=tmp_path
+        ), patch("tianluo.commands.run.run_flow", return_value=2):
             result = runner.invoke(
                 app, ["run", "--from-issue", "1"], catch_exceptions=False
             )
@@ -309,8 +309,8 @@ class TestFromIssueEarlyDispatchFailureReverts:
 
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=tmp_path
-        ), patch("se3.commands.run.run_worktree_mode", return_value=1):
+            "tianluo.commands.run.get_project_root", return_value=tmp_path
+        ), patch("tianluo.commands.run.run_worktree_mode", return_value=1):
             result = runner.invoke(
                 app,
                 ["run", "--from-issue", "1", "--worktree"],
@@ -328,7 +328,7 @@ class TestFromIssueEarlyDispatchFailureReverts:
         issue_id = IssueManager(tmp_path).create(
             description="Fix the thing", type="bug"
         ).id
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-1"
 
         # The current dispatch itself persists the worktree engine.json (COMPLETED)
         # and then its trailing merge fails → rc 1. Writing it inside the mocked
@@ -346,8 +346,8 @@ class TestFromIssueEarlyDispatchFailureReverts:
 
         runner = CliRunner()
         with patch(
-            "se3.commands.run.get_project_root", return_value=tmp_path
-        ), patch("se3.commands.run.run_worktree_mode", side_effect=fake_worktree):
+            "tianluo.commands.run.get_project_root", return_value=tmp_path
+        ), patch("tianluo.commands.run.run_worktree_mode", side_effect=fake_worktree):
             result = runner.invoke(
                 app,
                 ["run", "--from-issue", "1", "--worktree"],
@@ -426,7 +426,7 @@ def _write_wt_engine(
 ):
     """Persist a worktree engine.json the way a real ``--worktree`` from-issue
     flow does — carrying ``source_issue_id`` so finalization is process-decoupled."""
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": flow_id,
@@ -455,7 +455,7 @@ def _patch_real_merge(monkeypatch, report, captured):
         captured.append({"content": content, "title": title})
 
     monkeypatch.setattr(
-        "se3.commands.merge_cmd.render_text", capture_render_text
+        "tianluo.commands.merge_cmd.render_text", capture_render_text
     )
 
     class MockOrchestrator:
@@ -466,15 +466,15 @@ def _patch_real_merge(monkeypatch, report, captured):
             return report
 
     monkeypatch.setattr(
-        "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator
+        "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator
     )
     monkeypatch.setattr(
-        "se3.commands.merge_cmd._branch_exists", lambda _root, _branch: True
+        "tianluo.commands.merge_cmd._branch_exists", lambda _root, _branch: True
     )
 
 
 def _success_report(branch):
-    from se3.engine.merge.orchestrator import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeReport
 
     return MergeReport(
         success=True,
@@ -485,7 +485,7 @@ def _success_report(branch):
 
 
 def _failure_report(branch):
-    from se3.engine.merge.orchestrator import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeReport
 
     return MergeReport(success=False, failed_branch=branch)
 
@@ -506,7 +506,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         # The in-flow merge landed the branch on master (delete_merged=False), so
         # its ref exists and is an ancestor — the state finalize now verifies.
         _create_ancestor_branch(tmp_path, branch)
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-1"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-1"
 
         # --- First run PAUSED: only the persisted worktree engine.json survives
         # (the original wrapper process is gone). It carries the source_issue_id.
@@ -532,7 +532,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             )
             return 0
 
-        monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
+        monkeypatch.setattr("tianluo.commands.run.run_flow", fake_run_flow)
 
         # resume_run rediscovers the paused worktree run and re-dispatches it —
         # this models the daemon spawning `se3 run --resume` as a new process.
@@ -558,7 +558,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-2"
         _create_ancestor_branch(tmp_path, branch)
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-2"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-2"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -575,9 +575,9 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         def boom_cleanup(self, branches):
             raise RuntimeError("simulated branch-deletion failure")
 
-        monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
+        monkeypatch.setattr("tianluo.commands.run.run_flow", fake_run_flow)
         monkeypatch.setattr(
-            "se3.engine.merge.cleanup.CleanupManager.delete_merged_branches",
+            "tianluo.engine.merge.cleanup.CleanupManager.delete_merged_branches",
             boom_cleanup,
         )
 
@@ -601,7 +601,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/never-landed-9"
         # Deliberately DO NOT create the branch as an ancestor — it never merged.
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-never-9"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-never-9"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -615,7 +615,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             )
             return 0
 
-        monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
+        monkeypatch.setattr("tianluo.commands.run.run_flow", fake_run_flow)
 
         rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
 
@@ -632,7 +632,7 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
         _init_git_repo(tmp_path)
         issue_id = _make_in_progress_issue(tmp_path)
         branch = "worktree/fix-the-thing-3"
-        wt_path = tmp_path / "se3" / "worktrees" / "worktree-fix-3"
+        wt_path = tmp_path / "tianluo" / "worktrees" / "worktree-fix-3"
         _write_wt_engine(
             wt_path, status="paused", source_issue_id=issue_id, branch=branch
         )
@@ -654,9 +654,9 @@ class TestWorktreeFromIssuePauseResumeMergeResolvedE2E:
             called["merge"] = True
             raise AssertionError("run_merge must not run for a FAILED flow")
 
-        monkeypatch.setattr("se3.commands.run.run_flow", fake_run_flow)
+        monkeypatch.setattr("tianluo.commands.run.run_flow", fake_run_flow)
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator", guard_orchestrator
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator", guard_orchestrator
         )
 
         rc = run.resume_run(tmp_path, "wt-1", output_format="cli")
@@ -739,13 +739,13 @@ class TestSyncFromIssueResumeFinalizeE2E:
             lambda f: setattr(f, "status", FlowStatus.COMPLETED)
         )
 
-        # No se3/worktrees under tmp_path → resume_run routes straight to the
+        # No tianluo/worktrees under tmp_path → resume_run routes straight to the
         # synchronous run_flow path (models the daemon's `se3 run --resume`).
-        with patch("se3.commands.run.PersistenceManager", return_value=mock_pm), \
-             patch("se3.commands.run.StateMachine", return_value=mock_sm), \
-             patch("se3.commands.run.STEP_HANDLERS", {}), \
-             patch("se3.engine.step_renderers.render_step_output"), \
-             patch("se3.commands.run.render_full"):
+        with patch("tianluo.commands.run.PersistenceManager", return_value=mock_pm), \
+             patch("tianluo.commands.run.StateMachine", return_value=mock_sm), \
+             patch("tianluo.commands.run.STEP_HANDLERS", {}), \
+             patch("tianluo.engine.step_renderers.render_step_output"), \
+             patch("tianluo.commands.run.render_full"):
             rc = run.resume_run(tmp_path, "sync-1", output_format="cli")
 
         assert rc == 0
@@ -773,11 +773,11 @@ class TestSyncFromIssueResumeFinalizeE2E:
         # The step fails again with retries already exhausted → auto-fail branch.
         mock_sm.run_step.return_value = StepStatus.FAILED
 
-        with patch("se3.commands.run.PersistenceManager", return_value=mock_pm), \
-             patch("se3.commands.run.StateMachine", return_value=mock_sm), \
-             patch("se3.commands.run.STEP_HANDLERS", {}), \
-             patch("se3.engine.step_renderers.render_step_output"), \
-             patch("se3.commands.run.render_full"):
+        with patch("tianluo.commands.run.PersistenceManager", return_value=mock_pm), \
+             patch("tianluo.commands.run.StateMachine", return_value=mock_sm), \
+             patch("tianluo.commands.run.STEP_HANDLERS", {}), \
+             patch("tianluo.engine.step_renderers.render_step_output"), \
+             patch("tianluo.commands.run.render_full"):
             rc = run.resume_run(tmp_path, "sync-fail-1", output_format="cli")
 
         assert rc == 1
@@ -801,18 +801,18 @@ class TestSyncFromIssueResumeFinalizeE2E:
         mock_sm = MagicMock()
         mock_sm.run_step.return_value = StepStatus.FAILED
 
-        with patch("se3.commands.run.PersistenceManager", return_value=mock_pm), \
-             patch("se3.commands.run.StateMachine", return_value=mock_sm), \
-             patch("se3.commands.run.STEP_HANDLERS", {}), \
+        with patch("tianluo.commands.run.PersistenceManager", return_value=mock_pm), \
+             patch("tianluo.commands.run.StateMachine", return_value=mock_sm), \
+             patch("tianluo.commands.run.STEP_HANDLERS", {}), \
              patch(
-                 "se3.commands.run._resolve_step_failure_action",
+                 "tianluo.commands.run._resolve_step_failure_action",
                  return_value=("decision", "abort"),
              ), \
              patch(
-                 "se3.commands.run._failure_decision_to_choice", return_value=2
+                 "tianluo.commands.run._failure_decision_to_choice", return_value=2
              ), \
-             patch("se3.engine.step_renderers.render_step_output"), \
-             patch("se3.commands.run.render_full"):
+             patch("tianluo.engine.step_renderers.render_step_output"), \
+             patch("tianluo.commands.run.render_full"):
             rc = run.resume_run(tmp_path, "sync-1", output_format="cli")
 
         assert rc == 1

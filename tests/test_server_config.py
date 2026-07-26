@@ -7,7 +7,7 @@ Covers:
 - local-auth lockout / rate-limit parsing + validation
 - oidc / proxy_header disabled-by-default seams
 - db_path default + resolution (~ expansion)
-- se3.yaml / global config override + local-override precedence
+- tianluo.yaml / global config override + local-override precedence
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from se3.config import (
+from tianluo.config import (
     AuthConfig,
     LocalAuthConfig,
     OidcConfig,
@@ -213,9 +213,9 @@ class TestOidcAndProxySeams:
 
 class TestDbPath:
     def test_custom_db_path(self):
-        cfg = ServerConfig.from_dict({"db_path": "/var/lib/se3/db.sqlite"})
-        assert cfg.db_path == "/var/lib/se3/db.sqlite"
-        assert cfg.resolved_db_path() == Path("/var/lib/se3/db.sqlite")
+        cfg = ServerConfig.from_dict({"db_path": "/var/lib/tianluo/db.sqlite"})
+        assert cfg.db_path == "/var/lib/tianluo/db.sqlite"
+        assert cfg.resolved_db_path() == Path("/var/lib/tianluo/db.sqlite")
 
     def test_blank_db_path_falls_back(self):
         cfg = ServerConfig.from_dict({"db_path": "   "})
@@ -229,16 +229,16 @@ class TestLoadServerConfig:
         assert cfg.auth.providers == ["local"]
 
     def test_yaml_without_server_section(self, tmp_path):
-        _write_yaml(tmp_path / "se3.yaml", {"version": {"enabled": True}})
+        _write_yaml(tmp_path / "tianluo.yaml", {"version": {"enabled": True}})
         cfg = load_server_config(tmp_path)
         assert cfg.auth.providers == ["local"]
 
     def test_yaml_with_server_section(self, tmp_path):
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {
                 "server": {
-                    "db_path": "/data/se3.db",
+                    "db_path": "/data/tianluo.db",
                     "auth": {
                         "providers": ["local", "proxy_header"],
                         "session": {"cookie_secure": False},
@@ -248,30 +248,30 @@ class TestLoadServerConfig:
             },
         )
         cfg = load_server_config(tmp_path)
-        assert cfg.db_path == "/data/se3.db"
+        assert cfg.db_path == "/data/tianluo.db"
         assert cfg.auth.providers == ["local", "proxy_header"]
         assert cfg.auth.session.cookie_secure is False
         assert cfg.auth.local.max_failed_attempts == 7
 
     def test_local_yaml_shadows_yaml(self, tmp_path):
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {"server": {"db_path": "/from-yaml.db"}},
         )
         _write_yaml(
-            tmp_path / "se3.local.yaml",
+            tmp_path / "tianluo.local.yaml",
             {"server": {"db_path": "/from-local.db"}},
         )
         cfg = load_server_config(tmp_path)
         assert cfg.db_path == "/from-local.db"
 
     def test_existing_config_loading_not_broken(self, tmp_path):
-        # A se3.yaml carrying both a server: section and unrelated sections
+        # A tianluo.yaml carrying both a server: section and unrelated sections
         # still loads other config without error.
-        from se3.config import load_version_config
+        from tianluo.config import load_version_config
 
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {
                 "server": {"auth": {"providers": ["local"]}},
                 "version": {"enabled": False},

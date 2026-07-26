@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.version_analyze import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.version_analyze import (
     VERSION_RULES_MAX_BYTES,
     _fallback_commit_message,
     _read_version_rules_file,
@@ -23,7 +23,7 @@ def _make_flow(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-001",
         "task_description": "Implement user login",
         "task_type": "feature",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
         # Mirror the real FlowInstance default. Without it a MagicMock(spec=…)
         # returns a truthy MagicMock for is_worktree_mode, sending the handler
         # down the worktree intent-only branch (which suppresses the
@@ -51,9 +51,9 @@ def _make_step(inputs: dict | None = None) -> Step:
 class TestCommitMessageInOutput:
     """version_analyze stores commit_message in step.outputs."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_commit_message_stored_from_llm_response(self, mock_caller_cls, mock_ver, mock_inject):
         """When LLM returns commit_message, it is stored in outputs."""
         llm_response = json.dumps({
@@ -76,9 +76,9 @@ class TestCommitMessageInOutput:
         assert step.outputs["commit_message"] == "Add user login with JWT tokens"
         assert step.outputs["bump_type"] == "minor"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_commit_message_fallback_when_llm_omits_field(self, mock_caller_cls, mock_ver, mock_inject):
         """When LLM response omits commit_message, fallback is used."""
         llm_response = json.dumps({
@@ -101,9 +101,9 @@ class TestCommitMessageInOutput:
         # Fallback should use task description
         assert step.outputs["commit_message"] == "Fix login timeout bug"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_commit_message_fallback_when_llm_returns_empty(self, mock_caller_cls, mock_ver, mock_inject):
         """When LLM returns empty commit_message, fallback is used."""
         llm_response = json.dumps({
@@ -130,9 +130,9 @@ class TestDiscoveryRunUsesRealType:
     """A --discover run must inject the real analyzed type (not the run mode) as
     the prompt's Task Type and drive _fallback_commit_message with it."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_discovery_flow_injects_real_task_type(self, mock_caller_cls, mock_ver, mock_inject):
         llm_response = json.dumps({
             "bump_type": "minor",
@@ -160,9 +160,9 @@ class TestDiscoveryRunUsesRealType:
         assert "**Task Type:** feature" in prompt
         assert "**Task Type:** discovery" not in prompt
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_discovery_flow_fallback_commit_message_uses_real_type(
         self, mock_caller_cls, mock_ver, mock_inject
     ):
@@ -194,9 +194,9 @@ class TestDiscoveryRunUsesRealType:
 class TestVersionChangesOutput:
     """version_analyze stores changelog bullets (versions_changes) in outputs."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_versions_changes_stored_from_llm_response(self, mock_caller_cls, mock_ver, mock_inject):
         """(m) When LLM returns versions_changes, they are stored verbatim."""
         bullets = [
@@ -224,9 +224,9 @@ class TestVersionChangesOutput:
         assert result == StepStatus.COMPLETED
         assert step.outputs["versions_changes"] == bullets
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_versions_changes_fallback_when_llm_omits_field(self, mock_caller_cls, mock_ver, mock_inject):
         """(n) When LLM omits versions_changes, fall back to [commit_message]."""
         llm_response = json.dumps({
@@ -249,9 +249,9 @@ class TestVersionChangesOutput:
         assert result == StepStatus.COMPLETED
         assert step.outputs["versions_changes"] == ["Fix login timeout regression"]
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_versions_changes_not_a_list_falls_back(self, mock_caller_cls, mock_ver, mock_inject):
         """(n) A non-list versions_changes falls back to [commit_message]."""
         llm_response = json.dumps({
@@ -274,9 +274,9 @@ class TestVersionChangesOutput:
         assert result == StepStatus.COMPLETED
         assert step.outputs["versions_changes"] == ["Fix crash on empty input"]
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_versions_changes_filters_non_string_elements(self, mock_caller_cls, mock_ver, mock_inject):
         """(o) Non-string / empty elements are filtered, strings are kept."""
         llm_response = json.dumps({
@@ -309,9 +309,9 @@ class TestVersionChangesOutput:
             "Add valid bullet two",
         ]
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_versions_changes_all_non_string_falls_back(self, mock_caller_cls, mock_ver, mock_inject):
         """(o) A list with no usable strings falls back to [commit_message]."""
         llm_response = json.dumps({
@@ -360,9 +360,9 @@ class TestTagDecisionOutput:
         )
         assert result["is_tag"] is expected
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_default_semver_outputs_is_tag_for_minor(
         self, mock_caller_cls, mock_ver, mock_inject
     ):
@@ -476,13 +476,13 @@ class TestTagDecisionOutput:
         )
         assert result["is_tag"] is False
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_custom_rules_prompt_and_output_include_is_tag(
         self, mock_caller_cls, mock_ver, mock_inject, tmp_path
     ):
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         (rules_dir / "version-rules.md").write_text(
             "Create tags for calendar releases only.", encoding="utf-8"
@@ -500,7 +500,7 @@ class TestTagDecisionOutput:
         mock_caller.call.return_value = llm_response
         mock_caller_cls.return_value = mock_caller
 
-        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        flow = _make_flow(change_path=tmp_path / "tianluo.yaml")
         step = _make_step({"task_description": "Ship calendar release"})
 
         result = version_analyze_handler(step, flow)
@@ -511,13 +511,13 @@ class TestTagDecisionOutput:
         assert "**is_tag**" in called_prompt
         assert '"is_tag": true' in called_prompt
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_worktree_intent_includes_is_tag(
         self, mock_caller_cls, mock_ver, mock_inject, tmp_path
     ):
-        from se3.engine.version_intent import read_intent
+        from tianluo.engine.version_intent import read_intent
 
         llm_response = json.dumps({
             "bump_type": "minor",
@@ -531,7 +531,7 @@ class TestTagDecisionOutput:
         mock_caller_cls.return_value = mock_caller
 
         flow = _make_flow(
-            change_path=tmp_path / "se3.yaml",
+            change_path=tmp_path / "tianluo.yaml",
             flow_id="flow-tag-intent",
             is_worktree_mode=True,
         )
@@ -552,8 +552,8 @@ class TestVersionChangesForwarding:
     """versions_changes is forwarded from version_analyze.outputs to commit.inputs."""
 
     def _build_commit_inputs(self, va_outputs: dict) -> dict:
-        from se3.engine.models import State
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import State
+        from tianluo.engine.state_machine import StateMachine
 
         va_step = Step(
             step_type=StepType.VERSION_ANALYZE,
@@ -605,9 +605,9 @@ class TestVersionChangesForwarding:
 class TestLLMFailureFailsStep:
     """When the LLM call fails or omits suggested_version, the step FAILS."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_llm_exception_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
         """LLM exception → step FAILED with informative error message."""
         mock_caller = MagicMock()
@@ -624,9 +624,9 @@ class TestLLMFailureFailsStep:
         assert "1.0.0" in step.error_message
         assert "suggested_version" in step.error_message
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_missing_suggested_version_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
         """LLM returns JSON without suggested_version → step FAILED."""
         llm_response = json.dumps({
@@ -647,9 +647,9 @@ class TestLLMFailureFailsStep:
         assert result == StepStatus.FAILED
         assert "suggested_version" in step.error_message
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_empty_suggested_version_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
         """LLM returns empty suggested_version → step FAILED."""
         llm_response = json.dumps({
@@ -671,11 +671,11 @@ class TestLLMFailureFailsStep:
 
 
 class TestVersionRulesFileInjection:
-    """version_analyze reads se3/version-rules.md and injects it into the prompt."""
+    """version_analyze reads tianluo/version-rules.md and injects it into the prompt."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_rules_file_absent_uses_default_placeholder(
         self, mock_caller_cls, mock_ver, mock_inject, tmp_path
     ):
@@ -691,7 +691,7 @@ class TestVersionRulesFileInjection:
         mock_caller.call.return_value = llm_response
         mock_caller_cls.return_value = mock_caller
 
-        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        flow = _make_flow(change_path=tmp_path / "tianluo.yaml")
         step = _make_step({"task_description": "Add feature"})
 
         result = version_analyze_handler(step, flow)
@@ -703,14 +703,14 @@ class TestVersionRulesFileInjection:
         assert '"is_tag": true' not in called_prompt
         assert "**is_tag**" not in called_prompt
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
-    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
-    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("tianluo.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("tianluo.engine.steps.version_analyze.LLMCaller")
     def test_rules_file_present_is_injected_into_prompt(
         self, mock_caller_cls, mock_ver, mock_inject, tmp_path
     ):
         """When rules file exists, its content is injected into the prompt."""
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         rules_marker = "PROJECT RULE: docs-only commits never bump version."
         (rules_dir / "version-rules.md").write_text(rules_marker, encoding="utf-8")
@@ -726,7 +726,7 @@ class TestVersionRulesFileInjection:
         mock_caller.call.return_value = llm_response
         mock_caller_cls.return_value = mock_caller
 
-        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        flow = _make_flow(change_path=tmp_path / "tianluo.yaml")
         step = _make_step({"task_description": "Update docs"})
 
         result = version_analyze_handler(step, flow)
@@ -746,7 +746,7 @@ class TestReadVersionRulesFile:
         assert _read_version_rules_file(tmp_path) is None
 
     def test_normal_file_returns_full_content(self, tmp_path):
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         content = "# Custom Rules\n\n- docs → none\n"
         (rules_dir / "version-rules.md").write_text(content, encoding="utf-8")
@@ -756,7 +756,7 @@ class TestReadVersionRulesFile:
         assert content in result
 
     def test_oversized_file_is_truncated_with_warning(self, tmp_path, caplog):
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         # Build content well over the limit
         big = "x" * (VERSION_RULES_MAX_BYTES + 1024)
@@ -773,7 +773,7 @@ class TestReadVersionRulesFile:
         assert any("exceeds" in rec.message for rec in caplog.records)
 
     def test_invalid_utf8_returns_none_with_warning(self, tmp_path, caplog):
-        rules_dir = tmp_path / "se3"
+        rules_dir = tmp_path / "tianluo"
         rules_dir.mkdir()
         (rules_dir / "version-rules.md").write_bytes(b"\xff\xfe\xfa not utf-8")
 

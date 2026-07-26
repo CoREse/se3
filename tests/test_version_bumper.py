@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.version_bumper import (
+from tianluo.engine.version_bumper import (
     PythonVersionHandler,
     TomlVersionHandler,
     VersionBumper,

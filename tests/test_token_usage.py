@@ -1,4 +1,4 @@
-"""Tests for the token-usage accounting module (``se3.engine.token_usage``).
+"""Tests for the token-usage accounting module (``tianluo.engine.token_usage``).
 
 Covers the :class:`UsageTotals` data structure (field-wise merge, fault-tolerant
 serialization, formatting) and the step-scoped accumulator
@@ -12,7 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from se3.engine.token_usage import (
+from tianluo.engine.token_usage import (
     UsageTotals,
     accumulate_step_usage,
     add_call_usage,

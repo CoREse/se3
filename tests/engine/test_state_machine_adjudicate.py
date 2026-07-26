@@ -21,9 +21,9 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch
 
-from se3.config import WorkflowConfig
-from se3.engine import adjudication
-from se3.engine.models import (
+from tianluo.config import WorkflowConfig
+from tianluo.engine import adjudication
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -31,7 +31,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 _QUOTE = "handle the empty-input edge case"
@@ -44,10 +44,10 @@ _SELECTED = [
 
 
 def _make_state_machine(tmp_path, cfg=None):
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     if cfg is not None:
-        # Pin the workflow config so tests do not depend on an on-disk se3.yaml.
+        # Pin the workflow config so tests do not depend on an on-disk tianluo.yaml.
         sm._get_workflow_config = lambda: cfg  # type: ignore[assignment]
     return sm
 

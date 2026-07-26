@@ -15,8 +15,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from se3.engine.dag_scheduler import RelayContext
-from se3.engine.models import (
+from tianluo.engine.dag_scheduler import RelayContext
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -318,27 +318,27 @@ class TestShouldUseDag:
 
     def test_single_group_returns_false(self):
         """Single group should never use DAG path."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [{"group_id": "G1", "tasks": ["t1"]}]
         assert _should_use_dag(groups) is False
 
     def test_single_group_with_depends_on_returns_false(self):
         """Single group even with depends_on should not use DAG (len <= 1)."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [{"group_id": "G1", "depends_on": ["G0"], "tasks": ["t1"]}]
         assert _should_use_dag(groups) is False
 
     def test_empty_groups_returns_false(self):
         """Empty group list should not use DAG."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         assert _should_use_dag([]) is False
 
     def test_multiple_groups_no_depends_on_returns_true(self):
         """Multiple independent groups should use DAG for parallel execution."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [
             {"group_id": "G1", "tasks": ["t1"]},
@@ -349,7 +349,7 @@ class TestShouldUseDag:
 
     def test_multiple_groups_empty_depends_on_returns_true(self):
         """Multiple groups with empty depends_on lists should use DAG for parallel execution."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [
             {"group_id": "G1", "depends_on": [], "tasks": ["t1"]},
@@ -359,7 +359,7 @@ class TestShouldUseDag:
 
     def test_multiple_groups_with_depends_on_returns_true(self):
         """Multiple groups with at least one non-empty depends_on enables DAG."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [
             {"group_id": "G1", "tasks": ["t1"]},
@@ -369,7 +369,7 @@ class TestShouldUseDag:
 
     def test_diamond_dependency_returns_true(self):
         """Diamond dependency pattern enables DAG."""
-        from se3.engine.steps.implement import _should_use_dag
+        from tianluo.engine.steps.implement import _should_use_dag
 
         groups = [
             {"group_id": "G1", "tasks": ["t1"]},
@@ -384,7 +384,7 @@ class TestShouldUseDag:
         # This tests the control flow in implement_handler, not _should_use_dag itself.
         # Fix iterations hit the is_fix_iteration branch which returns before
         # _should_use_dag is ever called. We verify by checking the handler structure.
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         import inspect
 
         source = inspect.getsource(implement_handler)
@@ -397,7 +397,7 @@ class TestShouldUseDag:
 
     def test_single_group_path_bypasses_dag(self):
         """Single group (len <= 1) takes early return before DAG check."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         import inspect
 
         source = inspect.getsource(implement_handler)
@@ -410,7 +410,7 @@ class TestShouldUseDag:
 
     def test_no_commits_falls_back_to_sequential(self):
         """When has_commits() returns False, DAG path is skipped."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         import inspect
 
         source = inspect.getsource(implement_handler)
@@ -451,11 +451,11 @@ class TestDagEmptyRepoFallback:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=False)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=True)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=False)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=True)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_empty_repo_skips_dag_uses_sequential(
         self, mock_injection, mock_parse, mock_caller, mock_dag, mock_has_commits,
     ):
@@ -486,7 +486,7 @@ class TestDagEmptyRepoFallback:
             outputs={},
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         # Should NOT have called _run_dag_parallel (we'd see an error if it did)
@@ -494,9 +494,9 @@ class TestDagEmptyRepoFallback:
         # LLMCaller should have been called once per group (sequential)
         assert mock_caller.call_count == len(self.task_groups)
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_repo_with_commits_uses_dag(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
@@ -516,7 +516,7 @@ class TestDagEmptyRepoFallback:
             outputs={},
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
@@ -545,18 +545,18 @@ class TestStaleBranchHandling:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.parse_json_response")
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.create_worktree")
-    @patch("se3.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.create_worktree")
+    @patch("tianluo.engine.steps.implement._run_git")
     def test_execute_fn_deletes_stale_branch_before_creation(
         self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse,
         mock_force_cleanup,
     ):
         """execute_fn must call 'branch -D' before 'branch <name> <base>' to clean stale branches."""
-        from se3.engine.steps.implement import _make_execute_fn
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _make_execute_fn
+        from tianluo.engine.dag_scheduler import GroupResult
 
         # Simulate: stale branch exists (delete returns 0)
         def run_git_side_effect(root, *args, **kwargs):
@@ -626,17 +626,17 @@ class TestStaleBranchHandling:
             f"Stale branch delete (idx={delete_idx}) must come before branch create (idx={create_idx})"
         )
 
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.parse_json_response")
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.create_worktree")
-    @patch("se3.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.create_worktree")
+    @patch("tianluo.engine.steps.implement._run_git")
     def test_execute_fn_succeeds_when_no_stale_branch(
         self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse,
         mock_force_cleanup,
     ):
         """Normal execution works when there is no stale branch (delete returns non-zero)."""
-        from se3.engine.steps.implement import _make_execute_fn
+        from tianluo.engine.steps.implement import _make_execute_fn
 
         def run_git_side_effect(root, *args, **kwargs):
             result = MagicMock()
@@ -693,13 +693,13 @@ class TestStaleBranchHandling:
         assert result.status == "completed"
         assert result.files_changed == ["b.py"]
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement._make_execute_fn")
-    @patch("se3.config.load_conflict_resolver_config")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement._make_execute_fn")
+    @patch("tianluo.config.load_conflict_resolver_config")
     def test_finally_cleans_up_branches_for_all_groups(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
@@ -711,8 +711,8 @@ class TestStaleBranchHandling:
         remain as orphans (stale branch cleanup at the start of execute_fn
         handles these on the next run).
         """
-        from se3.engine.steps.implement import _run_dag_parallel
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.dag_scheduler import GroupResult
 
         mock_config.return_value = MagicMock(strategy="ours")
 
@@ -757,16 +757,16 @@ class TestStaleBranchHandling:
         )
 
     @patch(
-        "se3.engine.steps.implement._is_branch_reachable_from",
+        "tianluo.engine.steps.implement._is_branch_reachable_from",
         return_value=True,
     )
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement._make_execute_fn")
-    @patch("se3.config.load_conflict_resolver_config")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement._make_execute_fn")
+    @patch("tianluo.config.load_conflict_resolver_config")
     def test_finally_cleans_up_branches_on_normal_completion(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
@@ -779,8 +779,8 @@ class TestStaleBranchHandling:
         with ``_merge_leaf_branch`` mocked to return True we semantically
         mean "merge succeeded → branch IS reachable".
         """
-        from se3.engine.steps.implement import _run_dag_parallel
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.dag_scheduler import GroupResult
 
         mock_config.return_value = MagicMock(strategy="ours")
 
@@ -859,9 +859,9 @@ class TestDagResumeFiltering:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_resume_filters_completed_groups_from_dag(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
@@ -887,7 +887,7 @@ class TestDagResumeFiltering:
             },
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
@@ -908,9 +908,9 @@ class TestDagResumeFiltering:
         assert prior["test_mapping"] == {"a.py": "test_a.py"}
         assert prior["implemented_groups"] == ["G1"]
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel", return_value=StepStatus.COMPLETED)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel", return_value=StepStatus.COMPLETED)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_resume_all_completed_returns_early(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
@@ -934,7 +934,7 @@ class TestDagResumeFiltering:
             },
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
@@ -943,9 +943,9 @@ class TestDagResumeFiltering:
         call_kwargs = mock_dag_parallel.call_args
         assert call_kwargs[1]["groups"] == [] or call_kwargs[0][0] == []
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_fresh_start_passes_no_prior_outputs(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
@@ -965,7 +965,7 @@ class TestDagResumeFiltering:
             outputs={},
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
@@ -973,20 +973,20 @@ class TestDagResumeFiltering:
         prior = call_kwargs.kwargs.get("prior_outputs") or call_kwargs[1].get("prior_outputs")
         assert prior is None
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement._make_execute_fn")
-    @patch("se3.config.load_conflict_resolver_config")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement._make_execute_fn")
+    @patch("tianluo.config.load_conflict_resolver_config")
     def test_prior_outputs_merged_in_run_dag_parallel(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """_run_dag_parallel merges prior_outputs into aggregated results."""
-        from se3.engine.steps.implement import _run_dag_parallel
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.dag_scheduler import GroupResult
 
         mock_config.return_value = MagicMock(strategy="ours")
 
@@ -1052,20 +1052,20 @@ class TestDagResumeFiltering:
         assert "G2" in step.outputs["implemented_groups"]
         assert "G3" in step.outputs["implemented_groups"]
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement._make_execute_fn")
-    @patch("se3.config.load_conflict_resolver_config")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement._make_execute_fn")
+    @patch("tianluo.config.load_conflict_resolver_config")
     def test_no_prior_outputs_preserves_default_behavior(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """_run_dag_parallel without prior_outputs behaves as before."""
-        from se3.engine.steps.implement import _run_dag_parallel
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.dag_scheduler import GroupResult
 
         mock_config.return_value = MagicMock(strategy="ours")
 
@@ -1133,9 +1133,9 @@ class TestDagParallelResumeBehavior:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_dag_resume_skips_completed_groups(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
@@ -1161,7 +1161,7 @@ class TestDagParallelResumeBehavior:
             },
         )
 
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
@@ -1174,17 +1174,17 @@ class TestDagParallelResumeBehavior:
         assert "G1" not in passed_ids, "Completed group G1 must not be re-executed"
         assert sorted(passed_ids) == ["G2", "G3"]
 
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.parse_json_response")
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.create_worktree")
-    @patch("se3.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.create_worktree")
+    @patch("tianluo.engine.steps.implement._run_git")
     def test_dag_resume_cleans_stale_worktrees(
         self, mock_run_git, mock_create_wt, mock_caller_cls,
         mock_parse, mock_force_cleanup,
     ):
         """Stale worktrees from a previous run are cleaned up via force_cleanup_worktree before branch recreation."""
-        from se3.engine.steps.implement import _make_execute_fn
+        from tianluo.engine.steps.implement import _make_execute_fn
 
         def run_git_side_effect(root, *args, **kwargs):
             result = MagicMock()
@@ -1248,20 +1248,20 @@ class TestDagParallelResumeBehavior:
         )
         assert delete_idx is not None, "branch -D call must happen after force_cleanup_worktree"
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement._make_execute_fn")
-    @patch("se3.config.load_conflict_resolver_config")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement._make_execute_fn")
+    @patch("tianluo.config.load_conflict_resolver_config")
     def test_dag_resume_restores_accumulated_state(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """Prior outputs are preserved and merged with new group results."""
-        from se3.engine.steps.implement import _run_dag_parallel
-        from se3.engine.dag_scheduler import GroupResult
+        from tianluo.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.dag_scheduler import GroupResult
 
         mock_config.return_value = MagicMock(strategy="ours")
 
@@ -1338,14 +1338,14 @@ class TestStreamPrefixConstruction:
 
     def test_single_group_no_prefix(self):
         """Single group execution should not set stream_prefix (empty by default)."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         # When _run_single_llm_call is called without stream_prefix, it defaults to ''
         caller = LLMCaller(stream_prefix='')
         assert caller.stream_prefix == ''
 
     def test_sequential_group_prefix_format(self):
         """Sequential execution should use [Gx] prefix format."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         # Simulate what implement.py does for sequential execution
         group_id = "G2"
         caller = LLMCaller(stream_prefix=f'[{group_id}] ')
@@ -1353,7 +1353,7 @@ class TestStreamPrefixConstruction:
 
     def test_dag_parallel_group_prefix_format(self):
         """DAG parallel execution should use [Gx] prefix format."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         group_id = "G3"
         caller = LLMCaller(stream_prefix=f'[{group_id}] ')
         assert caller.stream_prefix == '[G3] '
@@ -1390,11 +1390,11 @@ class TestStreamPrefixConstruction:
         merged_prefix = f"[{'+'.join(merged_group_ids)}] "
         assert merged_prefix == "[G1+G2] "
 
-    @patch("se3.engine.steps.implement._run_single_llm_call")
-    @patch("se3.engine.steps.implement._resolve_files_changed")
-    @patch("se3.engine.steps.implement._display_task_plan")
-    @patch("se3.engine.steps.implement._compute_total_loc", return_value=100)
-    @patch("se3.engine.steps.implement._extract_sorted_groups")
+    @patch("tianluo.engine.steps.implement._run_single_llm_call")
+    @patch("tianluo.engine.steps.implement._resolve_files_changed")
+    @patch("tianluo.engine.steps.implement._display_task_plan")
+    @patch("tianluo.engine.steps.implement._compute_total_loc", return_value=100)
+    @patch("tianluo.engine.steps.implement._extract_sorted_groups")
     def test_loc_merge_no_prefix_for_single_call(
         self, mock_extract, mock_loc, mock_display, mock_resolve, mock_run
     ):
@@ -1418,10 +1418,10 @@ class TestStreamPrefixConstruction:
             task_description="test",
             task_type="feature",
         )
-        flow.change_path = Path("/tmp/test/se3.yaml")
+        flow.change_path = Path("/tmp/test/tianluo.yaml")
 
-        from se3.engine.steps.implement import implement_handler
-        with patch("se3.config.ImplementConfig.load") as mock_config:
+        from tianluo.engine.steps.implement import implement_handler
+        with patch("tianluo.config.ImplementConfig.load") as mock_config:
             mock_config.return_value = MagicMock(group_loc_threshold=300)
             implement_handler(step, flow)
 
@@ -1435,7 +1435,7 @@ class TestImplementVersionFileGuardrail:
     """G1: version-file guardrail must appear in implement / fix prompts."""
 
     def test_implement_prompt_includes_guardrail(self):
-        from se3.engine.steps.implement import (
+        from tianluo.engine.steps.implement import (
             IMPLEMENT_PROMPT,
             VERSION_FILE_GUARDRAIL,
         )
@@ -1447,7 +1447,7 @@ class TestImplementVersionFileGuardrail:
         assert VERSION_FILE_GUARDRAIL.strip() in IMPLEMENT_PROMPT
 
     def test_implement_group_prompt_includes_guardrail(self):
-        from se3.engine.steps.implement import (
+        from tianluo.engine.steps.implement import (
             IMPLEMENT_GROUP_PROMPT,
             VERSION_FILE_GUARDRAIL,
         )
@@ -1456,7 +1456,7 @@ class TestImplementVersionFileGuardrail:
         assert VERSION_FILE_GUARDRAIL.strip() in IMPLEMENT_GROUP_PROMPT
 
     def test_fix_prompt_includes_guardrail_and_fix_clause(self):
-        from se3.engine.steps.implement import (
+        from tianluo.engine.steps.implement import (
             FIX_PROMPT,
             VERSION_FILE_GUARDRAIL,
             FIX_VERSION_FILE_GUARDRAIL,

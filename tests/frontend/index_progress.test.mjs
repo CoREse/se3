@@ -46,10 +46,10 @@ export function registerIndexProgressTests(ctx) {
 
   // ---- (a) normalizeRecord -------------------------------------------------
   check("G3 normalizeRecord recognizes index_progress and maps fields", () => {
-    const norm = app.normalizeRecord(ipRecord("src/se3/cli.py", 3, 12, 42));
+    const norm = app.normalizeRecord(ipRecord("src/tianluo/cli.py", 3, 12, 42));
     assert.equal(norm.kind, "index_progress");
     assert.equal(norm.role, "index-progress");
-    assert.equal(norm.path, "src/se3/cli.py");
+    assert.equal(norm.path, "src/tianluo/cli.py");
     assert.equal(norm.indexKind, "file");
     assert.equal(norm.done, 3);
     assert.equal(norm.total, 12);
@@ -77,8 +77,8 @@ export function registerIndexProgressTests(ctx) {
   // ---- (b) pure helpers ----------------------------------------------------
   check("G3 indexProgressLabel formats path with (done/total)", () => {
     assert.equal(
-      app.indexProgressLabel("src/se3/cli.py", 3, 12),
-      "Updating code-index: src/se3/cli.py (3/12)",
+      app.indexProgressLabel("src/tianluo/cli.py", 3, 12),
+      "Updating code-index: src/tianluo/cli.py (3/12)",
     );
   });
 
@@ -102,13 +102,13 @@ export function registerIndexProgressTests(ctx) {
   // ---- (c) render path -----------------------------------------------------
   check("G3 index_progress renders an .index-progress-marker with status class", () => {
     const container = document.createElement("div");
-    app.renderConversation(container, [ipRecord("src/se3/cli.py", 3, 12, 1)], false);
+    app.renderConversation(container, [ipRecord("src/tianluo/cli.py", 3, 12, 1)], false);
     const marker = findOne(container, "index-progress-marker");
     assert.ok(marker, "expected an .index-progress-marker row");
     assert.ok(marker.classList.contains("status-running"),
       "an in-progress marker should carry the .status-running class");
     const text = findOne(marker, "index-progress-text");
-    assert.ok(text && text.textContent === "Updating code-index: src/se3/cli.py (3/12)",
+    assert.ok(text && text.textContent === "Updating code-index: src/tianluo/cli.py (3/12)",
       `marker text should be the progress label, got ${text && text.textContent}`);
     // Affordance-free: no fold / raw / chip on the marker.
     assert.equal(findAll(marker, "msg-chip").length, 0,

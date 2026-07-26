@@ -22,14 +22,14 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     ChatMessage,
     ChatSession,
     format_history_for_retry,
 )
-from se3.engine.llm_caller import _post_dedup_safety_cap
-from se3.engine.prompt_dedup import deduplicate_prompt_lines
-from se3.engine.retry_context import (
+from tianluo.engine.llm_caller import _post_dedup_safety_cap
+from tianluo.engine.prompt_dedup import deduplicate_prompt_lines
+from tianluo.engine.retry_context import (
     POST_DEDUP_SAFETY_LIMIT as _POST_DEDUP_SAFETY_LIMIT,
     RETRY_HISTORY_MARKER as _RETRY_HISTORY_MARKER,
     RETRY_HISTORY_SEPARATOR as _RETRY_HISTORY_SEPARATOR,
@@ -61,7 +61,7 @@ def _big_spec_block(tag: str = "shared-spec", n_lines: int = 2000) -> str:
 
 class TestRepeatedSpecNoTruncation:
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_repeated_spec_not_truncated_by_format_history(self, mock_get, caplog):
         spec_text = _big_spec_block("shared-spec")
         assert len(spec_text) > 130_000, "spec fixture must exceed old 50K cap"
@@ -82,7 +82,7 @@ class TestRepeatedSpecNoTruncation:
         )
         mock_get.return_value = _make_session([user_msg])
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.chat_history"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.chat_history"):
             retry_context = format_history_for_retry(
                 Path("/tmp"), "flow", "step", mode="retry"
             )
@@ -96,7 +96,7 @@ class TestRepeatedSpecNoTruncation:
             "hit safety limit" in r.message for r in caplog.records
         )
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_dedup_eliminates_repetition_below_safety_limit(self, mock_get, caplog):
         spec_text = _big_spec_block("shared-spec")
         old_prompt = (
@@ -189,7 +189,7 @@ class TestPostDedupSafetyCap:
         )
         assert len(effective_prompt) > _POST_DEDUP_SAFETY_LIMIT
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.llm_caller"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.llm_caller"):
             capped = _post_dedup_safety_cap(effective_prompt)
 
         # Length is strictly bounded by the cap — the arithmetic is exact
@@ -217,7 +217,7 @@ class TestPostDedupSafetyCap:
         tail = f"{_RETRY_HISTORY_SEPARATOR}\n{tail_body}\nNEW_PROMPT_TAIL_SENTINEL\n"
         effective_prompt = f"{_RETRY_HISTORY_MARKER}\nshort history\n{tail}"
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.llm_caller"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.llm_caller"):
             capped = _post_dedup_safety_cap(effective_prompt)
 
         assert "NEW_PROMPT_TAIL_SENTINEL" in capped
@@ -242,7 +242,7 @@ class TestPostDedupSafetyCap:
         effective_prompt = f"{_RETRY_HISTORY_MARKER}\n{body}"
         assert _RETRY_HISTORY_SEPARATOR not in effective_prompt
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.llm_caller"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.llm_caller"):
             capped = _post_dedup_safety_cap(effective_prompt)
 
         # Returns unchanged (cannot act without knowing where tail starts).
@@ -303,7 +303,7 @@ class TestRetryOfRetryAnchoring:
     dimension would pass CI silently.
     """
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_cap_anchors_outer_separator_on_retry_of_retry(self, mock_get, caplog):
         # (i) simulate attempt 0 producing an effective_prompt that already
         #     contains a marker+separator pair (as would happen on any retry
@@ -353,7 +353,7 @@ class TestRetryOfRetryAnchoring:
             "fixture must exceed the cap to actually exercise it"
 
         # (iv) run dedup + cap
-        with caplog.at_level(logging.WARNING, logger="se3.engine.llm_caller"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.llm_caller"):
             deduped = deduplicate_prompt_lines(effective_prompt)
             capped = _post_dedup_safety_cap(deduped)
 
@@ -385,7 +385,7 @@ class TestCallWithRetryInvokesSafetyCap:
     def test_safety_cap_called_on_retry_path(self, tmp_path):
         from unittest.mock import MagicMock, patch
 
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(
             project_root=tmp_path,
@@ -414,7 +414,7 @@ class TestCallWithRetryInvokesSafetyCap:
             "[The above attempt(s) failed. Please try again with the same task.]\n"
         )
 
-        with patch("se3.engine.llm_caller._post_dedup_safety_cap", spy), \
+        with patch("tianluo.engine.llm_caller._post_dedup_safety_cap", spy), \
              patch.object(caller, "_get_current_runner") as mock_get_runner, \
              patch.object(caller, "_get_retry_context", return_value=realistic_retry_context):
             runner_inst = MagicMock()
@@ -446,7 +446,7 @@ class TestCallWithRetryInvokesSafetyCap:
         """No retry → cap is not invoked (dedup also skipped)."""
         from unittest.mock import MagicMock, patch
 
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(
             project_root=tmp_path,
@@ -459,7 +459,7 @@ class TestCallWithRetryInvokesSafetyCap:
 
         spy = MagicMock(side_effect=lambda p, limit=_POST_DEDUP_SAFETY_LIMIT: p)
 
-        with patch("se3.engine.llm_caller._post_dedup_safety_cap", spy), \
+        with patch("tianluo.engine.llm_caller._post_dedup_safety_cap", spy), \
              patch.object(caller, "_get_current_runner") as mock_get_runner:
             runner_inst = MagicMock()
             result_obj = MagicMock()

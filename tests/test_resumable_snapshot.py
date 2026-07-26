@@ -4,7 +4,7 @@ Covers the engine-side half of the "any flow that *should* be resumable
 actually can be resumed" guarantee (design problem 2, group G2):
 
 * ``save_flow`` mirrors every non-COMPLETED save into
-  ``se3/state/resumable/<flow_id>.json`` and removes it on COMPLETED.
+  ``tianluo/state/resumable/<flow_id>.json`` and removes it on COMPLETED.
 * ``load_flow_by_id`` falls back to that snapshot after engine.json is
   overwritten by a later run, covering paused / interrupted (RUNNING) /
   recoverable-FAILED flows.
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -27,7 +27,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
+from tianluo.engine.persistence import PersistenceManager
 
 
 def _make_flow(
@@ -261,7 +261,7 @@ def test_resume_writes_snapshot_back_to_engine_json(pm: PersistenceManager) -> N
 # --------------------------------------------------------------------------
 
 def test_picker_lists_snapshot_only_flow(tmp_path: Path) -> None:
-    from se3.commands.run import find_resumable_snapshot_flows
+    from tianluo.commands.run import find_resumable_snapshot_flows
 
     pm = PersistenceManager(tmp_path)
     pm.save_flow(_make_flow("paused1", FlowStatus.PAUSED))
@@ -273,7 +273,7 @@ def test_picker_lists_snapshot_only_flow(tmp_path: Path) -> None:
 
 
 def test_picker_excludes_completed_flow(tmp_path: Path) -> None:
-    from se3.commands.run import find_resumable_snapshot_flows
+    from tianluo.commands.run import find_resumable_snapshot_flows
 
     pm = PersistenceManager(tmp_path)
     flow = _make_flow("c1", FlowStatus.RUNNING)
@@ -286,7 +286,7 @@ def test_picker_excludes_completed_flow(tmp_path: Path) -> None:
 
 
 def test_picker_entry_shape(tmp_path: Path) -> None:
-    from se3.commands.run import find_resumable_snapshot_flows
+    from tianluo.commands.run import find_resumable_snapshot_flows
 
     pm = PersistenceManager(tmp_path)
     pm.save_flow(_make_flow("shape1", FlowStatus.FAILED, task="describe me"))

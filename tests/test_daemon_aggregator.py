@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import (
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import (
     DaemonAggregator,
     PendingCall,
     ProjectRegistryError,
@@ -114,10 +114,10 @@ def _make_root(
     used to write call files whose on-disk shape doesn't fit the
     ``(call_id, context)`` shorthand — e.g. legacy producers that record
     ``flow_id`` at the top level of the payload (mirroring
-    ``_write_discovery_call`` in ``src/se3/commands/run.py``).
+    ``_write_discovery_call`` in ``src/tianluo/commands/run.py``).
     """
     _write(
-        tmp_path / "se3" / "state" / "engine.json",
+        tmp_path / "tianluo" / "state" / "engine.json",
         {
             "flow_id": engine_flow_id,
             "task_description": "t",
@@ -136,11 +136,11 @@ def _make_root(
         body: dict = {"prompt": "p"}
         if context is not None:
             body["context"] = context
-        _write(tmp_path / "se3" / "calls" / f"{call_id}.json", body)
+        _write(tmp_path / "tianluo" / "calls" / f"{call_id}.json", body)
 
     if extra_call_payloads:
         for call_id, payload in extra_call_payloads.items():
-            _write(tmp_path / "se3" / "calls" / f"{call_id}.json", payload)
+            _write(tmp_path / "tianluo" / "calls" / f"{call_id}.json", payload)
 
     return tmp_path
 
@@ -173,7 +173,7 @@ def test_snapshot_folds_legacy_top_level_flow_id(tmp_path: Path) -> None:
     """Call files with top-level ``flow_id`` (no ``context``) are attributed.
 
     Producers that predate the ``context.flow_id`` convention — notably
-    ``_write_discovery_call`` in ``src/se3/commands/run.py``, which writes
+    ``_write_discovery_call`` in ``src/tianluo/commands/run.py``, which writes
     ``{"flow_id": flow.flow_id, "prompt": ..., ...}`` and never adds a
     ``context`` field — must still be folded into ``context["flow_id"]`` by
     :meth:`DaemonAggregator._parse_call_file` so the per-flow filter keeps
@@ -237,11 +237,11 @@ def test_snapshot_no_engine_json_yields_no_flow(tmp_path: Path) -> None:
     method's return.
     """
     _write(
-        tmp_path / "se3" / "calls" / "alpha.json",
+        tmp_path / "tianluo" / "calls" / "alpha.json",
         {"prompt": "p", "context": {"flow_id": "flow-x"}},
     )
     _write(
-        tmp_path / "se3" / "calls" / "beta.json",
+        tmp_path / "tianluo" / "calls" / "beta.json",
         {"prompt": "p"},
     )
     aggregator = DaemonAggregator()
@@ -257,7 +257,7 @@ def test_snapshot_completed_flow_reports_total_and_full_progress(tmp_path: Path)
     set by the engine completion branch.
     """
     _write(
-        tmp_path / "se3" / "state" / "engine.json",
+        tmp_path / "tianluo" / "state" / "engine.json",
         {
             "flow_id": "flow-done",
             "task_description": "t",
@@ -296,9 +296,9 @@ def test_run_fallback_completion_advances_index_to_total(tmp_path: Path) -> None
     the aggregator to confirm the end-to-end value, rather than hand-crafting a
     completed snapshot.
     """
-    from se3.commands import run as run_mod
-    from se3.engine import persistence as persistence_mod
-    from se3.engine.models import (
+    from tianluo.commands import run as run_mod
+    from tianluo.engine import persistence as persistence_mod
+    from tianluo.engine.models import (
         FlowInstance,
         FlowStatus,
         State,
@@ -332,7 +332,7 @@ def test_run_fallback_completion_advances_index_to_total(tmp_path: Path) -> None
     # Persist the completed flow exactly as the run loop would and confirm the
     # aggregator computes total/total + progress 1.0 from it.
     project_root = tmp_path
-    (project_root / "se3" / "state").mkdir(parents=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True)
     persistence = persistence_mod.PersistenceManager(project_root=project_root)
     persistence.save_flow(flow)
 
@@ -424,7 +424,7 @@ def test_machine_status_project_roots_includes_historical(tmp_path: Path) -> Non
     active_root.mkdir()
 
     history_root = tmp_path / "history-proj"
-    archive_dir = history_root / "se3" / "state" / "archive"
+    archive_dir = history_root / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_20260101_000000.json").write_text(
         json.dumps({"flow_id": "f1", "status": "completed"}), encoding="utf-8"
@@ -454,8 +454,8 @@ def test_machine_status_project_roots_sorted_and_unique(tmp_path: Path) -> None:
     proj_b.mkdir()
     # Give proj_a some history so it would also be picked up via the
     # historical enumeration path, exercising the dedupe.
-    (proj_a / "se3" / "state" / "archive").mkdir(parents=True)
-    (proj_a / "se3" / "state" / "archive" / "engine_x.json").write_text(
+    (proj_a / "tianluo" / "state" / "archive").mkdir(parents=True)
+    (proj_a / "tianluo" / "state" / "archive" / "engine_x.json").write_text(
         json.dumps({"flow_id": "f1"}), encoding="utf-8"
     )
 
@@ -586,7 +586,7 @@ def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
 
 def test_all_project_roots_caches_historical_enumeration(monkeypatch) -> None:
     """Within the TTL window, the disk history walk runs at most once."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
 
@@ -612,7 +612,7 @@ def test_all_project_roots_caches_historical_enumeration(monkeypatch) -> None:
 
 def test_all_project_roots_active_root_visible_immediately(monkeypatch) -> None:
     """A newly added active root appears at once, not after the TTL."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     monkeypatch.setattr(
         agg_mod, "enumerate_historical_project_roots", lambda base: []
@@ -634,10 +634,10 @@ def test_readd_existing_root_keeps_history_cache_warm(monkeypatch) -> None:
 
     The daemon poll loop re-adds every active flow's already-known root on
     every ~2s tick. If that idempotent re-add invalidated the cache, the full
-    ``se3/history`` walk would re-run every tick — the exact high-frequency
+    ``tianluo/history`` walk would re-run every tick — the exact high-frequency
     disk scan the cache exists to eliminate.
     """
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -666,7 +666,7 @@ def test_readd_existing_root_keeps_history_cache_warm(monkeypatch) -> None:
 
 def test_all_project_roots_reenumerates_after_ttl(monkeypatch) -> None:
     """Once the TTL elapses the disk history walk runs again."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -693,7 +693,7 @@ def test_all_project_roots_reenumerates_after_ttl(monkeypatch) -> None:
 
 def test_all_project_roots_reenumerates_on_base_change(monkeypatch) -> None:
     """A changed base fingerprint forces re-enumeration even within the TTL."""
-    import se3.daemon.aggregator as agg_mod
+    import tianluo.daemon.aggregator as agg_mod
 
     calls: list = []
     monkeypatch.setattr(
@@ -753,7 +753,7 @@ def _write_issue(
 
     slug = title.lower().replace(" ", "-")[:30] if title else "untitled"
     filename = f"{issue_id}_{slug}.yaml"
-    target = tmp_path / "se3" / "issues" / subdir / filename
+    target = tmp_path / "tianluo" / "issues" / subdir / filename
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         yaml.dump(data, default_flow_style=False, sort_keys=False),
@@ -766,12 +766,12 @@ def test_get_snapshot_archived_root_no_flowless_flow(tmp_path: Path) -> None:
     """An archived root (issues on disk, no engine.json) yields no empty flow.
 
     Regression for the empty ``(untitled flow)`` card: after ``end-session``
-    archives engine.json, the root still has issue YAML under se3/issues/.
+    archives engine.json, the root still has issue YAML under tianluo/issues/.
     ``get_snapshot`` must NOT surface a flowless (no flow_id) entry in
     ``.flows`` for such a root, while its issues still reach
     ``MachineStatus.issues`` via the independent ``_collect_issues`` pass.
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(tmp_path, "042", subdir="open", title="Lingering issue")
     aggregator = DaemonAggregator()
@@ -789,7 +789,7 @@ def test_get_snapshot_archived_root_no_flowless_flow(tmp_path: Path) -> None:
 
 def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
     """_collect_issues reads both open/ and closed/ directories."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(tmp_path, "001", subdir="open", title="First")
     _write_issue(tmp_path, "002", subdir="closed", title="Second", status="closed")
@@ -803,7 +803,7 @@ def test_collect_issues_reads_open_and_closed(tmp_path: Path) -> None:
 
 def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
     """Each IssueSnapshot carries all webui-relevant fields."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     _write_issue(
         tmp_path,
@@ -838,9 +838,9 @@ def test_collect_issues_snapshot_fields(tmp_path: Path) -> None:
 
 def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
     """Malformed YAML files are silently skipped."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
-    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir = tmp_path / "tianluo" / "issues" / "open"
     issues_dir.mkdir(parents=True, exist_ok=True)
     # Write garbage
     (issues_dir / "bad.yaml").write_text("not: [valid: yaml: {", encoding="utf-8")
@@ -853,16 +853,16 @@ def test_collect_issues_skips_malformed(tmp_path: Path) -> None:
 
 
 def test_collect_issues_returns_empty_when_no_dir(tmp_path: Path) -> None:
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     assert DaemonAggregator()._collect_issues(tmp_path) == []
 
 
 def test_machine_status_includes_issues(tmp_path: Path) -> None:
     """MachineStatus.issues is populated by get_snapshot."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
-    _write(tmp_path / "se3" / "state" / "engine.json", {
+    _write(tmp_path / "tianluo" / "state" / "engine.json", {
         "flow_id": "f1",
         "task_description": "t",
         "task_type": "feature",
@@ -893,7 +893,7 @@ def test_machine_status_includes_issues(tmp_path: Path) -> None:
 
 def test_issue_snapshot_to_dict_omits_none_optional_fields(tmp_path: Path) -> None:
     """to_dict omits title/priority/type when they are None."""
-    from se3.daemon.aggregator import IssueSnapshot
+    from tianluo.daemon.aggregator import IssueSnapshot
 
     snap = IssueSnapshot(
         id="001",
@@ -923,13 +923,13 @@ def _make_worktree_run(
 ) -> Path:
     """Create a ``se3 run --worktree`` isolation subdir under *main_root*.
 
-    Writes ``<main_root>/se3/worktrees/<wt_name>/se3/state/engine.json`` (and a
+    Writes ``<main_root>/tianluo/worktrees/<wt_name>/tianluo/state/engine.json`` (and a
     history jsonl) describing a worktree-mode flow, mirroring what a live
     ``se3 run --worktree`` body persists. Returns the worktree directory path.
     """
-    wt_root = main_root / "se3" / "worktrees" / wt_name
+    wt_root = main_root / "tianluo" / "worktrees" / wt_name
     _write(
-        wt_root / "se3" / "state" / "engine.json",
+        wt_root / "tianluo" / "state" / "engine.json",
         {
             "flow_id": flow_id,
             "task_description": "isolated task",
@@ -947,7 +947,7 @@ def _make_worktree_run(
             },
         },
     )
-    hist = wt_root / "se3" / "history" / flow_id / "01_implement_abc.jsonl"
+    hist = wt_root / "tianluo" / "history" / flow_id / "01_implement_abc.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
     hist.write_text(json.dumps({"role": "user", "content": "go"}) + "\n", encoding="utf-8")
     return wt_root
@@ -1001,7 +1001,7 @@ def test_snapshot_includes_worktree_flow_but_not_in_project_roots(tmp_path: Path
 def test_dag_impl_worktree_not_observed(tmp_path: Path) -> None:
     """An implement-step DAG isolation worktree (no is_worktree_mode) is ignored.
 
-    DAG implement worktrees share the ``se3/worktrees/`` parent but never write
+    DAG implement worktrees share the ``tianluo/worktrees/`` parent but never write
     a top-level ``is_worktree_mode`` flow record, so the strict gate must keep
     them out of the observable root set.
     """
@@ -1051,7 +1051,7 @@ def test_snapshot_surfaces_waiting_for_lock_true(tmp_path: Path) -> None:
     engine.json alone.
     """
     _write(
-        tmp_path / "se3" / "state" / "engine.json",
+        tmp_path / "tianluo" / "state" / "engine.json",
         {
             "flow_id": "flow-queued",
             "task_description": "t",
@@ -1081,7 +1081,7 @@ def test_snapshot_surfaces_waiting_for_lock_true(tmp_path: Path) -> None:
 def test_snapshot_waiting_for_lock_defaults_false(tmp_path: Path) -> None:
     """An engine.json without the flag (the common case) reads as not-waiting."""
     _write(
-        tmp_path / "se3" / "state" / "engine.json",
+        tmp_path / "tianluo" / "state" / "engine.json",
         {
             "flow_id": "flow-normal",
             "task_description": "t",
@@ -1110,21 +1110,21 @@ def test_snapshot_waiting_for_lock_defaults_false(tmp_path: Path) -> None:
 # displayed project-root set (both the in-memory active set and the persistent
 # registry callback). Every registration entry point routes through it, so
 # normalizing a worktree copy back to its owning main root *here* keeps the
-# transient ``<main>/se3/worktrees/<name>`` sandbox out of every displayed view
+# transient ``<main>/tianluo/worktrees/<name>`` sandbox out of every displayed view
 # at once. These tests pin that normalization at the aggregator boundary.
 
 
 def _make_worktree_dir(main_root: Path, wt_name: str = "wt-1") -> Path:
-    """Create a worktree isolation copy dir under ``<main>/se3/worktrees/``."""
-    wt = main_root / "se3" / "worktrees" / wt_name
-    (wt / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    """Create a worktree isolation copy dir under ``<main>/tianluo/worktrees/``."""
+    wt = main_root / "tianluo" / "worktrees" / wt_name
+    (wt / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     return wt
 
 
 def test_add_project_root_normalizes_worktree_into_active_set(tmp_path: Path) -> None:
     """Feeding a worktree path registers only its main root in the active set."""
     main = tmp_path / "main"
-    (main / "se3" / "state").mkdir(parents=True)
+    (main / "tianluo" / "state").mkdir(parents=True)
     wt = _make_worktree_dir(main)
 
     agg = DaemonAggregator(machine_id="m1")
@@ -1140,7 +1140,7 @@ def test_add_project_root_normalizes_worktree_into_registry_callback(
 ) -> None:
     """The registry_persist callback is fed the main root, never the worktree."""
     main = tmp_path / "main"
-    (main / "se3" / "state").mkdir(parents=True)
+    (main / "tianluo" / "state").mkdir(parents=True)
     wt = _make_worktree_dir(main)
 
     persisted: list = []
@@ -1151,14 +1151,14 @@ def test_add_project_root_normalizes_worktree_into_registry_callback(
 
 
 def test_all_project_roots_never_lists_a_worktree_path(tmp_path: Path) -> None:
-    """No ``/se3/worktrees/`` path ever appears in the dropdown-facing view.
+    """No ``/tianluo/worktrees/`` path ever appears in the dropdown-facing view.
 
     Even when the worktree path is fed in directly *and* lives in the persistent
     registry, the merged ``all_project_roots`` view must contain only the main
     root — the displayed project list / New Task dropdown is worktree-free.
     """
     main = tmp_path / "main"
-    (main / "se3" / "state").mkdir(parents=True)
+    (main / "tianluo" / "state").mkdir(parents=True)
     wt = _make_worktree_dir(main)
 
     agg = DaemonAggregator(
@@ -1172,7 +1172,7 @@ def test_all_project_roots_never_lists_a_worktree_path(tmp_path: Path) -> None:
 
     roots = agg.all_project_roots()
     assert str(main.resolve()) in roots
-    assert all("/se3/worktrees/" not in r for r in roots)
+    assert all("/tianluo/worktrees/" not in r for r in roots)
 
 
 # ---- registered_projects / unregister_project_root -------------------------
@@ -1264,7 +1264,7 @@ def test_registered_projects_swallows_callback_failure(tmp_path: Path) -> None:
 
 def test_snapshot_carries_registered_projects(tmp_path: Path) -> None:
     proj = tmp_path / "proj"
-    (proj / "se3" / "state").mkdir(parents=True)
+    (proj / "tianluo" / "state").mkdir(parents=True)
     agg = _registry_backed_aggregator([str(proj.resolve())])
 
     payload = agg.get_snapshot().to_dict()
@@ -1302,8 +1302,8 @@ def test_unregister_clears_persisted_memo_so_readd_writes_through(
 def test_unregister_drops_root_from_all_project_roots(tmp_path: Path) -> None:
     """Its own on-disk history must not resurrect a deregistered root."""
     proj = tmp_path / "proj"
-    (proj / "se3" / "history" / "flow-1").mkdir(parents=True)
-    (proj / "se3" / "history" / "flow-1" / "_meta.json").write_text(
+    (proj / "tianluo" / "history" / "flow-1").mkdir(parents=True)
+    (proj / "tianluo" / "history" / "flow-1" / "_meta.json").write_text(
         json.dumps({"project_root": str(proj.resolve())}), encoding="utf-8"
     )
     roots: list = []
@@ -1318,7 +1318,7 @@ def test_unregister_drops_root_from_all_project_roots(tmp_path: Path) -> None:
 
 def test_unregister_folds_worktree_spelling_to_main_root(tmp_path: Path) -> None:
     main = tmp_path / "main"
-    (main / "se3" / "state").mkdir(parents=True)
+    (main / "tianluo" / "state").mkdir(parents=True)
     wt = _make_worktree_dir(main)
     roots: list = []
     agg = _registry_backed_aggregator(roots)

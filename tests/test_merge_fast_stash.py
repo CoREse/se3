@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_cmd import (
+from tianluo.commands.merge_cmd import (
     _fast_stash_dirty,
     _fast_stash_pop,
     _has_user_uncommitted_changes,
@@ -135,7 +135,7 @@ def test_incomplete_stash_pop_preserves_branch_under_delete_merged(
     validation and strand the merged intent on master with no reconcile
     bump/changelog.
     """
-    import se3.commands.merge_cmd as merge_cmd
+    import tianluo.commands.merge_cmd as merge_cmd
 
     default = _init_repo(tmp_path)
     _make_feature_branch(tmp_path, "feature", "feat.txt")

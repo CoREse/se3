@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.tool_formatters import (
+from tianluo.engine.tool_formatters import (
     TOOL_FORMATTERS,
     _extract_text,
     format_tool_result_preview,
@@ -101,7 +101,7 @@ class TestTruncatePath:
         finally:
             # Restore original state
             if old_root is None:
-                from se3.engine import tool_formatters
+                from tianluo.engine import tool_formatters
                 tool_formatters._project_root = None
             else:
                 set_project_root(old_root)
@@ -117,7 +117,7 @@ class TestTruncatePath:
             assert result == "src/main.py"
         finally:
             if old_root is None:
-                from se3.engine import tool_formatters
+                from tianluo.engine import tool_formatters
                 tool_formatters._project_root = None
             else:
                 set_project_root(old_root)
@@ -146,7 +146,7 @@ class TestTruncatePath:
     def test_no_project_root_still_works(self):
         old_root = get_project_root()
         try:
-            from se3.engine import tool_formatters
+            from tianluo.engine import tool_formatters
             tool_formatters._project_root = None
             result = truncate_path("src/main.py")
             assert result == "src/main.py"
@@ -191,7 +191,7 @@ class TestTruncatePath:
             assert get_project_root() == Path("/foo")
         finally:
             if old_root is None:
-                from se3.engine import tool_formatters
+                from tianluo.engine import tool_formatters
                 tool_formatters._project_root = None
             else:
                 set_project_root(old_root)

@@ -9,8 +9,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from se3.engine.llm_caller import LLMCaller
-from se3.engine.chat_history import ChatMessage, ChatSession
+from tianluo.engine.llm_caller import LLMCaller
+from tianluo.engine.chat_history import ChatMessage, ChatSession
 
 
 class TestLLMCallerRetryMode:
@@ -26,8 +26,8 @@ class TestLLMCallerRetryMode:
         caller = LLMCaller(project_root=Path("/tmp"), retry_mode="retry")
         assert caller.retry_mode == "retry"
 
-    @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.LLMCaller._get_retry_context")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_continue_mode_uses_continuation_prompt(self, mock_runner_cls, mock_get_ctx):
         """In continue mode with retry context, should use continuation instruction, not original prompt."""
         mock_get_ctx.return_value = "[Previous conversation context]\nsome history"
@@ -67,8 +67,8 @@ class TestLLMCallerRetryMode:
         assert "Continue the task from where you left off" in effective_prompt
         assert "Do NOT repeat work already completed" in effective_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.LLMCaller._get_retry_context")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_retry_mode_uses_original_prompt(self, mock_runner_cls, mock_get_ctx):
         """In retry mode with retry context, should prepend history + original prompt."""
         mock_get_ctx.return_value = "[Previous conversation context]\nsome history"
@@ -103,8 +103,8 @@ class TestLLMCallerRetryMode:
         assert "Previous conversation context" in effective_prompt
         assert "Original task prompt" in effective_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.LLMCaller._get_retry_context")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_first_attempt_unchanged(self, mock_runner_cls, mock_get_ctx):
         """On first attempt (external_attempt=0), behavior should be unchanged regardless of mode."""
         mock_runner = MagicMock()
@@ -162,7 +162,7 @@ class TestLLMCallerRetryMode:
             return None
 
         # Patch via the chat_history module directly
-        import se3.engine.chat_history as ch_mod
+        import tianluo.engine.chat_history as ch_mod
         original_fn = ch_mod.format_history_for_retry
         try:
             ch_mod.format_history_for_retry = tracking_format
@@ -187,7 +187,7 @@ class TestStateMachineRetryMetadata:
 
     def test_retry_injects_metadata(self):
         """When a step is retried, is_retry and retry_count should be set in inputs."""
-        from se3.engine.models import Step, StepType, StepStatus, FlowInstance, FlowStatus, State
+        from tianluo.engine.models import Step, StepType, StepStatus, FlowInstance, FlowStatus, State
 
         # Create a step that will "fail"
         step = Step(
@@ -213,7 +213,7 @@ class TestStateMachineRetryMetadata:
 
     def test_first_execution_no_retry_metadata(self):
         """On first execution, is_retry and retry_count should not be present."""
-        from se3.engine.models import Step, StepType, StepStatus
+        from tianluo.engine.models import Step, StepType, StepStatus
 
         step = Step(
             step_type=StepType.IMPLEMENT,
@@ -230,8 +230,8 @@ class TestStateMachineLoadOrCreateFailedFlow:
 
     def test_load_or_create_returns_resumed_for_failed_flow(self):
         """load_or_create_flow should return (flow, True) for FAILED flows."""
-        from se3.engine.models import FlowInstance, FlowStatus
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import FlowInstance, FlowStatus
+        from tianluo.engine.state_machine import StateMachine
         from unittest.mock import MagicMock
 
         mock_persistence = MagicMock()
@@ -250,8 +250,8 @@ class TestStateMachineLoadOrCreateFailedFlow:
 
     def test_load_or_create_creates_new_for_completed_flow(self):
         """load_or_create_flow should create new flow for COMPLETED flows."""
-        from se3.engine.models import FlowInstance, FlowStatus
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import FlowInstance, FlowStatus
+        from tianluo.engine.state_machine import StateMachine
         from unittest.mock import MagicMock
 
         mock_persistence = MagicMock()
@@ -282,8 +282,8 @@ class TestInitFlowIdempotency:
 
     def test_init_flow_safe_for_failed_flow(self):
         """init_flow() can be called on a FAILED flow (idempotent guards skip existing data)."""
-        from se3.engine.models import FlowInstance, FlowStatus
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import FlowInstance, FlowStatus
+        from tianluo.engine.state_machine import StateMachine
         from unittest.mock import MagicMock, patch
 
         mock_persistence = MagicMock()
@@ -304,8 +304,8 @@ class TestInitFlowIdempotency:
 
     def test_init_flow_safe_for_paused_flow(self):
         """init_flow() can be called on a PAUSED flow (idempotent)."""
-        from se3.engine.models import FlowInstance, FlowStatus
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import FlowInstance, FlowStatus
+        from tianluo.engine.state_machine import StateMachine
         from unittest.mock import MagicMock, patch
 
         mock_persistence = MagicMock()
@@ -326,8 +326,8 @@ class TestInitFlowIdempotency:
 
     def test_init_flow_safe_for_completed_flow(self):
         """init_flow() can be called on a COMPLETED flow (idempotent — guards skip)."""
-        from se3.engine.models import FlowInstance, FlowStatus
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.models import FlowInstance, FlowStatus
+        from tianluo.engine.state_machine import StateMachine
         from unittest.mock import MagicMock, patch
 
         mock_persistence = MagicMock()

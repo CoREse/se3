@@ -26,7 +26,7 @@ import { fileURLToPath } from "node:url";
 // @media (max-width: 600px) breakpoint).
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STYLE_CSS = path.join(
-  HERE, "..", "..", "src", "se3", "server", "static", "style.css");
+  HERE, "..", "..", "src", "tianluo", "server", "static", "style.css");
 const CSS = fs.readFileSync(STYLE_CSS, "utf8");
 
 // Brace-balanced body of the @media (max-width: 600px) block (mirrors the

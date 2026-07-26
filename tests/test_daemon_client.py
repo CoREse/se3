@@ -11,14 +11,14 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.client import (
+from tianluo.daemon import protocol
+from tianluo.daemon.client import (
     DaemonClient,
     _default_respond_handler,
     _format_exc,
     _normalize_ws_url,
 )
-from se3.daemon.daemon import Daemon, DaemonConfig
+from tianluo.daemon.daemon import Daemon, DaemonConfig
 
 
 # --------------------------------------------------------------------------
@@ -187,7 +187,7 @@ def test_welcome_rejection_records_reason_in_last_error():
 
 def test_default_respond_handler_writes_file(tmp_path):
     _default_respond_handler("call-7", str(tmp_path), {"answer": "go"})
-    target = tmp_path / "se3" / "calls" / "call-7.response.json"
+    target = tmp_path / "tianluo" / "calls" / "call-7.response.json"
     assert target.is_file()
     payload = json.loads(target.read_text())
     assert payload["call_id"] == "call-7"
@@ -467,7 +467,7 @@ def test_dispatch_respond_call_routes_to_handler(tmp_path):
         )
 
     asyncio.run(scenario())
-    target = tmp_path / "se3" / "calls" / "c9.response.json"
+    target = tmp_path / "tianluo" / "calls" / "c9.response.json"
     assert target.is_file()
 
 
@@ -508,7 +508,7 @@ def test_dispatch_issue_command_create(tmp_path):
 
     asyncio.run(scenario())
 
-    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir = tmp_path / "tianluo" / "issues" / "open"
     assert issues_dir.is_dir()
     files = list(issues_dir.glob("*.yaml"))
     assert len(files) == 1
@@ -524,7 +524,7 @@ def test_dispatch_issue_command_edit(tmp_path):
     """ISSUE_COMMAND edit updates an existing issue."""
     import yaml
 
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="Old description", title="Old title")
@@ -549,7 +549,7 @@ def test_dispatch_issue_command_edit(tmp_path):
 
 def test_dispatch_issue_command_close(tmp_path):
     """ISSUE_COMMAND close closes an issue."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="To be closed")
@@ -574,7 +574,7 @@ def test_dispatch_issue_command_close(tmp_path):
 
 def test_dispatch_issue_command_reopen(tmp_path):
     """ISSUE_COMMAND reopen reopens a closed issue."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     mgr = IssueManager(tmp_path)
     issue = mgr.create(description="To reopen")
@@ -599,7 +599,7 @@ def test_dispatch_issue_command_reopen(tmp_path):
 
 def test_dispatch_issue_command_rejects_unregistered_root(tmp_path):
     """ISSUE_COMMAND rejects project_root not in known roots."""
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.engine.issue_manager import IssueManager
 
     other = tmp_path / "other"
     other.mkdir()
@@ -615,7 +615,7 @@ def test_dispatch_issue_command_rejects_unregistered_root(tmp_path):
 
     asyncio.run(scenario())
     # No issue should have been created
-    assert not (other / "se3" / "issues").exists()
+    assert not (other / "tianluo" / "issues").exists()
 
 
 def test_dispatch_issue_command_rejects_relative_path():
@@ -650,7 +650,7 @@ def test_dispatch_issue_command_ignores_empty_operation():
 def test_issue_command_reuses_cached_project_roots_without_snapshot(tmp_path):
     """With a warm cache, the issue command must not rebuild the snapshot.
 
-    The heavy snapshot provider (which walks se3/history) is the cause of the
+    The heavy snapshot provider (which walks tianluo/history) is the cause of the
     ack delay; a populated ``_last_known_project_roots`` cache means the
     project_root validation reuses it and never invokes the provider.
     """
@@ -677,7 +677,7 @@ def test_issue_command_reuses_cached_project_roots_without_snapshot(tmp_path):
     # Snapshot provider was never called on the issue hot path.
     assert calls["n"] == 0
     # The issue still landed on disk.
-    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    files = list((tmp_path / "tianluo" / "issues" / "open").glob("*.yaml"))
     assert len(files) == 1
 
 
@@ -705,7 +705,7 @@ def test_issue_command_falls_back_to_snapshot_when_cache_cold(tmp_path):
     # Snapshot built exactly once for validation, then cached for next time.
     assert calls["n"] == 1
     assert client._last_known_project_roots == {str(Path(tmp_path).resolve())}
-    files = list((tmp_path / "se3" / "issues" / "open").glob("*.yaml"))
+    files = list((tmp_path / "tianluo" / "issues" / "open").glob("*.yaml"))
     assert len(files) == 1
 
 
@@ -746,7 +746,7 @@ def test_issue_command_replies_failure_when_cold_snapshot_raises(tmp_path):
     # The cache stays cold so a later snapshot can still populate it.
     assert client._last_known_project_roots is None
     # No issue was written to disk.
-    issues_dir = tmp_path / "se3" / "issues" / "open"
+    issues_dir = tmp_path / "tianluo" / "issues" / "open"
     assert not issues_dir.exists() or not list(issues_dir.glob("*.yaml"))
 
 
@@ -883,7 +883,7 @@ def test_project_command_ack_echoes_normalized_path(tmp_path):
         client,
         ws,
         operation="add",
-        project_root="/main/repo/se3/worktrees/wt-1",
+        project_root="/main/repo/tianluo/worktrees/wt-1",
         request_id="req-norm",
     )
 
@@ -948,7 +948,7 @@ def test_project_command_without_handler_replies_unsupported(tmp_path):
 
 def test_project_command_propagates_handler_error_code(tmp_path):
     """A ProjectCommandError's code reaches the wire verbatim."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     handler = _RecordingProjectHandler(
         raises=ProjectCommandError("live_flow", "has a running flow")
@@ -984,7 +984,7 @@ def test_project_command_codeless_exception_reports_no_code(tmp_path):
 
 def test_project_command_failure_does_not_fast_push(tmp_path):
     """A refused command changed nothing, so no snapshot push is warranted."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     handler = _RecordingProjectHandler(
         raises=ProjectCommandError("not_registered", "not registered")
@@ -1077,7 +1077,7 @@ def test_project_command_without_request_id_sends_no_ack(tmp_path):
 
 def test_daemon_project_request_adapter_dispatches(tmp_path, monkeypatch):
     """The daemon's adapter routes add/remove and rejects anything else."""
-    from se3.daemon.daemon import ProjectCommandError
+    from tianluo.daemon.daemon import ProjectCommandError
 
     daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "pids"))
     seen = []
@@ -1132,7 +1132,7 @@ def test_push_status_sends_status_update():
 def test_push_status_does_not_block_event_loop():
     """A slow synchronous snapshot provider must be offloaded to a thread.
 
-    The snapshot build walks ``se3/history`` and can take seconds on a large
+    The snapshot build walks ``tianluo/history`` and can take seconds on a large
     history; if it ran inline on the event loop it would starve the heartbeat
     and SPAWN_FLOW handling (the bug this fixes). We model the heavy build with
     a blocking ``time.sleep`` and assert a concurrently-scheduled coroutine
@@ -1232,7 +1232,7 @@ def test_history_changed_without_provider_is_false():
 
 def test_push_history_prunes_drained_terminal_flow_cursor():
     """The cursor map keeps active/flushed flows and drops drained ones."""
-    from se3.daemon.history import FlowRead
+    from tianluo.daemon.history import FlowRead
 
     provider = _FakeHistoryProvider()
     client = _make_client(history_provider=provider)
@@ -1259,7 +1259,7 @@ def test_push_history_prunes_drained_terminal_flow_cursor():
 
 def test_push_history_keeps_empty_active_flow_cursor():
     """An active flow with an empty delta keeps its cursor (no re-snapshot)."""
-    from se3.daemon.history import FlowRead
+    from tianluo.daemon.history import FlowRead
 
     provider = _FakeHistoryProvider()
     client = _make_client(history_provider=provider)
@@ -1333,15 +1333,15 @@ def test_dispatch_history_index_request_invalidates_cache(tmp_path):
     TTL window would be invisible until the cache expires, contradicting the
     MSG_HISTORY_INDEX_REQUEST contract of "rebuild from disk immediately".
     """
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     root = tmp_path / "proj"
-    state = root / "se3" / "state"
+    state = root / "tianluo" / "state"
     state.mkdir(parents=True)
     (state / "engine.json").write_text(
         json.dumps({"flow_id": "f1", "status": "RUNNING"}), encoding="utf-8"
     )
-    hist = root / "se3" / "history" / "f1"
+    hist = root / "tianluo" / "history" / "f1"
     hist.mkdir(parents=True)
     (hist / "01_analyze.jsonl").write_text(
         json.dumps({"role": "user", "content": "hello"}) + "\n", encoding="utf-8"
@@ -1353,7 +1353,7 @@ def test_dispatch_history_index_request_invalidates_cache(tmp_path):
     assert [m.flow_id for m in r1] == ["f1"]
 
     # Add a new flow; the cache is still warm so build_index would miss it.
-    hist2 = root / "se3" / "history" / "f2"
+    hist2 = root / "tianluo" / "history" / "f2"
     hist2.mkdir(parents=True)
     (hist2 / "01_analyze.jsonl").write_text(
         json.dumps({"role": "user", "content": "world"}) + "\n", encoding="utf-8"
@@ -1409,7 +1409,7 @@ def _start_server(port: int, seed_key: str | None = None):
     """
     import uvicorn
 
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
     from _authsrv import authed_app
 
     app, daemon_key = authed_app()
@@ -1543,7 +1543,7 @@ class _BlockingHistoryProvider:
         return []
 
     def read_flow(self, flow_id, *, project_root=None, cursor=None):
-        from se3.daemon.history import FlowRead
+        from tianluo.daemon.history import FlowRead
 
         time.sleep(self.block_seconds)
         return FlowRead(flow_id, protocol.HISTORY_MODE_FULL, [], {})
@@ -1742,8 +1742,8 @@ def _invoke_daemon_status(monkeypatch, status_payload):
     """Run ``se3 daemon status`` with a stubbed ``daemon_status`` and return stdout."""
     from typer.testing import CliRunner
 
-    import se3.daemon as daemon_pkg
-    from se3.cli import app
+    import tianluo.daemon as daemon_pkg
+    from tianluo.cli import app
 
     monkeypatch.setattr(daemon_pkg, "daemon_status", lambda config: status_payload)
     result = CliRunner().invoke(app, ["daemon", "status"])
@@ -1758,7 +1758,7 @@ def test_status_shows_reason_when_last_error_present(monkeypatch):
             "running": True,
             "pid": 123,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": False,
             "last_error": "TimeoutError",
             "tracked_flows": [],
@@ -1774,7 +1774,7 @@ def test_status_no_empty_parens_when_last_error_blank(monkeypatch):
             "running": True,
             "pid": 123,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": False,
             "last_error": "",
             "tracked_flows": [],
@@ -1793,7 +1793,7 @@ def test_status_connected_branch_unchanged(monkeypatch):
             "running": True,
             "pid": 1,
             "machine_id": "m",
-            "server_url": "wss://se3.example",
+            "server_url": "wss://tianluo.example",
             "connected": True,
             "tracked_flows": [],
         },
@@ -1879,7 +1879,7 @@ def test_session_connects_with_raised_ws_max_size():
 
 def _make_reader_root(tmp_path, flow_id, status="RUNNING"):
     """Write a minimal active engine.json so build_index lists *flow_id*."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -1893,7 +1893,7 @@ def test_resolve_flow_root_from_index_returns_attributed_root(tmp_path):
     ``read_active_flows`` to, so respond / interject writes line up with the
     history-read path for a ``--worktree`` / discovery session.
     """
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     _make_reader_root(tmp_path, "wt-flow")
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
@@ -1913,7 +1913,7 @@ def test_resolve_flow_root_from_index_without_provider_is_empty():
 def test_interject_falls_back_to_history_index_root(tmp_path):
     """An interjection with no payload root and a snapshot that omits the flow
     resolves the root from the history index and writes the call file there."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     _make_reader_root(tmp_path, "wt-flow")
     reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
@@ -1932,7 +1932,7 @@ def test_interject_falls_back_to_history_index_root(tmp_path):
 
     asyncio.run(scenario())
 
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     assert calls_dir.is_dir()
     files = list(calls_dir.glob("*.json"))
     assert files, "interjection call file must be written under the index root"

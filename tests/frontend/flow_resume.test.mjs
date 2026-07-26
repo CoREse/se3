@@ -12,7 +12,7 @@ import path from "node:path";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const app = require(path.join(here, "..", "..", "src", "se3", "server", "static", "app.js"));
+const app = require(path.join(here, "..", "..", "src", "tianluo", "server", "static", "app.js"));
 
 let passed = 0;
 function check(name, fn) {

@@ -18,7 +18,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -26,7 +26,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestFixLoopIterations:
@@ -35,7 +35,7 @@ class TestFixLoopIterations:
     @pytest.fixture
     def state_machine(self, tmp_path):
         """Create a test state machine with mocked persistence."""
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     @pytest.fixture
@@ -180,7 +180,7 @@ class TestFixContextPassing:
     @pytest.fixture
     def state_machine(self, tmp_path):
         """Create a test state machine with mocked persistence."""
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     @pytest.fixture
@@ -328,7 +328,7 @@ class TestTestStepFailureHandling:
 
     def test_test_step_returns_revision_needed_on_failure(self):
         """Test that test step returns REVISION_NEEDED when tests fail."""
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
 
         flow = FlowInstance(
             flow_id="test-flow-123",
@@ -337,10 +337,10 @@ class TestTestStepFailureHandling:
         )
         step = self._make_step()
 
-        with patch("se3.config.TestConfig") as mock_config, \
-             patch("se3.engine.steps.test._run_command") as mock_run, \
-             patch("se3.engine.steps.test._record_test_history"), \
-             patch("se3.engine.steps.test._report_pre_existing_issues"):
+        with patch("tianluo.config.TestConfig") as mock_config, \
+             patch("tianluo.engine.steps.test._run_command") as mock_run, \
+             patch("tianluo.engine.steps.test._record_test_history"), \
+             patch("tianluo.engine.steps.test._report_pre_existing_issues"):
             mock_config.load.return_value = MagicMock(
                 command="python -m pytest -v", timeout=60,
                 get_phases_for_run=MagicMock(return_value=[]),
@@ -358,7 +358,7 @@ class TestTestStepFailureHandling:
 
     def test_test_step_stores_detailed_results_and_fix_context(self):
         """Test that test step stores detailed test results and fix context when failing."""
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
 
         flow = FlowInstance(
             flow_id="test-flow-123",
@@ -367,10 +367,10 @@ class TestTestStepFailureHandling:
         )
         step = self._make_step()
 
-        with patch("se3.config.TestConfig") as mock_config, \
-             patch("se3.engine.steps.test._run_command") as mock_run, \
-             patch("se3.engine.steps.test._record_test_history"), \
-             patch("se3.engine.steps.test._report_pre_existing_issues"):
+        with patch("tianluo.config.TestConfig") as mock_config, \
+             patch("tianluo.engine.steps.test._run_command") as mock_run, \
+             patch("tianluo.engine.steps.test._record_test_history"), \
+             patch("tianluo.engine.steps.test._report_pre_existing_issues"):
             mock_config.load.return_value = MagicMock(
                 command="python -m pytest -v", timeout=60,
                 get_phases_for_run=MagicMock(return_value=[]),
@@ -400,7 +400,7 @@ class TestFixLoopIntegration:
     @pytest.fixture
     def state_machine(self, tmp_path):
         """Create a test state machine with mocked persistence."""
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     def test_complete_fix_loop_workflow(self, state_machine):
@@ -479,15 +479,15 @@ class TestConfigMaxIterations:
     """Test cases for max_fix_iterations configuration."""
 
     def test_max_fix_iterations_from_se3_yaml(self, tmp_path):
-        """Test that max_fix_iterations can be configured via se3.yaml."""
-        from se3.config import get_max_fix_iterations
+        """Test that max_fix_iterations can be configured via tianluo.yaml."""
+        from tianluo.config import get_max_fix_iterations
 
-        # Create se3.yaml with custom max_fix_iterations
+        # Create tianluo.yaml with custom max_fix_iterations
         config_content = """
 workflow:
   max_fix_iterations: 5
 """
-        (tmp_path / "se3.yaml").write_text(config_content)
+        (tmp_path / "tianluo.yaml").write_text(config_content)
 
         result = get_max_fix_iterations(tmp_path)
 
@@ -495,15 +495,15 @@ workflow:
 
     def test_max_fix_iterations_default(self, tmp_path):
         """Test default max_fix_iterations when not configured."""
-        from se3.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
+        from tianluo.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
 
         result = get_max_fix_iterations(tmp_path)
 
         assert result == DEFAULT_MAX_FIX_ITERATIONS == 100
 
     def test_max_fix_iterations_no_config_file(self, tmp_path):
-        """Test default when se3.yaml doesn't exist."""
-        from se3.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
+        """Test default when tianluo.yaml doesn't exist."""
+        from tianluo.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
 
         non_existent_path = tmp_path / "non_existent"
         result = get_max_fix_iterations(non_existent_path)

@@ -26,7 +26,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-STATIC_DIR = REPO_ROOT / "src" / "se3" / "server" / "static"
+STATIC_DIR = REPO_ROOT / "src" / "tianluo" / "server" / "static"
 APP_JS = STATIC_DIR / "app.js"
 I18N_DIR = STATIC_DIR / "i18n"
 FLOW_RESUME_TEST = REPO_ROOT / "tests" / "frontend" / "flow_resume.test.mjs"

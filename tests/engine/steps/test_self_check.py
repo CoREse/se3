@@ -7,8 +7,8 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
-from se3.engine.steps.self_check import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
+from tianluo.engine.steps.self_check import (
     self_check_handler,
     _format_changes,
     _format_test_results,
@@ -97,7 +97,7 @@ class TestSelfCheckHandler:
             "summary": "Implementation looks solid.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -124,7 +124,7 @@ class TestSelfCheckHandler:
             "summary": "Minor suggestions only.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -148,7 +148,7 @@ class TestSelfCheckHandler:
             "summary": "Critical issue found.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -178,7 +178,7 @@ class TestSelfCheckHandler:
             "summary": "Issues found.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -206,7 +206,7 @@ class TestSelfCheckHandler:
             "summary": "Issue persists.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -217,7 +217,7 @@ class TestSelfCheckHandler:
         assert step.outputs["actionable_count"] == 1
 
     def test_returns_failed_on_llm_error(self, flow, step):
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.side_effect = RuntimeError("LLM timeout")
             mock_cls.return_value = mock_caller
@@ -228,12 +228,12 @@ class TestSelfCheckHandler:
         assert "LLM timeout" in step.error_message
 
     def test_returns_failed_on_unparseable_response(self, flow, step):
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = "not valid json at all"
             mock_cls.return_value = mock_caller
 
-            with patch("se3.engine.steps.self_check.parse_json_response", return_value=None):
+            with patch("tianluo.engine.steps.self_check.parse_json_response", return_value=None):
                 result = self_check_handler(step, flow)
 
         assert result == StepStatus.FAILED
@@ -270,7 +270,7 @@ class TestSelfCheckHandler:
             "summary": "Mixed.",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -287,7 +287,7 @@ class TestSelfCheckHandler:
     def test_uses_two_phase_json_mode(self, flow, step):
         response = json.dumps({"issues": [], "summary": "OK"})
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -323,7 +323,7 @@ class TestSelfCheckHandler:
         step.inputs["fix_iteration"] = 2
         response = json.dumps({"issues": [], "summary": "OK"})
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -351,7 +351,7 @@ class TestSelfCheckHandler:
             "summary": "issue",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -376,7 +376,7 @@ class TestSelfCheckHandler:
         }
         response = json.dumps(llm_result)
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -668,7 +668,7 @@ class TestSelfCheckConvergence:
         )
         response = json.dumps({"issues": repeated, "summary": "same"})
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -697,7 +697,7 @@ class TestSelfCheckConvergence:
             "summary": "first",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -734,7 +734,7 @@ class TestSelfCheckConvergence:
             "summary": "new issue found",
         })
 
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -753,28 +753,28 @@ class TestNormalizeForQuoteMatch:
     """Symmetric normalization for verbatim_quote ↔ source pool comparison."""
 
     def test_basic_passthrough(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         assert _normalize_for_quote_match("hello world") == "hello world"
 
     def test_literal_backslash_n_becomes_real_newline_then_space(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         assert _normalize_for_quote_match("a\\nb") == "a b"
 
     def test_smart_quotes_replaced_with_ascii(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         assert _normalize_for_quote_match("“hello” ‘world’") == '"hello" \'world\''
 
     def test_whitespace_collapsed(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         assert _normalize_for_quote_match("a  \n\t  b\n\nc") == "a b c"
 
     def test_nfkc_normalizes_compatibility_codepoints(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         # Fullwidth digit "１" becomes "1" under NFKC.
         assert _normalize_for_quote_match("１") == "1"
 
     def test_non_string_input_returns_empty(self):
-        from se3.engine.steps.self_check import _normalize_for_quote_match
+        from tianluo.engine.steps.self_check import _normalize_for_quote_match
         assert _normalize_for_quote_match(None) == ""
         assert _normalize_for_quote_match(123) == ""
         assert _normalize_for_quote_match(["list"]) == ""
@@ -784,12 +784,12 @@ class TestBuildSourcePool:
     """Source pool collection for verbatim_quote validation."""
 
     def test_includes_task_description(self):
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({"task_description": "user wants X"})
         assert "user wants X" in pool
 
     def test_includes_original_task_description(self):
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description": "refined: implement X",
             "original_task_description": "raw user input",
@@ -800,7 +800,7 @@ class TestBuildSourcePool:
     def test_excludes_base_spec(self):
         """``base`` spec content is too generic — any nit can hang off
         it. Excluded from source pool."""
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description": "task X",
             "spec_content": {
@@ -813,7 +813,7 @@ class TestBuildSourcePool:
         assert "Code must be PEP 8 compliant" not in pool
 
     def test_empty_inputs_returns_empty_pool(self):
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         assert _build_source_pool({}) == []
 
     def test_prefers_clean_base_over_composed(self):
@@ -823,7 +823,7 @@ class TestBuildSourcePool:
         our ``## Additional Instructions`` boilerplate header from the
         pool, blocking the attack where an LLM uses the header text
         itself as a verbatim_quote."""
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description_base": "task X",
             "task_description": (
@@ -843,7 +843,7 @@ class TestBuildSourcePool:
         entry, so a quote citing only the interjection content (without
         the bullet/timestamp prefix or section header) substring-
         matches."""
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description_base": "task X",
             "user_interjections": [
@@ -860,14 +860,14 @@ class TestBuildSourcePool:
         """Older inputs without ``task_description_base`` still work via
         the composed ``task_description``. (Forward-compat for unit
         tests / tests of pre-upgrade state.)"""
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({"task_description": "legacy task"})
         assert "legacy task" in pool
 
     def test_user_interjections_non_dict_entries_skipped(self):
         """Defensive: malformed interjection entries don't crash the
         pool builder."""
-        from se3.engine.steps.self_check import _build_source_pool
+        from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description_base": "task",
             "user_interjections": [
@@ -918,7 +918,7 @@ class TestValidateAndFilterIssues:
         return issue
 
     def test_kept_when_all_checks_pass(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         kept, stats = _validate_and_filter_issues(
             [self._good_issue()], self._inputs()
         )
@@ -927,7 +927,7 @@ class TestValidateAndFilterIssues:
         assert stats["input_count"] == 1
 
     def test_out_of_scope_dropped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         kept, stats = _validate_and_filter_issues(
             [self._good_issue(out_of_scope=True)], self._inputs()
         )
@@ -940,13 +940,13 @@ class TestValidateAndFilterIssues:
         signal does not disappear silently."""
         import logging
 
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
 
         issue = self._good_issue(out_of_scope=True)
         issue["description"] = "pre-existing flakiness in unrelated module"
         issue["evidence_lines"] = ["src/legacy.py:7"]
         issue["missing_in"] = []
-        with caplog.at_level(logging.INFO, logger="se3.engine.steps.self_check"):
+        with caplog.at_level(logging.INFO, logger="tianluo.engine.steps.self_check"):
             kept, stats = _validate_and_filter_issues([issue], self._inputs())
         assert kept == []
         assert stats["out_of_scope_count"] == 1
@@ -957,7 +957,7 @@ class TestValidateAndFilterIssues:
         assert "src/legacy.py:7" in joined
 
     def test_empty_quote_dropped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         bad = self._good_issue()
         bad["expectation_source"]["verbatim_quote"] = "  "
         kept, stats = _validate_and_filter_issues([bad], self._inputs())
@@ -965,7 +965,7 @@ class TestValidateAndFilterIssues:
         assert stats["empty_quote_count"] == 1
 
     def test_quote_not_in_source_dropped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         bad = self._good_issue()
         bad["expectation_source"]["verbatim_quote"] = "this phrase is not in the task"
         kept, stats = _validate_and_filter_issues([bad], self._inputs())
@@ -973,14 +973,14 @@ class TestValidateAndFilterIssues:
         assert stats["quote_not_in_source_count"] == 1
 
     def test_evidence_path_not_in_changes_dropped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         bad = self._good_issue(evidence_lines=["unrelated/file.py:1"], missing_in=[])
         kept, stats = _validate_and_filter_issues([bad], self._inputs())
         assert kept == []
         assert stats["bad_evidence_count"] == 1
 
     def test_missing_in_substitutes_for_evidence_lines(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         good = self._good_issue(
             evidence_lines=[],
             missing_in=["src/auth.py"],
@@ -990,14 +990,14 @@ class TestValidateAndFilterIssues:
         assert stats["bad_evidence_count"] == 0
 
     def test_empty_required_field_dropped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         bad = self._good_issue(actual_behavior="")
         kept, stats = _validate_and_filter_issues([bad], self._inputs())
         assert kept == []
         assert stats["empty_field_count"] == 1
 
     def test_non_dict_entry_skipped(self):
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         kept, stats = _validate_and_filter_issues(
             [None, "not a dict", 42, self._good_issue()],
             self._inputs(),
@@ -1008,7 +1008,7 @@ class TestValidateAndFilterIssues:
     def test_smart_quote_drift_in_quote_still_matches(self):
         """LLM paraphrasing with curly quotes still substring-matches
         against an ASCII-quoted source via the symmetric normalize."""
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         inputs = self._inputs(task_description='Implement "reliable" retry policy')
         good = self._good_issue()
         good["expectation_source"]["verbatim_quote"] = "“reliable” retry policy"
@@ -1022,7 +1022,7 @@ class TestValidateAndFilterIssues:
         source pool uses ``task_description_base`` (the un-decorated
         base), not the composed ``task_description``, so the header
         text is not in the pool."""
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         inputs = self._inputs()
         inputs["task_description_base"] = inputs["task_description"]
         # Composed task_description (what the LLM sees in its prompt)
@@ -1044,7 +1044,7 @@ class TestValidateAndFilterIssues:
         """The companion contract: an LLM legitimately citing an
         interjection's content (without the boilerplate header) MUST
         still pass validation."""
-        from se3.engine.steps.self_check import _validate_and_filter_issues
+        from tianluo.engine.steps.self_check import _validate_and_filter_issues
         inputs = self._inputs()
         inputs["task_description_base"] = inputs["task_description"]
         inputs["user_interjections"] = [
@@ -1097,7 +1097,7 @@ class TestPreviousIssueResolutions:
             ],
             "summary": "one fixed, one not",
         })
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -1111,7 +1111,7 @@ class TestPreviousIssueResolutions:
     def test_missing_resolutions_field_defaults_to_empty_list(self, flow):
         step = self._make_step()
         response = json.dumps({"issues": [], "summary": "ok"})
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
@@ -1145,7 +1145,7 @@ class TestPreviousIssueResolutions:
             "issues": [valid, empty_quote, out_of_scope],
             "summary": "mixed",
         })
-        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller

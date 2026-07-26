@@ -5,7 +5,7 @@ When ``se3 merge`` is invoked without ``--delete-merged`` or
 
 * delete the merged branch (lowercase ``git branch -d``)
 * archive its bound worktree under
-  ``<project_root>/se3/worktrees/.archive/<slug>-<ts>/`` before the
+  ``<project_root>/tianluo/worktrees/.archive/<slug>-<ts>/`` before the
   destructive removal.
 
 When ``--no-delete-merged`` is supplied, the branch and worktree are
@@ -56,7 +56,7 @@ def _branch_exists(path: Path, name: str) -> bool:
 
 
 def _archive_dirs(path: Path) -> list[Path]:
-    archive_root = path / "se3" / "worktrees" / ".archive"
+    archive_root = path / "tianluo" / "worktrees" / ".archive"
     if not archive_root.exists():
         return []
     return sorted(p for p in archive_root.iterdir() if p.is_dir())
@@ -72,7 +72,7 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
 ) -> None:
     """``run_merge`` without overriding ``delete_merged`` deletes the
     merged branch.  When the branch had a bound worktree, the worktree
-    is archived to ``se3/worktrees/.archive/`` before deletion.
+    is archived to ``tianluo/worktrees/.archive/`` before deletion.
     """
     default = _init_repo(tmp_path)
     _make_feature_branch(tmp_path, "feature", "feat.txt")
@@ -91,7 +91,7 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
     assert _archive_dirs(tmp_path) == []
 
     # Run the merge with default delete_merged (True).
-    from se3.commands.merge_cmd import run_merge
+    from tianluo.commands.merge_cmd import run_merge
 
     exit_code = run_merge(
         branches=["feature"],
@@ -101,14 +101,14 @@ def test_run_merge_default_deletes_branch_and_archives_worktree(
     assert exit_code == 0
     # Branch should be deleted by default now.
     assert _branch_exists(tmp_path, "feature") is False
-    # Archive should exist under se3/worktrees/.archive/feature-<ts>/.
+    # Archive should exist under tianluo/worktrees/.archive/feature-<ts>/.
     archives = _archive_dirs(tmp_path)
     assert archives, (
-        "expected an archive directory under se3/worktrees/.archive/"
+        "expected an archive directory under tianluo/worktrees/.archive/"
     )
     archived_for_feature = [d for d in archives if d.name.startswith("feature-")]
     assert archived_for_feature, (
-        f"no feature-* archive found under se3/worktrees/.archive/; "
+        f"no feature-* archive found under tianluo/worktrees/.archive/; "
         f"saw: {archives}"
     )
     # Worktree directory itself should be gone.
@@ -131,7 +131,7 @@ def test_run_merge_no_delete_merged_preserves_branch_and_skips_archive(
 
     _git(tmp_path, "checkout", default)
 
-    from se3.commands.merge_cmd import run_merge
+    from tianluo.commands.merge_cmd import run_merge
 
     exit_code = run_merge(
         branches=["feature"],
@@ -165,14 +165,14 @@ def test_cli_no_delete_merged_flag_overrides_default(
         captured["strategy"] = strategy
         return 0
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", stub_run_merge)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", stub_run_merge)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(
@@ -201,14 +201,14 @@ def test_cli_default_delete_merged_is_on(
         captured["delete_merged"] = delete_merged
         return 0
 
-    monkeypatch.setattr("se3.commands.merge_cmd.run_merge", stub_run_merge)
+    monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", stub_run_merge)
 
     import os
     old_cwd = os.getcwd()
     os.chdir(tmp_path)
     try:
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["merge", "feature"])

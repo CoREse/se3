@@ -17,13 +17,13 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 def _make_flow(tmp_path: Path) -> FlowInstance:
     """Create a minimal FlowInstance with change_path set."""
     flow = FlowInstance(task_description="test task")
-    flow.change_path = tmp_path / "se3.yaml"
+    flow.change_path = tmp_path / "tianluo.yaml"
     return flow
 
 
@@ -85,10 +85,10 @@ tests/test_new.py::test_fresh FAILED
 # ---------------------------------------------------------------------------
 
 _PATCHES = {
-    "config": "se3.config.TestConfig",
-    "run_cmd": "se3.engine.steps.test._run_command",
-    "record": "se3.engine.steps.test._record_test_history",
-    "report": "se3.engine.steps.test._report_pre_existing_issues",
+    "config": "tianluo.config.TestConfig",
+    "run_cmd": "tianluo.engine.steps.test._run_command",
+    "record": "tianluo.engine.steps.test._record_test_history",
+    "report": "tianluo.engine.steps.test._report_pre_existing_issues",
 }
 
 
@@ -104,7 +104,7 @@ class TestFixLoopInheritedOnly:
 
     @pytest.fixture(autouse=True)
     def _disable_baseline_budget(self):
-        with patch("se3.config.WorkflowConfig") as mock_wf:
+        with patch("tianluo.config.WorkflowConfig") as mock_wf:
             mock_wf.load.return_value = MagicMock(baseline_fix_max_attempts=0)
             yield
 
@@ -123,7 +123,7 @@ class TestFixLoopInheritedOnly:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -149,7 +149,7 @@ class TestFixLoopInheritedOnly:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         # Legacy key retained for back-compat, plus the new explicit alias.
@@ -172,7 +172,7 @@ class TestFixLoopInheritedOnly:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=["tests/test_a.py::test_two"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         mock_report.assert_called_once()
@@ -193,7 +193,7 @@ class TestFixLoopInheritedOnly:
         mock_run.return_value = _primary_result(False, STDOUT_REGRESSION_FAIL)
 
         flow = _make_flow(tmp_path)
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
 
         # Three separate test-step invocations on the same flow.
         for _ in range(3):
@@ -220,7 +220,7 @@ class TestFixLoopNewTestFail:
         flow = _make_flow(tmp_path)
         step = _make_step(tests_added=["tests/test_new.py"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -246,7 +246,7 @@ class TestFixLoopIntroducedRegression:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=[])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -277,7 +277,7 @@ class TestFixLoopMixedScenario:
             baseline_failures=["tests/test_a.py::test_two"],
         )
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         # Fix loop triggers because test_fresh (new test) failed
@@ -310,7 +310,7 @@ class TestFixLoopAllPass:
         flow = _make_flow(tmp_path)
         step = _make_step()
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.COMPLETED
@@ -339,10 +339,10 @@ class TestNoAutoPopulate:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=[])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
-        kf_path = tmp_path / "se3" / "state" / "known_test_failures.json"
+        kf_path = tmp_path / "tianluo" / "state" / "known_test_failures.json"
         assert not kf_path.exists()
 
     @patch(_PATCHES["report"])
@@ -351,7 +351,7 @@ class TestNoAutoPopulate:
     @patch(_PATCHES["config"])
     def test_existing_known_file_left_untouched(self, mock_config, mock_run, mock_record, mock_report, tmp_path):
         """A pre-existing known_test_failures.json is never written/updated."""
-        state_dir = tmp_path / "se3" / "state"
+        state_dir = tmp_path / "tianluo" / "state"
         state_dir.mkdir(parents=True)
         original = {
             "tests/test_a.py::test_two": {
@@ -372,7 +372,7 @@ class TestNoAutoPopulate:
         flow = _make_flow(tmp_path)
         step = _make_step(baseline_failures=[])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         # File content is byte-for-byte unchanged (not consulted, not rewritten).
@@ -411,7 +411,7 @@ class TestDynamicTimeout:
         step = _make_step()
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         # Should use 100 * 2.5 = 250s timeout
@@ -435,7 +435,7 @@ class TestDynamicTimeout:
         step = _make_step()
         # No estimated_test_duration in inputs
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         # Should use fallback config.timeout
@@ -459,7 +459,7 @@ class TestDynamicTimeout:
         step = _make_step(tests_added=["tests/test_new.py"])
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -489,7 +489,7 @@ class TestDynamicTimeout:
         step = _make_step()
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         # Primary call: dynamic timeout
@@ -514,7 +514,7 @@ class TestDynamicTimeout:
         step = _make_step(tests_added=["tests/test_new.py"])
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -541,7 +541,7 @@ class TestDynamicTimeout:
         step = _make_step(tests_added=["tests/test_new.py"])
         step.inputs["estimated_test_duration"] = 10000
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED
@@ -567,7 +567,7 @@ class TestDynamicTimeout:
         step = _make_step(tests_added=["tests/test_new.py"])
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         test_handler(step, flow)
 
         fix_context = step.outputs["fix_context"]
@@ -598,8 +598,8 @@ class TestDynamicTimeout:
         step = _make_step(tests_added=["tests/test_new.py"])
         step.inputs["estimated_test_duration"] = 100
 
-        from se3.engine.steps.test import test_handler
-        from se3.engine.steps.implement import _format_fix_context_structured
+        from tianluo.engine.steps.test import test_handler
+        from tianluo.engine.steps.implement import _format_fix_context_structured
 
         test_handler(step, flow)
 
@@ -648,7 +648,7 @@ class TestDynamicTimeout:
         flow = _make_flow(tmp_path)
         step = _make_step(tests_added=["tests/test_new.py"])
 
-        from se3.engine.steps.test import test_handler
+        from tianluo.engine.steps.test import test_handler
         status = test_handler(step, flow)
 
         assert status == StepStatus.REVISION_NEEDED

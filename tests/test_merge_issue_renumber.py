@@ -14,8 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.issue_manager import IssueManager, IssueStatus
-from se3.engine.merge.runtime_sync import (
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.merge.runtime_sync import (
     IssueMergeRecord,
     merge_worktree_issues,
 )
@@ -23,7 +23,7 @@ from se3.engine.merge.runtime_sync import (
 
 def _read_next_id(project_root: Path) -> int:
     """Return the integer value of the project's ``.next_id`` counter file."""
-    counter = project_root / "se3" / "issues" / ".next_id"
+    counter = project_root / "tianluo" / "issues" / ".next_id"
     return int(counter.read_text().strip())
 
 
@@ -77,7 +77,7 @@ def test_overlapping_ids_renumbered_without_conflict(tmp_path: Path) -> None:
     assert adopted.description.startswith("worktree brand new issue")
     assert wt_new.description in adopted.description
     assert "旧号 #003 → 新号 #004" in adopted.description
-    open_dir = main_root / "se3" / "issues" / "open"
+    open_dir = main_root / "tianluo" / "issues" / "open"
     matches = list(open_dir.glob("004_*.yaml"))
     assert len(matches) == 1
     assert matches[0].name.startswith("004_")
@@ -178,7 +178,7 @@ def test_closed_worktree_issue_renumbered_into_closed_dir(tmp_path: Path) -> Non
     assert records[0].status_dir == "closed"
     new_id = records[0].new_id
 
-    closed_dir = main_root / "se3" / "issues" / "closed"
+    closed_dir = main_root / "tianluo" / "issues" / "closed"
     matches = list(closed_dir.glob(f"{new_id}_*.yaml"))
     assert len(matches) == 1
 
@@ -188,14 +188,14 @@ def test_closed_worktree_issue_renumbered_into_closed_dir(tmp_path: Path) -> Non
 
 
 def test_missing_worktree_issues_dir_is_noop(tmp_path: Path) -> None:
-    """No worktree ``se3/issues/`` directory yields an empty merge, no error."""
+    """No worktree ``tianluo/issues/`` directory yields an empty merge, no error."""
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
 
     main_mgr = IssueManager(main_root)
     main_mgr.create("only main")
 
-    # wt_root has no se3/issues/ at all.
+    # wt_root has no tianluo/issues/ at all.
     records = merge_worktree_issues(main_root, wt_root)
     assert records == []
     assert _ids_on_disk(main_mgr) == {"001"}
@@ -275,7 +275,7 @@ def test_adopt_scopes_rewrite_when_kept_owner_has_mismatched_filename(
     filename-prefix-only check saw no ``005_*.yaml`` and rewrote store-wide,
     corrupting the reference — this pins the fix.
     """
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_root = tmp_path / "main"
     main_mgr = IssueManager(main_root)
@@ -303,7 +303,7 @@ def test_adopt_scopes_rewrite_when_kept_owner_has_mismatched_filename(
 
 def test_adopt_issue_rejects_empty_description(tmp_path: Path) -> None:
     """Adopting an issue with an empty description raises ValueError."""
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_mgr = IssueManager(tmp_path / "main")
     bad = Issue(id="009", description="   ")
@@ -319,7 +319,7 @@ def test_renumber_rewrites_self_reference_and_records_trace(tmp_path: Path) -> N
     to ``#<new>``, a traceable "old -> new" line is recorded, both sides survive,
     and ``.next_id`` lands at ``max(ID) + 1``.
     """
-    from se3.engine.merge.issue_renumber import format_renumber_trace
+    from tianluo.engine.merge.issue_renumber import format_renumber_trace
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -375,7 +375,7 @@ def test_batch_retired_number_rewrites_preexisting_store_reference(
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
 
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_mgr = IssueManager(main_root)
     main_mgr.create("keep")            # 001
@@ -458,8 +458,8 @@ def test_colliding_old_ids_in_source_leave_own_references_ambiguous(
     distinct new IDs with the token left as written and the ambiguity
     recorded durably in each holder.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -522,8 +522,8 @@ def test_ambiguous_shared_old_id_reference_left_and_recorded(
     (listing both candidates) recorded in the adopted copy, and the batch must
     stay idempotent on re-run.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -585,7 +585,7 @@ def test_runtime_sync_ambiguity_surfaced_via_out_param(tmp_path: Path) -> None:
     one ``{"file", "old_id", "candidates"}`` entry per affected file into the
     caller-supplied out list.
     """
-    from se3.engine.issue_manager import Issue
+    from tianluo.engine.issue_manager import Issue
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -616,7 +616,7 @@ def test_runtime_sync_ambiguity_surfaced_via_out_param(tmp_path: Path) -> None:
     for entry in ambiguous:
         assert set(entry.keys()) == {"file", "old_id", "candidates"}
         # File paths are repo-relative under the issue store.
-        assert entry["file"].startswith("se3/issues/")
+        assert entry["file"].startswith("tianluo/issues/")
         assert len(entry["candidates"]) >= 2
     # The dependent gamma issue is among the recorded files.
     assert any("gamma" in entry["file"] for entry in ambiguous)
@@ -636,8 +636,8 @@ def test_shared_old_id_with_identity_keeper_stays_ambiguous(
     references. The tokens must keep their digits and both candidates
     (including the kept number) must be recorded.
     """
-    from se3.engine.issue_manager import Issue
-    from se3.engine.merge.issue_renumber import format_ambiguous_reference_note
+    from tianluo.engine.issue_manager import Issue
+    from tianluo.engine.merge.issue_renumber import format_ambiguous_reference_note
 
     main_root = tmp_path / "main"
     wt_root = tmp_path / "wt"
@@ -645,7 +645,7 @@ def test_shared_old_id_with_identity_keeper_stays_ambiguous(
     main_mgr = IssueManager(main_root)
     main_mgr.create("main base")  # 001
     # The next allocation will be exactly the incoming colliding number.
-    (main_root / "se3" / "issues" / ".next_id").write_text("5")
+    (main_root / "tianluo" / "issues" / ".next_id").write_text("5")
 
     wt_mgr = IssueManager(wt_root)
     wt_mgr._ensure_dirs()
@@ -975,7 +975,7 @@ def test_adopted_copy_keeping_its_number_still_dedups_on_rerun(
         main_mgr.create(f"main {n}")  # 001..004 -> next_id 005
 
     # Seed the worktree counter so its issue numbers sit at 005 and 007.
-    wt_issues_dir = wt_root / "se3" / "issues"
+    wt_issues_dir = wt_root / "tianluo" / "issues"
     (wt_issues_dir / "open").mkdir(parents=True)
     (wt_issues_dir / ".next_id").write_text("5")
     wt_mgr = IssueManager(wt_root)
@@ -1010,7 +1010,7 @@ def test_next_id_matches_max_after_renumber(tmp_path: Path) -> None:
     main_mgr.create("keep")  # 001
 
     # Simulate a lagging/garbage counter the way a botched prior write might.
-    (main_root / "se3" / "issues" / ".next_id").write_text("not-a-number")
+    (main_root / "tianluo" / "issues" / ".next_id").write_text("not-a-number")
 
     src_mgr = IssueManager(tmp_path / "src")
     src_issue = src_mgr.create("adopt me referencing #009")
@@ -1039,7 +1039,7 @@ def test_stale_lagging_counter_cannot_mint_duplicate_id(tmp_path: Path) -> None:
     main_mgr = IssueManager(main_root)
     for n in range(5):
         main_mgr.create(f"main {n}")  # 001..005 -> counter 6
-    (main_root / "se3" / "issues" / ".next_id").write_text("5")
+    (main_root / "tianluo" / "issues" / ".next_id").write_text("5")
 
     wt_mgr = IssueManager(wt_root)
     wt_mgr.create("worktree only issue")  # 001 in the worktree
@@ -1053,7 +1053,7 @@ def test_stale_lagging_counter_cannot_mint_duplicate_id(tmp_path: Path) -> None:
     assert _ids_on_disk(main_mgr) == {
         "001", "002", "003", "004", "005", "006",
     }
-    open_dir = main_root / "se3" / "issues" / "open"
+    open_dir = main_root / "tianluo" / "issues" / "open"
     assert len(list(open_dir.glob("005_*.yaml"))) == 1
     assert len(list(open_dir.glob("006_*.yaml"))) == 1
 

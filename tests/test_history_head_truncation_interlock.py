@@ -37,8 +37,8 @@ import asyncio
 import json
 from pathlib import Path
 
-from se3.daemon.history import DaemonHistoryReader
-from se3.server.state import ServerState
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.server.state import ServerState
 
 FLOW = "20260714-093536_a4af4b75"
 MACHINE = "m1"
@@ -50,7 +50,7 @@ ROUND2 = 5   # records appended afterwards
 
 def _flush(root: Path, count: int, *, start: int) -> None:
     """Append *count* jsonl records to the flow's discovery step file."""
-    path = root / "se3" / "history" / FLOW / STEP_FILE
+    path = root / "tianluo" / "history" / FLOW / STEP_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
         for ordinal in range(start, start + count):
@@ -99,11 +99,11 @@ def test_lost_frame_then_empty_full_still_yields_complete_history(tmp_path):
     # of this project, so the suite must run on a bare pytest install.
     async def scenario():
         # A real `se3 run --worktree` layout: the flow body lives under
-        # <main>/se3/worktrees/<name>/ and keeps its own se3/history there. The
+        # <main>/tianluo/worktrees/<name>/ and keeps its own tianluo/history there. The
         # path shape matters — it is what makes the server treat the flow as an
         # active worktree flow, which scopes the empty-full guard.
-        root = tmp_path / "se3" / "worktrees" / "wt-a4af4b75"
-        (root / "se3" / "history" / FLOW).mkdir(parents=True)
+        root = tmp_path / "tianluo" / "worktrees" / "wt-a4af4b75"
+        (root / "tianluo" / "history" / FLOW).mkdir(parents=True)
 
         reader = DaemonHistoryReader(project_roots_provider=lambda: [str(root)])
         state = ServerState()

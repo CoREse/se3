@@ -22,8 +22,8 @@ from unittest.mock import patch
 import pytest
 import logging
 
-import se3.config as _cfg
-from se3.config import (
+import tianluo.config as _cfg
+from tianluo.config import (
     AgentDef,
     load_agent_registry,
     load_agents,
@@ -54,12 +54,12 @@ def _no_global(tmp_path):
     The caller typically uses ``with _no_global(tmp_path):`` to scope the
     patch tightly around the call under test.
     """
-    return patch("se3.config.Path.home", return_value=tmp_path)
+    return patch("tianluo.config.Path.home", return_value=tmp_path)
 
 
 class TestDictForm:
     def test_basic_dict_registry(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: {cmd: claude, priority: 10}
   backup: {cmd: claude-dev, priority: 5}
@@ -77,7 +77,7 @@ class TestDictForm:
 
     def test_registry_with_string_entry(self, tmp_path):
         # A bare string entry → treated as cmd.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: claude
 """
@@ -88,14 +88,14 @@ class TestDictForm:
         assert registry["primary"].priority == 0
 
     def test_entry_without_cmd_is_skipped(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   bad: {priority: 10}
   good: {cmd: claude, priority: 5}
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert "bad" not in registry
@@ -103,14 +103,14 @@ class TestDictForm:
         assert any("no usable 'cmd'" in rec.message for rec in caplog.records)
 
     def test_empty_registry_does_not_raise(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
         with _no_global(tmp_path):
             registry = load_agent_registry(tmp_path)
         assert registry == {}
         # load_agents falls back to the probed built-in chain. Pin which()
         # so the result does not depend on the host's installed agents.
         which_claude_only = patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd, *a, **k: "/fake/bin/claude" if cmd == "claude" else None,
         )
         with _no_global(tmp_path), which_claude_only:
@@ -128,7 +128,7 @@ class TestEntryLevelMerge:
   shared: {cmd: shared-global, priority: 5}
 """
         )
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   primary: {cmd: project-claude, priority: 10}
   only_project: {cmd: extra, priority: 2}
@@ -148,14 +148,14 @@ class TestEntryLevelMerge:
 
 class TestListFormIgnored:
     def test_list_agents_warned_and_ignored(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   - name: primary
     cmd: claude
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert registry == {}
@@ -164,9 +164,9 @@ class TestListFormIgnored:
         )
 
     def test_scalar_agents_warned_and_ignored(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text("agents: claude\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: claude\n")
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert registry == {}
@@ -179,7 +179,7 @@ class TestClaudeCommandsLegacyMigration:
     def test_legacy_migration_creates_registry_and_defaults(
         self, tmp_path, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
     priority: 10
@@ -188,7 +188,7 @@ class TestClaudeCommandsLegacyMigration:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert set(registry.keys()) == {"claude", "claude-dev"}
@@ -206,7 +206,7 @@ class TestClaudeCommandsLegacyMigration:
         assert "defaults:" in combined
 
     def test_legacy_cmd_collision_adds_suffix(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
   - cmd: claude
@@ -221,7 +221,7 @@ class TestClaudeCommandsLegacyMigration:
     def test_legacy_defaults_chain_feeds_load_agents(self, tmp_path):
         # When only claude_commands is present, load_agents builds the
         # chain from the migrated names in list order.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """claude_commands:
   - cmd: claude
     priority: 1
@@ -236,7 +236,7 @@ class TestClaudeCommandsLegacyMigration:
         assert [a["name"] for a in chain] == ["claude", "claude-dev"]
 
     def test_claude_commands_ignored_when_agents_present(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             """agents:
   real: {cmd: real-claude}
 claude_commands:
@@ -244,7 +244,7 @@ claude_commands:
 """
         )
         with _no_global(tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 registry = load_agent_registry(tmp_path)
 
         assert set(registry.keys()) == {"real"}

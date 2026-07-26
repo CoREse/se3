@@ -1,24 +1,24 @@
-# SE3 Framework — Charter
+# tianluo (田螺) Framework — Charter
 
 ## Purpose
-项目宪章（charter）。此文件由 `se3 init` / `se3 migrate` 生成，在每个 `se3 run`
+项目宪章（charter）。此文件由 `luo init` / `luo migrate` 生成，在每个 `luo run`
 step 中**无条件全量注入**，并兼任沙箱子进程的 conventions 通道（子进程读不到
 CLAUDE.md，只能经 charter 获得项目级约定）。
 
 charter 只收录**代码说不出、且全项目每个 step 都需要全量看到**的高层内容：项目
 身份、顶层架构、项目级横切强制约定、版本管理。它**不**承载每模块/每符号的定位
-信息——那是 code-index（`se3 code-index`）的职责，按需钻取，不进 charter（复制
+信息——那是 code-index（`luo code-index`）的职责，按需钻取，不进 charter（复制
 进来只会得到一份随规模膨胀、又不如代码准的镜像）。
 
 ## Requirements
 
 ### Requirement: Project Identity
-- 项目名称: SE3 Framework
-- 简述: SE 3.0 的 code-first 软件工程流程引擎——**以 CLI 为本**：core `se3` 是一套
-  CLI 命令（单次 `se3 run` 流程），其上可**可选**叠加常驻 daemon 与中央 web-server
-  控制平面（`se3[server]`，依赖隔离、独立部署）。代码是唯一权威真相源，通过
+- 项目名称: tianluo（田螺；曾用名 se3，方法论仍称 SE 3.0）
+- 简述: SE 3.0 的 code-first 软件工程流程引擎——**以 CLI 为本**：core `tianluo` 是一套
+  CLI 命令（单次 `luo run` 流程），其上可**可选**叠加常驻 daemon 与中央 web-server
+  控制平面（`tianluo[server]`，依赖隔离、独立部署）。代码是唯一权威真相源，通过
   code-index、本 charter 与同位 why-comments 向人类与 agent 暴露其当前状态（已退役
-  `se3/specs/` 的 spec 镜像治理）。
+  `tianluo/specs/` 的 spec 镜像治理）。
 - 主要语言/框架: Python 3.8+、Typer（CLI）、PyYAML、Rich、prompt-toolkit
 
 ### Requirement: Top-Level Architecture
@@ -26,16 +26,16 @@ charter 只收录**代码说不出、且全项目每个 step 都需要全量看�
 只写**需主观判断、无单一代码归属**的架构决策（『为何这些模块归为一个子系统』
 这类语义分层）。
 
-SE3 由若干子系统拼合而成；以下只记录需要主观判断、无单一代码归属的架构分层与边界。
+tianluo 由若干子系统拼合而成；以下只记录需要主观判断、无单一代码归属的架构分层与边界。
 
 **Code-first 知识模型。** 项目源码是唯一权威真相源。知识通过三件套对外暴露：
-`se3/charter.md`（本宪章——项目身份/顶层架构/横切约定）、`se3/code-index.md`
+`tianluo/charter.md`（本宪章——项目身份/顶层架构/横切约定）、`tianluo/code-index.md`
 （代码自身的结构地图，按需钻取到符号级）、以及与代码同位的 why-comments（记录
-某段代码『为何如此』的意图）。已退役的 spec 镜像（`se3/specs/` 的 code↔spec
+某段代码『为何如此』的意图）。已退役的 spec 镜像（`tianluo/specs/` 的 code↔spec
 双向治理）不再是真相源；当 charter/why-comments 与代码不一致时，以代码为准。
-未来意图通过 issue（`se3 issue`）进入，而非改写知识文件去描述尚未实现的未来。
+未来意图通过 issue（`luo issue`）进入，而非改写知识文件去描述尚未实现的未来。
 
-**流程引擎（`se3 run`）——程序驱动的状态机。** run 流程由状态机（而非 LLM
+**流程引擎（`luo run`）——程序驱动的状态机。** run 流程由状态机（而非 LLM
 决策）编排开发步骤序列，LLM 只在每个 step 内部被调用、处理需要『思考』的部分。
 这一『程序驱动、LLM 只填思考空位』的边界是核心架构决策：步骤路由、上下文流转、
 流程的可中断/可续跑都由代码确定性掌控；任何 flow 都可在确切的中断点恢复。
@@ -49,23 +49,23 @@ stream-json 模型为准；LLM-相关的关注点（CLI 参数构造、输出解
 经 `build_call_args` 意图翻译缝合——使 LLMCaller 无需感知任何具体 LLM 的 CLI 细节，
 从而可在不改上层调用方的前提下接入新 runner 类型。
 
-**控制平面：core CLI / daemon / 中央 server 三层。** core `se3` CLI 是基础；
-daemon 是常驻进程，其生命周期长于单次 `se3 run`，负责发现/监管本机 flow、聚合
-`se3/state|logs|calls|issues` 状态，并对中央 server 维持唯一一条出站连接；中央
-server 是独立部署件（经 `se3-server` 入口启动，非 core 子命令）。硬边界：server
-的重 Web 依赖经 `pyproject.toml` optional-dependencies（`se3[server]`）隔离，仅装
-core（`se3`）时绝不能因 server 代码触发 import 错误——对 `se3.server` 及其重依赖
-的引用一律延迟到 `se3-server` 入口真正运行时。
+**控制平面：core CLI / daemon / 中央 server 三层。** core `luo` CLI 是基础；
+daemon 是常驻进程，其生命周期长于单次 `luo run`，负责发现/监管本机 flow、聚合
+`tianluo/state|logs|calls|issues` 状态，并对中央 server 维持唯一一条出站连接；中央
+server 是独立部署件（经 `tianluo-server` 入口启动，非 core 子命令）。硬边界：server
+的重 Web 依赖经 `pyproject.toml` optional-dependencies（`tianluo[server]`）隔离，仅装
+core（`luo`）时绝不能因 server 代码触发 import 错误——对 `tianluo.server` 及其重依赖
+的引用一律延迟到 `tianluo-server` 入口真正运行时。
 
-**隔离与合并。** `se3 run --worktree` 在独立 git worktree 中跑**完全相同**的
-flow（相同步骤/状态持久化/`--resume`/`--type`），成功后经重量级 `se3 merge`
-编排器自动合回原分支。主 worktree 互斥锁（`se3/state/merge.lock`，阻塞式
+**隔离与合并。** `luo run --worktree` 在独立 git worktree 中跑**完全相同**的
+flow（相同步骤/状态持久化/`--resume`/`--type`），成功后经重量级 `luo merge`
+编排器自动合回原分支。主 worktree 互斥锁（`tianluo/state/merge.lock`，阻塞式
 queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式的 flow body
 不持该锁，故多个 `--worktree` run 可并发执行，仅在各自最终 merge 处竞争。
 
 **注意:** 每个目录/模块/符号『在哪、干嘛、有哪些关键符号』这类机械定位信息
-**不写在这里**，由 code-index 自动维护、按需查阅（`se3 code-index` 显示顶层
-地图，`se3 code-index show <path>` 钻取到函数级）。charter 只承载机械结构
+**不写在这里**，由 code-index 自动维护、按需查阅（`luo code-index` 显示顶层
+地图，`luo code-index show <path>` 钻取到函数级）。charter 只承载机械结构
 层级表达不了的语义/架构分层。
 
 ### Requirement: Coding Conventions
@@ -84,7 +84,7 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
   不回溯翻译既有知识资产。
 - 类型注解采用 `from __future__ import annotations` 风格。
 - 测试放在 `tests/` 目录，命名 `test_*.py`，使用 pytest。受控例外：
-  `src/se3/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎
+  `src/tianluo/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎
   内部行为（私有 helper、状态机内部分支、step 内部细节）。
 - **关键 why-comment 标记前缀**：记载绑定意图/不变量（binding intent/invariant）
   的关键 why-comment 应以 `WHY:` 或 `INVARIANT:` 前缀显式标注。此类被标记的注释受
@@ -99,16 +99,16 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
 - **LLM 子进程隔离**：流程引擎的若干 step（如 analyze、plan）以 LLM 子进程执行，
   这些子进程读不到 CLAUDE.md，只能经本 charter（及沙箱 conventions 通道）获得
   项目级约定。因此项目级约定必须落在 charter，而非 CLAUDE.md。
-- **core/server 依赖隔离**：仅装 core 时 `se3` 命令族不得因 server 代码引发 import
-  错误；对 `se3.server` 包及其重依赖的引用必须延迟到 `se3-server` 入口真正运行。
-- **代码即真相源**：未来意图经 issue（`se3 issue`）进入，不得改写 charter /
+- **core/server 依赖隔离**：仅装 core 时 `luo` 命令族不得因 server 代码引发 import
+  错误；对 `tianluo.server` 包及其重依赖的引用必须延迟到 `tianluo-server` 入口真正运行。
+- **代码即真相源**：未来意图经 issue（`luo issue`）进入，不得改写 charter /
   code-index / why-comments 去描述尚未构建的未来。
 
 ### Requirement: Workflow Conventions
-- 用 `se3 commit` 而非 `git commit`（强制测试通过、拦截敏感文件）。
+- 用 `luo commit` 而非 `git commit`（强制测试通过、拦截敏感文件）。
 - 提交信息必须包含上下文，便于下一会话顺利接续。
 - 仅在测试已运行通过后，才可将功能标记为完成。
-- 主入口命令：`se3 run "任务描述"`。
+- 主入口命令：`luo run "任务描述"`。
 
 ### Requirement: Version Management
 
@@ -117,7 +117,7 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
 **版本号文件（单一真相源）:**
 - Python 项目: `pyproject.toml` 中的 `project.version` 字段
 - Node.js 项目: `package.json` 中的 `version` 字段
-- 其他项目: 在 `se3.yaml` 中显式指定 `version.file_path`
+- 其他项目: 在 `tianluo.yaml` 中显式指定 `version.file_path`
 
 **版本格式:**
 遵循 SemVer 2.0.0: `MAJOR.MINOR.PATCH[-prerelease][+build]`
@@ -128,7 +128,7 @@ queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式
 **版本决策模型:**
 - `version_analyze` 步骤的 `suggested_version` 字段是新版本号的唯一权威来源
   （由 LLM 基于实际变更内容、SemVer 2.0.0 默认规则以及可选的项目级规则文件推导）
-- 可选自定义规则: 在 `se3/version-rules.md` 写入自然语言规则，
+- 可选自定义规则: 在 `tianluo/version-rules.md` 写入自然语言规则，
   `version_analyze` 会将其注入 LLM prompt 作为决策依据；文件不存在时回落到默认 SemVer 2.0.0 规则
 - `commit` 步骤直接采用 `suggested_version` 写入版本文件；若该字段缺失或步骤失败，
   流程报错中断并提示人工介入（不再有静默 patch bump 兜底）

@@ -1,13 +1,13 @@
 """Tests for the unified interaction-call channel.
 
 Covers the three layers that turn every human-in-the-loop interaction in a
-running flow into one artifact — a JSON call file under ``se3/calls/``:
+running flow into one artifact — a JSON call file under ``tianluo/calls/``:
 
-* :mod:`se3.daemon.protocol` — the ``MSG_INTERJECT_FLOW`` message, the
+* :mod:`tianluo.daemon.protocol` — the ``MSG_INTERJECT_FLOW`` message, the
   ``CALL_KIND_*`` constants and decode backward-compatibility;
-* :class:`se3.daemon.aggregator.DaemonAggregator` — parsing call files of
+* :class:`tianluo.daemon.aggregator.DaemonAggregator` — parsing call files of
   every ``kind`` *and* legacy call files written before the field existed;
-* :mod:`se3.engine.interaction_calls` — writing call files, reading sibling
+* :mod:`tianluo.engine.interaction_calls` — writing call files, reading sibling
   response files, and draining queued mid-flow interjections.
 
 A dedicated backward-compatibility case feeds the aggregator and the reader a
@@ -22,9 +22,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator
-from se3.engine import interaction_calls
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.engine import interaction_calls
 
 
 # --------------------------------------------------------------------------
@@ -100,7 +100,7 @@ def _write(path: Path, payload: object) -> None:
 
 
 def test_aggregator_parses_every_call_kind(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     _write(calls / "k_call.json", {"kind": "call", "prompt": "answer me"})
     _write(
@@ -136,7 +136,7 @@ def test_aggregator_parses_every_call_kind(tmp_path: Path):
 
 def test_aggregator_legacy_call_file_without_kind(tmp_path: Path):
     """Backward compatibility: a pre-feature call file has no metadata."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     # The exact shape SE3 wrote before the unified channel existed: just the
     # confirm-call fields, no `kind` / `prompt` / `context` / `options`.
@@ -158,7 +158,7 @@ def test_aggregator_legacy_call_file_without_kind(tmp_path: Path):
 
 
 def test_aggregator_unknown_kind_falls_back_to_call(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     _write(calls / "weird.json", {"kind": "not_a_real_kind", "prompt": "x"})
     _write(calls / "garbage.json", "this is not even a json object")
@@ -177,7 +177,7 @@ def test_aggregator_unknown_kind_falls_back_to_call(tmp_path: Path):
 
 
 def test_write_and_read_call_round_trip(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     path = interaction_calls.write_call(
         calls,
         kind=interaction_calls.CALL_KIND_CLI_CONFIRM,
@@ -199,13 +199,13 @@ def test_write_and_read_call_round_trip(tmp_path: Path):
 def test_write_call_rejects_unknown_kind(tmp_path: Path):
     with pytest.raises(ValueError):
         interaction_calls.write_call(
-            tmp_path / "se3" / "calls", kind="bogus", prompt="x"
+            tmp_path / "tianluo" / "calls", kind="bogus", prompt="x"
         )
 
 
 def test_read_call_legacy_file_defaults_kind(tmp_path: Path):
     """A call file with no `kind` key reads back as a plain `call`."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     legacy = calls / "old_call.json"
     legacy.write_text(json.dumps({"step": "s1"}), encoding="utf-8")
@@ -236,7 +236,7 @@ def test_classify_kind_defensive():
 
 
 def test_write_response_round_trip(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     path = interaction_calls.write_call(
         calls, kind="call", prompt="?", call_id="c1"
     )
@@ -249,7 +249,7 @@ def test_write_response_round_trip(tmp_path: Path):
 
 def test_read_response_accepts_daemon_response_json(tmp_path: Path):
     """The daemon client writes `<stem>.response.json`; reader accepts both."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     path = interaction_calls.write_call(
         calls, kind="retry_decision", prompt="failed", call_id="rd1"
     )
@@ -269,7 +269,7 @@ def test_read_response_accepts_daemon_response_json(tmp_path: Path):
 
 
 def test_drain_interjection_requests_consumes_and_is_idempotent(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_interjection_request(
         calls, "first instruction", flow_id="f1", call_id="ij_1"
     )
@@ -287,7 +287,7 @@ def test_drain_interjection_requests_consumes_and_is_idempotent(tmp_path: Path):
 
 
 def test_drain_ignores_non_interjection_kinds(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_call(calls, kind="call", prompt="q", call_id="plain")
     interaction_calls.write_call(
         calls, kind="retry_decision", prompt="failed", call_id="rd"
@@ -301,7 +301,7 @@ def test_drain_ignores_non_interjection_kinds(tmp_path: Path):
 
 
 def test_drain_skips_empty_text_requests(tmp_path: Path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     # An interjection call whose text is whitespace-only is consumed silently.
     interaction_calls.write_call(
         calls,
@@ -325,7 +325,7 @@ def test_drain_unlinks_call_file_and_writes_served_sibling(tmp_path: Path):
     """Drain seals each consumed call via write-response-then-delete:
     a sibling .response is written first, then the .json file is unlinked.
     """
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_interjection_request(
         calls, "do the thing", flow_id="f1", call_id="ij_remove"
     )
@@ -347,7 +347,7 @@ def test_drain_unlinks_call_file_and_writes_served_sibling(tmp_path: Path):
 
 def test_drain_returns_step_id_and_step_type_when_present(tmp_path: Path):
     """Drained entries surface step_id / step_type from the call context."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_call(
         calls,
         kind=interaction_calls.CALL_KIND_INTERJECTION,
@@ -367,7 +367,7 @@ def test_drain_returns_step_id_and_step_type_when_present(tmp_path: Path):
 
 def test_drain_legacy_call_without_context_step_fields_empty(tmp_path: Path):
     """Legacy interjection calls (no context.step_id) still drain cleanly."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_interjection_request(
         calls, "legacy text", flow_id="", call_id="ij_legacy"
     )
@@ -380,7 +380,7 @@ def test_drain_legacy_call_without_context_step_fields_empty(tmp_path: Path):
 
 def test_drain_second_pass_is_idempotent_after_unlink(tmp_path: Path):
     """A second drain pass finds nothing — the unlink ensures non-repeat."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     interaction_calls.write_interjection_request(
         calls, "once", flow_id="f1", call_id="ij_once"
     )
@@ -426,7 +426,7 @@ def test_cli_confirm_handler_returns_answer_when_response_arrives(tmp_path: Path
     handler = interaction_calls.make_cli_confirm_handler(
         tmp_path, flow_id="f1", step_id="s1", poll_interval=0.01
     )
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
 
     answered = {"done": False}
 
@@ -450,7 +450,7 @@ def test_cli_confirm_handler_marks_orphan_consumed_when_child_exits(tmp_path: Pa
     handler = interaction_calls.make_cli_confirm_handler(
         tmp_path, flow_id="f1", step_id="s1", poll_interval=0.01
     )
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
 
     # is_alive() reports the subprocess as already gone — no answer will come.
     assert handler("Press 1", ["1", "2"], lambda: False) is None

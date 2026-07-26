@@ -19,11 +19,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.commands.merge.llm_trace import LLMTrace
-from se3.engine.merge.conflict_resolver import ConflictResolver
-from se3.engine.merge.guardrail_repair import GuardrailRepairer
-from se3.engine.merge.human_call import _atomic_write_json
-from se3.engine.merge.orchestrator import (
+from tianluo.commands.merge.llm_trace import LLMTrace
+from tianluo.engine.merge.conflict_resolver import ConflictResolver
+from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
+from tianluo.engine.merge.human_call import _atomic_write_json
+from tianluo.engine.merge.orchestrator import (
     DetachedHeadError,
     EmptyRepoError,
     MergeOrchestrator,
@@ -153,7 +153,7 @@ def test_orchestrator_log_level_info_default(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """_log defaults to INFO level."""
-    caplog.set_level(logging.DEBUG, logger="se3.engine.merge.orchestrator")
+    caplog.set_level(logging.DEBUG, logger="tianluo.engine.merge.orchestrator")
     orch = MergeOrchestrator(tmp_path)
     orch._log("normal info message")
     assert any(r.levelno == logging.INFO for r in caplog.records)
@@ -163,7 +163,7 @@ def test_orchestrator_log_level_error(
     tmp_path: Path, caplog: pytest.LogCaptureFixture,
 ) -> None:
     """_log respects the level= parameter for errors."""
-    caplog.set_level(logging.DEBUG, logger="se3.engine.merge.orchestrator")
+    caplog.set_level(logging.DEBUG, logger="tianluo.engine.merge.orchestrator")
     orch = MergeOrchestrator(tmp_path)
     orch._log("something broke", level=logging.ERROR)
     assert any(r.levelno == logging.ERROR for r in caplog.records)

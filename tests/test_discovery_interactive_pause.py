@@ -1,12 +1,12 @@
 """Tests for the interactive (CLI-terminal) discovery pause dual-path wait.
 
 An interactive ``se3 run --discover`` pause now ALSO mirrors itself to a
-``se3/calls/`` call file so the web console can answer it, and the run loop
+``tianluo/calls/`` call file so the web console can answer it, and the run loop
 waits on the terminal and the web response file in parallel — whichever answers
 first drives the *same* live process forward (no ``--resume``). The flow stays
 RUNNING throughout, so a watching daemon never races it with a duplicate spawn.
 
-These tests drive that path in :mod:`se3.commands.run`:
+These tests drive that path in :mod:`tianluo.commands.run`:
 
 * both pause forms (question / programmatic-confirm) write the right call file,
 * a web response file is consumed and the call+response are cleaned up,
@@ -27,12 +27,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from se3.commands.run import (
+from tianluo.commands.run import (
     _PROGRAMMATIC_CONFIRM,
     _handle_discovery_pause,
     _handle_discovery_programmatic_confirm,
 )
-from se3.daemon.aggregator import DaemonAggregator, PendingCall
+from tianluo.daemon.aggregator import DaemonAggregator, PendingCall
 
 
 # --------------------------------------------------------------------------
@@ -61,7 +61,7 @@ class _RecordingPersistence:
 
 
 def _calls_dir(project_root: Path) -> Path:
-    return project_root / "se3" / "calls"
+    return project_root / "tianluo" / "calls"
 
 
 def _only_call_file(project_root: Path) -> Path:
@@ -93,7 +93,7 @@ def test_interactive_question_pause_writes_call_file(tmp_path):
         captured["data"] = json.loads(call_file.read_text())
         return "Use Postgres"
 
-    with patch("se3.commands.run._read_multiline_input", side_effect=fake_read):
+    with patch("tianluo.commands.run._read_multiline_input", side_effect=fake_read):
         result = _handle_discovery_pause(
             flow, step, persistence, None, tmp_path
         )
@@ -127,7 +127,7 @@ def test_interactive_confirm_pause_writes_discovery_confirm_call(tmp_path):
         captured["data"] = json.loads(call_file.read_text())
         return "1"
 
-    with patch("se3.commands.run._read_multiline_input", side_effect=fake_read):
+    with patch("tianluo.commands.run._read_multiline_input", side_effect=fake_read):
         result = _handle_discovery_programmatic_confirm(
             flow, step, persistence, None, tmp_path
         )
@@ -153,7 +153,7 @@ def test_interactive_pause_keeps_flow_running(tmp_path):
     step = _make_step(outputs={"message": "?"})
     persistence = _RecordingPersistence()
 
-    with patch("se3.commands.run._read_multiline_input", return_value="answer"):
+    with patch("tianluo.commands.run._read_multiline_input", return_value="answer"):
         _handle_discovery_pause(flow, step, persistence, None, tmp_path)
 
     assert persistence.saved == 0
@@ -179,7 +179,7 @@ def test_web_response_consumed_and_files_cleaned(tmp_path):
         resp.write_text(json.dumps({"response": "Scope is the auth module"}))
         return None
 
-    with patch("se3.commands.run._read_multiline_input", side_effect=fake_read):
+    with patch("tianluo.commands.run._read_multiline_input", side_effect=fake_read):
         result = _handle_discovery_pause(
             flow, step, persistence, None, tmp_path
         )
@@ -205,7 +205,7 @@ def test_web_confirm_response_returns_sentinel(tmp_path):
         resp.write_text(json.dumps({"response": "1"}))
         return None
 
-    with patch("se3.commands.run._read_multiline_input", side_effect=fake_read):
+    with patch("tianluo.commands.run._read_multiline_input", side_effect=fake_read):
         result = _handle_discovery_programmatic_confirm(
             flow, step, persistence, None, tmp_path
         )
@@ -229,7 +229,7 @@ def test_web_confirm_other_text_continues_discovery(tmp_path):
         resp.write_text(json.dumps({"response": "Also handle OAuth"}))
         return None
 
-    with patch("se3.commands.run._read_multiline_input", side_effect=fake_read):
+    with patch("tianluo.commands.run._read_multiline_input", side_effect=fake_read):
         result = _handle_discovery_programmatic_confirm(
             flow, step, persistence, None, tmp_path
         )
@@ -248,7 +248,7 @@ def test_terminal_first_consumes_terminal_and_cleans_up(tmp_path):
     persistence = _RecordingPersistence()
 
     with patch(
-        "se3.commands.run._read_multiline_input", return_value="terminal answer"
+        "tianluo.commands.run._read_multiline_input", return_value="terminal answer"
     ):
         result = _handle_discovery_pause(
             flow, step, persistence, None, tmp_path
@@ -265,7 +265,7 @@ def test_cancel_saves_flow_and_cleans_up_call(tmp_path):
     step = _make_step(outputs={"message": "?"})
     persistence = _RecordingPersistence()
 
-    with patch("se3.commands.run._read_multiline_input", return_value=None):
+    with patch("tianluo.commands.run._read_multiline_input", return_value=None):
         result = _handle_discovery_pause(
             flow, step, persistence, None, tmp_path
         )
@@ -282,12 +282,12 @@ def test_no_project_root_is_terminal_only(tmp_path):
     step = _make_step(outputs={"message": "?"})
     persistence = _RecordingPersistence()
 
-    with patch("se3.commands.run._read_multiline_input", return_value="hi"):
+    with patch("tianluo.commands.run._read_multiline_input", return_value="hi"):
         result = _handle_discovery_pause(flow, step, persistence, None, None)
 
     assert result == "hi"
-    # No se3/calls/ directory created when there is no web channel.
-    assert not (tmp_path / "se3" / "calls").exists()
+    # No tianluo/calls/ directory created when there is no web channel.
+    assert not (tmp_path / "tianluo" / "calls").exists()
 
 
 # --------------------------------------------------------------------------
@@ -365,9 +365,9 @@ def test_dedup_preserves_first_seen_order():
 def test_dedup_integrates_with_snapshot(tmp_path):
     """End-to-end: two discovery call files sharing a step_id surface as one
     pending call in the per-flow snapshot."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     calls_dir.mkdir(parents=True)
 
     engine = {

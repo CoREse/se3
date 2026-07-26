@@ -12,7 +12,7 @@ works on real daemon data" fix. It stands up a fully isolated instance —
 * a throwaway ``se3 init`` project,
 
 and then proves, against records the *real* daemon produced (file-name →
-``step_type`` injection in :mod:`se3.daemon.history`), that:
+``step_type`` injection in :mod:`tianluo.daemon.history`), that:
 
 (a) the rendering paradigm takes effect — step headers read the paradigm names
     (DISCOVERY / IMPLEMENT / VERSION ANALYZE …) rather than the raw
@@ -206,8 +206,8 @@ class _IsolatedConsole:
         server subprocess later opens. The admin owns the daemon (via the key)
         and authenticates the HTTP/browser clients.
         """
-        import se3.server.crypto as crypto
-        from se3.server.persistence import Store
+        import tianluo.server.crypto as crypto
+        from tianluo.server.persistence import Store
 
         store = Store(str(self.db_path))
         owner_id = store.create_owner("admin", is_admin=True)
@@ -243,7 +243,7 @@ class _IsolatedConsole:
 
         # 1. Initialise a throwaway SE3 project from the worktree.
         init = subprocess.run(
-            [_PY, "-m", "se3.cli", "init", "-p", str(self.project)],
+            [_PY, "-m", "tianluo.cli", "init", "-p", str(self.project)],
             env=env,
             cwd=str(self.project),
             capture_output=True,
@@ -251,7 +251,7 @@ class _IsolatedConsole:
             timeout=120,
         )
         assert init.returncode == 0, f"se3 init failed: {init.stdout}\n{init.stderr}"
-        assert (self.project / "se3" / "charter.md").exists()
+        assert (self.project / "tianluo" / "charter.md").exists()
 
         # 1b. Seed the admin owner + daemon key before the server opens the DB.
         self._seed_admin_and_key()
@@ -264,8 +264,8 @@ class _IsolatedConsole:
         self._sfh = open(self._server_log, "wb")
         server_launcher = (
             "import uvicorn;"
-            "from se3.server.app import create_app;"
-            "from se3.server.auth.session import SessionStore, CookieConfig;"
+            "from tianluo.server.app import create_app;"
+            "from tianluo.server.auth.session import SessionStore, CookieConfig;"
             f"app=create_app(db_path={str(self.db_path)!r}, "
             "session_store=SessionStore(cookie_config=CookieConfig(secure=False)));"
             f"uvicorn.run(app, host='127.0.0.1', port={self.port}, log_level='warning')"
@@ -288,7 +288,7 @@ class _IsolatedConsole:
         #    External ``se3 run`` process scanning is disabled so the daemon can
         #    never aggregate the user's real flows.
         launcher = (
-            "from se3.daemon.daemon import Daemon, DaemonConfig;"
+            "from tianluo.daemon.daemon import Daemon, DaemonConfig;"
             "d=Daemon(DaemonConfig("
             f"server_url='ws://127.0.0.1:{self.port}',"
             f"pid_dir=r'{self.daemon_dir}',"
@@ -413,7 +413,7 @@ def _write_real_history_flow(project: Path, flow_id: str) -> Dict[str, str]:
     exercise the full parser matrix: a plain ``discovery``, a group-suffixed
     ``implement`` (``_G1``), and an underscore-bearing ``version_analyze``.
     """
-    hist = project / "se3" / "history" / flow_id
+    hist = project / "tianluo" / "history" / flow_id
     hist.mkdir(parents=True, exist_ok=True)
     (hist / "_meta.json").write_text(
         json.dumps(
@@ -470,7 +470,7 @@ def _write_real_history_flow(project: Path, flow_id: str) -> Dict[str, str]:
                 "outputs": {
                     "task_type": "feature",
                     "complexity": "medium",
-                    "scope": "src/se3/server",
+                    "scope": "src/tianluo/server",
                     "reasoning": "Add a GET /health endpoint to the server module.",
                     "relevant_specs": ["base:Server Modules"],
                 },
@@ -607,7 +607,7 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
     ``GET /api/history/{flow_id}`` records, and asserts the rendered DOM
     paradigm — NOT merely the HTTP envelope.
 
-    This is a *critical acceptance test* (registered in ``se3.yaml`` under
+    This is a *critical acceptance test* (registered in ``tianluo.yaml`` under
     ``test.critical_tests``): it is the only case that exercises the real UI
     render path end to end through a browser, so it MUST actually run rather
     than skip. When Playwright or its Chromium binary is missing the test
@@ -841,7 +841,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
     # Point the project's agent registry at the deterministic fake agent.
     fake_agent = console.tmp / "fake_agent.py"
     _write_fake_agent(fake_agent)
-    se3_yaml = project / "se3.yaml"
+    se3_yaml = project / "tianluo.yaml"
     se3_yaml.write_text(
         se3_yaml.read_text(encoding="utf-8")
         + f"\nagents:\n  fake: {{type: claude-code, cmd: {fake_agent}, priority: 10}}\n"
@@ -853,7 +853,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
     # pause stays RUNNING and dual-waits the terminal + web response file.
     master_fd, slave_fd = pty.openpty()
     run = subprocess.Popen(
-        [_PY, "-m", "se3.cli", "run", "--discover", "Add a health endpoint"],
+        [_PY, "-m", "tianluo.cli", "run", "--discover", "Add a health endpoint"],
         env=env,
         cwd=str(project),
         stdin=slave_fd,
@@ -878,7 +878,7 @@ def test_cli_discovery_pause_answered_from_web(console: "_IsolatedConsole") -> N
                 break
 
     try:
-        engine_json = project / "se3" / "state" / "engine.json"
+        engine_json = project / "tianluo" / "state" / "engine.json"
 
         # 1. Wait for the live process to create the flow and pause.
         def _flow_id() -> Optional[str]:

@@ -33,9 +33,9 @@ pexpect = pytest.importorskip("pexpect")  # noqa: E402  (used for TIMEOUT/EOF)
 
 import json  # noqa: E402
 
-from se3.agent_runner import AgentRunner, InfraErrorType  # noqa: E402
-import se3.claude_interactive_runner as cir  # noqa: E402
-from se3.claude_interactive_runner import (  # noqa: E402
+from tianluo.agent_runner import AgentRunner, InfraErrorType  # noqa: E402
+import tianluo.claude_interactive_runner as cir  # noqa: E402
+from tianluo.claude_interactive_runner import (  # noqa: E402
     ClaudeInteractiveRunner,
     MonitoredResult,
     SessionTranscriptWatcher,
@@ -972,7 +972,7 @@ class TestToStreamJson:
 
     def test_output_parsed_by_upstream(self):
         # Round-trip through the real upstream parsers.
-        from se3.engine.chat_history import (
+        from tianluo.engine.chat_history import (
             parse_usage_from_ndjson,
             extract_assistant_text,
         )
@@ -991,7 +991,7 @@ class TestToStreamJson:
         assert usage["output_tokens"] == 4
 
     def test_tool_use_feeds_last_touched_files(self):
-        from se3.engine.llm_caller import StreamJSONTracker
+        from tianluo.engine.llm_caller import StreamJSONTracker
 
         rec = _assistant_record(
             stop_reason="tool_use",
@@ -1859,7 +1859,7 @@ class TestCreateRunnerDispatch:
 
     def _caller(self):
         from unittest.mock import patch
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         with patch.object(LLMCaller, "__init__", lambda self, *a, **kw: None):
             caller = LLMCaller.__new__(LLMCaller)
@@ -1882,7 +1882,7 @@ class TestCreateRunnerDispatch:
         assert runner.command["priority"] == 7
 
     def test_default_type_still_creates_claude_code_runner(self):
-        from se3.claude_runner import ClaudeCodeRunner
+        from tianluo.claude_runner import ClaudeCodeRunner
 
         caller = self._caller()
         runner = caller._create_runner({"type": "claude-code", "cmd": "claude"})
@@ -1890,7 +1890,7 @@ class TestCreateRunnerDispatch:
         assert not isinstance(runner, ClaudeInteractiveRunner)
 
     def test_missing_type_defaults_to_claude_code_runner(self):
-        from se3.claude_runner import ClaudeCodeRunner
+        from tianluo.claude_runner import ClaudeCodeRunner
 
         caller = self._caller()
         # No "type" key -> defaults to claude-code, not claude-interactive.

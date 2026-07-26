@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from se3.engine.models import FlowInstance, Step, StepStatus
-from se3.engine.steps.commit import _generate_commit_message
+from tianluo.engine.models import FlowInstance, Step, StepStatus
+from tianluo.engine.steps.commit import _generate_commit_message
 
 
 def _make_flow(**kwargs) -> FlowInstance:
@@ -14,7 +14,7 @@ def _make_flow(**kwargs) -> FlowInstance:
         "flow_id": "test-flow-001",
         "task_description": "Fix authentication bug",
         "task_type": "bugfix",
-        "change_path": Path("/tmp/project/se3.yaml"),
+        "change_path": Path("/tmp/project/tianluo.yaml"),
     }
     defaults.update(kwargs)
     flow = MagicMock(spec=FlowInstance)

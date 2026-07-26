@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.guardrail_repair import GuardrailRepairer, RepairResult
-from se3.engine.merge.guardrails import GuardrailViolation, GuardrailReport
-from se3.engine.worktree import _run_git
+from tianluo.engine.merge.guardrail_repair import GuardrailRepairer, RepairResult
+from tianluo.engine.merge.guardrails import GuardrailViolation, GuardrailReport
+from tianluo.engine.worktree import _run_git
 
 
 # --------- helpers ---------
@@ -47,7 +47,7 @@ def _init_repo(path: Path) -> None:
 def _make_violations() -> list[GuardrailViolation]:
     return [
         GuardrailViolation(
-            file_path="se3/specs/base/spec.md",
+            file_path="tianluo/specs/base/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         ),
@@ -56,7 +56,7 @@ def _make_violations() -> list[GuardrailViolation]:
 
 def _make_original_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHALL validate all user inputs.\n"
         ),
@@ -65,7 +65,7 @@ def _make_original_specs() -> dict[str, str]:
 
 def _make_merged_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
         ),
@@ -73,7 +73,7 @@ def _make_merged_specs() -> dict[str, str]:
 
 
 def _setup_spec_files(tmp_path: Path) -> None:
-    spec_dir = tmp_path / "se3" / "specs" / "base"
+    spec_dir = tmp_path / "tianluo" / "specs" / "base"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.md").write_text(
         "## Requirement: Auth\n\n"
@@ -97,7 +97,7 @@ class TestGuardrailRepairerSuccessfulRepair:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -118,7 +118,7 @@ class TestGuardrailRepairerSuccessfulRepair:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -140,10 +140,10 @@ class TestGuardrailRepairerSuccessfulRepair:
 
         assert result.success is True
         assert result.error is None
-        assert "se3/specs/base/spec.md" in result.repaired_files
+        assert "tianluo/specs/base/spec.md" in result.repaired_files
 
         # File should have been written with corrected content
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         assert "SHALL" in spec_path.read_text()
         assert "SHOULD" not in spec_path.read_text()
 
@@ -156,11 +156,11 @@ class TestGuardrailRepairerSuccessfulRepair:
         _init_repo(tmp_path)
 
         # Set up two spec files
-        spec_dir1 = tmp_path / "se3" / "specs" / "base"
+        spec_dir1 = tmp_path / "tianluo" / "specs" / "base"
         spec_dir1.mkdir(parents=True)
         (spec_dir1 / "spec.md").write_text("SHOULD do X\n")
 
-        spec_dir2 = tmp_path / "se3" / "specs" / "config"
+        spec_dir2 = tmp_path / "tianluo" / "specs" / "config"
         spec_dir2.mkdir(parents=True)
         (spec_dir2 / "spec.md").write_text("MAY do Y\n")
 
@@ -179,11 +179,11 @@ class TestGuardrailRepairerSuccessfulRepair:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                     {
-                        "path": "se3/specs/config/spec.md",
+                        "path": "tianluo/specs/config/spec.md",
                         "corrected_content": "MUST do Y\n",
                     },
                 ],
@@ -195,29 +195,29 @@ class TestGuardrailRepairerSuccessfulRepair:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
         violations = [
             GuardrailViolation(
-                file_path="se3/specs/base/spec.md",
+                file_path="tianluo/specs/base/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
             ),
             GuardrailViolation(
-                file_path="se3/specs/config/spec.md",
+                file_path="tianluo/specs/config/spec.md",
                 violation_type="WEAKENING",
                 message="MUST weakened to MAY",
             ),
         ]
         original_specs = {
-            "se3/specs/base/spec.md": "SHALL do X\n",
-            "se3/specs/config/spec.md": "MUST do Y\n",
+            "tianluo/specs/base/spec.md": "SHALL do X\n",
+            "tianluo/specs/config/spec.md": "MUST do Y\n",
         }
         merged_specs = {
-            "se3/specs/base/spec.md": "SHOULD do X\n",
-            "se3/specs/config/spec.md": "MAY do Y\n",
+            "tianluo/specs/base/spec.md": "SHOULD do X\n",
+            "tianluo/specs/config/spec.md": "MAY do Y\n",
         }
 
         result = repairer.repair_violations(
@@ -231,8 +231,8 @@ class TestGuardrailRepairerSuccessfulRepair:
 
         assert result.success is True
         assert len(result.repaired_files) == 2
-        assert "se3/specs/base/spec.md" in result.repaired_files
-        assert "se3/specs/config/spec.md" in result.repaired_files
+        assert "tianluo/specs/base/spec.md" in result.repaired_files
+        assert "tianluo/specs/config/spec.md" in result.repaired_files
 
 
 class TestGuardrailRepairerFailures:
@@ -248,7 +248,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHOULD validate all user inputs.\n"
@@ -265,7 +265,7 @@ class TestGuardrailRepairerFailures:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -273,7 +273,7 @@ class TestGuardrailRepairerFailures:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -294,7 +294,7 @@ class TestGuardrailRepairerFailures:
         assert result.error is not None
         assert "Still" in result.error or "violations" in result.error.lower()
         # Should still report which files were written
-        assert "se3/specs/base/spec.md" in result.repaired_files
+        assert "tianluo/specs/base/spec.md" in result.repaired_files
 
     def test_json_parse_failure(self, tmp_path: Path, monkeypatch) -> None:
         """LLM returns garbage that cannot be parsed as JSON."""
@@ -354,7 +354,7 @@ class TestGuardrailRepairerFailures:
         assert "mock LLM subprocess failure" in result.error
 
     def test_non_spec_path_rejected(self, tmp_path: Path, monkeypatch) -> None:
-        """LLM attempts to write a file outside se3/specs/**/spec.md — rejected."""
+        """LLM attempts to write a file outside tianluo/specs/**/spec.md — rejected."""
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
@@ -402,7 +402,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/../../evil.md",
+                        "path": "tianluo/specs/base/../../evil.md",
                         "corrected_content": "evil",
                     },
                 ],
@@ -521,7 +521,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         # missing corrected_content
                     },
                 ],
@@ -544,7 +544,7 @@ class TestGuardrailRepairerFailures:
 
         assert result.success is False
         assert "without corrected_content" in result.error.lower()
-        assert "se3/specs/base/spec.md" in result.error
+        assert "tianluo/specs/base/spec.md" in result.error
 
     def test_repair_result_defaults(self) -> None:
         """RepairResult dataclass has correct defaults."""
@@ -560,13 +560,13 @@ class TestGuardrailRepairerFailures:
 
         repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
-        # This path passes the regex (^se3/specs/.+/spec\.md$) but resolves
-        # to se3/tools/spec.md — outside the se3/specs/ directory.
+        # This path passes the regex (^tianluo/specs/.+/spec\.md$) but resolves
+        # to tianluo/tools/spec.md — outside the tianluo/specs/ directory.
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/../../tools/spec.md",
+                        "path": "tianluo/specs/base/../../tools/spec.md",
                         "corrected_content": "evil",
                     },
                 ],
@@ -590,8 +590,8 @@ class TestGuardrailRepairerFailures:
         assert result.success is False
         assert "outside spec dir" in result.error.lower()
 
-        # se3/tools/spec.md must NOT have been created
-        assert not (tmp_path / "se3" / "tools" / "spec.md").exists()
+        # tianluo/tools/spec.md must NOT have been created
+        assert not (tmp_path / "tianluo" / "tools" / "spec.md").exists()
 
     def test_repair_recheck_crash_restores_content(self, tmp_path: Path, monkeypatch) -> None:
         """Guardrails re-check crashes after files written — merged content restored."""
@@ -605,7 +605,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -621,7 +621,7 @@ class TestGuardrailRepairerFailures:
             raise RuntimeError("Simulated guardrails re-check crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_crash,
         )
 
@@ -653,7 +653,7 @@ class TestGuardrailRepairerFailures:
         assert "guardrails" in result.error.lower() or "re-check" in result.error.lower()
 
         # Merged content should be restored (SHOULD, not SHALL)
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         restored_content = spec_path.read_text()
         assert "SHOULD" in restored_content
         assert "SHALL" not in restored_content
@@ -679,7 +679,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -699,11 +699,11 @@ class TestGuardrailRepairerFailures:
                     cmd=["git"] + list(args), timeout=30,
                 )
             # Fall through to real _run_git
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", mock_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", mock_run_git,
         )
 
         violations = _make_violations()
@@ -723,7 +723,7 @@ class TestGuardrailRepairerFailures:
         assert "timeout" in result.error.lower()
 
         # Merged content should be restored (SHOULD, not SHALL)
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         restored_content = spec_path.read_text()
         assert "SHOULD" in restored_content
         assert "SHALL" not in restored_content
@@ -733,11 +733,11 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
 
         # Set up two spec files
-        spec_dir1 = tmp_path / "se3" / "specs" / "base"
+        spec_dir1 = tmp_path / "tianluo" / "specs" / "base"
         spec_dir1.mkdir(parents=True)
         (spec_dir1 / "spec.md").write_text("SHOULD do X\n")
 
-        spec_dir2 = tmp_path / "se3" / "specs" / "config"
+        spec_dir2 = tmp_path / "tianluo" / "specs" / "config"
         spec_dir2.mkdir(parents=True)
         (spec_dir2 / "spec.md").write_text("MAY do Y\n")
 
@@ -757,7 +757,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -771,7 +771,7 @@ class TestGuardrailRepairerFailures:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/config/spec.md",
+                        file_path="tianluo/specs/config/spec.md",
                         violation_type="WEAKENING",
                         message="MUST weakened to MAY",
                     ),
@@ -779,29 +779,29 @@ class TestGuardrailRepairerFailures:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
         violations = [
             GuardrailViolation(
-                file_path="se3/specs/base/spec.md",
+                file_path="tianluo/specs/base/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
             ),
             GuardrailViolation(
-                file_path="se3/specs/config/spec.md",
+                file_path="tianluo/specs/config/spec.md",
                 violation_type="WEAKENING",
                 message="MUST weakened to MAY",
             ),
         ]
         original_specs = {
-            "se3/specs/base/spec.md": "SHALL do X\n",
-            "se3/specs/config/spec.md": "MUST do Y\n",
+            "tianluo/specs/base/spec.md": "SHALL do X\n",
+            "tianluo/specs/config/spec.md": "MUST do Y\n",
         }
         merged_specs = {
-            "se3/specs/base/spec.md": "SHOULD do X\n",
-            "se3/specs/config/spec.md": "MAY do Y\n",
+            "tianluo/specs/base/spec.md": "SHOULD do X\n",
+            "tianluo/specs/config/spec.md": "MAY do Y\n",
         }
 
         result = repairer.repair_violations(
@@ -815,15 +815,15 @@ class TestGuardrailRepairerFailures:
 
         assert result.success is False
         # Should report that file A was repaired
-        assert "se3/specs/base/spec.md" in result.repaired_files
+        assert "tianluo/specs/base/spec.md" in result.repaired_files
         # Should report remaining violations from file B
-        assert "se3/specs/config/spec.md" in result.error
+        assert "tianluo/specs/config/spec.md" in result.error
         assert "MUST weakened to MAY" in result.error
         assert "Remaining violations" in result.error
 
         # File A should be restored to merged content (not the repaired content)
         # because the repair failed overall
-        base_content = (tmp_path / "se3" / "specs" / "base" / "spec.md").read_text()
+        base_content = (tmp_path / "tianluo" / "specs" / "base" / "spec.md").read_text()
         assert "SHOULD" in base_content
 
     def test_conflict_markers_in_repaired_content_rejected(self, tmp_path: Path, monkeypatch) -> None:
@@ -837,7 +837,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -870,17 +870,17 @@ class TestGuardrailRepairerFailures:
         assert "conflict markers" in result.error.lower()
 
         # Original file should be unchanged (no write occurred)
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         assert "SHOULD" in spec_path.read_text()
         assert "<<<<<<<" not in spec_path.read_text()
 
     def test_is_spec_path_method(self, tmp_path: Path) -> None:
-        """_is_spec_path accepts only se3/specs/**/spec.md."""
-        from se3.engine.merge.guardrails import _is_spec_path
-        assert _is_spec_path("se3/specs/base/spec.md") is True
-        assert _is_spec_path("se3/specs/nested/deep/spec.md") is True
+        """_is_spec_path accepts only tianluo/specs/**/spec.md."""
+        from tianluo.engine.merge.guardrails import _is_spec_path
+        assert _is_spec_path("tianluo/specs/base/spec.md") is True
+        assert _is_spec_path("tianluo/specs/nested/deep/spec.md") is True
         assert _is_spec_path("README.md") is False
-        assert _is_spec_path("se3/specs/base/other.txt") is False
+        assert _is_spec_path("tianluo/specs/base/other.txt") is False
         assert _is_spec_path("src/main.py") is False
         assert _is_spec_path("se3\\specs\\base\\spec.md") is True
 
@@ -895,7 +895,7 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -928,11 +928,11 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
 
         # Set up two spec files
-        spec_dir1 = tmp_path / "se3" / "specs" / "base"
+        spec_dir1 = tmp_path / "tianluo" / "specs" / "base"
         spec_dir1.mkdir(parents=True)
         (spec_dir1 / "spec.md").write_text("SHOULD do X\n")
 
-        spec_dir2 = tmp_path / "se3" / "specs" / "config"
+        spec_dir2 = tmp_path / "tianluo" / "specs" / "config"
         spec_dir2.mkdir(parents=True)
         (spec_dir2 / "spec.md").write_text("MAY do Y\n")
 
@@ -952,11 +952,11 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                     {
-                        "path": "se3/specs/config/spec.md",
+                        "path": "tianluo/specs/config/spec.md",
                         "corrected_content": (
                             "MUST do Y\n"
                             "<<<<<<< HEAD\n"
@@ -973,23 +973,23 @@ class TestGuardrailRepairerFailures:
 
         violations = [
             GuardrailViolation(
-                file_path="se3/specs/base/spec.md",
+                file_path="tianluo/specs/base/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
             ),
             GuardrailViolation(
-                file_path="se3/specs/config/spec.md",
+                file_path="tianluo/specs/config/spec.md",
                 violation_type="WEAKENING",
                 message="MUST weakened to MAY",
             ),
         ]
         original_specs = {
-            "se3/specs/base/spec.md": "SHALL do X\n",
-            "se3/specs/config/spec.md": "MUST do Y\n",
+            "tianluo/specs/base/spec.md": "SHALL do X\n",
+            "tianluo/specs/config/spec.md": "MUST do Y\n",
         }
         merged_specs = {
-            "se3/specs/base/spec.md": "SHOULD do X\n",
-            "se3/specs/config/spec.md": "MAY do Y\n",
+            "tianluo/specs/base/spec.md": "SHOULD do X\n",
+            "tianluo/specs/config/spec.md": "MAY do Y\n",
         }
 
         result = repairer.repair_violations(
@@ -1005,12 +1005,12 @@ class TestGuardrailRepairerFailures:
         assert "conflict markers" in result.error.lower()
 
         # File A should have been restored to merged content (not repaired)
-        base_content = (tmp_path / "se3" / "specs" / "base" / "spec.md").read_text()
+        base_content = (tmp_path / "tianluo" / "specs" / "base" / "spec.md").read_text()
         assert "SHOULD" in base_content
         assert "SHALL" not in base_content
 
         # File B should still have merged content (never written)
-        config_content = (tmp_path / "se3" / "specs" / "config" / "spec.md").read_text()
+        config_content = (tmp_path / "tianluo" / "specs" / "config" / "spec.md").read_text()
         assert "MAY" in config_content
         assert "MUST" not in config_content
 
@@ -1028,14 +1028,14 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
             })
 
         monkeypatch.setattr(
-            "se3.engine.llm_caller.LLMCaller.call",
+            "tianluo.engine.llm_caller.LLMCaller.call",
             mock_llm_call,
         )
 
@@ -1043,7 +1043,7 @@ class TestGuardrailRepairerFailures:
             raise ValueError("simulated two-phase extraction crash")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.extract_json_two_phase",
+            "tianluo.engine.merge.guardrail_repair.extract_json_two_phase",
             mock_extract_json,
         )
 
@@ -1077,11 +1077,11 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
 
         # Set up two spec files
-        spec_dir1 = tmp_path / "se3" / "specs" / "base"
+        spec_dir1 = tmp_path / "tianluo" / "specs" / "base"
         spec_dir1.mkdir(parents=True)
         (spec_dir1 / "spec.md").write_text("SHOULD do X\n")
 
-        spec_dir2 = tmp_path / "se3" / "specs" / "config"
+        spec_dir2 = tmp_path / "tianluo" / "specs" / "config"
         spec_dir2.mkdir(parents=True)
         (spec_dir2 / "spec.md").write_text("MAY do Y\n")
 
@@ -1101,11 +1101,11 @@ class TestGuardrailRepairerFailures:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                     {
-                        "path": "se3/specs/config/spec.md",
+                        "path": "tianluo/specs/config/spec.md",
                         "corrected_content": "MUST do Y\n",
                     },
                 ],
@@ -1127,23 +1127,23 @@ class TestGuardrailRepairerFailures:
 
         violations = [
             GuardrailViolation(
-                file_path="se3/specs/base/spec.md",
+                file_path="tianluo/specs/base/spec.md",
                 violation_type="WEAKENING",
                 message="SHALL weakened to SHOULD",
             ),
             GuardrailViolation(
-                file_path="se3/specs/config/spec.md",
+                file_path="tianluo/specs/config/spec.md",
                 violation_type="WEAKENING",
                 message="MUST weakened to MAY",
             ),
         ]
         original_specs = {
-            "se3/specs/base/spec.md": "SHALL do X\n",
-            "se3/specs/config/spec.md": "MUST do Y\n",
+            "tianluo/specs/base/spec.md": "SHALL do X\n",
+            "tianluo/specs/config/spec.md": "MUST do Y\n",
         }
         merged_specs = {
-            "se3/specs/base/spec.md": "SHOULD do X\n",
-            "se3/specs/config/spec.md": "MAY do Y\n",
+            "tianluo/specs/base/spec.md": "SHOULD do X\n",
+            "tianluo/specs/config/spec.md": "MAY do Y\n",
         }
 
         result = repairer.repair_violations(
@@ -1159,12 +1159,12 @@ class TestGuardrailRepairerFailures:
         assert "disk full" in result.error or "Failed to write" in result.error
 
         # File A should have been restored to merged content (not repaired)
-        base_content = (tmp_path / "se3" / "specs" / "base" / "spec.md").read_text()
+        base_content = (tmp_path / "tianluo" / "specs" / "base" / "spec.md").read_text()
         assert "SHOULD" in base_content
         assert "SHALL" not in base_content
 
         # File B should still have merged content (never written)
-        config_content = (tmp_path / "se3" / "specs" / "config" / "spec.md").read_text()
+        config_content = (tmp_path / "tianluo" / "specs" / "config" / "spec.md").read_text()
         assert "MAY" in config_content
         assert "MUST" not in config_content
 
@@ -1218,7 +1218,7 @@ class TestGuardrailRepairInconsistentState:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1235,7 +1235,7 @@ class TestGuardrailRepairInconsistentState:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1243,7 +1243,7 @@ class TestGuardrailRepairInconsistentState:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check_merge_result,
         )
 
@@ -1264,7 +1264,7 @@ class TestGuardrailRepairInconsistentState:
             return original_run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", fake_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", fake_run_git,
         )
 
         violations = _make_violations()
@@ -1299,11 +1299,11 @@ class TestParseResponseDictPath:
     def test_dict_with_files_key(self, tmp_path: Path) -> None:
         """Dict with 'files' key is returned as-is."""
         repairer = GuardrailRepairer(tmp_path, test_mode=True)
-        payload = {"files": [{"path": "se3/specs/base/spec.md", "corrected_content": "x"}]}
+        payload = {"files": [{"path": "tianluo/specs/base/spec.md", "corrected_content": "x"}]}
         result = repairer._parse_response(payload)
         assert result is not None
         assert "files" in result
-        assert result["files"][0]["path"] == "se3/specs/base/spec.md"
+        assert result["files"][0]["path"] == "tianluo/specs/base/spec.md"
 
     def test_dict_without_files_key(self, tmp_path: Path) -> None:
         """Dict missing 'files' key returns None."""
@@ -1330,7 +1330,7 @@ class TestUnsafeFixupCharsConstant:
         from pathlib import Path as _P
 
         src = _P(
-            "src/se3/engine/merge/guardrail_repair.py"
+            "src/tianluo/engine/merge/guardrail_repair.py"
         ).read_text(encoding="utf-8")
         # All characters that MUST be present in the strip-set:
         # single quote, backtick, dollar, double-quote, backslash,
@@ -1374,7 +1374,7 @@ class TestProbeBranchVerifiable:
             raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", _fake_run_git
+            "tianluo.engine.merge.guardrail_repair._run_git", _fake_run_git
         )
         import logging as _logging
         with caplog.at_level(_logging.WARNING):

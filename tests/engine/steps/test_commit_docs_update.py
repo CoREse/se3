@@ -23,9 +23,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, State, Step, StepStatus, StepType
-from se3.engine.steps.commit import commit_handler
-from se3.engine.version_bumper import VersionBumper, VersionConfig
+from tianluo.engine.models import FlowInstance, State, Step, StepStatus, StepType
+from tianluo.engine.steps.commit import commit_handler
+from tianluo.engine.version_bumper import VersionBumper, VersionConfig
 
 
 # ---------------------------------------------------------------------------
@@ -38,7 +38,7 @@ def _make_flow(tmp_path: Path, **kwargs) -> FlowInstance:
         "task_description": "Add a shiny feature",
         "task_type": "feature",
         # project_root == flow.change_path.parent == tmp_path
-        "change_path": tmp_path / "se3.yaml",
+        "change_path": tmp_path / "tianluo.yaml",
         "baseline_commit": None,
         # Mirror the real FlowInstance default: a MagicMock(spec=…) otherwise
         # reads is_worktree_mode as a truthy MagicMock and diverts the commit
@@ -96,7 +96,7 @@ def _bumper(tmp_path: Path, new_version: str = "0.2.0") -> VersionBumper:
 def _docs_config():
     """A DocsConfig-like stub feeding a deterministic versions_entry template.
 
-    Keeps the integration tests hermetic (no real se3.yaml / git probing) and
+    Keeps the integration tests hermetic (no real tianluo.yaml / git probing) and
     independent of the packaged ``versions_md.md`` content, while still
     exercising the real wiring path: ``load_docs_config(...).to_updater_config()``
     is forwarded verbatim into ``DocumentationUpdater(config=...)``. The badge
@@ -114,11 +114,11 @@ def _docs_config():
 # ---------------------------------------------------------------------------
 
 class TestReadmeAndVersionsUpdated:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_badge_and_versions_updated(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_load_docs, tmp_path
@@ -143,7 +143,7 @@ class TestReadmeAndVersionsUpdated:
         flow = _make_flow(tmp_path)
         step = _make_step({"versions_changes": ["Add feature A", "Fix bug B"]})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -169,11 +169,11 @@ class TestReadmeAndVersionsUpdated:
 # ---------------------------------------------------------------------------
 
 class TestReadmeNoBadgeInsertsAfterHeading:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_badge_inserted_after_title(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_load_docs, tmp_path
@@ -189,7 +189,7 @@ class TestReadmeNoBadgeInsertsAfterHeading:
         step = _make_step({"suggested_version": "1.0.0", "versions_changes": ["Initial cut"]})
 
         with patch(
-            "se3.engine.steps.commit.VersionBumper",
+            "tianluo.engine.steps.commit.VersionBumper",
             return_value=_bumper(tmp_path, new_version="1.0.0"),
         ):
             result = commit_handler(step, flow)
@@ -215,11 +215,11 @@ class TestReadmeNoBadgeInsertsAfterHeading:
 # ---------------------------------------------------------------------------
 
 class TestVersionsCreatedWhenMissing:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_versions_md_created_with_title(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_load_docs, tmp_path
@@ -240,7 +240,7 @@ class TestVersionsCreatedWhenMissing:
         flow = _make_flow(tmp_path)
         step = _make_step({"versions_changes": ["Add feature A"]})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -256,11 +256,11 @@ class TestVersionsCreatedWhenMissing:
 # ---------------------------------------------------------------------------
 
 class TestNoReadmeStillCommits:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_missing_readme_does_not_block_commit(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_load_docs, tmp_path
@@ -277,7 +277,7 @@ class TestNoReadmeStillCommits:
         flow = _make_flow(tmp_path)
         step = _make_step({"versions_changes": ["Add feature A"]})
 
-        with patch("se3.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
+        with patch("tianluo.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
             result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -295,12 +295,12 @@ class TestNoReadmeStillCommits:
 # ---------------------------------------------------------------------------
 
 class TestDocsUpdateFailureDoesNotBlockCommit:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.docs_updater.DocumentationUpdater")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.docs_updater.DocumentationUpdater")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_runtime_error_logs_warning_and_completes(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_updater_cls, mock_load_docs, tmp_path, caplog
@@ -324,8 +324,8 @@ class TestDocsUpdateFailureDoesNotBlockCommit:
         flow = _make_flow(tmp_path)
         step = _make_step({"versions_changes": ["Add feature A"]})
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.steps.commit"):
-            with patch("se3.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.steps.commit"):
+            with patch("tianluo.engine.steps.commit.VersionBumper", return_value=_bumper(tmp_path)):
                 result = commit_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
@@ -339,12 +339,12 @@ class TestDocsUpdateFailureDoesNotBlockCommit:
 # ---------------------------------------------------------------------------
 
 class TestNoBumpSkipsDocs:
-    @patch("se3.config.load_docs_config")
-    @patch("se3.engine.docs_updater.DocumentationUpdater")
-    @patch("se3.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
-    @patch("se3.engine.steps.commit.subprocess")
-    @patch("se3.engine.steps.commit._has_changes", return_value=True)
-    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("tianluo.config.load_docs_config")
+    @patch("tianluo.engine.docs_updater.DocumentationUpdater")
+    @patch("tianluo.engine.steps.commit._read_head_commit", return_value=("abc123", ""))
+    @patch("tianluo.engine.steps.commit.subprocess")
+    @patch("tianluo.engine.steps.commit._has_changes", return_value=True)
+    @patch("tianluo.engine.steps.commit._load_version_config")
     def test_docs_not_touched_when_no_bump(
         self, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash,
         mock_updater_cls, mock_load_docs, tmp_path

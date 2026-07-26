@@ -29,8 +29,8 @@ import asyncio
 
 import pytest
 
-from se3.daemon import protocol
-from se3.server.state import ServerState
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState
 
 FLOW = "20260714-093536_a4af4b75"
 MACHINE = "m1"
@@ -61,7 +61,7 @@ async def _active_worktree_flow(state: ServerState, status: str = "paused") -> N
             "flows": [
                 {
                     "flow_id": FLOW,
-                    "project_root": "/repo/se3/worktrees/wt-a4af4b75",
+                    "project_root": "/repo/tianluo/worktrees/wt-a4af4b75",
                     "status": status,
                 }
             ],

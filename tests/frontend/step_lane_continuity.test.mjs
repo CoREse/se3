@@ -30,7 +30,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STYLE_CSS = path.join(
-  HERE, "..", "..", "src", "se3", "server", "static", "style.css");
+  HERE, "..", "..", "src", "tianluo", "server", "static", "style.css");
 const CSS = fs.readFileSync(STYLE_CSS, "utf8");
 
 // The 13 content step types and their original lane colour/alpha (must be

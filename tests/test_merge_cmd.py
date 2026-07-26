@@ -1,4 +1,4 @@
-"""Tests for se3 merge command entry point (merge_cmd.py)."""
+"""Tests for luo merge command entry point (merge_cmd.py)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_cmd import (
+from tianluo.commands.merge_cmd import (
     _branch_exists,
     _failure_title_and_summary,
     _is_working_tree_clean,
@@ -96,7 +96,7 @@ class TestIsWorkingTreeClean:
         (the porcelain check would otherwise mask the broken marker
         probe).
         """
-        from se3.commands.merge_cmd import _resolve_git_dir
+        from tianluo.commands.merge_cmd import _resolve_git_dir
 
         _init_repo(tmp_path)
         # Create a linked worktree on a fresh branch.
@@ -189,13 +189,13 @@ class TestRunMergeValidation:
 class TestMergeConfig:
     def test_merge_config_from_se3_yaml(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
             "  delete_merged_default: true\n"
         )
-        from se3.config import MergeConfig
+        from tianluo.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
         assert config.strategy == "fast"
@@ -203,24 +203,24 @@ class TestMergeConfig:
 
     def test_merge_config_invalid_strategy_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: invalid_strategy\n"
         )
-        from se3.config import ConfigError, MergeConfig
+        from tianluo.config import ConfigError, MergeConfig
 
         with pytest.raises(ConfigError):
             MergeConfig.load(tmp_path)
 
     def test_merge_config_legacy_robust_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: robust\n"
         )
-        from se3.config import ConfigError, MergeConfig
+        from tianluo.config import ConfigError, MergeConfig
 
         with pytest.raises(ConfigError) as excinfo:
             MergeConfig.load(tmp_path)
@@ -228,12 +228,12 @@ class TestMergeConfig:
 
     def test_merge_config_legacy_default_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: default\n"
         )
-        from se3.config import ConfigError, MergeConfig
+        from tianluo.config import ConfigError, MergeConfig
 
         with pytest.raises(ConfigError) as excinfo:
             MergeConfig.load(tmp_path)
@@ -241,7 +241,7 @@ class TestMergeConfig:
 
     def test_merge_config_defaults_when_missing(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        from se3.config import MergeConfig
+        from tianluo.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
         assert config.strategy == "fast"
@@ -252,48 +252,48 @@ class TestMergeConfig:
 
     def test_merge_config_max_conflict_resolve_iterations(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  max_conflict_resolve_iterations: 25\n"
         )
-        from se3.config import MergeConfig
+        from tianluo.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
         assert config.max_conflict_resolve_iterations == 25
 
     def test_merge_config_max_conflict_resolve_iterations_zero_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  max_conflict_resolve_iterations: 0\n"
         )
-        from se3.config import ConfigError, MergeConfig
+        from tianluo.config import ConfigError, MergeConfig
 
         with pytest.raises(ConfigError):
             MergeConfig.load(tmp_path)
 
     def test_merge_config_strict_runtime_sync_true(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strict_runtime_sync: true\n"
         )
-        from se3.config import MergeConfig
+        from tianluo.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
         assert config.strict_runtime_sync is True
 
     def test_merge_config_strict_runtime_sync_string_true(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strict_runtime_sync: 'true'\n"
         )
-        from se3.config import MergeConfig
+        from tianluo.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
         assert config.strict_runtime_sync is True
@@ -303,20 +303,20 @@ class TestMergeConfigFromSubdirectory:
     """Verify config is found when cwd is a subdirectory of the project."""
 
     def test_load_merge_config_from_subdirectory(self, tmp_path: Path) -> None:
-        """load_merge_config(project_root) finds se3.yaml even when cwd
+        """load_merge_config(project_root) finds tianluo.yaml even when cwd
         is a subdirectory — mirrors the fix in cli.py:merge_cmd.
         """
         _init_repo(tmp_path)
         subdir = tmp_path / "src"
         subdir.mkdir()
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
             "  delete_merged_default: true\n"
         )
 
-        from se3.config import load_merge_config
+        from tianluo.config import load_merge_config
 
         # With explicit project_root → finds the config
         config = load_merge_config(tmp_path)
@@ -335,14 +335,14 @@ class TestMergeCliFromSubdirectory:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """When invoked from a subdirectory, ``merge_cmd`` resolves the
-        project root (via ``get_project_root``) and loads ``se3.yaml``
+        project root (via ``get_project_root``) and loads ``tianluo.yaml``
         merge configuration so that strategy/delete-merged values flow
         through to ``run_merge``.
         """
         import os
 
         _init_repo(tmp_path)
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: fast\n"
@@ -373,13 +373,13 @@ class TestMergeCliFromSubdirectory:
             captured["suppress_human_call"] = suppress_human_call
             return 0
 
-        monkeypatch.setattr("se3.commands.merge_cmd.run_merge", mock_run_merge)
+        monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", mock_run_merge)
 
         old_cwd = os.getcwd()
         os.chdir(str(subdir))
         try:
             from typer.testing import CliRunner
-            from se3.cli import app
+            from tianluo.cli import app
 
             runner = CliRunner()
             result = runner.invoke(app, ["merge", "feature"])
@@ -390,7 +390,7 @@ class TestMergeCliFromSubdirectory:
             # project_root is not passed explicitly — run_merge calls
             # get_project_root() internally when None. The key assertion
             # is that strategy/delete_merged/strict_runtime_sync from
-            # se3.yaml were read.
+            # tianluo.yaml were read.
         finally:
             os.chdir(old_cwd)
 
@@ -457,10 +457,10 @@ class TestRunMergeSuccess:
 
         sentinel_root = Path("/resolved/main/repo")
         with patch(
-            "se3.commands.run._resolve_main_lock_root",
+            "tianluo.commands.run._resolve_main_lock_root",
             return_value=sentinel_root,
         ) as mock_resolve, patch(
-            "se3.commands.merge.merge_lock.MergeLock"
+            "tianluo.commands.merge.merge_lock.MergeLock"
         ) as MockLock:
             MockLock.return_value = MagicMock()
             exit_code = run_merge(["feature"], project_root=tmp_path)
@@ -528,9 +528,9 @@ class TestRunMergeSuccess:
         )
 
         # Mock LLM resolver to fail — default strategy escalates to human call
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
@@ -555,7 +555,7 @@ class TestMergeDeleteMergedTristate:
     def _run_cli_tristate(
         self, tmp_path: Path, monkeypatch, extra_args: list[str]
     ) -> dict:
-        """Run se3 merge CLI and return the captured delete_merged value."""
+        """Run luo merge CLI and return the captured delete_merged value."""
         import os
 
         _init_repo(tmp_path)
@@ -577,13 +577,13 @@ class TestMergeDeleteMergedTristate:
             captured["delete_merged"] = delete_merged
             return 0
 
-        monkeypatch.setattr("se3.commands.merge_cmd.run_merge", mock_run_merge)
+        monkeypatch.setattr("tianluo.commands.merge_cmd.run_merge", mock_run_merge)
 
         old_cwd = os.getcwd()
         os.chdir(str(tmp_path))
         try:
             from typer.testing import CliRunner
-            from se3.cli import app
+            from tianluo.cli import app
 
             runner = CliRunner()
             result = runner.invoke(app, ["merge", "feature"] + extra_args)
@@ -594,21 +594,21 @@ class TestMergeDeleteMergedTristate:
         return captured
 
     def test_omit_flag_uses_config_true(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: true\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, [])
         assert captured["exit_code"] == 0, captured.get("output")
         assert captured["delete_merged"] is True
 
     def test_no_delete_overrides_config_true(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: true\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, ["--no-delete-merged"])
         assert captured["exit_code"] == 0
         assert captured["delete_merged"] is False
 
     def test_delete_overrides_config_false(self, tmp_path: Path, monkeypatch) -> None:
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text("merge:\n  delete_merged_default: false\n")
         captured = self._run_cli_tristate(tmp_path, monkeypatch, ["--delete-merged"])
         assert captured["exit_code"] == 0
@@ -633,14 +633,14 @@ class TestMergeVersionAggregationWarning:
 
         # Mock aggregate_and_apply to return failure
         def mock_aggregate(project_root, bumps, pre_version):
-            from se3.engine.merge.version_aggregator import AggregateResult
+            from tianluo.engine.merge.version_aggregator import AggregateResult
             return AggregateResult(
                 success=False,
                 error="git commit --amend failed: mock failure",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            "tianluo.engine.merge.orchestrator.aggregate_and_apply",
             mock_aggregate,
         )
 
@@ -824,7 +824,7 @@ class TestFailureReasonRendering:
             captured.append({"content": content, "title": title})
 
         monkeypatch.setattr(
-            "se3.commands.merge_cmd.render_text", capture_render_text,
+            "tianluo.commands.merge_cmd.render_text", capture_render_text,
         )
 
         class MockOrchestrator:
@@ -837,11 +837,11 @@ class TestFailureReasonRendering:
         # MergeOrchestrator is imported inside run_merge from the engine
         # module, so we patch the source class there.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
         )
         # Bypass branch-existence check so validation reaches the orchestrator.
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._branch_exists", lambda _root, _branch: True,
+            "tianluo.commands.merge_cmd._branch_exists", lambda _root, _branch: True,
         )
         # The branch args here are fakes (existence is stubbed above and the
         # orchestrator is mocked, so no real ref is ever created). Stub the
@@ -849,7 +849,7 @@ class TestFailureReasonRendering:
         # now (correctly) raises IntentReadError and blocks the merge. In
         # production the branch is validated to exist before this scan runs.
         monkeypatch.setattr(
-            "se3.engine.version_intent.intent_flow_ids_introduced",
+            "tianluo.engine.version_intent.intent_flow_ids_introduced",
             lambda *_a, **_k: set(),
         )
         return captured
@@ -857,7 +857,7 @@ class TestFailureReasonRendering:
     def test_merge_conflict_rendering(self, tmp_path: Path, monkeypatch) -> None:
         """failure_reason='merge_conflict' → 'Merge failed' title + git conflict summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -874,7 +874,7 @@ class TestFailureReasonRendering:
     def test_guardrail_violation_rendering(self, tmp_path: Path, monkeypatch) -> None:
         """failure_reason='guardrail_violation' → 'Merge failed' title + guardrails summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -893,7 +893,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """failure_reason='guardrail_repair_failed' → 'Merge aborted' title."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -910,7 +910,7 @@ class TestFailureReasonRendering:
     def test_fast_abort_rendering(self, tmp_path: Path, monkeypatch) -> None:
         """failure_reason='fast_abort' → 'Merge aborted' title + fast summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -927,7 +927,7 @@ class TestFailureReasonRendering:
     def test_fast_failure_rendering(self, tmp_path: Path, monkeypatch) -> None:
         """failure_reason='fast_failure' → 'Merge aborted' title + merge-failed summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -950,7 +950,7 @@ class TestFailureReasonRendering:
         No call file was written, so pending_human must be False and exit code is 1 (not 130).
         """
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -971,7 +971,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """pending_human + guardrail_violation → 'Merge failed' title (not generic 'Merge Paused')."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -991,7 +991,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """failure_reason='guardrail_missing_post_sha' -> 'Merge aborted' title."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1010,7 +1010,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """failure_reason='guardrail_missing_pre_sha' -> 'Merge aborted' title with HEAD warning."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1030,7 +1030,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """failure_reason='binary_file_conflict' -> 'Merge aborted' title without strategy mention."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1048,7 +1048,7 @@ class TestFailureReasonRendering:
     def test_generic_failure_reason_shown(self, tmp_path: Path, monkeypatch) -> None:
         """Unknown failure_reason still appears as 'Reason: ...' in output."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1067,7 +1067,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """fast_abort path with rollback_failed=True → CRITICAL 'repository may be corrupted' message."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1087,28 +1087,28 @@ class TestFailureReasonRendering:
     ) -> None:
         """rollback_failed=True with human_call_file set → CRITICAL message includes call file path."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
             failed_branch="feature",
             failure_reason="guardrail_repair_stalled",
             rollback_failed=True,
-            human_call_file="se3/calls/merge_20260101_000000_feature.json",
+            human_call_file="tianluo/calls/merge_20260101_000000_feature.json",
         )
         captured = self._mock_orchestrator_report(monkeypatch, report)
         exit_code = run_merge(["feature"], project_root=tmp_path)
         assert exit_code == 1
         assert len(captured) == 1
         assert "CRITICAL" in captured[0]["content"]
-        assert "Call file: se3/calls/merge_20260101_000000_feature.json" in captured[0]["content"]
+        assert "Call file: tianluo/calls/merge_20260101_000000_feature.json" in captured[0]["content"]
 
     def test_fast_binary_file_conflict_rendering(
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """failure_reason='binary_file_conflict_fast_abort' -> strategy-appropriate message without human review promise."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1131,7 +1131,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """failure_reason='conflict_context_failed_call_file_write_failed' → correct title/summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1151,8 +1151,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """Success path with runtime_sync_collisions renders collision summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=True,
@@ -1182,8 +1182,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """Pending-human path with runtime_sync_collisions renders collision summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=False,
@@ -1212,8 +1212,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """Generic failure path with runtime_sync_collisions renders collision summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=False,
@@ -1245,8 +1245,8 @@ class TestFailureReasonRendering:
         practice, but the branch must still render them consistently.
         """
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=False,
@@ -1276,7 +1276,7 @@ class TestFailureReasonRendering:
     ) -> None:
         """Strict-mode runtime_sync_collision surfaces the colliding path."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.orchestrator import MergeReport
 
         report = MergeReport(
             success=False,
@@ -1289,7 +1289,7 @@ class TestFailureReasonRendering:
         assert exit_code == 1
         assert len(captured) == 1
         assert "Failed branch: feature-b" in captured[0]["content"]
-        assert "Colliding path: se3/history/run-007.json" in captured[0]["content"]
+        assert "Colliding path: tianluo/history/run-007.json" in captured[0]["content"]
 
     def test_audit_only_collision_renders_distinct_section(
         self, tmp_path: Path, monkeypatch
@@ -1304,8 +1304,8 @@ class TestFailureReasonRendering:
         bookkeeping-only.
         """
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=True,
@@ -1349,8 +1349,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """Both sections render when collisions contain a mix of written and audit-only rows."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=True,
@@ -1403,8 +1403,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """When all collisions succeeded (written=True), the audit-only header is suppressed."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import BypassedCollision
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import BypassedCollision
 
         report = MergeReport(
             success=True,
@@ -1433,8 +1433,8 @@ class TestFailureReasonRendering:
     ) -> None:
         """The git-channel #old -> #new renumber mapping appears in the summary."""
         _init_repo(tmp_path)
-        from se3.engine.merge.orchestrator import MergeReport
-        from se3.engine.merge.runtime_sync import IssueMergeRecord
+        from tianluo.engine.merge.orchestrator import MergeReport
+        from tianluo.engine.merge.runtime_sync import IssueMergeRecord
 
         report = MergeReport(
             success=True,
@@ -1453,8 +1453,8 @@ class TestFailureReasonRendering:
 
 class TestAppendHumanCallLines:
     """Fix (iteration 4): in suppress mode the CLI must NOT print a phantom
-    ``se3/calls/`` file (never created by _RecordingNullHumanCallWriter); it
-    renders the recorded escalation payload and the rerun-`se3 merge` recovery
+    ``tianluo/calls/`` file (never created by _RecordingNullHumanCallWriter); it
+    renders the recorded escalation payload and the rerun-`luo merge` recovery
     instead. In non-suppress mode the real call-file path is still printed.
     """
 
@@ -1464,25 +1464,25 @@ class TestAppendHumanCallLines:
             self.recorded_escalations = recorded_escalations or []
 
     def test_non_suppress_prints_real_call_file(self):
-        from se3.commands.merge_cmd import _append_human_call_lines
+        from tianluo.commands.merge_cmd import _append_human_call_lines
 
         lines: list[str] = []
-        report = self._Report(human_call_file="se3/calls/merge_x.json")
+        report = self._Report(human_call_file="tianluo/calls/merge_x.json")
         _append_human_call_lines(lines, report, suppress_human_call=False)
-        assert lines == ["Call file: se3/calls/merge_x.json"]
+        assert lines == ["Call file: tianluo/calls/merge_x.json"]
 
     def test_suppress_renders_escalations_not_phantom_path(self):
-        from se3.commands.merge_cmd import _append_human_call_lines
+        from tianluo.commands.merge_cmd import _append_human_call_lines
 
         lines: list[str] = []
         report = self._Report(
-            human_call_file="se3/calls/merge_never_written.json",
+            human_call_file="tianluo/calls/merge_never_written.json",
             recorded_escalations=[
                 {"type": "conflict", "branch": "feature/x"},
                 {
                     "type": "guardrail_violation",
                     "branch": "feature/y",
-                    "violations": ["touched se3/specs"],
+                    "violations": ["touched tianluo/specs"],
                 },
             ],
         )
@@ -1495,14 +1495,14 @@ class TestAppendHumanCallLines:
         # The escalation payload and the rerun recovery ARE surfaced.
         assert "conflict: feature/x" in rendered
         assert "guardrail_violation: feature/y" in rendered
-        assert "touched se3/specs" in rendered
-        assert "rerun `se3 merge`" in rendered
+        assert "touched tianluo/specs" in rendered
+        assert "rerun `luo merge`" in rendered
 
     def test_suppress_no_escalation_renders_nothing(self):
         # A non-escalation failure (postcondition / runtime-sync / branch
         # validation) has no call file and no recorded escalation; the CLI must
         # not claim a human escalation happened when none did.
-        from se3.commands.merge_cmd import _append_human_call_lines
+        from tianluo.commands.merge_cmd import _append_human_call_lines
 
         lines: list[str] = []
         report = self._Report()

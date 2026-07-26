@@ -22,9 +22,9 @@ from __future__ import annotations
 import asyncio
 import json
 
-from se3.daemon import protocol
-from se3.daemon.history import DaemonHistoryReader
-from se3.server.state import ServerState
+from tianluo.daemon import protocol
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.server.state import ServerState
 
 FLOW = "20260714-093536_a4af4b75"
 MACHINE = "m1"
@@ -49,7 +49,7 @@ async def _running_flow(state: ServerState) -> None:
             "flows": [
                 {
                     "flow_id": FLOW,
-                    "project_root": "/repo/se3/worktrees/wt-a4af4b75",
+                    "project_root": "/repo/tianluo/worktrees/wt-a4af4b75",
                     "status": "running",
                 }
             ],
@@ -202,7 +202,7 @@ def test_real_daemon_delta_over_a_blank_line_reaches_the_bundle(tmp_path):
     blank line makes the cursor advance by one more than the records delivered —
     the exact shape that used to be misread as a hole."""
 
-    jsonl = tmp_path / "se3" / "history" / FLOW / STEP_FILE
+    jsonl = tmp_path / "tianluo" / "history" / FLOW / STEP_FILE
     jsonl.parent.mkdir(parents=True, exist_ok=True)
     jsonl.write_text(
         json.dumps({"role": "user", "content": "q1"}) + "\n"

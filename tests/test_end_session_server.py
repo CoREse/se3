@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import authed_app, authed_hello, login, recv_daemon_frame  # noqa: E402
 
@@ -81,9 +81,9 @@ def test_end_flow_cross_owner_returns_404():
     """A flow owned by another owner reads as absent (404), never controllable."""
     from fastapi.testclient import TestClient
 
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     app = create_app(
         session_store=SessionStore(cookie_config=CookieConfig(secure=False))
@@ -157,10 +157,10 @@ def test_end_flow_completed_returns_409(client_and_app):
 def test_end_flow_completed_worktree_dispatches(client_and_app):
     """A COMPLETED *worktree* session whose follow-up cleanup failed leaves a
     dangling worktree on disk; the daemon still reports it live under its
-    ``<main>/se3/worktrees/<name>`` root. It MUST stay endable so the orphan can
+    ``<main>/tianluo/worktrees/<name>`` root. It MUST stay endable so the orphan can
     be archived — 202, not the 409 an ordinary completed flow gets."""
     client, app = client_and_app
-    wt_root = "/proj/se3/worktrees/wt_dangling"
+    wt_root = "/proj/tianluo/worktrees/wt_dangling"
     with client.websocket_connect("/ws") as ws:
         _report_flow(ws, client, app, "f-wt", "completed", project_root=wt_root)
         resp = client.post("/api/flows/f-wt/end", json={"reason": "cleanup"})

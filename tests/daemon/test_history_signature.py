@@ -22,8 +22,8 @@ import os
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-from se3.daemon.history import DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as disk_cache
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,7 @@ def _make_reader(root):
 
 
 def _write_engine(root, payload, mtime_ns=None):
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = state_dir / "engine.json"
     engine.write_text(json.dumps(payload), encoding="utf-8")
@@ -180,7 +180,7 @@ def test_signature_structure_unchanged_for_active_flow(tmp_path):
     folded content digest), __status__, then one (name, mtime, size) part per
     history jsonl."""
     _write_engine(tmp_path, {"flow_id": "live", "status": "RUNNING"})
-    hist_dir = tmp_path / "se3" / "history" / "live"
+    hist_dir = tmp_path / "tianluo" / "history" / "live"
     hist_dir.mkdir(parents=True)
     (hist_dir / "01_discovery.jsonl").write_text(
         json.dumps({"role": "user", "content": "q"}) + "\n", encoding="utf-8"
@@ -213,7 +213,7 @@ def test_terminal_then_new_flow_rewrite_detected(tmp_path):
 def test_jsonl_append_still_moves_signature(tmp_path):
     """History jsonl fingerprinting is untouched by the cheap path."""
     _write_engine(tmp_path, {"flow_id": "live", "status": "RUNNING"})
-    hist_dir = tmp_path / "se3" / "history" / "live"
+    hist_dir = tmp_path / "tianluo" / "history" / "live"
     hist_dir.mkdir(parents=True)
     jsonl = hist_dir / "02_analyze.jsonl"
     jsonl.write_text("{}\n", encoding="utf-8")

@@ -22,12 +22,12 @@ every connection window makes net forward progress and a large backlog is caught
 up monotonically across successive windows. A truncated round re-arms fast-push so
 the next chunk drains without waiting out an idle-geared tick.
 
-These tests drive the real :class:`~se3.daemon.history.DaemonHistoryReader` over a
+These tests drive the real :class:`~tianluo.daemon.history.DaemonHistoryReader` over a
 real multi-MB jsonl backlog behind the same minimal provider the cursor-commit
 suite uses, through a websocket stub that dies after a bounded per-window byte
 budget — modelling "each connection is too short-lived to transfer all backlog" —
 and replay exactly the frames that reached the socket into a real
-:class:`~se3.server.state.ServerState` to assert the server ends up with the
+:class:`~tianluo.server.state.ServerState` to assert the server ends up with the
 complete, duplicate-free, monotonically-assembled history.
 
 The async cases drive their own event loop via ``asyncio.run``: pytest-asyncio is
@@ -42,12 +42,12 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.client import (
+from tianluo.daemon import protocol
+from tianluo.daemon.client import (
     DaemonClient,
     _format_close_reason,
 )
-from se3.daemon.history import (
+from tianluo.daemon.history import (
     DaemonHistoryReader,
     MAX_BYTES_PER_REPORT,
 )
@@ -72,7 +72,7 @@ def _write_backlog(root, flow_id: str, step: str, count: int) -> List[str]:
     exactly, padded to :data:`_RECORD_CONTENT_BYTES` so the file is multiple MB —
     far larger than one :data:`MAX_BYTES_PER_REPORT` chunk.
     """
-    path = root / "se3" / "history" / flow_id / step
+    path = root / "tianluo" / "history" / flow_id / step
     path.parent.mkdir(parents=True, exist_ok=True)
     bodies: List[str] = []
     with path.open("w", encoding="utf-8") as fh:
@@ -250,7 +250,7 @@ def test_short_lived_windows_make_monotonic_progress_and_catch_up(tmp_path):
     """Each too-short window nets one chunk; the cursor climbs to full delivery."""
 
     async def scenario():
-        from se3.server.state import ServerState
+        from tianluo.server.state import ServerState
 
         flow_id = "20260720-163316_2df2d504"
         step = "06_implement_398863d6.jsonl"
@@ -486,7 +486,7 @@ def test_session_logs_server_initiated_close(caplog):
     client = _session_client()
     ws = _ClosingWS(close_code=1001, close_reason="server going away")
 
-    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.client"):
         _run_session(client, ws)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -509,7 +509,7 @@ def test_session_logs_transport_drop_with_distinguishable_reason(caplog):
         raise_exc=ConnectionClosedError(None, None),
     )
 
-    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.client"):
         _run_session(client, ws)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -530,7 +530,7 @@ def test_auth_rejected_session_does_not_log_a_disconnect(caplog):
     welcome = protocol.make_welcome("srv", accepted=False, reason="unknown daemon key")
     ws = _ClosingWS(preframes=[welcome.to_json()])
 
-    with caplog.at_level("WARNING", logger="se3.daemon.client"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.client"):
         _run_session(client, ws)
 
     messages = [r.getMessage() for r in caplog.records]
@@ -581,7 +581,7 @@ def test_reconnect_resumes_drain_instead_of_restarting_from_zero(tmp_path):
     """
 
     async def scenario():
-        from se3.server.state import ServerState
+        from tianluo.server.state import ServerState
 
         flow_id = "20260720-163316_2df2d504"
         step = "06_implement_398863d6.jsonl"
@@ -700,7 +700,7 @@ def test_history_request_delivers_full_backlog_despite_byte_cap(tmp_path):
     """
 
     async def scenario():
-        from se3.server.state import ServerState
+        from tianluo.server.state import ServerState
 
         flow_id = "20260714-120000_archived1"
         step = "06_implement_deadbeef.jsonl"

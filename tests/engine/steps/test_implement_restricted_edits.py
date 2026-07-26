@@ -19,8 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.implement import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.implement import (
     _apply_restricted_edits,
     implement_handler,
 )
@@ -163,9 +163,9 @@ class TestCompletionStatusSingleCall:
             outputs={},
         )
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_complete_status_returns_completed(self, mock_parse, mock_caller_cls, mock_inj):
         """Default/complete status returns COMPLETED."""
         mock_parse.return_value = {
@@ -185,9 +185,9 @@ class TestCompletionStatusSingleCall:
         assert step.outputs["completion_status"] == "complete"
         assert step.outputs["incomplete_tasks"] == []
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_partial_status_returns_partial(self, mock_parse, mock_caller_cls, mock_inj):
         """Partial status returns PARTIAL."""
         mock_parse.return_value = {
@@ -207,9 +207,9 @@ class TestCompletionStatusSingleCall:
         assert step.outputs["completion_status"] == "partial"
         assert len(step.outputs["incomplete_tasks"]) == 1
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_failed_status_returns_failed(self, mock_parse, mock_caller_cls, mock_inj):
         """Failed status returns FAILED."""
         mock_parse.return_value = {
@@ -228,9 +228,9 @@ class TestCompletionStatusSingleCall:
         assert result == StepStatus.FAILED
         assert step.outputs["completion_status"] == "failed"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_missing_completion_status_defaults_to_completed(self, mock_parse, mock_caller_cls, mock_inj):
         """Missing completion_status field defaults to COMPLETED (backward compat)."""
         mock_parse.return_value = {
@@ -247,9 +247,9 @@ class TestCompletionStatusSingleCall:
         assert result == StepStatus.COMPLETED
         assert step.outputs["completion_status"] == "complete"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_summary_stored_in_outputs(self, mock_parse, mock_caller_cls, mock_inj):
         """Summary from LLM response is stored in step.outputs."""
         mock_parse.return_value = {
@@ -297,9 +297,9 @@ class TestRestrictedEditsSingleCall:
             outputs={},
         )
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_restricted_edits_applied_and_tracked(self, mock_parse, mock_caller_cls, mock_inj):
         """Restricted edits are applied and results stored in outputs."""
         # Create target file
@@ -328,9 +328,9 @@ class TestRestrictedEditsSingleCall:
         assert ".claude/CLAUDE.md" in step.outputs["files_changed"]
         assert target.read_text(encoding="utf-8") == "new line"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_no_restricted_edits_field_backward_compat(self, mock_parse, mock_caller_cls, mock_inj):
         """Missing restricted_edits field doesn't break anything."""
         mock_parse.return_value = {
@@ -347,9 +347,9 @@ class TestRestrictedEditsSingleCall:
         assert result == StepStatus.COMPLETED
         assert "restricted_edits_applied" not in step.outputs
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_failed_restricted_edits_tracked(self, mock_parse, mock_caller_cls, mock_inj):
         """Failed restricted edits are tracked in outputs."""
         mock_parse.return_value = {
@@ -403,10 +403,10 @@ class TestCompletionStatusGroupByGroup:
             outputs={},
         )
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_all_groups_complete(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """All groups completing returns COMPLETED."""
         groups = [
@@ -425,10 +425,10 @@ class TestCompletionStatusGroupByGroup:
         assert result == StepStatus.COMPLETED
         assert step.outputs["completion_status"] == "complete"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_one_group_partial_returns_partial(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """One group being partial makes overall status PARTIAL."""
         groups = [
@@ -453,10 +453,10 @@ class TestCompletionStatusGroupByGroup:
         assert step.outputs["completion_status"] == "partial"
         assert len(step.outputs["incomplete_tasks"]) == 1
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_failed_group_overrides_partial(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """A failed group makes overall status FAILED even if others are partial."""
         groups = [
@@ -476,10 +476,10 @@ class TestCompletionStatusGroupByGroup:
         assert step.outputs["completion_status"] == "failed"
         assert len(step.outputs["incomplete_tasks"]) == 2
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_missing_status_defaults_complete(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Missing completion_status in group responses defaults to complete."""
         groups = [
@@ -498,10 +498,10 @@ class TestCompletionStatusGroupByGroup:
         assert result == StepStatus.COMPLETED
         assert step.outputs["completion_status"] == "complete"
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_group_restricted_edits_aggregated(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Restricted edits from multiple groups are aggregated."""
         # Create files for edits
@@ -540,10 +540,10 @@ class TestCompletionStatusGroupByGroup:
         assert "a.txt" in step.outputs["files_changed"]
         assert "b.txt" in step.outputs["files_changed"]
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._should_use_dag", return_value=False)
+    @patch("tianluo.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.parse_json_response")
     def test_summary_aggregated_across_groups(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Summary is concatenated from all groups."""
         groups = [

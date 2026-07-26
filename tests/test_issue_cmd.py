@@ -11,7 +11,7 @@ import pytest
 import yaml
 from typer.testing import CliRunner
 
-from se3.commands.issue_cmd import (
+from tianluo.commands.issue_cmd import (
     _get_editor,
     _new_issue_editor_yaml,
     _open_editor_with_content,
@@ -19,7 +19,7 @@ from se3.commands.issue_cmd import (
     _resolve_description,
     app,
 )
-from se3.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
 runner = CliRunner()
 
@@ -41,7 +41,7 @@ def issue_mgr(project_dir):
 
 def _run_cmd(args, project_dir):
     """Run CLI command with project_root patched."""
-    with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir):
+    with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir):
         return runner.invoke(app, args)
 
 
@@ -95,8 +95,8 @@ class TestCreateStdinPipe:
         fake_stdin = io.StringIO("Multi-line\ndescription from stdin\n")
         fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
 
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd.sys") as mock_sys:
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd.sys") as mock_sys:
             mock_sys.stdin = fake_stdin
             mock_sys.stdin.isatty = lambda: False
             result = runner.invoke(app, ["create"])
@@ -114,8 +114,8 @@ class TestCreateStdinPipe:
         fake_stdin = io.StringIO("")
         fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
 
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd.sys") as mock_sys:
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd.sys") as mock_sys:
             mock_sys.stdin = fake_stdin
             mock_sys.stdin.isatty = lambda: False
             result = runner.invoke(app, ["create"])
@@ -128,9 +128,9 @@ class TestCreateInteractive:
 
     def test_create_interactive_tty(self, project_dir):
         """TTY mode calls _read_multiline_input once for description."""
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd.sys") as mock_sys, \
-             patch("se3.cli._read_multiline_input", return_value="interactive description"):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd.sys") as mock_sys, \
+             patch("tianluo.cli._read_multiline_input", return_value="interactive description"):
             mock_sys.stdin.isatty.return_value = True
             result = runner.invoke(app, ["create"])
 
@@ -144,8 +144,8 @@ class TestCreateInteractive:
 
     def test_create_interactive_cancelled(self, project_dir):
         """User cancels at the prompt → exit 1."""
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._resolve_description", return_value=None):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._resolve_description", return_value=None):
             result = runner.invoke(app, ["create"])
 
         assert result.exit_code == 1
@@ -181,29 +181,29 @@ class TestResolveDescription:
     def test_stdin_pipe_when_no_positional(self):
         fake_stdin = io.StringIO("piped content\n")
         fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
-        with patch("se3.commands.issue_cmd.sys") as mock_sys:
+        with patch("tianluo.commands.issue_cmd.sys") as mock_sys:
             mock_sys.stdin = fake_stdin
             mock_sys.stdin.isatty = lambda: False
             result = _resolve_description(None)
         assert result == "piped content"
 
     def test_tty_interactive(self):
-        with patch("se3.commands.issue_cmd.sys") as mock_sys, \
-             patch("se3.cli._read_multiline_input", return_value="typed text"):
+        with patch("tianluo.commands.issue_cmd.sys") as mock_sys, \
+             patch("tianluo.cli._read_multiline_input", return_value="typed text"):
             mock_sys.stdin.isatty.return_value = True
             result = _resolve_description(None)
         assert result == "typed text"
 
     def test_tty_cancel_returns_none(self):
-        with patch("se3.commands.issue_cmd.sys") as mock_sys, \
-             patch("se3.cli._read_multiline_input", return_value=None):
+        with patch("tianluo.commands.issue_cmd.sys") as mock_sys, \
+             patch("tianluo.cli._read_multiline_input", return_value=None):
             mock_sys.stdin.isatty.return_value = True
             result = _resolve_description(None)
         assert result is None
 
     def test_tty_empty_returns_none(self):
-        with patch("se3.commands.issue_cmd.sys") as mock_sys, \
-             patch("se3.cli._read_multiline_input", return_value=""):
+        with patch("tianluo.commands.issue_cmd.sys") as mock_sys, \
+             patch("tianluo.cli._read_multiline_input", return_value=""):
             mock_sys.stdin.isatty.return_value = True
             result = _resolve_description(None)
         assert result is None
@@ -265,8 +265,8 @@ class TestCreateEditor:
     def test_create_editor_success(self, project_dir):
         """Editor returns valid YAML → issue is created."""
         edited_content = "title: Editor Title\ndescription: From the editor\ntype: feature\npriority: high\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["create", "--editor"])
 
         assert result.exit_code == 0
@@ -282,8 +282,8 @@ class TestCreateEditor:
 
     def test_create_editor_cancelled(self, project_dir):
         """Editor returns None (non-zero exit) → cancelled."""
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=None):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=None):
             result = runner.invoke(app, ["create", "--editor"])
 
         assert result.exit_code == 1
@@ -292,8 +292,8 @@ class TestCreateEditor:
     def test_create_editor_no_description(self, project_dir):
         """Editor returns YAML without description → error."""
         edited_content = "title: No desc\ntype: bug\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["create", "--editor"])
 
         assert result.exit_code == 1
@@ -302,8 +302,8 @@ class TestCreateEditor:
     def test_create_editor_with_tags_string(self, project_dir):
         """Tags as comma-separated string in YAML are parsed."""
         edited_content = "description: test\ntags: a,b,c\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["create", "--editor"])
 
         assert result.exit_code == 0
@@ -314,8 +314,8 @@ class TestCreateEditor:
     def test_create_editor_with_tags_list(self, project_dir):
         """Tags as YAML list are parsed."""
         edited_content = "description: test\ntags:\n  - x\n  - y\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["create", "--editor"])
 
         assert result.exit_code == 0
@@ -331,8 +331,8 @@ class TestEditCommand:
         issue_mgr.create("Original desc", title="Original Title", source="human")
 
         edited_content = "id: '001'\ntitle: Updated Title\ndescription: Updated description\ntype: feature\npriority: high\ntags:\n  - new-tag\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["edit", "001"])
 
         assert result.exit_code == 0
@@ -351,8 +351,8 @@ class TestEditCommand:
     def test_edit_cancelled_by_editor(self, project_dir, issue_mgr):
         issue_mgr.create("desc", title="Title")
 
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=None):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=None):
             result = runner.invoke(app, ["edit", "001"])
 
         assert result.exit_code == 1
@@ -361,8 +361,8 @@ class TestEditCommand:
     def test_edit_invalid_yaml(self, project_dir, issue_mgr):
         issue_mgr.create("desc", title="Title")
 
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value="{{bad yaml"):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value="{{bad yaml"):
             result = runner.invoke(app, ["edit", "001"])
 
         assert result.exit_code == 1
@@ -372,8 +372,8 @@ class TestEditCommand:
         issue_mgr.create("desc", title="Title")
 
         edited_content = "id: '001'\ntitle: Title\ndescription: ''\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["edit", "001"])
 
         assert result.exit_code == 1
@@ -384,8 +384,8 @@ class TestEditCommand:
         issue_mgr.create("desc", title="Title", source="human")
 
         edited_content = "id: '001'\ntitle: New Title\ndescription: New desc\n"
-        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
-             patch("se3.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
+        with patch("tianluo.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("tianluo.commands.issue_cmd._open_editor_with_content", return_value=edited_content):
             result = runner.invoke(app, ["edit", "001"])
 
         assert result.exit_code == 0
@@ -399,8 +399,8 @@ class TestOpenEditorWithContent:
 
     def test_editor_success(self, tmp_path):
         """Mock subprocess.run to simulate editor modifying the file."""
-        with patch("se3.commands.issue_cmd.subprocess") as mock_sub, \
-             patch("se3.commands.issue_cmd._get_editor", return_value="vim"):
+        with patch("tianluo.commands.issue_cmd.subprocess") as mock_sub, \
+             patch("tianluo.commands.issue_cmd._get_editor", return_value="vim"):
             def fake_run(args, **kwargs):
                 # Simulate editor modifying the temp file
                 path = args[1]
@@ -414,8 +414,8 @@ class TestOpenEditorWithContent:
         assert result == "edited content"
 
     def test_editor_nonzero_exit_returns_none(self):
-        with patch("se3.commands.issue_cmd.subprocess") as mock_sub, \
-             patch("se3.commands.issue_cmd._get_editor", return_value="vim"):
+        with patch("tianluo.commands.issue_cmd.subprocess") as mock_sub, \
+             patch("tianluo.commands.issue_cmd._get_editor", return_value="vim"):
             mock_sub.run.return_value = MagicMock(returncode=1)
             result = _open_editor_with_content("content")
         assert result is None

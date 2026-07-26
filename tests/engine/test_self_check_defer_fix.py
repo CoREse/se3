@@ -26,7 +26,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from se3.config import (
+from tianluo.config import (
     ConfigError,
     WorkflowConfig,
     DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD,
@@ -34,15 +34,15 @@ from se3.config import (
     resolve_self_check_passes_required,
     load_self_check_resolution,
 )
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps.self_check import (
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps.self_check import (
     self_check_handler,
     _merge_dedup_issues,
     _issue_signature,
@@ -122,7 +122,7 @@ def _make_step(
 
 
 def _run_handler(step, flow, issues):
-    with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
         mock_caller = Mock()
         mock_caller.call.return_value = json.dumps(
             {"issues": issues, "summary": "s"}
@@ -449,7 +449,7 @@ class TestConvergenceSubordinateToDefer:
 
 
 def _make_state_machine(tmp_path, cfg):
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     sm._get_workflow_config = lambda **kwargs: cfg
     return sm
@@ -553,7 +553,7 @@ def _write_nested_project(tmp_path, *, explicit_passes=None):
     }
     if explicit_passes is not None:
         cfg["workflow"]["self_check_passes_required"] = explicit_passes
-    (tmp_path / "se3.yaml").write_text(yaml.safe_dump(cfg))
+    (tmp_path / "tianluo.yaml").write_text(yaml.safe_dump(cfg))
     return tmp_path
 
 
@@ -575,12 +575,12 @@ class TestNestedChainPassesRequiredRecording:
 
     def test_flat_or_default_unchanged(self, tmp_path):
         # No self_check override → falls back to the configured count (1).
-        (tmp_path / "se3.yaml").write_text(yaml.safe_dump({"workflow": {}}))
+        (tmp_path / "tianluo.yaml").write_text(yaml.safe_dump({"workflow": {}}))
         assert resolve_self_check_passes_required(tmp_path) == 1
 
     def test_state_machine_injects_chain_count(self, tmp_path):
         _write_nested_project(tmp_path)
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
         sm._workflow_config_cache = None
         sm._self_check_resolution_cache = None
@@ -592,7 +592,7 @@ class TestNestedChainPassesRequiredRecording:
     def test_handler_records_effective_passes_required(self, tmp_path):
         """End-to-end: the value injected (2) is what the handler records."""
         _write_nested_project(tmp_path)
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=tmp_path)
         sm._workflow_config_cache = None
         sm._self_check_resolution_cache = None

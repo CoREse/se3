@@ -1,7 +1,7 @@
 """Prompt-size invariance for the LLM-as-editor conflict prompt.
 
 Regression guard for the 2026-07-10 failure where a 2.5MB tracked
-``se3/code-index.md`` conflict produced a ~9.9MB prompt (99.97% of it
+``tianluo/code-index.md`` conflict produced a ~9.9MB prompt (99.97% of it
 four inlined copies of the file), blowing past every agent CLI's input
 limit so no LLM ever ran.  The prompt must now be bounded by the number
 of conflicting files and hunks — never by their content size.
@@ -11,8 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from se3.engine.merge.conflict_context import ConflictFile, ConflictHunk
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_context import ConflictFile, ConflictHunk
+from tianluo.engine.merge.conflict_resolver import (
     BatchContext,
     ConflictResolver,
     MergeStrategy,
@@ -38,7 +38,7 @@ def _conflict_file(size_mb: int) -> ConflictFile:
         return SENTINELS[kind] + "x" * pad
 
     return ConflictFile(
-        path="se3/code-index.md",
+        path="tianluo/code-index.md",
         base_content=body("base"),
         ours_content=body("ours"),
         theirs_content=body("theirs"),
@@ -92,7 +92,7 @@ def test_prompt_omits_three_way_contents(tmp_path: Path) -> None:
 
 def test_prompt_keeps_paths_hunks_and_git_show_hint(tmp_path: Path) -> None:
     prompt = _build(tmp_path, 5)
-    assert str(tmp_path / "se3/code-index.md") in prompt
+    assert str(tmp_path / "tianluo/code-index.md") in prompt
     assert "Lines 10-42" in prompt
     assert "Lines 100-137" in prompt
     assert "git show :2:" in prompt

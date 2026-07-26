@@ -48,7 +48,7 @@ def _build_history(tmp_path: Path) -> Path:
     _mk(hist, "20260706-013804_cafef00d", {".jsonl": _LEAK_LINE})  # only-.jsonl leak
     _mk(hist, "test-flow-123", {".jsonl": _LEAK_LINE, ".jsonl.from-x": "x"})
     _mk(hist, "test-flow-neg", {".jsonl": _LEAK_LINE})
-    (hist / "se3" / "history").mkdir(parents=True)  # nested test-residue dir
+    (hist / "tianluo" / "history").mkdir(parents=True)  # nested test-residue dir
     (hist / "prompt_history").write_text("stray", encoding="utf-8")
     # prompt_history* DIRECTORY residue: multi-file so criteria (a)/(b) never
     # catch it -- only the name-based residue rule (c) removes it.

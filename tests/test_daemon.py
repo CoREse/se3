@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import (
+from tianluo.daemon import (
     Daemon,
     DaemonAggregator,
     DaemonConfig,
@@ -24,7 +24,7 @@ from se3.daemon import (
     start_daemon,
     stop_daemon,
 )
-from se3.daemon.daemon import (
+from tianluo.daemon.daemon import (
     DaemonAlreadyRunning,
     PROJECT_ROOTS_FILENAME,
     _append_project_root,
@@ -32,8 +32,8 @@ from se3.daemon.daemon import (
     _read_project_roots_raw,
     _sanitize_project_roots,
 )
-from se3.daemon import spawner as spawner_mod
-from se3.daemon.supervisor import _cmdline_is_se3_run
+from tianluo.daemon import spawner as spawner_mod
+from tianluo.daemon.supervisor import _cmdline_is_se3_run
 
 
 # --------------------------------------------------------------------------
@@ -61,7 +61,7 @@ def _spawn_sleeper(seconds: float = 30.0) -> subprocess.Popen:
 
 def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
     """Write a minimal engine.json under a fake project root."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -81,8 +81,8 @@ def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
 
 
 def _make_resumable_snapshot(root, *, flow_id, status="running", index=2):
-    """Write a per-flow resumable snapshot under se3/state/resumable/."""
-    snap_dir = root / "se3" / "state" / "resumable"
+    """Write a per-flow resumable snapshot under tianluo/state/resumable/."""
+    snap_dir = root / "tianluo" / "state" / "resumable"
     snap_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "flow_id": flow_id,
@@ -208,7 +208,7 @@ def _write_fake_se3(directory, body: str):
     The basename is ``se3`` so psutil observes ``[interpreter, /path/se3, ...]``
     (se3 at argv[1]) — the real shebang-rewritten console-script shape.
     """
-    path = directory / "se3"
+    path = directory / "tianluo"
     path.write_text(f"#!{sys.executable}\n{body}", encoding="utf-8")
     path.chmod(0o755)
     return path
@@ -219,7 +219,7 @@ class TestCmdlineIsSe3Run:
     must reject inline-code stubs that carry ``se3``/``run`` as script argv."""
 
     def test_inline_code_form_is_not_se3_run(self):
-        # ``python -c <code> se3 run``: se3/run are the inline script's argv,
+        # ``python -c <code> se3 run``: tianluo/run are the inline script's argv,
         # not an se3 subcommand — this is the ghost-session false positive.
         assert _cmdline_is_se3_run(["python3", "-c", "<code>", "se3", "run"]) is False
 
@@ -257,7 +257,7 @@ class TestCmdlineIsSe3Run:
         ) is False
 
     def test_se3_run_as_script_arguments_only(self):
-        # se3/run at argv[2]+ with no -m se3 and no se3 program token.
+        # tianluo/run at argv[2]+ with no -m se3 and no se3 program token.
         assert _cmdline_is_se3_run(["python3", "script.py", "se3", "run"]) is False
 
     def test_other_se3_subcommand_with_trailing_run_is_not_se3_run(self):
@@ -368,22 +368,23 @@ class TestScanExternalDiscovery:
 
 
 class TestResolveSe3Command:
-    """Same-prefix-first resolution of the ``se3`` argv prefix.
+    """Same-prefix-first resolution of the CLI argv prefix.
 
     The daemon may be installed in a Python environment whose bin dir is
-    not first on ``PATH``; relying on ``shutil.which('se3')`` would then
-    spawn ``se3 run`` / ``se3 init`` children from an unrelated environment,
+    not first on ``PATH``; relying on ``shutil.which()`` would then spawn
+    ``luo run`` / ``luo init`` children from an unrelated environment,
     silently mismatching versions. ``_resolve_se3_command`` therefore
-    prefers the console script sitting next to ``sys.executable`` and falls
-    back to ``[sys.executable, '-m', 'se3']``.
+    prefers a console script (``luo`` / ``tianluo`` / legacy ``se3``)
+    sitting next to ``sys.executable`` and falls back to
+    ``[sys.executable, '-m', 'tianluo']``.
     """
 
     def test_prefers_sys_executable_prefix(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
         fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
-        fake_se3 = tmp_path / "se3"
-        fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
-        unrelated = tmp_path / "other" / "se3"
+        fake_luo = tmp_path / "luo"
+        fake_luo.write_text("#!/bin/sh\n", encoding="utf-8")
+        unrelated = tmp_path / "other" / "luo"
         unrelated.parent.mkdir()
         unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -392,13 +393,26 @@ class TestResolveSe3Command:
             spawner_mod.shutil, "which", lambda name: str(unrelated)
         )
 
+        assert spawner_mod._resolve_se3_command() == [str(fake_luo)]
+
+    def test_prefers_legacy_se3_script_over_module_form(self, tmp_path, monkeypatch):
+        # An old install that only ships the `se3` console script must still
+        # resolve to it (same-prefix rule beats the module-form fallback).
+        fake_python = tmp_path / "python"
+        fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake_se3 = tmp_path / "tianluo"
+        fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(spawner_mod.sys, "executable", str(fake_python))
+        monkeypatch.setattr(spawner_mod.shutil, "which", lambda name: None)
+
         assert spawner_mod._resolve_se3_command() == [str(fake_se3)]
 
     def test_falls_back_to_module_form(self, tmp_path, monkeypatch):
         fake_python = tmp_path / "python"
         fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
-        # No sibling `se3` placed under tmp_path on purpose.
-        unrelated = tmp_path / "other" / "se3"
+        # No sibling console script placed under tmp_path on purpose.
+        unrelated = tmp_path / "other" / "luo"
         unrelated.parent.mkdir()
         unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
 
@@ -410,7 +424,7 @@ class TestResolveSe3Command:
         assert spawner_mod._resolve_se3_command() == [
             str(fake_python),
             "-m",
-            "se3",
+            "tianluo",
         ]
 
 
@@ -606,8 +620,8 @@ class TestEnsureSe3Project:
     """Pre-spawn auto-init hook used by the web `New Task` form."""
 
     def test_skips_init_when_already_se3_project(self, tmp_path, monkeypatch):
-        """Directory containing se3/charter.md must not re-run init."""
-        spec = tmp_path / "se3" / "charter.md"
+        """Directory containing tianluo/charter.md must not re-run init."""
+        spec = tmp_path / "tianluo" / "charter.md"
         spec.parent.mkdir(parents=True)
         spec.write_text("# existing\n", encoding="utf-8")
 
@@ -637,7 +651,7 @@ class TestEnsureSe3Project:
             captured["args"] = args
             captured["cwd"] = kwargs.get("cwd")
             # Simulate init writing the marker file.
-            spec = tmp_path / "se3" / "charter.md"
+            spec = tmp_path / "tianluo" / "charter.md"
             spec.parent.mkdir(parents=True, exist_ok=True)
             spec.write_text("# initialized\n", encoding="utf-8")
             return _FakeCompleted()
@@ -719,7 +733,7 @@ class TestAggregator:
 
     def test_pending_calls_detected(self, tmp_path):
         _make_engine_json(tmp_path)
-        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir = tmp_path / "tianluo" / "calls"
         calls_dir.mkdir(parents=True)
         (calls_dir / "call_001.json").write_text("{}", encoding="utf-8")
         agg = DaemonAggregator()
@@ -736,7 +750,7 @@ class TestAggregator:
         assert agg.has_changes() is False  # unchanged
         time.sleep(0.01)
         _make_engine_json(tmp_path, status="completed")
-        os.utime(tmp_path / "se3" / "state" / "engine.json", None)
+        os.utime(tmp_path / "tianluo" / "state" / "engine.json", None)
         assert agg.has_changes() is True
 
     def test_set_project_roots(self, tmp_path):
@@ -968,7 +982,7 @@ class TestDaemonLifecycle:
             "discovery_step_123", str(proj), "1"
         )
         response_file = (
-            proj / "se3" / "calls" / "discovery_step_123.response.json"
+            proj / "tianluo" / "calls" / "discovery_step_123.response.json"
         )
         assert response_file.exists()
         procs = daemon.spawner.processes
@@ -992,7 +1006,7 @@ class TestDaemonLifecycle:
     def test_poll_once_offloads_snapshot_build(self, tmp_path):
         """The heavy snapshot build must not block the event loop.
 
-        ``get_snapshot`` can fan out into a full ``se3/history`` walk; running it
+        ``get_snapshot`` can fan out into a full ``tianluo/history`` walk; running it
         synchronously on the loop stalls heartbeats and inbound SPAWN_FLOW. This
         test installs a deliberately blocking ``get_snapshot`` and asserts a
         concurrent coroutine (standing in for the heartbeat / receive loop)
@@ -1269,14 +1283,14 @@ class TestDaemonLogging:
         root.setLevel(saved_level)
 
     def test_log_format_includes_timestamp(self):
-        from se3.daemon.daemon import DAEMON_LOG_FORMAT
+        from tianluo.daemon.daemon import DAEMON_LOG_FORMAT
 
         assert "%(asctime)s" in DAEMON_LOG_FORMAT
 
     def test_configure_installs_timestamped_handler(self):
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         tagged = [
@@ -1290,7 +1304,7 @@ class TestDaemonLogging:
     def test_configure_is_idempotent(self):
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         _configure_daemon_logging()
@@ -1306,7 +1320,7 @@ class TestDaemonLogging:
         import io
         import logging
 
-        from se3.daemon.daemon import _configure_daemon_logging
+        from tianluo.daemon.daemon import _configure_daemon_logging
 
         _configure_daemon_logging()
         handler = next(
@@ -1316,7 +1330,7 @@ class TestDaemonLogging:
         )
         stream = io.StringIO()
         handler.setStream(stream)
-        logging.getLogger("se3.daemon.daemon").info("hello daemon")
+        logging.getLogger("tianluo.daemon.daemon").info("hello daemon")
         output = stream.getvalue()
         assert "hello daemon" in output
         # A timestamp line begins with a 4-digit year.
@@ -1344,7 +1358,7 @@ class _FakeClock:
 class TestDaemonStartWarnings:
     def test_precheck_warns_when_websockets_missing(self, monkeypatch, capsys):
         """The CLI front-end shouts when 'websockets' is unavailable."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         # Force `import websockets` inside the precheck to fail.
         monkeypatch.setitem(sys.modules, "websockets", None)
@@ -1352,11 +1366,11 @@ class TestDaemonStartWarnings:
         out = capsys.readouterr().out
         assert "websockets" in out
         assert "local-only" in out.lower()
-        assert "pip install 'se3[server]'" in out
+        assert "pip install 'tianluo[server]'" in out
 
     def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
         """A fresh status file still showing a last_error at the deadline warns."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1375,7 +1389,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_warns_when_pending(self, monkeypatch, capsys):
         """When no verdict lands before the timeout, say so rather than lie."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1394,7 +1408,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_confirms_when_connected(self, monkeypatch, capsys):
         """A connected daemon gets a positive confirmation line."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1415,7 +1429,7 @@ class TestDaemonStartWarnings:
         self, monkeypatch, capsys
     ):
         """A first-dial error must not be reported if backoff reconnects."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1445,7 +1459,7 @@ class TestDaemonStartWarnings:
 
     def test_report_connection_ignores_stale_status_file(self, monkeypatch, capsys):
         """A status file predating the current daemon must not be trusted."""
-        from se3 import cli as cli_mod
+        from tianluo import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
@@ -1472,7 +1486,7 @@ class TestDaemonStartWarnings:
 
 
 def _make_history_flow(root, *, flow_id="flow-hist", project_root=None):
-    """Create a history-only flow under *root* (``se3/history/<flow_id>``).
+    """Create a history-only flow under *root* (``tianluo/history/<flow_id>``).
 
     Writes a ``_meta.json`` carrying ``project_root`` and one per-step ``jsonl``
     file so the flow is enumerable by both
@@ -1480,7 +1494,7 @@ def _make_history_flow(root, *, flow_id="flow-hist", project_root=None):
     :meth:`DaemonHistoryReader.build_index`.
     """
     project_root = project_root if project_root is not None else str(root)
-    flow_dir = root / "se3" / "history" / flow_id
+    flow_dir = root / "tianluo" / "history" / flow_id
     flow_dir.mkdir(parents=True, exist_ok=True)
     (flow_dir / "_meta.json").write_text(
         json.dumps(
@@ -1544,7 +1558,7 @@ class TestProjectRootsRegistryHelpers:
 
     def test_append_uses_atomic_write(self, tmp_path, monkeypatch):
         """The write goes through _atomic_write_json (temp file + rename)."""
-        from se3.daemon import daemon as daemon_mod
+        from tianluo.daemon import daemon as daemon_mod
 
         calls = []
         real_atomic = daemon_mod._atomic_write_json

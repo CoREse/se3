@@ -22,10 +22,10 @@ import threading
 import pytest
 
 from _authsrv import authed_app, authed_hello, login, recv_daemon_frame
-from se3.daemon import protocol
-from se3.server import app as app_module
-from se3.server.state import MachineRecord, ServerState, _sanitize_registered_projects
-from se3.server.ws import ProjectCommandRegistry, _handle_message
+from tianluo.daemon import protocol
+from tianluo.server import app as app_module
+from tianluo.server.state import MachineRecord, ServerState, _sanitize_registered_projects
+from tianluo.server.ws import ProjectCommandRegistry, _handle_message
 
 
 PROJ_A = "/srv/projects/alpha"

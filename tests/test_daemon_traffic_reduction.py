@@ -22,15 +22,15 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import (
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import (
     DaemonAggregator,
     FlowSnapshot,
     MachineStatus,
     PendingCall,
 )
-from se3.daemon.client import DaemonClient, _status_signature
-from se3.daemon.history import _DESC_CLIP
+from tianluo.daemon.client import DaemonClient, _status_signature
+from tianluo.daemon.history import _DESC_CLIP
 
 
 # --------------------------------------------------------------------------- #
@@ -62,7 +62,7 @@ def _make_client(**kw) -> DaemonClient:
 def _write_issue(root: Path, issue_id: str, *, description: str) -> None:
     import yaml
 
-    open_dir = root / "se3" / "issues" / "open"
+    open_dir = root / "tianluo" / "issues" / "open"
     open_dir.mkdir(parents=True, exist_ok=True)
     # IssueManager._find_issue_file matches the ``NNN_slug`` filename convention,
     # so name the file that way (the aggregator reads the in-file id regardless).
@@ -113,7 +113,7 @@ def test_status_update_pending_call_prompts_clipped_on_both_surfaces() -> None:
     long_prompt = "P" * 4000
     call = PendingCall(
         call_id="c1",
-        path="/p/se3/calls/c1.json",
+        path="/p/tianluo/calls/c1.json",
         project_root="/p",
         kind=protocol.CALL_KIND_INTERJECTION,
         prompt=long_prompt,
@@ -260,7 +260,7 @@ def test_detail_request_returns_full_issue(tmp_path: Path) -> None:
 
 
 def test_detail_request_returns_full_call_prompt(tmp_path: Path) -> None:
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
     long_prompt = "Q" * 3000
     (calls_dir / "c1.json").write_text(
@@ -292,7 +292,7 @@ def test_detail_request_normalizes_legacy_call_fields(tmp_path: Path) -> None:
     surfaces the full text under the canonical ``prompt`` key, so the frontend
     (which reads only ``detail.call.prompt``) can swap out the clipped preview.
     """
-    calls_dir = tmp_path / "se3" / "calls"
+    calls_dir = tmp_path / "tianluo" / "calls"
     calls_dir.mkdir(parents=True, exist_ok=True)
     long_message = "M" * 3000
     long_question = "?" * 3000

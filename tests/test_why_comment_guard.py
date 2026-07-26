@@ -24,8 +24,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.steps import invariant_check
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps import invariant_check
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------
@@ -772,13 +772,17 @@ def test_no_baseline_guard_silently_skips(tmp_path, monkeypatch):
 def test_prompt_carries_amendment_exemption():
     prompt = invariant_check.INVARIANT_CHECK_PROMPT
     assert "Constitutional-amendment exemption" in prompt
-    assert "se3/charter.md" in prompt
+    assert "tianluo/charter.md" in prompt
     # It must scope the exemption to task-directed clauses only.
     assert "explicitly calls for that charter change" in prompt
 
 
 def test_charter_declares_marker_prefix_convention():
-    charter = (Path(__file__).resolve().parents[1] / "se3" / "charter.md").read_text(
+    from tianluo.runtime_paths import runtime_dir
+
+    # Resolve through runtime_dir(): this repo itself may still be on the
+    # legacy se3/ layout until `luo migrate rename` is run on it.
+    charter = (runtime_dir(Path(__file__).resolve().parents[1]) / "charter.md").read_text(
         encoding="utf-8"
     )
     assert "WHY:" in charter and "INVARIANT:" in charter

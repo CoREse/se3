@@ -1,4 +1,4 @@
-"""Tests for the invariant_check step (src/se3/engine/steps/invariant_check.py).
+"""Tests for the invariant_check step (src/tianluo/engine/steps/invariant_check.py).
 
 INVARIANT_CHECK is the anchored replacement for the retired spec_gate/spec_check.
 Coverage:
@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.steps import invariant_check
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps import invariant_check
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------

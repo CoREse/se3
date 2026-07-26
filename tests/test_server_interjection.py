@@ -21,10 +21,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.engine import interaction_calls
+from tianluo.engine import interaction_calls
 
 
 # --------------------------------------------------------------------------
@@ -159,7 +159,7 @@ def test_failure_with_tty_races_and_writes_retry_decision_call(tmp_path: Path):
     STILL writes a retry_decision call file, so a webui bystander sees the
     failure as a Retry/Skip/Abort chip while the CLI prompt is raced against
     the webui response."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = SimpleNamespace(flow_id="flow-1")
     step = _stub_failed_step()
@@ -178,7 +178,7 @@ def test_failure_with_tty_races_and_writes_retry_decision_call(tmp_path: Path):
 
 def test_failure_without_tty_writes_retry_decision_call(tmp_path: Path):
     """Off a terminal the handler externalises the decision as a call file."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = SimpleNamespace(flow_id="flow-1")
     step = _stub_failed_step(step_id="step-7", step_type="verify_spec")
@@ -201,7 +201,7 @@ def test_failure_without_tty_writes_retry_decision_call(tmp_path: Path):
 
 def test_failure_without_tty_applies_existing_response(tmp_path: Path):
     """A retry_decision answered out-of-band resolves to that decision."""
-    from se3.commands import run
+    from tianluo.commands import run
 
     flow = SimpleNamespace(flow_id="flow-1")
     step = _stub_failed_step(step_id="step-7")
@@ -224,7 +224,7 @@ def test_failure_without_tty_applies_existing_response(tmp_path: Path):
 
 
 def test_stdin_is_interactive_reflects_isatty(monkeypatch):
-    from se3.commands import run
+    from tianluo.commands import run
 
     class _FakeStdin(io.StringIO):
         def __init__(self, tty):

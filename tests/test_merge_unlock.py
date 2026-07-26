@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3.commands.merge.merge_lock import (
+from tianluo.commands.merge.merge_lock import (
     LockStatus,
     ReleaseOutcome,
     break_lock_file,
@@ -23,7 +23,7 @@ from se3.commands.merge.merge_lock import (
 )
 
 # Default lock path relative to a project root.
-LOCK_REL = Path("se3/state/merge.lock")
+LOCK_REL = Path("tianluo/state/merge.lock")
 
 
 def _lock_path(project_root: Path) -> Path:
@@ -236,14 +236,14 @@ def test_release_force_failed_remove_when_unlink_denied(tmp_path: Path) -> None:
 @pytest.fixture()
 def cli_project(tmp_path, monkeypatch):
     """Point the CLI's get_project_root at tmp_path."""
-    import se3.commands.run as run_mod
+    import tianluo.commands.run as run_mod
 
     monkeypatch.setattr(run_mod, "get_project_root", lambda: tmp_path)
     return tmp_path
 
 
 def _run(args):
-    from se3.cli import app
+    from tianluo.cli import app
 
     return CliRunner().invoke(app, args)
 

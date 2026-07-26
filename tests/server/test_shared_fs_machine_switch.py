@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 
 FLOW_ID = "flow-shared-fs"
@@ -56,7 +56,7 @@ MACHINE_B = "node008"
 # In the field a shared mount gives both nodes the SAME path; the two roots
 # differ here only so an assertion can name WHICH machine's metadata the server
 # resolved and handed to the daemon it pulls from. Neither path may sit under
-# ``se3/worktrees/`` — that would arm the active-worktree self-heal reconcile
+# ``tianluo/worktrees/`` — that would arm the active-worktree self-heal reconcile
 # and add a daemon round-trip these tests do not model.
 ROOT_A = "/shared/jobs/proj-a"
 ROOT_B = "/shared/jobs/proj-b"
@@ -110,7 +110,7 @@ def _server(monkeypatch, *, offline_grace: Optional[float]):
     """
     from fastapi.testclient import TestClient
 
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     # ``GET /api/history`` broadcasts a forced index re-push and waits for the
     # replies; our stand-in daemons never answer, so every call would otherwise
@@ -749,7 +749,7 @@ def blocked_fleet(monkeypatch):
 def test_respond_reaches_the_live_machine(blocked_fleet):
     """The answer must reach the machine that can still be reached.
 
-    A response is a file drop — the daemon writes ``se3/calls/<id>.response``
+    A response is a file drop — the daemon writes ``tianluo/calls/<id>.response``
     under the flow's project_root and the live process picks it up off the same
     shared disk. Routing it at the unreachable first reporter bounced the
     operator's reply with a 404 while the flow stayed blocked on the call.
@@ -902,7 +902,7 @@ def test_history_detail_with_no_live_machine_still_serves_the_cache(fleet):
 
 
 ISSUE_ID = "I-42"
-# Issues live in ``se3/issues/*.yaml`` under the project root, so on the shared
+# Issues live in ``tianluo/issues/*.yaml`` under the project root, so on the shared
 # mount BOTH nodes mirror the identical file. Unlike the flow roots above these
 # must therefore be the same path — that sameness is the whole scenario.
 ISSUE_ROOT = "/shared/jobs/proj-shared"

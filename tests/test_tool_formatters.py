@@ -8,7 +8,7 @@ import json
 import pytest
 from rich.console import Console
 
-from se3.engine.tool_formatters import (
+from tianluo.engine.tool_formatters import (
     TOOL_FORMATTERS,
     build_tool_detail_payload,
     format_tool_chip_header,
@@ -19,7 +19,7 @@ from se3.engine.tool_formatters import (
     generate_edit_diff,
     truncate_preview,
 )
-from se3.engine.truncation import TOOL_DETAIL_PAYLOAD_MAX_CHARS
+from tianluo.engine.truncation import TOOL_DETAIL_PAYLOAD_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +419,7 @@ class TestGenerateEditDiff:
 class TestRenderDiff:
     def _capture_render(self, diff_lines, file_path="test.py", max_lines=50):
         """Render diff to a string buffer and return output."""
-        from se3.engine.display import render_diff, set_console
+        from tianluo.engine.display import render_diff, set_console
         buf = io.StringIO()
         test_console = Console(file=buf, force_terminal=True, width=120)
         set_console(test_console)
@@ -513,7 +513,7 @@ class TestRenderDiff:
 
 class TestFormatToolDiff:
     def _capture_diff(self, tool_name, input_data, result_data, old_content=None):
-        from se3.engine.display import set_console
+        from tianluo.engine.display import set_console
         buf = io.StringIO()
         test_console = Console(file=buf, force_terminal=True, width=120)
         set_console(test_console)
@@ -626,7 +626,7 @@ class TestFormatToolDiff:
 
 class TestStreamJSONTrackerDiff:
     def _make_tracker(self):
-        from se3.engine.llm_caller import StreamJSONTracker
+        from tianluo.engine.llm_caller import StreamJSONTracker
         return StreamJSONTracker()
 
     def _tool_use_event(self, tool_name, tool_input, tool_use_id="tu_1"):
@@ -680,7 +680,7 @@ class TestStreamJSONTrackerDiff:
         assert "tu_1" not in tracker._tool_use_id_to_old_content
 
     def test_cache_consumed_on_result(self):
-        from se3.engine.display import set_console
+        from tianluo.engine.display import set_console
         buf = io.StringIO()
         set_console(Console(file=buf, force_terminal=True, width=120))
         try:
@@ -704,7 +704,7 @@ class TestStreamJSONTrackerDiff:
         assert "tu_1" not in tracker._tool_use_id_to_name
 
     def test_full_edit_flow_renders_diff(self):
-        from se3.engine.display import set_console
+        from tianluo.engine.display import set_console
         buf = io.StringIO()
         set_console(Console(file=buf, force_terminal=True, width=120))
         try:
@@ -743,7 +743,7 @@ class TestStreamJSONTrackerDiff:
 
     def test_write_overwrite_full_flow(self, tmp_path):
         """Full Write overwrite flow: tool_use → read file → tool_result → diff rendered."""
-        from se3.engine.display import set_console
+        from tianluo.engine.display import set_console
         target = tmp_path / "overwrite.py"
         target.write_text("old line\n", encoding="utf-8")
         buf = io.StringIO()
@@ -763,7 +763,7 @@ class TestStreamJSONTrackerDiff:
 
     def test_write_new_file_shows_created(self):
         """Write to non-existent file shows Created summary (old_content=None)."""
-        from se3.engine.display import set_console
+        from tianluo.engine.display import set_console
         buf = io.StringIO()
         set_console(Console(file=buf, force_terminal=True, width=120))
         try:

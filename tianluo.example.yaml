@@ -1,0 +1,151 @@
+# tianluo (SE 3.0) framework configuration — EXAMPLE
+#
+# This file is a shipped reference and is NOT read by the engine.
+# To configure a project, either:
+#   cp tianluo.example.yaml tianluo.yaml        # committed project config
+# or maintain a gitignored local override:
+#   tianluo.local.yaml                          # wins over tianluo.yaml
+# (Legacy se3.yaml / se3.local.yaml keep working through 12.x.)
+
+human_call:
+  timeout_days: 7
+  directory: tianluo/calls  # Human calls directory (legacy: human-calls)
+
+session:
+  progress_file: progress.md
+  max_progress_entries: 20
+
+# Agent Registry (top-level identity layer)
+# Every `llm_caller.*` or `confirmation.steps.*.reviewer` reference is
+# resolved by name against this dict. Unknown names fail fast at startup.
+# Global + project merge is entry-level: project entries override global
+# entries with the same name; non-conflicting entries coexist.
+agents:
+  primary: { type: claude-code, cmd: claude, priority: 10 }
+  backup: { type: claude-code, cmd: kclaude, priority: 5 }
+  low:    { type: claude-code, cmd: hclaude, priority: 1 }
+
+# LLM Caller Configuration
+# `defaults` is the default caller chain by agent name (referencing
+# entries in `agents` above). `steps.<step>` declares a HARD per-step
+# override — there is no silent fallback to `defaults`, so if you want a
+# default tail you must list it explicitly. Rotation on infrastructure
+# errors happens strictly within the step's list.
+llm_caller:
+  defaults: [primary]
+  steps:
+    implement: [primary]
+    summarize: [primary]
+
+# Confirmation (Review) Configuration
+# Per-step dict: a step is confirmed iff it appears as a key here.
+# There is NO global on/off switch. Per-step `reviewer` accepts:
+#   - "human"        → MCP call file / interactive approval pathway
+#   - <agent name>   → single-agent LLM review against that agent
+#   - omitted / null → LLM review via `llm_caller.defaults`
+confirmation:
+  steps:
+    # plan-confirm is ALWAYS-ON: a CONFIRM running the dedicated
+    # requirement-coverage review is inserted after every plan step
+    # regardless of this block — even if this `plan` entry (or all of
+    # confirmation.steps) is removed. This entry's scope is now narrowed to
+    # customizing only the reviewer and max_iterations; it no longer gates
+    # whether plan is confirmed. Omitting it falls back to LLM review via
+    # llm_caller.defaults with the default max_iterations.
+    plan:
+      # reviewer omitted → LLM review via llm_caller.defaults
+      max_iterations: 3
+    # Adjudicate rules on spec contradictions and emits an override patch to the
+    # task description and/or plan. It is 免确认 by default: with no entry here,
+    # a ruling (including one that rewrites the *task description*) auto-passes
+    # with no human/LLM门. Overriding the task description is high-impact, so if
+    # an unattended run must NOT silently rewrite it, opt in to human review via
+    # tianluo/calls (PAUSED approval) by uncommenting the block below. A plan-only
+    # ruling is never human-gated even then; point `reviewer` at an LLM agent
+    # name to auto-review plan-only overrides.
+    # adjudicate:
+    #   reviewer: human
+    #   max_iterations: 3
+
+# Version Bumping Configuration
+# Automatically bump version on commit step based on task type
+version:
+  enabled: true                       # Enable automatic version bumping
+  file_path: null                     # Explicit version file path (null = auto-detect)
+  include_in_commit_message: true     # Include version in commit message
+  auto_bump: true                     # Auto-apply bump without human confirmation
+
+  # Optional: customize version rules by creating tianluo/version-rules.md
+  # (natural-language Markdown). When absent, default SemVer 2.0.0 applies.
+
+# Language Configuration
+# Two independent language settings, merged project-over-global with
+# ~/.tianluo/config.yaml.
+language:
+  # Unified human language: drives BOTH the CLI's fixed UI copy AND the
+  # LLM human-facing step outputs (summarize / discovery / confirmed steps).
+  # (The central WebUI console's interface language is a per-user browser /
+  #  localStorage preference and does NOT follow this project setting.)
+  # CLI resolution precedence: SE3_LANG env > this key > ~/.tianluo/config.yaml >
+  # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
+  # null = no LLM-output restriction (CLI UI copy still resolves via the chain).
+  language: zh-CN
+  # Knowledge-asset language: the writing language of charter.md and the
+  # code-index (injected into the charter_freshness and code-index summary
+  # prompts). e.g. "zh-CN", "en-US". null = no restriction (LLM decides).
+  spec_language: en-US
+
+# E2E / Visual regression testing (optional)
+# Requires Puppeteer MCP or similar browser automation tool
+e2e:
+  baseline_dir: .e2e-baselines        # Where to store baseline screenshots
+  diff_threshold: 0.1                 # Pixel difference threshold (0-1)
+  default_viewport: "1280x720"        # Default browser viewport size
+  test_paths: []                      # URL paths to test (e.g., ["/", "/login"])
+
+# Test step configuration
+# `critical_tests` registers acceptance tests that MUST genuinely run during
+# verification. If any of these is skipped or silently missing from the test
+# results, the engine treats the run as unverified (tests_passed=False) instead
+# of accepting "skip == no failures". Entries are matched as substrings against
+# pytest's per-test ids (file::test), so a fully-qualified id is the precise
+# anchor. Requires the browser extra: `pip install tianluo[browser]` then
+# `playwright install chromium`.
+test:
+  critical_tests:
+    - "tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
+
+workflow:
+  # Backstop only: with the deterministic pre-implement test baseline, a
+  # correctly-scoped flow no longer loops on inherited failures, so this cap is
+  # rarely reached. Kept at the documented default (100) and intentionally
+  # identical to tianluo.local.yaml so the local override does not silently shadow a
+  # different value (config loading is whole-file select-one, not key-merge).
+  max_fix_iterations: 100
+
+  # Period (in fix iterations) of the adjudicate step's catch-all safety net:
+  # even when no oscillation signal fires, every N fix iterations force one
+  # adjudicate run to catch drift the structural triggers missed. Set to 0 (or
+  # null) to disable the periodic net (adjudicate then runs only on the
+  # structural signal triggers: candidate oscillation / contradiction / recur).
+  # Default: 10.
+  adjudicate_period: 10
+
+  # Defer-fix threshold for nested self_check chains. When a non-final
+  # self_check pass finds FEWER than this many issues and none is critical/high
+  # severity, its fix is deferred and the remaining passes run first; their
+  # findings are then merged (deduped) into one consolidated fix loop. Set to 0
+  # (or null) to disable — every issue-finding pass triggers fix immediately
+  # (the historical behavior). Default: 3.
+  # self_check_defer_fix_threshold: 3
+
+# Preset Prompts (common-task library)
+# Project-level presets override the built-in presets shipped with tianluo
+# (read at runtime from the package, never copied by `luo init`). Each
+# entry carries its task type and points at a prompt file committed with
+# the project. Run with `luo run --preset <name>`; list with
+# `luo run --preset list`.
+presets:
+  doc-sync:
+    type: feature
+    prompt_file: tianluo/prompts/doc-sync.md

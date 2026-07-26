@@ -4,7 +4,7 @@ import hashlib
 
 import pytest
 
-from se3.engine.prompt_dedup import deduplicate_prompt_lines
+from tianluo.engine.prompt_dedup import deduplicate_prompt_lines
 
 
 def _expected_marker(block_lines: list[str]) -> str:

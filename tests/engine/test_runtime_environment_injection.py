@@ -12,46 +12,46 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import context_builder
-from se3.engine.context_builder import (
+from tianluo.engine import context_builder
+from tianluo.engine.context_builder import (
     RUNTIME_ENV_INJECTION_DEFAULT_STEPS,
     RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS,
     _reset_runtime_environment_cache,
     get_runtime_environment_injection,
 )
 
-HEADING = "## se3 Runtime Environment"
+HEADING = "## tianluo Runtime Environment"
 
 # Whitelist commands the injection must advertise.
 WHITELIST_COMMANDS = [
-    "se3 history list",
-    "se3 history show",
-    "se3 history archived",
-    "se3 issue list",
-    "se3 issue show",
+    "luo history list",
+    "luo history show",
+    "luo history archived",
+    "luo issue list",
+    "luo issue show",
 ]
 
 # Blacklist commands the injection must warn about.
 BLACKLIST_COMMANDS = [
-    "se3 history restore",
-    "se3 issue create",
-    "se3 issue reset",
-    "se3 salvage",
-    "se3 merge",
-    "se3 sync",
-    "se3 init",
+    "luo history restore",
+    "luo issue create",
+    "luo issue reset",
+    "luo salvage",
+    "luo merge",
+    "luo sync",
+    "luo init",
 ]
 
 # Free-form file path references.
 PATH_REFERENCES = [
-    "se3/history/<flow_id>",
-    "se3/issues/",
+    "tianluo/history/<flow_id>",
+    "tianluo/issues/",
 ]
 
 # Workflow recommendation feature phrases.
 WORKFLOW_HINTS = [
-    "先用 `se3 history list` 找到",
-    "先用 `se3 issue list`",
+    "先用 `luo history list` 找到",
+    "先用 `luo issue list`",
 ]
 
 
@@ -78,14 +78,14 @@ def test_default_whitelist_returns_full_content(tmp_path):
     for hint in WORKFLOW_HINTS:
         assert hint in result, f"missing workflow hint: {hint}"
     # Blacklist preamble must be present verbatim.
-    assert "以下 se3 命令存在但" in result
+    assert "以下 luo 命令存在但" in result
     assert "除非用户在当前会话中" in result
 
 
 def test_forbidden_steps_always_return_empty_even_with_yaml(tmp_path):
     """commit / version_analyze are FORBIDDEN. Even if the user explicitly
-    lists them in se3.yaml the function must still return ``""``."""
-    (tmp_path / "se3.yaml").write_text(
+    lists them in tianluo.yaml the function must still return ``""``."""
+    (tmp_path / "tianluo.yaml").write_text(
         "runtime_environment_injection:\n  steps: [commit, version_analyze, plan]\n",
         encoding="utf-8",
     )
@@ -99,7 +99,7 @@ def test_forbidden_steps_always_return_empty_even_with_yaml(tmp_path):
 def test_yaml_override_narrows_and_widens_whitelist(tmp_path):
     """yaml `runtime_environment_injection.steps` replaces the default list."""
     # Narrow to only one step
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         "runtime_environment_injection:\n  steps: [my_custom_step]\n",
         encoding="utf-8",
     )
@@ -110,7 +110,7 @@ def test_yaml_override_narrows_and_widens_whitelist(tmp_path):
     assert HEADING in result
 
     # Widening: add a step to the existing defaults via override
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         "runtime_environment_injection:\n"
         "  steps: [analyze, plan, plan_tasks, implement, verify_spec, "
         "update_spec, self_check, discovery, summarize, my_extra_step]\n",
@@ -156,7 +156,7 @@ def test_missing_markdown_returns_empty_and_warns_once(tmp_path, caplog, monkeyp
         context_builder, "_load_runtime_environment_markdown", _broken_path_loader
     )
 
-    with caplog.at_level(logging.WARNING, logger="se3.engine.context_builder"):
+    with caplog.at_level(logging.WARNING, logger="tianluo.engine.context_builder"):
         result1 = get_runtime_environment_injection("plan", tmp_path)
         result2 = get_runtime_environment_injection("implement", tmp_path)
         result3 = get_runtime_environment_injection("self_check", tmp_path)
@@ -172,7 +172,7 @@ def test_missing_markdown_returns_empty_and_warns_once(tmp_path, caplog, monkeyp
 def test_null_yaml_falls_back_to_defaults(tmp_path):
     """``runtime_environment_injection: null`` (explicit null) must not crash;
     function falls back to default whitelist."""
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         "runtime_environment_injection: null\n",
         encoding="utf-8",
     )
@@ -183,7 +183,7 @@ def test_non_list_yaml_override_ignored(tmp_path):
     """If the user types ``steps: plan`` instead of ``steps: [plan]``, the
     string is ignored and defaults are used (so `'p' in 'plan'` substring
     semantics never leak)."""
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         "runtime_environment_injection:\n  steps: plan\n",
         encoding="utf-8",
     )
@@ -247,7 +247,7 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
     """
     from unittest.mock import MagicMock, patch
 
-    from se3.engine.models import FlowInstance, Step, StepType
+    from tianluo.engine.models import FlowInstance, Step, StepType
 
     single_group = [
         {
@@ -270,7 +270,7 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
     )
     flow = FlowInstance(
         task_description="Test runtime env injection",
-        change_path=tmp_path / "se3",
+        change_path=tmp_path / "tianluo",
     )
 
     captured_prompts: list[str] = []
@@ -282,8 +282,8 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
 
     mock_caller.call.side_effect = _capture_call
 
-    with patch("se3.engine.steps.implement.LLMCaller", return_value=mock_caller), \
-         patch("se3.engine.steps.implement.parse_json_response", return_value={
+    with patch("tianluo.engine.steps.implement.LLMCaller", return_value=mock_caller), \
+         patch("tianluo.engine.steps.implement.parse_json_response", return_value={
              "files_changed": ["a.py"],
              "tests_added": [],
              "test_mapping": {},
@@ -292,7 +292,7 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
              "incomplete_tasks": [],
              "restricted_edits": [],
          }):
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
         implement_handler(step, flow)
 
     assert captured_prompts, "implement_handler should have invoked the LLM at least once"
@@ -300,6 +300,6 @@ def test_runtime_env_appears_in_prompt_end_to_end(tmp_path, monkeypatch):
     # Heading + representative whitelist + representative blacklist commands
     # must all appear in the final prompt sent to the LLM.
     assert HEADING in prompt
-    assert "se3 history list" in prompt
-    assert "se3 issue list" in prompt
-    assert "se3 salvage" in prompt
+    assert "luo history list" in prompt
+    assert "luo issue list" in prompt
+    assert "luo salvage" in prompt

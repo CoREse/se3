@@ -22,15 +22,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.commands.run import _ensure_main_lock_for_step
-from se3.commands.merge.merge_lock import MergeLock
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.persistence import PersistenceManager
+from tianluo.commands.run import _ensure_main_lock_for_step
+from tianluo.commands.merge.merge_lock import MergeLock
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.persistence import PersistenceManager
 
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    (tmp_path / "se3" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
     return tmp_path
 
 
@@ -44,11 +44,11 @@ def _make_flow(step_type: StepType) -> tuple[FlowInstance, Step]:
 
 
 def _read_engine(project: Path) -> dict:
-    return json.loads((project / "se3" / "state" / "engine.json").read_text())
+    return json.loads((project / "tianluo" / "state" / "engine.json").read_text())
 
 
 def _jsonl_path(project: Path, flow_id: str, step_id: str) -> Path:
-    return project / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    return project / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
 
 
 # --------------------------------------------------------------------------
@@ -163,7 +163,7 @@ def test_busy_lock_surfaces_waiting_state_then_acquires(project: Path) -> None:
 
     # Wait until the worker has surfaced the waiting state on disk (before it
     # blocks on the held lock).
-    engine_path = project / "se3" / "state" / "engine.json"
+    engine_path = project / "tianluo" / "state" / "engine.json"
     deadline = time.time() + 5.0
     while time.time() < deadline:
         if engine_path.exists() and _read_engine(project).get("waiting_for_lock"):
@@ -206,7 +206,7 @@ def test_stale_lock_reclaimed_without_waiting(project: Path) -> None:
     flow, step = _make_flow(StepType.ANALYZE)
 
     # Write a stale lock file recording a PID that does not exist.
-    lock_file = project / "se3" / "state" / "merge.lock"
+    lock_file = project / "tianluo" / "state" / "merge.lock"
     dead_pid = 2 ** 22 - 1  # implausibly high, almost certainly absent
     lock_file.write_text(f"{dead_pid:016d}\n")
 
@@ -229,7 +229,7 @@ def test_stale_lock_reclaimed_without_waiting(project: Path) -> None:
 # --------------------------------------------------------------------------
 
 def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> None:
-    from se3.commands.run import run_flow
+    from tianluo.commands.run import run_flow
 
     flow = FlowInstance(
         flow_id="interrupt-wait-001",
@@ -258,12 +258,12 @@ def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> No
         persistence.save_flow(f)
         raise KeyboardInterrupt
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run.render_full"
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run.render_full"
     ), patch(
-        "se3.commands.run._ensure_main_lock_for_step", side_effect=_ensure
+        "tianluo.commands.run._ensure_main_lock_for_step", side_effect=_ensure
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm

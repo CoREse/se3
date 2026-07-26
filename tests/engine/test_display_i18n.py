@@ -1,7 +1,7 @@
-"""i18n routing for the UI-framework text in src/se3/engine/display.py.
+"""i18n routing for the UI-framework text in src/tianluo/engine/display.py.
 
 The section labels / usage-column headers / default block titles rendered by
-display.py are UI-framework text and must go through the ``se3.i18n`` catalog;
+display.py are UI-framework text and must go through the ``tianluo.i18n`` catalog;
 the LLM content threaded into those blocks (summary bodies, decision text) is
 data and must pass through verbatim. These tests assert both: the framework
 labels flip with the language, and the content stays untranslated.
@@ -14,10 +14,10 @@ from io import StringIO
 import pytest
 from rich.console import Console
 
-from se3 import i18n
-from se3.engine import display
-from se3.engine.display import render_proposal, render_usage_block, set_console
-from se3.engine.token_usage import UsageTotals
+from tianluo import i18n
+from tianluo.engine import display
+from tianluo.engine.display import render_proposal, render_usage_block, set_console
+from tianluo.engine.token_usage import UsageTotals
 
 
 @pytest.fixture(autouse=True)

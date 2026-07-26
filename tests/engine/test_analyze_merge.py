@@ -14,7 +14,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -23,8 +23,8 @@ from se3.engine.models import (
     STEP_POOL,
     get_default_step_sequence,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps import (
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps import (
     STEP_HANDLERS,
     project_summary_stub_handler,
 )
@@ -74,12 +74,12 @@ class TestBuildStepInputsAnalyzeMapping:
         })
         return flow
 
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_project_summary(self, _cfg, sm, flow_with_analyze):
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["project_summary"] == "Project: SE3 Framework, branch: main"
 
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_task_type_and_scope(self, _cfg, sm, flow_with_analyze):
         """Original ANALYZE outputs still forwarded."""
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
@@ -94,7 +94,7 @@ class TestBuildStepInputsDeprecatedBackwardCompat:
     def sm(self, tmp_path):
         return StateMachine(tmp_path)
 
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_old_project_summary_step_still_forwards(self, _cfg, sm, tmp_path):
         """Old persisted flow with PROJECT_SUMMARY step should still forward project_summary."""
         flow = _make_flow(tmp_path)
@@ -194,7 +194,7 @@ class TestStubHandlers:
     def test_step_handlers_uses_project_summary_stub(self):
         assert STEP_HANDLERS[StepType.PROJECT_SUMMARY] is project_summary_stub_handler
 
-    @patch("se3.engine.steps.project_summary_handler")
+    @patch("tianluo.engine.steps.project_summary_handler")
     def test_project_summary_stub_forwards(self, mock_handler):
         """project_summary_stub_handler should forward to project_summary_handler."""
         mock_handler.return_value = StepStatus.COMPLETED

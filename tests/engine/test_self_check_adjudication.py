@@ -23,15 +23,15 @@ import json
 import pytest
 from unittest.mock import Mock, patch
 
-from se3.engine import adjudication
-from se3.engine.models import (
+from tianluo.engine import adjudication
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.steps.self_check import self_check_handler, _pair_resolutions_with_prev
+from tianluo.engine.steps.self_check import self_check_handler, _pair_resolutions_with_prev
 
 
 _TASK = "Implement the parser feature and handle the empty-input edge case"
@@ -107,7 +107,7 @@ def _run(step, flow, issues, previous_issue_resolutions=None):
     payload = {"issues": issues, "summary": "s"}
     if previous_issue_resolutions is not None:
         payload["previous_issue_resolutions"] = previous_issue_resolutions
-    with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
         mock_caller = Mock()
         mock_caller.call.return_value = json.dumps(payload)
         mock_cls.return_value = mock_caller

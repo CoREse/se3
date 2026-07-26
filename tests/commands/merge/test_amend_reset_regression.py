@@ -6,7 +6,7 @@ These tests verify:
 - HEAD^2 assertion before amend
 - Post-condition ancestry check after repair success
 - last_hash stall detection works from iteration 1
-- max_iterations is configurable via se3.yaml
+- max_iterations is configurable via tianluo.yaml
 - Shared LLMCaller injection
 """
 
@@ -18,12 +18,12 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.guardrail_repair import (
+from tianluo.engine.merge.guardrail_repair import (
     GuardrailRepairer,
     GuardrailRepairInconsistentState,
     RepairResult,
 )
-from se3.engine.merge.guardrails import GuardrailViolation, GuardrailReport
+from tianluo.engine.merge.guardrails import GuardrailViolation, GuardrailReport
 
 
 # --------- helpers ---------
@@ -83,7 +83,7 @@ def _create_branch(path: Path, branch: str, content: str) -> str:
 def _make_violations() -> list[GuardrailViolation]:
     return [
         GuardrailViolation(
-            file_path="se3/specs/base/spec.md",
+            file_path="tianluo/specs/base/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         ),
@@ -92,7 +92,7 @@ def _make_violations() -> list[GuardrailViolation]:
 
 def _make_original_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHALL validate all user inputs.\n"
         ),
@@ -101,7 +101,7 @@ def _make_original_specs() -> dict[str, str]:
 
 def _make_merged_specs() -> dict[str, str]:
     return {
-        "se3/specs/base/spec.md": (
+        "tianluo/specs/base/spec.md": (
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
         ),
@@ -109,7 +109,7 @@ def _make_merged_specs() -> dict[str, str]:
 
 
 def _setup_spec_files(tmp_path: Path) -> None:
-    spec_dir = tmp_path / "se3" / "specs" / "base"
+    spec_dir = tmp_path / "tianluo" / "specs" / "base"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.md").write_text(
         "## Requirement: Auth\n\n"
@@ -149,7 +149,7 @@ class TestPreAmendShaRollback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -169,16 +169,16 @@ class TestPreAmendShaRollback:
                 )
                 return result
             # Fall through for everything else
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", mock_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", mock_run_git,
         )
 
         # Guardrails re-check fails
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(
                 passed=False,
                 violations=_make_violations(),
@@ -233,7 +233,7 @@ class TestPreAmendShaRollback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -245,7 +245,7 @@ class TestPreAmendShaRollback:
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
@@ -279,7 +279,7 @@ class TestPreAmendShaRollback:
 
     def test_no_HEAD_tilde1_in_rollback(self, tmp_path: Path, monkeypatch) -> None:
         """grep 'reset --soft HEAD~1' in repair code should find 0 hits in executable code."""
-        import se3.engine.merge.guardrail_repair as _grr
+        import tianluo.engine.merge.guardrail_repair as _grr
         source = Path(_grr.__file__).read_text()
         # Search for actual code usage (not docstrings/comments).
         # Lines containing backticks are docstring formatting (e.g. ``git reset --soft``).
@@ -326,18 +326,18 @@ class TestHeadIsMergeCommitAssertion:
                 return subprocess.CompletedProcess(
                     args=args, returncode=1, stdout="", stderr="fixup failed",
                 )
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair._run_git", mock_run_git,
+            "tianluo.engine.merge.guardrail_repair._run_git", mock_run_git,
         )
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -377,13 +377,13 @@ class TestRestoreMergedContent:
         def failing_write_text(self, content, encoding=None):
             raise OSError("simulated disk full")
 
-        import se3.engine.merge.guardrail_repair as _grr_mod
+        import tianluo.engine.merge.guardrail_repair as _grr_mod
         Path.write_text = failing_write_text
         try:
             with pytest.raises(OSError, match="simulated disk full"):
                 repairer._restore_merged_content(
-                    ["se3/specs/base/spec.md"],
-                    {"se3/specs/base/spec.md": "original content"},
+                    ["tianluo/specs/base/spec.md"],
+                    {"tianluo/specs/base/spec.md": "original content"},
                 )
         finally:
             Path.write_text = original_write_text
@@ -463,7 +463,7 @@ class TestAllowedPathsRefresh:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                     {
@@ -487,7 +487,7 @@ class TestAllowedPathsRefresh:
         assert result.success is False
         assert "outside spec dir" in result.error
         # The first file should have been restored
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         content = spec_path.read_text()
         assert "SHOULD" in content  # restored merged content
 
@@ -524,7 +524,7 @@ class TestPostConditionAfterRepair:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": "SHALL do X\n",
                     },
                 ],
@@ -533,7 +533,7 @@ class TestPostConditionAfterRepair:
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
@@ -590,7 +590,7 @@ class TestSharedLLMCaller:
 
     def test_llm_caller_injected(self, tmp_path: Path) -> None:
         """GuardrailRepairer accepts llm_caller in constructor."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(
             project_root=tmp_path,
@@ -611,20 +611,20 @@ class TestSharedLLMCaller:
 
 
 class TestConfigurableMaxIterations:
-    """Verify max_iterations is read from se3.yaml (Task 10 / A10)."""
+    """Verify max_iterations is read from tianluo.yaml (Task 10 / A10)."""
 
     def test_default_max_iterations(self, tmp_path: Path) -> None:
-        """Default max iterations is 2 when se3.yaml is absent."""
-        from se3.engine.merge.orchestrator import _load_max_repair_iterations
+        """Default max iterations is 2 when tianluo.yaml is absent."""
+        from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
         val = _load_max_repair_iterations(tmp_path)
         assert val == 2
 
     def test_configurable_max_iterations(self, tmp_path: Path) -> None:
-        """max_iterations can be set via se3.yaml."""
-        from se3.engine.merge.orchestrator import _load_max_repair_iterations
+        """max_iterations can be set via tianluo.yaml."""
+        from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -635,9 +635,9 @@ class TestConfigurableMaxIterations:
 
     def test_invalid_max_iterations_fallback(self, tmp_path: Path) -> None:
         """Invalid max_iterations falls back to default."""
-        from se3.engine.merge.orchestrator import _load_max_repair_iterations
+        from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -648,9 +648,9 @@ class TestConfigurableMaxIterations:
 
     def test_zero_max_iterations_fallback(self, tmp_path: Path) -> None:
         """Zero max_iterations falls back to default."""
-        from se3.engine.merge.orchestrator import _load_max_repair_iterations
+        from tianluo.engine.merge.orchestrator import _load_max_repair_iterations
 
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -663,7 +663,7 @@ class TestConfigurableMaxIterations:
         self, tmp_path: Path,
     ) -> None:
         """MergeOrchestrator stores the configured max_iterations on self."""
-        from se3.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
         # Create a minimal git repo so the orchestrator constructor
         # does not blow up reading config / project state.
@@ -673,7 +673,7 @@ class TestConfigurableMaxIterations:
             ["git", "-C", str(tmp_path), "init"],
             check=True, capture_output=True,
         )
-        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml = tmp_path / "tianluo.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  guardrail_repair:\n"
@@ -691,10 +691,10 @@ class TestStallDetection:
 
     def test_stall_detected_at_iteration_1_with_none(self, tmp_path: Path, monkeypatch) -> None:
         """last_hash=None means iter1 hash is never spuriously compared."""
-        from se3.engine.merge.guardrails import violation_set_hash
+        from tianluo.engine.merge.guardrails import violation_set_hash
 
         v = GuardrailViolation(
-            file_path="se3/specs/base/spec.md",
+            file_path="tianluo/specs/base/spec.md",
             violation_type="WEAKENING",
             message="SHALL weakened to SHOULD",
         )
@@ -720,7 +720,7 @@ class TestAsymmetricAllowFixupParent:
     def test_llm_resolved_stray_commit_trips_silent_merge_loss(
         self, tmp_path: Path, monkeypatch,
     ) -> None:
-        from se3.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
         _init_repo(tmp_path)
         # Create a feature branch
@@ -744,7 +744,7 @@ class TestAsymmetricAllowFixupParent:
 
         # Mock guardrails to pass (so no repair runs)
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post: GuardrailReport(passed=True, violations=[]),
         )
 
@@ -787,8 +787,8 @@ class TestAsymmetricAllowFixupParent:
         used_amend=True, allow_fixup_parent=False, so HEAD^1 is NOT
         checked and the post-condition correctly fires silent_merge_loss.
         """
-        from se3.engine.merge.orchestrator import MergeOrchestrator
-        from se3.engine.merge.guardrail_repair import RepairResult
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.engine.merge.guardrail_repair import RepairResult
 
         _init_repo(tmp_path)
         # Create a feature branch
@@ -812,7 +812,7 @@ class TestAsymmetricAllowFixupParent:
 
         # Mock guardrails to FAIL (triggering repair path)
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post: GuardrailReport(
                 passed=False, violations=_make_violations(),
             ),
@@ -822,12 +822,12 @@ class TestAsymmetricAllowFixupParent:
         def mock_repair(*args, **kwargs):
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
                 used_amend=True,
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -865,7 +865,7 @@ class TestTimeoutFailClosed:
     """Post-condition timeout must be treated as fail-closed, not soft warning."""
 
     def test_postcond_check_timeout_returns_failure(self, tmp_path: Path, monkeypatch) -> None:
-        from se3.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
         _init_repo(tmp_path)
         # Create a feature branch
@@ -896,7 +896,7 @@ class TestTimeoutFailClosed:
         # top, so patch the orchestrator's bound reference rather than
         # the postcondition module's symbol.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.assert_branch_merged",
+            "tianluo.engine.merge.orchestrator.assert_branch_merged",
             mock_postcond,
         )
 
@@ -960,7 +960,7 @@ class TestEmptyPostShaFallback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -974,7 +974,7 @@ class TestEmptyPostShaFallback:
         # Guardrails re-check passes after repair (so the only thing
         # gating success is the post-repair HEAD validation).
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(
                 passed=True, violations=[],
             ),
@@ -1067,7 +1067,7 @@ class TestEmptyPostShaFallback:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1078,7 +1078,7 @@ class TestEmptyPostShaFallback:
 
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(
                 passed=True, violations=[],
             ),
@@ -1157,7 +1157,7 @@ class TestRollbackRefusesMissingPreRepairSha:
             return json.dumps({
                 "files": [
                     {
-                        "path": "se3/specs/base/spec.md",
+                        "path": "tianluo/specs/base/spec.md",
                         "corrected_content": (
                             "## Requirement: Auth\n\n"
                             "The system SHALL validate all user inputs.\n"
@@ -1172,7 +1172,7 @@ class TestRollbackRefusesMissingPreRepairSha:
         # policy the commit never happens so this should not be
         # invoked — patched defensively anyway.
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(
                 passed=False,
                 violations=_make_violations(),
@@ -1182,7 +1182,7 @@ class TestRollbackRefusesMissingPreRepairSha:
         # Patch _run_git so that EVERY "rev-parse HEAD" call returns
         # failure.  Both the initial capture AND the defensive late
         # re-capture must fail to exercise the refuse-to-commit path.
-        import se3.engine.merge.guardrail_repair as _grr_mod
+        import tianluo.engine.merge.guardrail_repair as _grr_mod
         orig_run_git = _grr_mod._run_git
 
         def patched_run_git(project_root, *args, check=True, timeout=30):
@@ -1229,7 +1229,7 @@ class TestRollbackRefusesMissingPreRepairSha:
 
         # The working tree must have been restored (the refuse path
         # runs `_restore_merged_content` before returning).
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         restored = spec_path.read_text()
         assert "SHOULD" in restored, (
             "Working tree should be restored to merged (SHOULD) content"
@@ -1241,7 +1241,7 @@ class TestRollbackRefusesMissingPreRepairSha:
         """The orchestrator catches GuardrailRepairInconsistentState and
         pins the INCONSISTENT_REPAIR_STATE failure reason, hard-stopping
         the merge sequence."""
-        from se3.engine.merge.orchestrator import (
+        from tianluo.engine.merge.orchestrator import (
             MergeOrchestrator,
             FailureReason,
         )
@@ -1270,7 +1270,7 @@ class TestRollbackRefusesMissingPreRepairSha:
 
         # Mock guardrails to report violations (triggering repair path)
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(
                 passed=False, violations=_make_violations(),
             ),
@@ -1284,7 +1284,7 @@ class TestRollbackRefusesMissingPreRepairSha:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1323,8 +1323,8 @@ class TestEndToEndAmendResetRegression:
         contract than the unit tests, because it depends on every step
         of ``execute`` correctly preserving the merge commit.
         """
-        from se3.engine.merge.orchestrator import MergeOrchestrator
-        from se3.commands.merge.postcondition import assert_branch_merged
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.commands.merge.postcondition import assert_branch_merged
 
         _init_repo(tmp_path)
         # Create feature branch with new content
@@ -1348,7 +1348,7 @@ class TestEndToEndAmendResetRegression:
 
         # No guardrail violations — straight merge.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
@@ -1376,8 +1376,8 @@ class TestEndToEndAmendResetRegression:
         without scraping strings from ``merged_branches`` /
         ``failed_branch``.
         """
-        from se3.engine.merge.orchestrator import MergeOrchestrator
-        from se3.commands.merge.result_model import MergeOutcome
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.commands.merge.result_model import MergeOutcome
 
         _init_repo(tmp_path)
         subprocess.run(
@@ -1399,7 +1399,7 @@ class TestEndToEndAmendResetRegression:
         )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
@@ -1422,9 +1422,9 @@ class TestEndToEndAmendResetRegression:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """G1[2]: failure paths still produce a typed MergeOutcome."""
-        from se3.engine.merge.orchestrator import MergeOrchestrator
-        from se3.commands.merge.failure_reason import FailureReason
-        from se3.commands.merge.result_model import MergeOutcome
+        from tianluo.engine.merge.orchestrator import MergeOrchestrator
+        from tianluo.commands.merge.failure_reason import FailureReason
+        from tianluo.commands.merge.result_model import MergeOutcome
 
         _init_repo(tmp_path)
         # Mock _merge_single_branch to simulate a failure outcome without

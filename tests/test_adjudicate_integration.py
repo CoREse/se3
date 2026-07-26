@@ -34,9 +34,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from se3.config import WorkflowConfig
-from se3.engine import adjudication
-from se3.engine.models import (
+from tianluo.config import WorkflowConfig
+from tianluo.engine import adjudication
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -44,9 +44,9 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps.adjudicate import adjudicate_handler
-from se3.engine.steps.self_check import self_check_handler
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps.adjudicate import adjudicate_handler
+from tianluo.engine.steps.self_check import self_check_handler
 
 
 # --------------------------------------------------------------------------- #
@@ -90,7 +90,7 @@ def _cfg(**overrides):
 
 
 def _make_sm(tmp_path, cfg):
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     sm._get_workflow_config = lambda: cfg  # type: ignore[assignment]
     sm._get_self_check_passes_required = lambda: 1  # type: ignore[assignment]
@@ -161,7 +161,7 @@ def _run_self_check(step, flow, issues, resolutions=None):
     payload = {"issues": issues, "summary": "review"}
     if resolutions is not None:
         payload["previous_issue_resolutions"] = resolutions
-    with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
         caller = Mock()
         caller.call.return_value = json.dumps(payload)
         mock_cls.return_value = caller
@@ -173,7 +173,7 @@ def _run_self_check(step, flow, issues, resolutions=None):
 
 
 def _run_adjudicate(step, flow, ruling):
-    with patch("se3.engine.steps.adjudicate.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.adjudicate.LLMCaller") as mock_cls:
         caller = Mock()
         caller.call.return_value = json.dumps(ruling)
         mock_cls.return_value = caller
@@ -244,7 +244,7 @@ class TestConfirmationGate:
         # Not registered under confirmation.steps → auto-pass. Even a description
         # rewrite inserts NO CONFIRM and reflows straight to SELF_CHECK.
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             sc3 = sm.transition_to_next(flow)
         assert sc3.step_type == StepType.SELF_CHECK
@@ -321,7 +321,7 @@ class TestContradictionConverges:
         #     TestConfirmationGate.) ---
         human = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human
         ):
             confirm = sm.transition_to_next(flow)
         assert confirm.step_type == StepType.CONFIRM
@@ -407,7 +407,7 @@ class TestContradictionConverges:
 
         human = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human
         ):
             confirm = sm.transition_to_next(flow)
         confirm.status = StepStatus.COMPLETED
@@ -481,7 +481,7 @@ class TestContradictionConverges:
 
         human = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human
         ):
             confirm = sm.transition_to_next(flow)
         assert confirm.step_type == StepType.CONFIRM
@@ -506,7 +506,7 @@ class TestContradictionConverges:
         # --- Re-rule, then APPROVE → now the effects land. ---
         _run_adjudicate(revised, flow, _RULING)
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human
         ):
             confirm2 = sm.transition_to_next(flow)
         assert confirm2.step_type == StepType.CONFIRM
@@ -724,9 +724,9 @@ CACHE_CLAUSE = (
     "every read of the active engine.json must observe the freshest content on disk"
 )
 # The two homomorphic surfaces (the files whose code embodies each cold artifact).
-SURFACE_STEP_FILES = "src/se3/engine/persistence.py"
-SURFACE_CONTEXT_JSON = "src/se3/engine/context_store.py"
-SURFACE_ENGINE_JSON = "src/se3/engine/engine_state.py"
+SURFACE_STEP_FILES = "src/tianluo/engine/persistence.py"
+SURFACE_CONTEXT_JSON = "src/tianluo/engine/context_store.py"
+SURFACE_ENGINE_JSON = "src/tianluo/engine/engine_state.py"
 
 # The swept ruling: ONE boundary clause whose exception is scoped to "every cold
 # artifact", i.e. to both surfaces at once. The old B2/B3 wording is gone, so no
@@ -955,7 +955,7 @@ class TestHomomorphicSurfaceSweep:
 
         # --- The ruling auto-passes (no confirmation entry) and reflows. ---
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             sc3 = sm.transition_to_next(flow)
         assert sc3.step_type == StepType.SELF_CHECK
@@ -1021,7 +1021,7 @@ class TestHomomorphicSurfaceSweep:
         assert len(adj1.outputs["covered_surfaces"]) == 1
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             sc3 = sm.transition_to_next(flow)
         assert sc3.step_type == StepType.SELF_CHECK
@@ -1099,7 +1099,7 @@ class TestHomomorphicSurfaceSweep:
         assert len(adj2.outputs["covered_surfaces"]) == 1
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             sc5 = sm.transition_to_next(flow)
         assert sc5.step_type == StepType.SELF_CHECK
@@ -1117,7 +1117,7 @@ class TestHomomorphicSurfaceSweep:
         adj1 = TestHomomorphicSurfaceSweep()._oscillate_cold_surface(sm, flow)
         _run_adjudicate(adj1, flow, _UNSWEPT_RULING)
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             sc3 = sm.transition_to_next(flow)
 

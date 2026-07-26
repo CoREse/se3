@@ -21,9 +21,9 @@ from __future__ import annotations
 
 import asyncio
 
-from se3.daemon import protocol
-from se3.server.state import ServerState
-from se3.server.ws import _handle_message
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState
+from tianluo.server.ws import _handle_message
 
 
 class RecordingHub:
@@ -87,7 +87,7 @@ async def _paused_worktree_flow(state, flow_id="f1"):
     await _register_flow(
         state,
         status="paused",
-        project_root="/repo/se3/worktrees/wt-a",
+        project_root="/repo/tianluo/worktrees/wt-a",
         flow_id=flow_id,
     )
 

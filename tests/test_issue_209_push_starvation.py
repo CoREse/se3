@@ -31,13 +31,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import se3.daemon.disk_json_cache as disk_cache
-import se3.daemon.history as history_mod
-from se3.daemon.history import DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as disk_cache
+import tianluo.daemon.history as history_mod
+from tianluo.daemon.history import DaemonHistoryReader
 
 
 def _write_engine(root: Path, flow_id: str, status: str, *, blob_steps: int = 0) -> None:
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {"flow_id": flow_id, "status": status}
     if blob_steps:
@@ -102,9 +102,9 @@ def test_active_engine_json_parsed_once_per_change_across_readers(tmp_path, monk
     """
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING", blob_steps=1200)
-    _write_jsonl(root / "se3" / "history" / "f1" / "02_analyze_bbbb.jsonl", 5)
+    _write_jsonl(root / "tianluo" / "history" / "f1" / "02_analyze_bbbb.jsonl", 5)
 
-    engine_path = root / "se3" / "state" / "engine.json"
+    engine_path = root / "tianluo" / "state" / "engine.json"
     counter = _count_engine_parses(monkeypatch, engine_path)
 
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
@@ -135,7 +135,7 @@ def test_active_engine_json_reparsed_after_change(tmp_path, monkeypatch):
     """
     root = tmp_path / "proj"
     _write_engine(root, "f1", "RUNNING", blob_steps=10)
-    engine_path = root / "se3" / "state" / "engine.json"
+    engine_path = root / "tianluo" / "state" / "engine.json"
     counter = _count_engine_parses(monkeypatch, engine_path)
 
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
@@ -164,7 +164,7 @@ def test_discovery_to_analyze_transition_surfaces_via_read_active_flows(tmp_path
     root = tmp_path / "proj"
     flow_id = "20260101-000000_flow"
     _write_engine(root, flow_id, "RUNNING", blob_steps=20)
-    hist = root / "se3" / "history" / flow_id
+    hist = root / "tianluo" / "history" / flow_id
     _write_jsonl(hist / "01_discovery_aaaa.jsonl", 3)
 
     reader = DaemonHistoryReader(project_roots_provider=lambda: [root])
@@ -205,7 +205,7 @@ def test_retry_after_error_append_surfaces_via_read_active_flows(tmp_path):
     root = tmp_path / "proj"
     flow_id = "20260101-000000_flow"
     _write_engine(root, flow_id, "RUNNING", blob_steps=20)
-    hist = root / "se3" / "history" / flow_id
+    hist = root / "tianluo" / "history" / flow_id
     step = hist / "03_update_spec_cccc.jsonl"
     _write_jsonl(step, 2)
 

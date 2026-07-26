@@ -1,4 +1,4 @@
-"""Tests for the dual-layer preset prompt registry (src/se3/preset_loader.py).
+"""Tests for the dual-layer preset prompt registry (src/tianluo/preset_loader.py).
 
 Covers:
 - Built-in presets are read at runtime from package data (no init copy).
@@ -17,8 +17,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3 import preset_loader
-from se3.preset_loader import (
+from tianluo import preset_loader
+from tianluo.preset_loader import (
     LAYER_BUILTIN,
     LAYER_PROJECT,
     PresetError,
@@ -35,15 +35,15 @@ def project_root(tmp_path):
 
 
 def _write_project_preset(root: Path, name: str, content: str, *, with_yaml: bool = True):
-    prompts_dir = root / "se3" / "prompts"
+    prompts_dir = root / "tianluo" / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
     (prompts_dir / f"{name}.md").write_text(content, encoding="utf-8")
     if with_yaml:
-        (root / "se3.yaml").write_text(
+        (root / "tianluo.yaml").write_text(
             "presets:\n"
             f"  {name}:\n"
             "    type: feature\n"
-            f"    prompt_file: se3/prompts/{name}.md\n",
+            f"    prompt_file: tianluo/prompts/{name}.md\n",
             encoding="utf-8",
         )
 
@@ -65,7 +65,7 @@ class TestBuiltinLayer:
         assert text.strip()  # non-empty prompt body
         assert "README" in text
         # Nothing was copied into the project tree.
-        assert not (project_root / "se3" / "prompts").exists()
+        assert not (project_root / "tianluo" / "prompts").exists()
 
 
 class TestProjectOverride:
@@ -79,7 +79,7 @@ class TestProjectOverride:
         assert ptype == "feature"
 
     def test_project_preset_without_yaml_uses_default_type(self, project_root):
-        # A bare se3/prompts/*.md file with no se3.yaml metadata still
+        # A bare tianluo/prompts/*.md file with no tianluo.yaml metadata still
         # registers, using the default type.
         _write_project_preset(
             project_root, "doc-sync", "bare project prompt", with_yaml=False
@@ -90,10 +90,10 @@ class TestProjectOverride:
         assert ptype == preset_loader.DEFAULT_PRESET_TYPE
 
     def test_yaml_type_override(self, project_root):
-        prompts_dir = project_root / "se3" / "prompts"
+        prompts_dir = project_root / "tianluo" / "prompts"
         prompts_dir.mkdir(parents=True)
         (prompts_dir / "thing.md").write_text("thing body", encoding="utf-8")
-        (project_root / "se3.yaml").write_text(
+        (project_root / "tianluo.yaml").write_text(
             "presets:\n  thing:\n    type: bugfix\n", encoding="utf-8"
         )
         ptype, _text, layer = resolve("thing", project_root)
@@ -111,12 +111,12 @@ class TestErrors:
         assert "doc-sync" in msg
 
     def test_missing_prompt_file_raises(self, project_root):
-        # Declared in se3.yaml but the file does not exist.
-        (project_root / "se3.yaml").write_text(
+        # Declared in tianluo.yaml but the file does not exist.
+        (project_root / "tianluo.yaml").write_text(
             "presets:\n"
             "  ghost:\n"
             "    type: feature\n"
-            "    prompt_file: se3/prompts/ghost.md\n",
+            "    prompt_file: tianluo/prompts/ghost.md\n",
             encoding="utf-8",
         )
         with pytest.raises(PresetError) as exc:

@@ -12,13 +12,13 @@ region.
 
 from __future__ import annotations
 
-from se3.engine.chat_history import get_step_history, record_prompt
-from se3.engine.prompt_markers import (
+from tianluo.engine.chat_history import get_step_history, record_prompt
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
 )
-from se3.engine.steps.discovery import (
+from tianluo.engine.steps.discovery import (
     CONTINUE_DISCOVERY_PROMPT,
     INITIAL_DISCOVERY_PROMPT,
 )
@@ -29,7 +29,7 @@ from se3.engine.steps.discovery import (
 # plus an embedded session reference), so we know unusual characters do not
 # break the marker boundary.
 _FIXED_INITIAL_DESCRIPTION = (
-    "你看一下这个session：se3/history/20260520-142159_30166ecb。"
+    "你看一下这个session：tianluo/history/20260520-142159_30166ecb。"
     "youtube下载问题依旧，你是不是没有进行e2e测试？"
 )
 _FIXED_USER_RESPONSE = (

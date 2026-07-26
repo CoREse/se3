@@ -7,7 +7,7 @@ path (``merge_cmd._fast_stash_pop``) and the DAG implement leaf-back merge
 ``resolve_stashpop_safely`` recovery. They reproduce the original defect
 (a concurrent untracked file in the main repo gets swept into the pre-merge
 stash and lost on an untracked-collision pop) and assert the new invariant:
-the file's full content survives in ``se3/worktrees/.archive`` and the audit
+the file's full content survives in ``tianluo/worktrees/.archive`` and the audit
 issue points at it with archive path + blob sha.
 """
 
@@ -19,9 +19,9 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.commands.merge_cmd import _fast_stash_pop, run_merge
-from se3.engine.stash_utils import ARCHIVE_DIR, ArchivedEntry, StashPopOutcome
-from se3.engine.steps.implement import _merge_leaf_branch
+from tianluo.commands.merge_cmd import _fast_stash_pop, run_merge
+from tianluo.engine.stash_utils import ARCHIVE_DIR, ArchivedEntry, StashPopOutcome
+from tianluo.engine.steps.implement import _merge_leaf_branch
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -35,10 +35,10 @@ def _init_repo(path: Path) -> str:
     subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
     _git(path, "config", "user.email", "test@test.com")
     _git(path, "config", "user.name", "Test")
-    # Only the archive sink is ignored; the concurrent se3/issues artefacts
+    # Only the archive sink is ignored; the concurrent tianluo/issues artefacts
     # the repro hinges on must remain *untracked* (not ignored) so
     # ``--include-untracked`` actually sweeps them into the stash.
-    (path / ".gitignore").write_text("se3/worktrees/\n", encoding="utf-8")
+    (path / ".gitignore").write_text("tianluo/worktrees/\n", encoding="utf-8")
     _git(path, "add", ".gitignore")
     _git(path, "commit", "-m", "init")
     return _git(path, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
@@ -60,7 +60,7 @@ def _archived_files(repo: Path) -> dict[str, str]:
 
 
 def _open_issue_texts(repo: Path) -> list[str]:
-    issues_dir = repo / "se3" / "issues" / "open"
+    issues_dir = repo / "tianluo" / "issues" / "open"
     if not issues_dir.exists():
         return []
     return [p.read_text(encoding="utf-8") for p in issues_dir.glob("*.yaml")]
@@ -86,7 +86,7 @@ def test_fast_merge_path_archives_concurrent_untracked(tmp_path: Path) -> None:
     (tmp_path / "data" / "shared.txt").write_text(
         "CONCURRENT main untracked\n", encoding="utf-8"
     )
-    issues_open = tmp_path / "se3" / "issues" / "open"
+    issues_open = tmp_path / "tianluo" / "issues" / "open"
     issues_open.mkdir(parents=True)
     (issues_open / "229_concurrent.yaml").write_text(
         "title: concurrent issue 229\n", encoding="utf-8"
@@ -106,7 +106,7 @@ def test_fast_merge_path_archives_concurrent_untracked(tmp_path: Path) -> None:
     archived = _archived_files(tmp_path)
     assert archived.get("data/shared.txt") == "CONCURRENT main untracked\n"
     assert (
-        archived.get("se3/issues/open/229_concurrent.yaml")
+        archived.get("tianluo/issues/open/229_concurrent.yaml")
         == "title: concurrent issue 229\n"
     )
 
@@ -130,7 +130,7 @@ def test_fast_stash_pop_unit_archives_and_audits(tmp_path: Path) -> None:
     # path (not ``.next_id``, which IssueManager itself rewrites when it files
     # the audit issue) so the merged-tree assertion stays meaningful.
     (data / "payload.txt").write_text("STASHED payload\n", encoding="utf-8")
-    issues_open = tmp_path / "se3" / "issues" / "open"
+    issues_open = tmp_path / "tianluo" / "issues" / "open"
     issues_open.mkdir(parents=True)
     (issues_open / "230_x.yaml").write_text("stashed 230\n", encoding="utf-8")
 
@@ -148,7 +148,7 @@ def test_fast_stash_pop_unit_archives_and_audits(tmp_path: Path) -> None:
     assert (data / "payload.txt").read_text() == "MERGED payload\n"
     archived = _archived_files(tmp_path)
     assert archived.get("data/payload.txt") == "STASHED payload\n"
-    assert archived.get("se3/issues/open/230_x.yaml") == "stashed 230\n"
+    assert archived.get("tianluo/issues/open/230_x.yaml") == "stashed 230\n"
     assert any("recovered safely" in m for m in audit), audit
 
 
@@ -167,7 +167,7 @@ def test_leaf_merge_path_archives_concurrent_untracked(tmp_path: Path) -> None:
     # Concurrent uncommitted main-repo state: a colliding file + an unrelated
     # new issue file.
     (tmp_path / "app.py").write_text("CONCURRENT untracked\n", encoding="utf-8")
-    issues_open = tmp_path / "se3" / "issues" / "open"
+    issues_open = tmp_path / "tianluo" / "issues" / "open"
     issues_open.mkdir(parents=True)
     (issues_open / "231_concurrent.yaml").write_text(
         "title: concurrent issue 231\n", encoding="utf-8"
@@ -187,7 +187,7 @@ def test_leaf_merge_path_archives_concurrent_untracked(tmp_path: Path) -> None:
     archived = _archived_files(tmp_path)
     assert archived.get("app.py") == "CONCURRENT untracked\n"
     assert (
-        archived.get("se3/issues/open/231_concurrent.yaml")
+        archived.get("tianluo/issues/open/231_concurrent.yaml")
         == "title: concurrent issue 231\n"
     )
 
@@ -248,7 +248,7 @@ def test_fast_stash_pop_signals_incomplete_when_unresolved(tmp_path: Path) -> No
     # ``_fast_stash_pop`` imports ``resolve_stashpop_safely`` locally from
     # stash_utils, so the source module is the patch target.
     with patch(
-        "se3.engine.stash_utils.resolve_stashpop_safely",
+        "tianluo.engine.stash_utils.resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         incomplete = _fast_stash_pop(tmp_path, label, audit)
@@ -284,7 +284,7 @@ def test_run_merge_fast_reports_failure_on_incomplete_stashpop(
     (tmp_path / "app.py").write_text("CONCURRENT\n", encoding="utf-8")
 
     with patch(
-        "se3.engine.stash_utils.resolve_stashpop_safely",
+        "tianluo.engine.stash_utils.resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         exit_code = run_merge(
@@ -316,7 +316,7 @@ def test_leaf_merge_reports_failure_on_incomplete_stashpop(
     (tmp_path / "app.py").write_text("CONCURRENT\n", encoding="utf-8")
 
     with patch(
-        "se3.engine.steps.implement._resolve_stashpop_safely",
+        "tianluo.engine.steps.implement._resolve_stashpop_safely",
         return_value=_incomplete_outcome(),
     ):
         result = _merge_leaf_branch(

@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     get_step_history,
     record_group_status,
     record_prompt,
@@ -21,14 +21,14 @@ from se3.engine.chat_history import (
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """Create a temporary project directory with se3/history structure."""
-    (tmp_path / "se3" / "history").mkdir(parents=True)
+    """Create a temporary project directory with tianluo/history structure."""
+    (tmp_path / "tianluo" / "history").mkdir(parents=True)
     return tmp_path
 
 
 def _read_lines(project_root: Path, flow_id: str, step_id: str):
     path = (
-        project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+        project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
     )
     return [
         json.loads(line)
@@ -150,7 +150,7 @@ class TestRecordGroupStatus:
     def test_write_failure_does_not_raise(self, tmp_project, monkeypatch):
         # Force the open() inside record_group_status to raise OSError; the
         # function must swallow it (logger.warning) rather than propagate.
-        import se3.engine.chat_history as ch
+        import tianluo.engine.chat_history as ch
 
         def boom(*args, **kwargs):
             raise OSError("disk full")

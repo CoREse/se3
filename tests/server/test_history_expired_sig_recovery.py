@@ -50,7 +50,7 @@ from __future__ import annotations
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 
 def _make_records(n):
@@ -109,7 +109,7 @@ def _push_full(client, sock, flow_id, records, prev_generation):
 
 def _add_owner(app, username, *, is_admin=False):
     """Seed a second local owner so cross-owner scoping can be exercised."""
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     store = app.state.store
     owner_id = store.create_owner(username, is_admin=is_admin)

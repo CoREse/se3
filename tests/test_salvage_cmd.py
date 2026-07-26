@@ -12,7 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from se3.commands.salvage_cmd import (
+from tianluo.commands.salvage_cmd import (
     salvage,
     _load_session,
     _assess_git_diff,
@@ -20,7 +20,7 @@ from se3.commands.salvage_cmd import (
     _create_salvage_issues,
     _archive_session,
 )
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -33,9 +33,9 @@ from se3.engine.models import (
 def project_root(tmp_path):
     """Create a minimal project directory."""
     (tmp_path / ".git").mkdir()
-    (tmp_path / "se3" / "state").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "open").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "closed").mkdir(parents=True)
     return tmp_path
 
 
@@ -61,7 +61,7 @@ def valid_flow():
 
 def _write_flow_state(project_root: Path, flow: FlowInstance) -> None:
     """Write flow state to engine.json."""
-    state_file = project_root / "se3" / "state" / "engine.json"
+    state_file = project_root / "tianluo" / "state" / "engine.json"
     data = flow.to_dict()
     state_file.write_text(json.dumps(data, default=str), encoding="utf-8")
 
@@ -79,7 +79,7 @@ class TestLoadSession:
         assert len(warnings) == 0
 
     def test_load_corrupted_session(self, project_root):
-        state_file = project_root / "se3" / "state" / "engine.json"
+        state_file = project_root / "tianluo" / "state" / "engine.json"
         state_file.write_text('{"flow_id": "test", "task_description": "task", "status": "running", "state": {', encoding="utf-8")
 
         flow, warnings = _load_session(project_root)
@@ -97,7 +97,7 @@ class TestLoadSession:
 class TestAssessGitDiff:
     """Tests for git diff assessment."""
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_assess_with_changes(self, mock_run):
         mock_run.side_effect = [
             MagicMock(stdout=" M src/auth.py\n M src/models.py\n", returncode=0),
@@ -110,7 +110,7 @@ class TestAssessGitDiff:
         assert info["changed_file_count"] == 2
         assert len(info["changed_files"]) == 2
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_assess_no_changes(self, mock_run):
         mock_run.side_effect = [
             MagicMock(stdout="", returncode=0),
@@ -130,7 +130,7 @@ class TestCommitChanges:
         result = _commit_changes(Path("/fake"), None, {"changed_file_count": 0})
         assert result is None
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_commit_with_changes(self, mock_run, valid_flow):
         mock_run.side_effect = [
             MagicMock(returncode=0),  # git add
@@ -146,7 +146,7 @@ class TestCommitChanges:
 
         assert result == "abc1234"
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_commit_message_contains_task(self, mock_run, valid_flow):
         mock_run.side_effect = [
             MagicMock(returncode=0),
@@ -218,8 +218,8 @@ class TestArchiveSession:
         result = _archive_session(project_root)
 
         assert result is True
-        assert not (project_root / "se3" / "state" / "engine.json").exists()
-        archive_dir = project_root / "se3" / "state" / "archive"
+        assert not (project_root / "tianluo" / "state" / "engine.json").exists()
+        archive_dir = project_root / "tianluo" / "state" / "archive"
         assert archive_dir.exists()
         assert len(list(archive_dir.glob("*.json"))) == 1
 
@@ -230,14 +230,14 @@ class TestArchiveSession:
     def test_clears_resumable_snapshot(self, project_root, valid_flow):
         """A salvaged/archived flow must not leave a resumable snapshot behind.
 
-        The per-flow se3/state/resumable/<flow_id>.json written while the flow
+        The per-flow tianluo/state/resumable/<flow_id>.json written while the flow
         ran would otherwise be advertised as resumable by the daemon
         STATUS_UPDATE channel (whose dedup seeds only from active engine.json
         flow_ids) while hidden in the history index (which dedups against the
         archived entry), and a Resume click would re-run the already
         dispositioned flow.
         """
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.persistence import PersistenceManager
 
         _write_flow_state(project_root, valid_flow)
         pm = PersistenceManager(project_root)
@@ -253,7 +253,7 @@ class TestArchiveSession:
 class TestSalvageFullPipeline:
     """Tests for the full salvage pipeline."""
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_valid_session(self, mock_run, project_root, valid_flow):
         _write_flow_state(project_root, valid_flow)
 
@@ -268,7 +268,7 @@ class TestSalvageFullPipeline:
 
         assert exit_code == 0
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_no_session(self, mock_run, project_root):
         # Mock git commands for no changes
         mock_run.side_effect = [
@@ -283,18 +283,18 @@ class TestSalvageFullPipeline:
 
     def test_each_step_independent(self, project_root):
         """Each step should be independently fault-tolerant."""
-        with patch("se3.commands.salvage_cmd._load_session", side_effect=Exception("boom")):
-            with patch("se3.commands.salvage_cmd._assess_git_diff", return_value={"changed_file_count": 0}):
-                with patch("se3.commands.salvage_cmd._create_salvage_issues", return_value=[]):
-                    with patch("se3.commands.salvage_cmd._archive_session", return_value=False):
+        with patch("tianluo.commands.salvage_cmd._load_session", side_effect=Exception("boom")):
+            with patch("tianluo.commands.salvage_cmd._assess_git_diff", return_value={"changed_file_count": 0}):
+                with patch("tianluo.commands.salvage_cmd._create_salvage_issues", return_value=[]):
+                    with patch("tianluo.commands.salvage_cmd._archive_session", return_value=False):
                         exit_code = salvage(project_root)
                         # Only step 1 fails, rest succeed
                         assert exit_code == 1  # has failure
 
-    @patch("se3.commands.salvage_cmd.subprocess.run")
+    @patch("tianluo.commands.salvage_cmd.subprocess.run")
     def test_salvage_with_corrupted_session(self, mock_run, project_root):
         """Corrupted session should still allow git-diff-based salvage."""
-        state_file = project_root / "se3" / "state" / "engine.json"
+        state_file = project_root / "tianluo" / "state" / "engine.json"
         state_file.write_text("{corrupted json data", encoding="utf-8")
 
         mock_run.side_effect = [

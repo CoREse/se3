@@ -4,7 +4,7 @@ Covers:
 - DocsConfig.from_dict / load defaults (no documentation: section)
 - to_updater_config emits only non-None keys
 - documentation: section keys are forwarded to DocumentationUpdater
-- worktree-aware lookup is reused (se3.local.yaml shadows se3.yaml)
+- worktree-aware lookup is reused (tianluo.local.yaml shadows tianluo.yaml)
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from pathlib import Path
 
 import yaml
 
-from se3.config import DocsConfig, load_docs_config
-from se3.engine.docs_updater import DocumentationUpdater
+from tianluo.config import DocsConfig, load_docs_config
+from tianluo.engine.docs_updater import DocumentationUpdater
 
 
 def _write_yaml(path: Path, data: dict) -> None:
@@ -73,13 +73,13 @@ class TestLoadDocsConfig:
         assert cfg.to_updater_config() == {}
 
     def test_yaml_without_documentation_section(self, tmp_path):
-        _write_yaml(tmp_path / "se3.yaml", {"version": {"enabled": True}})
+        _write_yaml(tmp_path / "tianluo.yaml", {"version": {"enabled": True}})
         cfg = load_docs_config(tmp_path)
         assert cfg.to_updater_config() == {}
 
     def test_yaml_with_documentation_section(self, tmp_path):
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {
                 "documentation": {
                     "readme_badge_template": "version {{version}}",
@@ -95,13 +95,13 @@ class TestLoadDocsConfig:
 
     def test_local_yaml_shadows_yaml(self, tmp_path):
         # Reuse the existing worktree-aware / local-override lookup: a
-        # plain (non-worktree) project root prefers se3.local.yaml.
+        # plain (non-worktree) project root prefers tianluo.local.yaml.
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {"documentation": {"readme_badge_template": "from-yaml"}},
         )
         _write_yaml(
-            tmp_path / "se3.local.yaml",
+            tmp_path / "tianluo.local.yaml",
             {"documentation": {"readme_badge_template": "from-local"}},
         )
         cfg = load_docs_config(tmp_path)
@@ -112,7 +112,7 @@ class TestConfigForwardsToUpdater:
     def test_documentation_keys_take_effect_in_updater(self, tmp_path):
         """documentation: keys, via to_updater_config, drive the updater."""
         _write_yaml(
-            tmp_path / "se3.yaml",
+            tmp_path / "tianluo.yaml",
             {
                 "documentation": {
                     "versions_entry_template": "CUSTOM {{version}} :: {{changes}}",

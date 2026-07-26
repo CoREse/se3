@@ -2,15 +2,15 @@
 
 Covers:
 
-* :func:`se3.engine.prompt_markers.extract_user_content` — the Python-side
+* :func:`tianluo.engine.prompt_markers.extract_user_content` — the Python-side
   equivalent of the web console's ``splitUserPromptByMarker``, cutting the
   user's literal input out of a step-prompt body by the ``USER_CONTENT``
   markers.
 * The CLI title extractor
-  :meth:`se3.engine.persistence.PersistenceManager.extract_history_summary`
+  :meth:`tianluo.engine.persistence.PersistenceManager.extract_history_summary`
   (100-char clip contract).
 * The daemon title extractor
-  :func:`se3.daemon.history._extract_history_summary` (untruncated contract).
+  :func:`tianluo.daemon.history._extract_history_summary` (untruncated contract).
 
 Both extractors share the same three-tier priority — USER_CONTENT markers →
 ``Task description:`` regex → raw-content fallback — and this module asserts
@@ -24,14 +24,14 @@ import json
 
 import pytest
 
-from se3.engine.prompt_markers import (
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
     extract_user_content,
 )
-from se3.engine.persistence import PersistenceManager
-from se3.daemon.history import _extract_history_summary
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.daemon.history import _extract_history_summary
 
 
 # ---------------------------------------------------------------------------

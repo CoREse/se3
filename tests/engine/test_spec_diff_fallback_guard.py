@@ -3,7 +3,7 @@
 The second hard layer of the spec-write protection lives in
 ``StateMachine.run_step``: for every step NOT in the shared exemption set
 ``context_builder.SPEC_WRITE_ALLOWED_STEPS`` (``update_spec`` + all sync steps),
-the state machine snapshots ``se3/specs/**`` content hashes before the handler
+the state machine snapshots ``tianluo/specs/**`` content hashes before the handler
 runs and diffs them afterwards. A change — most notably one a ``Bash`` redirect
 slipped past the PreToolUse hook — fails the step. The guard only asks "did this
 step touch a spec file at all"; it is wholly orthogonal to verify_spec's
@@ -16,27 +16,27 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
-from se3.engine.models import (
+from tianluo.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 def _make_project(tmp_path: Path, se3_yaml: str | None = None) -> Path:
     """Lay down a minimal se3 project with one base spec."""
-    specs_dir = tmp_path / "se3" / "specs" / "base"
+    specs_dir = tmp_path / "tianluo" / "specs" / "base"
     specs_dir.mkdir(parents=True, exist_ok=True)
     (specs_dir / "spec.md").write_text(
         "<!-- spec-format: v1 -->\n\n# Base\n\n## Purpose\n\nTest.\n",
         encoding="utf-8",
     )
     if se3_yaml is not None:
-        (tmp_path / "se3.yaml").write_text(se3_yaml, encoding="utf-8")
+        (tmp_path / "tianluo.yaml").write_text(se3_yaml, encoding="utf-8")
     return tmp_path
 
 
@@ -55,7 +55,7 @@ def _spec_writing_handler(text: str):
     def handler(step: Step, flow: FlowInstance):
         # Direct filesystem write simulates a `Bash` redirect / sed / tee that
         # the PreToolUse tool-matcher hook (Write|Edit|NotebookEdit) never sees.
-        spec = Path(flow.state.context.get("project_root", "")) / "se3" / "specs" / "base" / "spec.md"
+        spec = Path(flow.state.context.get("project_root", "")) / "tianluo" / "specs" / "base" / "spec.md"
         if not spec.parent.exists():
             spec = step.inputs["__spec_path__"]
         spec.write_text(text, encoding="utf-8")
@@ -75,7 +75,7 @@ def _run(sm: StateMachine, flow: FlowInstance, step_type: StepType, handler) -> 
     sm._snapshot_specs_before_update = lambda f: None  # type: ignore[assignment]
     sm.register_handler(step_type, handler)
     step = Step(step_type=step_type)
-    spec_path = sm.project_root / "se3" / "specs" / "base" / "spec.md"
+    spec_path = sm.project_root / "tianluo" / "specs" / "base" / "spec.md"
     step.inputs["__spec_path__"] = spec_path
     flow.state.context["project_root"] = str(sm.project_root)
     sm.run_step(flow, step)
@@ -122,7 +122,7 @@ class TestRunStepDiffGuard:
         step = _run(sm, flow, StepType.IMPLEMENT, _spec_writing_handler("CHANGED"))
 
         assert step.status == StepStatus.FAILED
-        assert "se3/specs/base/spec.md" in step.error_message
+        assert "tianluo/specs/base/spec.md" in step.error_message
         assert "update_spec" in step.error_message
 
     def test_update_spec_write_not_flagged(self, tmp_path):
@@ -172,7 +172,7 @@ class TestRunStepDiffGuard:
         flow = _make_flow(tmp_path)
 
         def failing_handler(step: Step, flow: FlowInstance):
-            spec = sm.project_root / "se3" / "specs" / "base" / "spec.md"
+            spec = sm.project_root / "tianluo" / "specs" / "base" / "spec.md"
             spec.write_text("CHANGED", encoding="utf-8")
             raise RuntimeError("handler boom")
 

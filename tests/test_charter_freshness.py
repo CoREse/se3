@@ -1,4 +1,4 @@
-"""Tests for the charter_freshness step (src/se3/engine/steps/charter_freshness.py).
+"""Tests for the charter_freshness step (src/tianluo/engine/steps/charter_freshness.py).
 
 CHARTER_FRESHNESS is a flow-end advisory (never blocking) that reuses the
 version_analyze "LLM reads the change -> recommends" shape. Coverage:
@@ -8,7 +8,7 @@ version_analyze "LLM reads the change -> recommends" shape. Coverage:
 - Diff that DOES touch a charter class -> COMPLETED (non-blocking) with an
   update prompt + suggested_update.
 - An LLM failure degrades to a soft no-op (still COMPLETED, never blocks).
-- The admission-check trigger fires only when the diff edited se3/charter.md.
+- The admission-check trigger fires only when the diff edited tianluo/charter.md.
 """
 
 from __future__ import annotations
@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.steps import charter_freshness
-from se3.engine.steps import summarize
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine import charter
+from tianluo.engine.steps import charter_freshness
+from tianluo.engine.steps import summarize
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine import charter
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def _gate(admitted: bool, *, violations=None, weakened=None):
 
 
 def _write_charter(project_root: Path, text: str) -> None:
-    se3_dir = project_root / "se3"
+    se3_dir = project_root / "tianluo"
     se3_dir.mkdir(parents=True, exist_ok=True)
     (se3_dir / "charter.md").write_text(text, encoding="utf-8")
 
@@ -141,7 +141,7 @@ def test_touched_charter_surfaces_update_prompt(tmp_path, monkeypatch):
     })
     state = _install_fake_caller(monkeypatch, [resp])
     flow = _make_flow(tmp_path)
-    step = _make_step({"changes_made": {"files_changed": ["src/se3/engine/code_index.py"]}})
+    step = _make_step({"changes_made": {"files_changed": ["src/tianluo/engine/code_index.py"]}})
 
     result = charter_freshness.charter_freshness_handler(step, flow)
 
@@ -200,7 +200,7 @@ def test_admission_check_not_run_when_charter_untouched(tmp_path, monkeypatch):
 
 
 def test_admission_check_runs_and_warns_when_charter_oversized(tmp_path, monkeypatch):
-    """When the diff edits se3/charter.md and the charter is over its monitoring
+    """When the diff edits tianluo/charter.md and the charter is over its monitoring
     threshold, the altitude-gate warning is surfaced (still non-blocking)."""
     # Write an oversized charter (> the 32 KiB default) so check_admission flags
     # over_threshold.
@@ -211,7 +211,7 @@ def test_admission_check_runs_and_warns_when_charter_oversized(tmp_path, monkeyp
                        "reason": "charter edited", "suggested_update": "..."})
     _install_fake_caller(monkeypatch, [resp])
     flow = _make_flow(tmp_path)
-    step = _make_step({"changes_made": {"files_changed": ["se3/charter.md", "src/foo.py"]}})
+    step = _make_step({"changes_made": {"files_changed": ["tianluo/charter.md", "src/foo.py"]}})
 
     result = charter_freshness.charter_freshness_handler(step, flow)
 
@@ -227,7 +227,7 @@ def test_admission_check_runs_no_warn_when_charter_small(tmp_path, monkeypatch):
                        "reason": "charter edited", "suggested_update": "..."})
     _install_fake_caller(monkeypatch, [resp])
     flow = _make_flow(tmp_path)
-    step = _make_step({"changes_made": {"files_changed": ["se3/charter.md"]}})
+    step = _make_step({"changes_made": {"files_changed": ["tianluo/charter.md"]}})
 
     charter_freshness.charter_freshness_handler(step, flow)
 
@@ -377,7 +377,7 @@ def test_precondition_missing_stays_advisory_and_never_writes(tmp_path, monkeypa
     assert step.outputs["degraded_reason"] == "invariant_check_not_completed"
     assert step.outputs["suggested_update"] == "do it"
     # Disk unchanged.
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
 
 
 def test_gate_pass_writes_charter_atomically_with_diff(tmp_path, monkeypatch):
@@ -400,7 +400,7 @@ def test_gate_pass_writes_charter_atomically_with_diff(tmp_path, monkeypatch):
     # LLM sub-calls stayed read-only.
     assert state["init_kwargs"].get("force_read_only") is True
     # Disk actually updated.
-    on_disk = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+    on_disk = (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8")
     assert "beta subsystem" in on_disk
     assert "alpha subsystem" not in on_disk
 
@@ -424,7 +424,7 @@ def test_gate_reject_twice_degrades_without_writing(tmp_path, monkeypatch):
     assert "degraded_reason" in step.outputs
     assert step.outputs["gate_verdicts"]["llm_admitted"] is False
     # Prefer-stale-over-degraded: disk is byte-for-byte unchanged.
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
 
 
 def test_gate_malformed_response_fails_closed_without_writing(tmp_path, monkeypatch):
@@ -456,7 +456,7 @@ def test_gate_malformed_response_fails_closed_without_writing(tmp_path, monkeypa
     assert "degraded_reason" in step.outputs
     assert step.outputs["gate_verdicts"].get("llm_malformed")
     # Prefer-stale-over-degraded: disk is byte-for-byte unchanged.
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
 
 
 def test_gate_reject_then_retry_succeeds(tmp_path, monkeypatch):
@@ -479,7 +479,7 @@ def test_gate_reject_then_retry_succeeds(tmp_path, monkeypatch):
     assert step.outputs["charter_auto_updated"] is True
     # Second-round propose prompt carried the rejection feedback.
     assert "REJECTED" in state["prompts"][2]
-    assert "beta subsystem" in (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+    assert "beta subsystem" in (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8")
 
 
 def test_mechanical_reject_then_retry_succeeds_without_extra_gate_call(tmp_path, monkeypatch):
@@ -517,7 +517,7 @@ def test_size_red_light_is_gating_and_blocks_write(tmp_path, monkeypatch):
     ])
     flow = _with_completed_invariant_check(_make_flow(tmp_path))
     step = _make_step({"changes_made": {"files_changed": ["src/foo.py"]}})
-    before = (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8")
+    before = (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8")
 
     result = charter_freshness.charter_freshness_handler(step, flow)
 
@@ -526,7 +526,7 @@ def test_size_red_light_is_gating_and_blocks_write(tmp_path, monkeypatch):
     assert step.outputs["gate_verdicts"]["size_over_threshold"] is True
     # No LLM gate call was made (size gate short-circuits before it).
     assert state["calls"] == 2  # two propose calls only
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == before
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == before
 
 
 def test_resume_reentry_is_idempotent(tmp_path, monkeypatch):
@@ -543,7 +543,7 @@ def test_resume_reentry_is_idempotent(tmp_path, monkeypatch):
     assert result is StepStatus.COMPLETED
     assert state["calls"] == 1  # propose only; fresh -> no gate
     assert step.outputs["charter_auto_updated"] is False
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == updated
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == updated
 
 
 def test_propose_prompt_uses_on_disk_charter_not_frozen_anchor(tmp_path, monkeypatch):
@@ -585,7 +585,7 @@ def test_closed_loop_llm_failure_is_non_blocking(tmp_path, monkeypatch):
     assert result is StepStatus.COMPLETED
     assert step.outputs["charter_auto_updated"] is False
     assert step.outputs["skipped_reason"] == "llm_error"
-    assert (tmp_path / "se3" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
+    assert (tmp_path / "tianluo" / "charter.md").read_text(encoding="utf-8") == _DISK_CHARTER
 
 
 # ---------------------------------------------------------------------------
@@ -623,7 +623,7 @@ def test_summarize_aggregates_charter_auto_update(tmp_path):
         "charter_update_needed": True,
         "charter_auto_updated": True,
         "touched_classes": ["conventions"],
-        "charter_diff": "--- se3/charter.md (old)\n+++ se3/charter.md (new)\n-old\n+new",
+        "charter_diff": "--- tianluo/charter.md (old)\n+++ tianluo/charter.md (new)\n-old\n+new",
     })
 
     section = summarize._format_knowledge_guards(flow)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     _is_spec_path,
     _looks_binary,
@@ -79,14 +79,14 @@ def _setup_basic_conflict(
 
 class TestPureHelpers:
     def test_is_spec_path_matches_spec_md(self) -> None:
-        assert _is_spec_path("se3/specs/auth/spec.md") is True
-        assert _is_spec_path("se3/specs/nested/deep/spec.md") is True
+        assert _is_spec_path("tianluo/specs/auth/spec.md") is True
+        assert _is_spec_path("tianluo/specs/nested/deep/spec.md") is True
 
     def test_is_spec_path_rejects_non_spec(self) -> None:
-        assert _is_spec_path("se3/specs/auth/notes.md") is False
+        assert _is_spec_path("tianluo/specs/auth/notes.md") is False
         assert _is_spec_path("src/foo.py") is False
-        assert _is_spec_path("se3/state/foo.json") is False
-        assert _is_spec_path("se3/specs/spec.md") is False  # missing dir
+        assert _is_spec_path("tianluo/state/foo.json") is False
+        assert _is_spec_path("tianluo/specs/spec.md") is False  # missing dir
 
     def test_looks_binary_detects_null_bytes(self) -> None:
         assert _looks_binary(b"hello\x00world") is True
@@ -196,7 +196,7 @@ class TestBuildSingleFileSingleHunk:
 
 class TestBuildSpecFile:
     def test_spec_md_path_marked_is_spec(self, tmp_path: Path) -> None:
-        spec_path = "se3/specs/example/spec.md"
+        spec_path = "tianluo/specs/example/spec.md"
         ours_branch, theirs_branch = _setup_basic_conflict(
             tmp_path,
             rel_path=spec_path,

@@ -2,7 +2,7 @@
 
 These lock the daemon-side half of the presence contract:
 
-* :class:`~se3.daemon.client.DaemonClient` consumes both presence channels —
+* :class:`~tianluo.daemon.client.DaemonClient` consumes both presence channels —
   the ``MSG_VIEWERS`` 0↔non-0 edge frames and the ``viewers`` level riding on
   every ``MSG_PING`` heartbeat — into one belief (:attr:`viewer_count`), and a
   0→non-0 edge immediately wakes the push loop with a forced full
@@ -27,12 +27,12 @@ import json
 from types import SimpleNamespace
 from typing import Any, Dict, List
 
-from se3.daemon import client as client_module
-from se3.daemon import daemon as daemon_module
-from se3.daemon import protocol
-from se3.daemon.aggregator import MachineStatus
-from se3.daemon.client import DaemonClient
-from se3.daemon.daemon import Daemon, DaemonConfig
+from tianluo.daemon import client as client_module
+from tianluo.daemon import daemon as daemon_module
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import MachineStatus
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.daemon import Daemon, DaemonConfig
 
 
 # --------------------------------------------------------------------------

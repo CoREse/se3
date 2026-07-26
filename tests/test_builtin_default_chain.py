@@ -10,7 +10,7 @@ against PATH and uses every one it finds, in declared order. Covers:
 - The probe filter applies to level 4 ONLY: an explicitly configured
   ``llm_caller.defaults`` is never filtered, even when nothing is on PATH.
 
-Every case mocks ``se3.config.shutil.which``, so results never depend on
+Every case mocks ``tianluo.config.shutil.which``, so results never depend on
 whether the host running the suite happens to have claude or codex
 installed.
 """
@@ -19,8 +19,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.config as _cfg
-from se3.config import _builtin_default_chain, load_agents, load_claude_commands
+import tianluo.config as _cfg
+from tianluo.config import _builtin_default_chain, load_agents, load_claude_commands
 
 
 @pytest.fixture(autouse=True)
@@ -38,11 +38,11 @@ def _which_only(*available: str):
     def fake_which(cmd, *args, **kwargs):
         return f"/fake/bin/{cmd}" if cmd in available else None
 
-    return patch("se3.config.shutil.which", side_effect=fake_which)
+    return patch("tianluo.config.shutil.which", side_effect=fake_which)
 
 
 def _no_global(tmp_path):
-    return patch("se3.config.Path.home", return_value=tmp_path)
+    return patch("tianluo.config.Path.home", return_value=tmp_path)
 
 
 class TestBuiltinDefaultChain:
@@ -93,7 +93,7 @@ class TestBuiltinDefaultChain:
 class TestProbeAppliesToBuiltinBranchOnly:
     def test_no_config_falls_through_to_probed_builtin(self, tmp_path):
         """No defaults and no legacy claude_commands -> level 4, probe applies."""
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("codex"):
             agents = load_agents(tmp_path)
@@ -111,7 +111,7 @@ class TestProbeAppliesToBuiltinBranchOnly:
         raising) would let se3 quietly run a different agent than the one
         the user asked for, the worst possible failure mode.
         """
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   mine: {cmd: some-cmd}
 llm_caller:
   defaults: [mine]
@@ -133,7 +133,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
     """
 
     def test_builtin_codex_only_yields_no_claude_command(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("codex"):
             assert load_claude_commands(tmp_path) == []
@@ -141,7 +141,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
             assert [a["name"] for a in load_agents(tmp_path)] == ["codex"]
 
     def test_builtin_both_available_yields_claude_only(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("agents: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("agents: {}\n")
 
         with _no_global(tmp_path), _which_only("claude", "codex"):
             commands = load_claude_commands(tmp_path)
@@ -150,7 +150,7 @@ class TestLegacyClaudeCommandsNeverGetANonClaudeAgent:
 
     def test_explicit_codex_default_still_passes_through(self, tmp_path):
         """Level 1-3 are verbatim: a named agent must not be swallowed."""
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   my-codex: {type: codex, cmd: codex}
 llm_caller:
   defaults: [my-codex]

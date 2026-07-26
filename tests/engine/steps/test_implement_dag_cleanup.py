@@ -15,15 +15,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.dag_scheduler import GroupResult, RelayPlan
-from se3.engine.models import Step, StepStatus, StepType
-from se3.engine.steps.implement import (
+from tianluo.engine.dag_scheduler import GroupResult, RelayPlan
+from tianluo.engine.models import Step, StepStatus, StepType
+from tianluo.engine.steps.implement import (
     _is_branch_reachable_from,
     _run_dag_parallel,
 )
 
 
-_IMP = "se3.engine.steps.implement"
+_IMP = "tianluo.engine.steps.implement"
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:

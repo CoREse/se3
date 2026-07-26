@@ -1,7 +1,7 @@
 """Tests for the worktree→main normalization seam and registry cleanup.
 
 Bug2: an ``se3 run --worktree`` flow body lives under
-``<main>/se3/worktrees/<name>/`` — a transient isolation sandbox, never a
+``<main>/tianluo/worktrees/<name>/`` — a transient isolation sandbox, never a
 standalone project. Two failure modes are covered here:
 
 * a worktree path leaking into the *displayed* project-root set (the WebUI
@@ -22,8 +22,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.daemon import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.daemon import (
     Daemon,
     DaemonConfig,
     _append_project_root,
@@ -37,13 +37,13 @@ from se3.daemon.daemon import (
 
 def _make_project(root: Path) -> Path:
     """Create a minimal se3 project root and return it."""
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     return root
 
 
 def _make_worktree(main: Path, name: str = "wt-1") -> Path:
-    """Create a worktree isolation copy under ``<main>/se3/worktrees/<name>``."""
-    wt = main / "se3" / "worktrees" / name
+    """Create a worktree isolation copy under ``<main>/tianluo/worktrees/<name>``."""
+    wt = main / "tianluo" / "worktrees" / name
     _make_project(wt)
     return wt
 
@@ -144,7 +144,7 @@ def test_sanitize_removes_worktree_entry(tmp_path: Path) -> None:
 
     # Pre-pollute the registry with a worktree-copy entry plus the main root,
     # bypassing the (now-normalizing) _append_project_root.
-    from se3.daemon.daemon import _atomic_write_json
+    from tianluo.daemon.daemon import _atomic_write_json
 
     _atomic_write_json(
         path,
@@ -201,7 +201,7 @@ def test_daemon_init_sanitizes_on_startup(tmp_path: Path) -> None:
     pid_dir.mkdir(parents=True, exist_ok=True)
     registry = pid_dir / "project_roots.json"
 
-    from se3.daemon.daemon import _atomic_write_json
+    from tianluo.daemon.daemon import _atomic_write_json
 
     _atomic_write_json(
         registry,
@@ -226,7 +226,7 @@ def test_worktree_observable_but_not_registered(tmp_path: Path) -> None:
     main = _make_project(tmp_path / "main")
     wt = _make_worktree(main)
     # An is_worktree_mode engine.json makes the worktree observable.
-    (wt / "se3" / "state" / "engine.json").write_text(
+    (wt / "tianluo" / "state" / "engine.json").write_text(
         json.dumps({"flow_id": "flow-wt", "is_worktree_mode": True}),
         encoding="utf-8",
     )

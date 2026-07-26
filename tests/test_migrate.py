@@ -8,7 +8,7 @@ Covers:
   - charter.md written exactly once (no overwrite window);
   - cross-file why -> charter, code-bound why -> colocated comments;
   - code-index first build produces md + json;
-  - se3/specs deleted ONLY after charter + colocate confirmed;
+  - tianluo/specs deleted ONLY after charter + colocate confirmed;
   - .gitignore rewrite (idempotent whitelists);
   - per-step independent fault tolerance.
 """
@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands import migrate_cmd
-from se3.commands.migrate_cmd import (
+from tianluo.commands import migrate_cmd
+from tianluo.commands.migrate_cmd import (
     ColocatedWhy,
     Migrator,
     SalvageResult,
@@ -71,27 +71,27 @@ def _make_salvager(charter_body: str, colocations=None):
 def project(tmp_path: Path) -> Path:
     """A git project with a base spec, two non-base specs, and one source file."""
     root = tmp_path / "proj"
-    (root / "se3" / "specs" / "base").mkdir(parents=True)
-    (root / "se3" / "specs" / "flow-engine").mkdir(parents=True)
-    (root / "se3" / "specs" / "_changelog").mkdir(parents=True)
+    (root / "tianluo" / "specs" / "base").mkdir(parents=True)
+    (root / "tianluo" / "specs" / "flow-engine").mkdir(parents=True)
+    (root / "tianluo" / "specs" / "_changelog").mkdir(parents=True)
     (root / "src").mkdir(parents=True)
 
-    (root / "se3" / "specs" / "base" / "spec.md").write_text(
+    (root / "tianluo" / "specs" / "base" / "spec.md").write_text(
         "<!-- spec-format: v1 -->\n# MyProj — Base Specification\n\n## Purpose\nx\n",
         encoding="utf-8",
     )
-    (root / "se3" / "specs" / "flow-engine" / "spec.md").write_text(
+    (root / "tianluo" / "specs" / "flow-engine" / "spec.md").write_text(
         "<!-- spec-format: v1 -->\n# flow-engine Specification\n\n## Purpose\ny\n",
         encoding="utf-8",
     )
-    (root / "se3" / "specs" / "_changelog" / "spec.md").write_text(
+    (root / "tianluo" / "specs" / "_changelog" / "spec.md").write_text(
         "internal changelog — must be skipped\n", encoding="utf-8"
     )
     (root / "src" / "mod.py").write_text(
         '"""Module."""\n\n\ndef f():\n    return 1\n', encoding="utf-8"
     )
     (root / ".gitignore").write_text(
-        "__pycache__/\n\n/se3/*\n!/se3/specs/\n", encoding="utf-8"
+        "__pycache__/\n\n/tianluo/*\n!/tianluo/specs/\n", encoding="utf-8"
     )
 
     _init_git_project(root)
@@ -133,7 +133,7 @@ def test_list_migrators_sorted():
 # ---------------------------------------------------------------------------
 
 def test_cli_registers_migrate():
-    from se3 import cli
+    from tianluo import cli
 
     # add_typer registers a (typer_instance, name) entry.
     names = {getattr(g, "name", None) for g in cli.app.registered_groups}
@@ -143,7 +143,7 @@ def test_cli_registers_migrate():
 def test_migrate_list_command_runs():
     from typer.testing import CliRunner
 
-    from se3 import cli
+    from tianluo import cli
 
     result = CliRunner().invoke(cli.app, ["migrate", "list"])
     assert result.exit_code == 0
@@ -153,7 +153,7 @@ def test_migrate_list_command_runs():
 def test_migrate_run_unknown_id_errors():
     from typer.testing import CliRunner
 
-    from se3 import cli
+    from tianluo import cli
 
     result = CliRunner().invoke(cli.app, ["migrate", "run", "no-such-migrator"])
     assert result.exit_code == 1
@@ -174,7 +174,7 @@ def test_full_migration_happy_path(project: Path):
     assert report.ok, [(r.name, r.status, r.detail) for r in report.results]
 
     # charter written
-    charter = project / "se3" / "charter.md"
+    charter = project / "tianluo" / "charter.md"
     assert charter.exists()
     assert "high-altitude only" in charter.read_text(encoding="utf-8")
 
@@ -188,17 +188,17 @@ def test_full_migration_happy_path(project: Path):
     ast.parse(src)
 
     # code-index built (single authoritative md; no json sidecar)
-    assert (project / "se3" / "code-index.md").exists()
-    assert not (project / "se3" / "cache" / "code-index.json").exists()
+    assert (project / "tianluo" / "code-index.md").exists()
+    assert not (project / "tianluo" / "cache" / "code-index.json").exists()
 
     # specs deleted after salvage confirmed
-    assert not (project / "se3" / "specs").exists()
+    assert not (project / "tianluo" / "specs").exists()
 
     # gitignore rewritten
     gi = (project / ".gitignore").read_text(encoding="utf-8")
-    assert "!/se3/code-index.md" in gi
-    assert "!/se3/charter.md" in gi
-    assert "!/se3/specs/" not in gi
+    assert "!/tianluo/code-index.md" in gi
+    assert "!/tianluo/charter.md" in gi
+    assert "!/tianluo/specs/" not in gi
 
 
 def test_charter_written_exactly_once(project: Path, monkeypatch):
@@ -208,7 +208,7 @@ def test_charter_written_exactly_once(project: Path, monkeypatch):
     real_write = Path.write_text
 
     def _counting_write(self, data, *a, **k):
-        if self == (project / "se3" / "charter.md"):
+        if self == (project / "tianluo" / "charter.md"):
             writes["count"] += 1
         return real_write(self, data, *a, **k)
 
@@ -233,10 +233,10 @@ def test_specs_kept_when_charter_fails(project: Path):
         project, salvager=_boom, summarizer=FakeSummarizer()
     )
     # charter step failed; specs must survive
-    assert (project / "se3" / "specs").exists()
+    assert (project / "tianluo" / "specs").exists()
     statuses = {r.name: r.status for r in report.results}
     assert statuses["Assemble charter"] == "FAIL"
-    assert statuses["Delete se3/specs"] == "SKIP"
+    assert statuses["Delete tianluo/specs"] == "SKIP"
     # but the report is overall not-ok (a FAIL happened)
     assert not report.ok
 
@@ -249,9 +249,9 @@ def test_no_delete_specs_flag_keeps_specs(project: Path):
         delete_specs=False,
     )
     assert report.ok
-    assert (project / "se3" / "specs").exists()
+    assert (project / "tianluo" / "specs").exists()
     statuses = {r.name: r.status for r in report.results}
-    assert statuses["Delete se3/specs"] == "SKIP"
+    assert statuses["Delete tianluo/specs"] == "SKIP"
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +276,8 @@ def test_missing_colocation_target_is_skipped(project: Path):
     assert any("does_not_exist" in n for n in report.notes)
     # A skipped colocation means that code-bound intent never landed in source,
     # so the spec corpus must be KEPT (salvage incomplete), not deleted.
-    assert (project / "se3" / "specs").exists()
-    assert statuses["Delete se3/specs"] == "SKIP"
+    assert (project / "tianluo" / "specs").exists()
+    assert statuses["Delete tianluo/specs"] == "SKIP"
 
 
 def test_all_colocations_skipped_keeps_specs(project: Path):
@@ -294,8 +294,8 @@ def test_all_colocations_skipped_keeps_specs(project: Path):
         project, salvager=salvager, summarizer=FakeSummarizer()
     )
     statuses = {r.name: r.status for r in report.results}
-    assert statuses["Delete se3/specs"] == "SKIP"
-    assert (project / "se3" / "specs").exists()
+    assert statuses["Delete tianluo/specs"] == "SKIP"
+    assert (project / "tianluo" / "specs").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -304,8 +304,8 @@ def test_all_colocations_skipped_keeps_specs(project: Path):
 
 def test_gitignore_rewrite_idempotent(project: Path):
     first = migrate_cmd._rewrite_gitignore(project)
-    assert any("!/se3/code-index.md" in c for c in first)
-    assert any("removed !/se3/specs/" in c for c in first)
+    assert any("!/tianluo/code-index.md" in c for c in first)
+    assert any("removed !/tianluo/specs/" in c for c in first)
     # second run is a no-op
     second = migrate_cmd._rewrite_gitignore(project)
     assert second == []
@@ -314,10 +314,10 @@ def test_gitignore_rewrite_idempotent(project: Path):
 def test_gitignore_whitelists_after_se3_anchor(project: Path):
     migrate_cmd._rewrite_gitignore(project)
     lines = (project / ".gitignore").read_text(encoding="utf-8").splitlines()
-    anchor = lines.index("/se3/*")
-    # whitelists immediately follow the /se3/* anchor so the negations apply
-    assert lines[anchor + 1] in migrate_cmd._GITIGNORE_WHITELISTS
-    assert "!/se3/specs/" not in lines
+    anchor = lines.index("/tianluo/*")
+    # whitelists immediately follow the /tianluo/* anchor so the negations apply
+    assert lines[anchor + 1] in migrate_cmd._gitignore_whitelists("tianluo")
+    assert "!/tianluo/specs/" not in lines
 
 
 # ---------------------------------------------------------------------------
@@ -343,16 +343,16 @@ def legacy_project(tmp_path: Path) -> Path:
     root = tmp_path / "legacy"
     (root / "src").mkdir(parents=True)
     (root / "docs").mkdir(parents=True)
-    (root / "se3").mkdir(parents=True)
+    (root / "tianluo").mkdir(parents=True)
 
     (root / "README.md").write_text("# legacy\n", encoding="utf-8")
     (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
     (root / "src" / "mod.py").write_text("x = 1\n", encoding="utf-8")
     (root / "docs" / "guide.md").write_text("doc\n", encoding="utf-8")
-    (root / "se3" / "charter.md").write_text("# charter\n", encoding="utf-8")
-    # Flat legacy gitignore: a global pattern plus the /se3/* anchor, no `/*`.
+    (root / "tianluo" / "charter.md").write_text("# charter\n", encoding="utf-8")
+    # Flat legacy gitignore: a global pattern plus the /tianluo/* anchor, no `/*`.
     (root / ".gitignore").write_text(
-        "__pycache__/\n\n/se3/*\n!/se3/charter.md\n", encoding="utf-8"
+        "__pycache__/\n\n/tianluo/*\n!/tianluo/charter.md\n", encoding="utf-8"
     )
 
     _init_git_project(root)
@@ -364,7 +364,7 @@ def legacy_project(tmp_path: Path) -> Path:
 def test_root_deny_protects_tracked_toplevel(legacy_project: Path):
     """Introducing `/*` must whitelist every tracked top-level path so none of
     them is silently dropped from tracking."""
-    tracked_top = {".gitignore", "README.md", "pyproject.toml", "src", "docs", "se3"}
+    tracked_top = {".gitignore", "README.md", "pyproject.toml", "src", "docs", "tianluo"}
 
     changes = migrate_cmd._rewrite_gitignore(legacy_project)
     assert any("root /* default-deny" in c for c in changes)
@@ -374,7 +374,7 @@ def test_root_deny_protects_tracked_toplevel(legacy_project: Path):
     # files get `!/<name>`, dirs get `!/<name>/`
     for name in ("README.md", "pyproject.toml", ".gitignore"):
         assert f"!/{name}" in gi.splitlines()
-    for name in ("src", "docs", "se3"):
+    for name in ("src", "docs", "tianluo"):
         assert f"!/{name}/" in gi.splitlines()
 
     # git's own verdict: no tracked top-level path is ignored after the rewrite.
@@ -402,7 +402,7 @@ def test_root_deny_skipped_when_ls_files_unavailable(tmp_path: Path):
     — degrading without ever risking a silent drop — and nothing may raise."""
     root = tmp_path / "nogit"
     root.mkdir()
-    (root / ".gitignore").write_text("/se3/*\n!/se3/charter.md\n", encoding="utf-8")
+    (root / ".gitignore").write_text("/tianluo/*\n!/tianluo/charter.md\n", encoding="utf-8")
 
     assert migrate_cmd._tracked_toplevel_whitelists(root) is None
 
@@ -432,7 +432,7 @@ def test_root_deny_skipped_when_ls_files_raises(legacy_project: Path, monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_load_spec_corpus_splits_and_skips(project: Path):
-    base, non_base = migrate_cmd._load_spec_corpus(project / "se3" / "specs")
+    base, non_base = migrate_cmd._load_spec_corpus(project / "tianluo" / "specs")
     assert "Base Specification" in base
     assert set(non_base) == {"flow-engine"}  # _changelog skipped
 

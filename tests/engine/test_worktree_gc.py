@@ -17,8 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge import worktree_gc
-from se3.engine.merge.worktree_gc import (
+from tianluo.engine.merge import worktree_gc
+from tianluo.engine.merge.worktree_gc import (
     WorktreeGCReport,
     find_stale_worktree_runs,
     gc_worktree_runs,
@@ -67,7 +67,7 @@ def _make_worktree_run(
     age_seconds: float = 0.0,
     engine_json_text: str | None = None,
 ) -> Path:
-    """Create a real git worktree under ``se3/worktrees/<name>`` with a run state.
+    """Create a real git worktree under ``tianluo/worktrees/<name>`` with a run state.
 
     Returns the worktree directory path. ``merged`` merges the branch back into
     ``base`` so it becomes an ancestor of HEAD; ``age_seconds`` backdates the
@@ -80,14 +80,14 @@ def _make_worktree_run(
     _git(project_root, "commit", "-m", f"work on {branch}")
     _git(project_root, "checkout", base)
 
-    wt_path = project_root / "se3" / "worktrees" / name
+    wt_path = project_root / "tianluo" / "worktrees" / name
     wt_path.parent.mkdir(parents=True, exist_ok=True)
     _git(project_root, "worktree", "add", str(wt_path), branch)
 
     if merged:
         _git(project_root, "merge", "--no-edit", branch)
 
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine_json = state_dir / "engine.json"
     if engine_json_text is not None:
@@ -167,7 +167,7 @@ class TestFindStaleWorktreeRuns:
 
     def test_archive_dir_not_scanned(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
-        archive = tmp_path / "se3" / "worktrees" / ".archive" / "x" / "se3" / "state"
+        archive = tmp_path / "tianluo" / "worktrees" / ".archive" / "x" / "tianluo" / "state"
         archive.mkdir(parents=True)
         (archive / "engine.json").write_text(
             json.dumps({"status": "completed", "is_worktree_mode": True,
@@ -217,15 +217,15 @@ class TestGcMergedBranch:
         # Branch deleted, worktree removed.
         assert not _branch_exists(tmp_path, "feat-merged")
         assert not wt.exists()
-        # Archive landed under se3/worktrees/.archive/worktree_<name>-<epoch>
+        # Archive landed under tianluo/worktrees/.archive/worktree_<name>-<epoch>
         # (named from the RUN name, not the branch slug).
         _name, archive_path, _bytes = report.archived[0]
         assert archive_path is not None
-        assert archive_path.parent == tmp_path / "se3" / "worktrees" / ".archive"
+        assert archive_path.parent == tmp_path / "tianluo" / "worktrees" / ".archive"
         assert re.fullmatch(r"worktree_merged-\d+", archive_path.name)
         assert archive_path.is_dir()
         # Terminal state promoted into the main archive.
-        assert (tmp_path / "se3" / "state" / "archive"
+        assert (tmp_path / "tianluo" / "state" / "archive"
                 / "engine_flow-merged.json").exists()
 
     def test_deletes_merged_branch_when_head_on_unrelated_branch(
@@ -290,7 +290,7 @@ class TestGcUnresolvableBase:
     """
 
     def _rewrite_original_branch(self, wt: Path, value) -> None:
-        engine_json = wt / "se3" / "state" / "engine.json"
+        engine_json = wt / "tianluo" / "state" / "engine.json"
         header = json.loads(engine_json.read_text())
         if value is None:
             header.pop("worktree_original_branch", None)
@@ -363,7 +363,7 @@ class TestGcDryRun:
         # ...but the disk is untouched: worktree, branch, and no archive dir.
         assert wt.exists()
         assert _branch_exists(tmp_path, "feat-dry")
-        assert not (tmp_path / "se3" / "worktrees" / ".archive").exists()
+        assert not (tmp_path / "tianluo" / "worktrees" / ".archive").exists()
         # Dry-run archive path is None (nothing written).
         assert report.archived[0][1] is None
 

@@ -23,8 +23,8 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.agent_runner import AgentRunner, InfraErrorType
-from se3.codex_runner import (
+from tianluo.agent_runner import AgentRunner, InfraErrorType
+from tianluo.codex_runner import (
     CodexEventConverter,
     CodexRunner,
     MonitoredResult,
@@ -790,7 +790,7 @@ class TestCodexRunWithMonitor:
     """Test monitored execution (via mocks)."""
 
     def test_returns_monitored_result(self):
-        from se3.codex_runner import _SingleRunResult
+        from tianluo.codex_runner import _SingleRunResult
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         def fake_monitor(self_runner, *, full_cmd, **kw):
             return _SingleRunResult(returncode=0, output="", success=True, should_retry=False)
@@ -801,7 +801,7 @@ class TestCodexRunWithMonitor:
         assert result.cmd_used == "codex"
 
     def test_output_has_command_prefix(self):
-        from se3.codex_runner import _SingleRunResult
+        from tianluo.codex_runner import _SingleRunResult
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         def fake_monitor(self_runner, *, full_cmd, **kw):
             return _SingleRunResult(returncode=0, output="converted", success=True, should_retry=False)
@@ -810,7 +810,7 @@ class TestCodexRunWithMonitor:
         assert result.output.startswith("=== Command: codex ===")
 
     def test_interrupted_flag_propagated(self):
-        from se3.codex_runner import _SingleRunResult
+        from tianluo.codex_runner import _SingleRunResult
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         def fake_monitor(self_runner, *, full_cmd, **kw):
             return _SingleRunResult(returncode=-2, output="partial", success=False, should_retry=False, interrupted=True)
@@ -854,7 +854,7 @@ class TestLLMCallerCodexRegistration:
     """Test that type: codex is correctly dispatched in _create_runner."""
 
     def test_codex_type_creates_codex_runner(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         with patch.object(LLMCaller, "__init__", lambda self, *a, **kw: None):
             caller = LLMCaller.__new__(LLMCaller)
             caller.project_root = None
@@ -863,8 +863,8 @@ class TestLLMCallerCodexRegistration:
         assert runner.command["cmd"] == "codex"
 
     def test_claude_code_type_still_works(self):
-        from se3.claude_runner import ClaudeCodeRunner
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.claude_runner import ClaudeCodeRunner
+        from tianluo.engine.llm_caller import LLMCaller
         with patch.object(LLMCaller, "__init__", lambda self, *a, **kw: None):
             caller = LLMCaller.__new__(LLMCaller)
             caller.project_root = None
@@ -872,7 +872,7 @@ class TestLLMCallerCodexRegistration:
         assert isinstance(runner, ClaudeCodeRunner)
 
     def test_unknown_type_raises_value_error(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         with patch.object(LLMCaller, "__init__", lambda self, *a, **kw: None):
             caller = LLMCaller.__new__(LLMCaller)
             caller.project_root = None
@@ -880,7 +880,7 @@ class TestLLMCallerCodexRegistration:
                 caller._create_runner({"type": "unknown", "cmd": "foo"})
 
     def test_codex_runner_preserves_priority(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         with patch.object(LLMCaller, "__init__", lambda self, *a, **kw: None):
             caller = LLMCaller.__new__(LLMCaller)
             caller.project_root = None
@@ -1029,7 +1029,7 @@ class TestConverterNDJSONConsumerIntegration:
 
     def test_text_extraction_from_full_session(self):
         """_extract_text_from_ndjson should extract all assistant text chunks."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         ndjson_output = _run_full_codex_session(self.FULL_SESSION_EVENTS)
         text = LLMCaller._extract_text_from_ndjson(ndjson_output)
         assert text is not None
@@ -1038,7 +1038,7 @@ class TestConverterNDJSONConsumerIntegration:
 
     def test_usage_parsing_from_full_session(self):
         """parse_usage_from_ndjson should capture usage from turn.completed."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         ndjson_output = _run_full_codex_session(self.FULL_SESSION_EVENTS)
         usage = parse_usage_from_ndjson(ndjson_output)
         assert usage["input_tokens"] == 1500
@@ -1094,8 +1094,8 @@ class TestConverterNDJSONConsumerIntegration:
                 "data": {"usage": {"input_tokens": 10, "output_tokens": 5}},
             }),
         ]
-        from se3.engine.llm_caller import LLMCaller
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.llm_caller import LLMCaller
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         ndjson_output = _run_full_codex_session(events)
         # Text extraction should not crash (no assistant text in this case)
         text = LLMCaller._extract_text_from_ndjson(ndjson_output)
@@ -1123,8 +1123,8 @@ class TestConverterNDJSONConsumerIntegration:
                 "data": {"usage": {}},
             }),
         ]
-        from se3.engine.llm_caller import LLMCaller
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.llm_caller import LLMCaller
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         ndjson_output = _run_full_codex_session(events)
         text = LLMCaller._extract_text_from_ndjson(ndjson_output)
         usage = parse_usage_from_ndjson(ndjson_output)
@@ -1134,7 +1134,7 @@ class TestConverterNDJSONConsumerIntegration:
     def test_text_extraction_from_finalize_synthesized_result(self):
         """When finalize synthesizes a result (no turn.completed/failed),
         _extract_text_from_ndjson should still extract the accumulated text."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         events = [
             json.dumps({
                 "type": "item.completed",
@@ -1153,7 +1153,7 @@ class TestConverterNDJSONConsumerIntegration:
     def test_usage_from_finalize_synthesized_result(self):
         """finalize-synthesized result should still produce parseable usage
         (all zeros)."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({
                 "type": "item.completed",
@@ -1191,7 +1191,7 @@ class TestConverterNDJSONConsumerIntegration:
         assert parsed["usage"]["output_tokens"] == 200
         assert parsed["usage"]["cache_read_input_tokens"] == 50
         # Also verify parse_usage_from_ndjson can read it
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         usage = parse_usage_from_ndjson(result[0])
         assert usage["input_tokens"] == 500
 
@@ -1419,7 +1419,7 @@ class TestCodexRegistryEndToEnd:
     def test_llmcaller_with_codex_agents_list(self):
         """LLMCaller constructed with agents=[{type: codex, ...}]
         should create a CodexRunner as its current runner."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "my-codex", "type": "codex", "cmd": "codex", "priority": 0},
         ]
@@ -1430,8 +1430,8 @@ class TestCodexRegistryEndToEnd:
     def test_llmcaller_with_mixed_claude_and_codex_agents(self):
         """When agents list has both claude-code and codex, the first
         agent's runner type is used initially."""
-        from se3.claude_runner import ClaudeCodeRunner
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.claude_runner import ClaudeCodeRunner
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 10},
             {"name": "codex", "type": "codex", "cmd": "codex", "priority": 5},
@@ -1443,8 +1443,8 @@ class TestCodexRegistryEndToEnd:
     def test_llmcaller_codex_runner_rotation(self):
         """After rotating from claude to codex, the runner should switch
         to CodexRunner."""
-        from se3.claude_runner import ClaudeCodeRunner
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.claude_runner import ClaudeCodeRunner
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 10},
             {"name": "codex", "type": "codex", "cmd": "codex", "priority": 5},
@@ -1458,7 +1458,7 @@ class TestCodexRegistryEndToEnd:
 
     def test_codex_runner_cached_per_agent(self):
         """The runner cache should key by agent name/cmd and reuse."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "codex-a", "type": "codex", "cmd": "codex-a", "priority": 0},
             {"name": "codex-b", "type": "codex", "cmd": "codex-b", "priority": 0},
@@ -1476,7 +1476,7 @@ class TestCodexRegistryEndToEnd:
 
     def test_codex_default_command_when_no_cmd(self):
         """CodexRunner should default cmd to 'codex' when command omits it."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "c", "type": "codex", "cmd": "codex"},
         ]
@@ -1485,7 +1485,7 @@ class TestCodexRegistryEndToEnd:
 
     def test_codex_runner_receives_project_root(self):
         """CodexRunner should receive project_root from LLMCaller."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         agents = [
             {"name": "c", "type": "codex", "cmd": "codex"},
         ]
@@ -1501,7 +1501,7 @@ class TestCreateRunnerCodexDispatch:
     """Verify _create_runner passes the correct args to CodexRunner."""
 
     def test_create_runner_passes_cmd_and_priority(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         caller = LLMCaller.__new__(LLMCaller)
         caller.project_root = Path("/tmp/proj")
         runner = caller._create_runner({"type": "codex", "cmd": "my-codex", "priority": 42})
@@ -1511,14 +1511,14 @@ class TestCreateRunnerCodexDispatch:
 
     def test_create_runner_default_priority_zero(self):
         """When priority is not specified, it defaults to 0."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         caller = LLMCaller.__new__(LLMCaller)
         caller.project_root = Path("/tmp/proj")
         runner = caller._create_runner({"type": "codex", "cmd": "codex"})
         assert runner.command["priority"] == 0
 
     def test_create_runner_unknown_type_raises(self):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
         caller = LLMCaller.__new__(LLMCaller)
         caller.project_root = Path("/tmp/proj")
         with pytest.raises(ValueError, match="Unknown agent type: llama"):
@@ -1961,7 +1961,7 @@ class TestCostMissingEndToEnd:
     def test_cost_zero_tokens_nonzero_parse_usage_returns_nonempty(self):
         """When total_cost_usd is missing (0) but tokens are nonzero,
         parse_usage_from_ndjson must return a non-empty dict."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
@@ -1993,7 +1993,7 @@ class TestCostMissingEndToEnd:
 
     def test_cost_zero_tokens_nonzero_usage_totals_not_empty(self):
         """UsageTotals.from_dict on the same data must report is_empty() == False."""
-        from se3.engine.token_usage import UsageTotals
+        from tianluo.engine.token_usage import UsageTotals
         raw = {
             "input_tokens": 500,
             "output_tokens": 200,
@@ -2008,7 +2008,7 @@ class TestCostMissingEndToEnd:
 
     def test_turn_level_usage_end_to_end(self):
         """Usage at data.turn.usage must survive the full chain."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
@@ -2037,7 +2037,7 @@ class TestCostMissingEndToEnd:
     def test_turn_failed_with_usage_end_to_end(self):
         """turn.failed carrying usage must produce a non-empty usage dict
         in parse_usage_from_ndjson."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
@@ -2064,7 +2064,7 @@ class TestCostMissingEndToEnd:
     def test_add_call_usage_folds_cost_zero_tokens(self):
         """add_call_usage must fold token data into the step accumulator
         even when total_cost_usd is 0."""
-        from se3.engine.token_usage import (
+        from tianluo.engine.token_usage import (
             UsageTotals, add_call_usage, accumulate_step_usage,
         )
         raw_usage = {
@@ -2086,7 +2086,7 @@ class TestCostMissingEndToEnd:
     def test_cached_input_tokens_end_to_end(self):
         """cached_input_tokens in codex output must map to
         cache_read_input_tokens through the full chain."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
@@ -2112,7 +2112,7 @@ class TestCostMissingEndToEnd:
     def test_all_zero_usage_returns_empty_from_parse(self):
         """When all tokens and cost are zero, parse_usage_from_ndjson
         returns an empty dict (existing behavior preserved)."""
-        from se3.engine.chat_history import parse_usage_from_ndjson
+        from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
             json.dumps({
@@ -2135,7 +2135,7 @@ class TestShellSnapshotDetection:
 
     def test_real_sample_stderr_returns_true(self):
         """The actual stderr pattern from Codex CLI must be detected."""
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = (
             "codex_core::shell_snapshot: Shell snapshot validation failed "
             "at line 42: syntax error near unexpected token '('"
@@ -2143,41 +2143,41 @@ class TestShellSnapshotDetection:
         assert _detect_shell_snapshot_failure(stderr) is True
 
     def test_partial_pattern_shell_snapshot_validation_failed(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "Error: Shell snapshot validation failed in environment setup"
         assert _detect_shell_snapshot_failure(stderr) is True
 
     def test_partial_pattern_codex_core_shell_snapshot(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "codex_core::shell_snapshot: something went wrong"
         assert _detect_shell_snapshot_failure(stderr) is True
 
     def test_partial_pattern_syntax_error_unexpected_token(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "/bin/bash: line 5: syntax error near unexpected token '('"
         assert _detect_shell_snapshot_failure(stderr) is True
 
     def test_case_insensitive(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "CODEX_CORE::SHELL_SNAPSHOT: SHELL SNAPSHOT VALIDATION FAILED"
         assert _detect_shell_snapshot_failure(stderr) is True
 
     def test_empty_stderr_returns_false(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         assert _detect_shell_snapshot_failure("") is False
 
     def test_none_stderr_returns_false(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         assert _detect_shell_snapshot_failure(None) is False
 
     def test_normal_stderr_returns_false(self):
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "Warning: some deprecation warning\nLoading config...\n"
         assert _detect_shell_snapshot_failure(stderr) is False
 
     def test_stderr_with_unrelated_syntax_error_returns_false(self):
         """'syntax error' alone (without 'near unexpected token') should not match."""
-        from se3.codex_runner import _detect_shell_snapshot_failure
+        from tianluo.codex_runner import _detect_shell_snapshot_failure
         stderr = "python: SyntaxError: invalid syntax"
         assert _detect_shell_snapshot_failure(stderr) is False
 
@@ -2432,7 +2432,7 @@ class TestDetectInfraErrorStartupFailure:
     def test_monitored_result_stderr_tail_populated(self):
         """MonitoredResult.stderr_tail must be populated from the
         _SingleRunResult."""
-        from se3.codex_runner import _SingleRunResult
+        from tianluo.codex_runner import _SingleRunResult
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         def fake_monitor(self_runner, *, full_cmd, **kw):
             return _SingleRunResult(
@@ -2446,7 +2446,7 @@ class TestDetectInfraErrorStartupFailure:
     def test_monitored_result_stderr_tail_default_empty(self):
         """MonitoredResult.stderr_tail defaults to empty string when
         _SingleRunResult has no stderr_tail."""
-        from se3.codex_runner import _SingleRunResult
+        from tianluo.codex_runner import _SingleRunResult
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         def fake_monitor(self_runner, *, full_cmd, **kw):
             return _SingleRunResult(

@@ -4,8 +4,8 @@ The pre-flight runs inside ``MergeOrchestrator._execute_inner`` after the
 repository-state fail-fast and before the pre-merge SHA is captured. It:
 
   * auto-commits dirty tracked files when they all live under SE3's
-    self-managed data paths (``se3/issues/``) so a branch that also touched
-    ``se3/issues/.next_id`` can actually START its merge and route the
+    self-managed data paths (``tianluo/issues/``) so a branch that also touched
+    ``tianluo/issues/.next_id`` can actually START its merge and route the
     divergence through ``NextIdResolver`` (max-of-two-counters); and
   * fails loud with ``dirty_working_tree`` when any dirty tracked file lives
     outside those paths, listing the offending files.
@@ -16,8 +16,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.commands.merge.failure_reason import FailureReason, from_legacy_string
-from se3.engine.merge.orchestrator import MergeOrchestrator, MergeReport
+from tianluo.commands.merge.failure_reason import FailureReason, from_legacy_string
+from tianluo.engine.merge.orchestrator import MergeOrchestrator, MergeReport
 
 
 def _git(path: Path, *args: str) -> subprocess.CompletedProcess:
@@ -32,10 +32,10 @@ def _init_repo(path: Path) -> None:
     _git(path, "config", "user.email", "test@test.com")
     _git(path, "config", "user.name", "Test")
     (path / "README.md").write_text("# Test\n")
-    # Match the real init/migrate template: ignore se3/ runtime but whitelist
-    # the committed data dirs so se3/issues/ files travel with the branch.
+    # Match the real init/migrate template: ignore tianluo/ runtime but whitelist
+    # the committed data dirs so tianluo/issues/ files travel with the branch.
     (path / ".gitignore").write_text(
-        "/se3/*\n!/se3/specs/\n!/se3/issues/\n!/se3/version-intents/\n"
+        "/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n!/tianluo/version-intents/\n"
     )
     _git(path, "add", ".")
     _git(path, "commit", "-m", "initial")
@@ -50,7 +50,7 @@ def _log_subjects(path: Path) -> str:
 
 
 def _write_next_id(path: Path, value: str) -> Path:
-    p = path / "se3" / "issues" / ".next_id"
+    p = path / "tianluo" / "issues" / ".next_id"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(f"{value}\n")
     return p
@@ -61,9 +61,9 @@ def test_dirty_issue_state_auto_committed_and_nextid_resolver_takes_over(
 ) -> None:
     monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
     _init_repo(tmp_path)
-    issues = tmp_path / "se3" / "issues"
+    issues = tmp_path / "tianluo" / "issues"
     _write_next_id(tmp_path, "283")
-    _git(tmp_path, "add", "se3/issues/.next_id")
+    _git(tmp_path, "add", "tianluo/issues/.next_id")
     _git(tmp_path, "commit", "-m", "add issue counter")
 
     default = _default_branch(tmp_path)
@@ -71,7 +71,7 @@ def test_dirty_issue_state_auto_committed_and_nextid_resolver_takes_over(
     # Branch bumps .next_id higher than the (future) main value.
     _git(tmp_path, "checkout", "-b", "feature")
     _write_next_id(tmp_path, "290")
-    _git(tmp_path, "add", "se3/issues/.next_id")
+    _git(tmp_path, "add", "tianluo/issues/.next_id")
     _git(tmp_path, "commit", "-m", "feature allocates ids up to 290")
 
     _git(tmp_path, "checkout", default)
@@ -104,12 +104,12 @@ def test_dirty_issue_state_auto_committed_and_nextid_resolver_takes_over(
     # The untracked new issue yaml was swept into the sync commit — assert it
     # is actually TRACKED now, not merely present on disk. A regression that
     # narrows the add pathspec to only the dirty tracked path (e.g.
-    # `git add -- se3/issues/.next_id`) would leave 285_new.yaml untracked; the
+    # `git add -- tianluo/issues/.next_id`) would leave 285_new.yaml untracked; the
     # weaker exists()/--untracked-files=no pair would pass anyway, so pin the
     # file to the git index instead.
     assert _git(
-        tmp_path, "ls-files", "se3/issues/open/285_new.yaml"
-    ).stdout.strip() == "se3/issues/open/285_new.yaml"
+        tmp_path, "ls-files", "tianluo/issues/open/285_new.yaml"
+    ).stdout.strip() == "tianluo/issues/open/285_new.yaml"
     assert _git(
         tmp_path, "status", "--porcelain"
     ).stdout.strip() == ""
@@ -136,7 +136,7 @@ def test_dirty_file_outside_self_managed_fails_loud(
     _git(tmp_path, "commit", "-m", "feature change")
 
     _git(tmp_path, "checkout", default)
-    # Dirty tracked file OUTSIDE se3/issues/ must block the merge.
+    # Dirty tracked file OUTSIDE tianluo/issues/ must block the merge.
     (src / "foo.py").write_text("x = 2\n")
 
     orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -180,7 +180,7 @@ def test_mixed_dirty_lists_both_and_fails(
     assert report.failure_reason == "dirty_working_tree"
     detail = report.failure_detail or ""
     assert "src/foo.py" in detail
-    assert "se3/issues/.next_id" in detail
+    assert "tianluo/issues/.next_id" in detail
     # No auto-commit is attempted when any file is outside the whitelist.
     assert "chore: sync issue state" not in _log_subjects(tmp_path)
 
@@ -284,7 +284,7 @@ def test_untracked_only_does_not_commit(
     _git(tmp_path, "commit", "-m", "feature change")
 
     _git(tmp_path, "checkout", default)
-    issues = tmp_path / "se3" / "issues" / "open"
+    issues = tmp_path / "tianluo" / "issues" / "open"
     issues.mkdir(parents=True, exist_ok=True)
     (issues / "1_new.yaml").write_text("id: 1\n")  # untracked, no tracked dirty
 
@@ -301,16 +301,16 @@ def test_rename_within_self_managed_with_space_is_committed(
     tmp_path: Path,
 ) -> None:
     """Robust -z porcelain parsing: a staged rename of a space-containing
-    path wholly inside se3/issues/ is auto-committed (both ends whitelisted)."""
+    path wholly inside tianluo/issues/ is auto-committed (both ends whitelisted)."""
     _init_repo(tmp_path)
-    issues = tmp_path / "se3" / "issues" / "open"
+    issues = tmp_path / "tianluo" / "issues" / "open"
     issues.mkdir(parents=True, exist_ok=True)
     (issues / "1 old.yaml").write_text("id: 1\n")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "add issue with space in name")
 
-    # Staged rename with spaces on both ends, entirely within se3/issues/.
-    _git(tmp_path, "mv", "se3/issues/open/1 old.yaml", "se3/issues/open/2 new.yaml")
+    # Staged rename with spaces on both ends, entirely within tianluo/issues/.
+    _git(tmp_path, "mv", "tianluo/issues/open/1 old.yaml", "tianluo/issues/open/2 new.yaml")
 
     orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
     report = MergeReport()
@@ -323,17 +323,17 @@ def test_rename_within_self_managed_with_space_is_committed(
 
 
 def test_rename_out_of_self_managed_fails(tmp_path: Path) -> None:
-    """A rename whose destination leaves se3/issues/ has one end outside the
+    """A rename whose destination leaves tianluo/issues/ has one end outside the
     whitelist and must fail rather than be auto-committed."""
     _init_repo(tmp_path)
-    issues = tmp_path / "se3" / "issues" / "open"
+    issues = tmp_path / "tianluo" / "issues" / "open"
     issues.mkdir(parents=True, exist_ok=True)
     (issues / "1.yaml").write_text("id: 1\n")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "add issue")
 
     (tmp_path / "src").mkdir()
-    _git(tmp_path, "mv", "se3/issues/open/1.yaml", "src/1.yaml")
+    _git(tmp_path, "mv", "tianluo/issues/open/1.yaml", "src/1.yaml")
 
     orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
     report = MergeReport()
@@ -348,19 +348,19 @@ def test_rename_out_of_self_managed_fails(tmp_path: Path) -> None:
 def test_dirty_code_index_is_self_managed_and_auto_committed(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """se3/code-index.md is rewritten incrementally by flow steps, so it is
+    """tianluo/code-index.md is rewritten incrementally by flow steps, so it is
     routinely dirty between commit steps. It must be treated as self-managed
     (auto-committed into the sync commit), NOT block the merge — the exact
     state the main repo is in right now."""
     monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
     _init_repo(tmp_path)
-    ci = tmp_path / "se3" / "code-index.md"
+    ci = tmp_path / "tianluo" / "code-index.md"
     ci.parent.mkdir(parents=True, exist_ok=True)
     ci.write_text("# Code Index\n\n- old\n")
-    # Whitelist se3/code-index.md alongside the runtime ignore so it travels.
+    # Whitelist tianluo/code-index.md alongside the runtime ignore so it travels.
     (tmp_path / ".gitignore").write_text(
-        "/se3/*\n!/se3/specs/\n!/se3/issues/\n!/se3/version-intents/\n"
-        "!/se3/code-index.md\n"
+        "/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n!/tianluo/version-intents/\n"
+        "!/tianluo/code-index.md\n"
     )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "add code index")
@@ -396,7 +396,7 @@ def test_self_managed_nothing_to_commit_proceeds(
     monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
     _init_repo(tmp_path)
     _write_next_id(tmp_path, "5")
-    _git(tmp_path, "add", "se3/issues/.next_id")
+    _git(tmp_path, "add", "tianluo/issues/.next_id")
     _git(tmp_path, "commit", "-m", "add counter")
 
     default = _default_branch(tmp_path)
@@ -409,9 +409,9 @@ def test_self_managed_nothing_to_commit_proceeds(
     # Stage a change to .next_id, then restore the file content to HEAD without
     # unstaging: git status still reports it (index differs from worktree), but
     # after `git add` the index equals HEAD → commit finds nothing to commit.
-    nid = tmp_path / "se3" / "issues" / ".next_id"
+    nid = tmp_path / "tianluo" / "issues" / ".next_id"
     nid.write_text("9\n")
-    _git(tmp_path, "add", "se3/issues/.next_id")
+    _git(tmp_path, "add", "tianluo/issues/.next_id")
     nid.write_text("5\n")  # restore working-tree content to HEAD
 
     orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -486,8 +486,8 @@ def test_code_index_sibling_is_not_self_managed(
 ) -> None:
     """A file whitelist entry matches ONLY its exact path.
 
-    ``se3/code-index.md`` is a FILE entry, so a tracked sibling like
-    ``se3/code-index.md.bak`` must NOT be classified as self-managed via a
+    ``tianluo/code-index.md`` is a FILE entry, so a tracked sibling like
+    ``tianluo/code-index.md.bak`` must NOT be classified as self-managed via a
     prefix match — otherwise the whitelist check passes but the sync commit's
     pathspec (which targets the exact file) never stages the sibling, leaving
     it dirty and letting git refuse the merge later. The sibling has to be
@@ -495,14 +495,14 @@ def test_code_index_sibling_is_not_self_managed(
     """
     monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
     _init_repo(tmp_path)
-    ci = tmp_path / "se3" / "code-index.md"
+    ci = tmp_path / "tianluo" / "code-index.md"
     ci.parent.mkdir(parents=True, exist_ok=True)
     ci.write_text("# Code Index\n\n- old\n")
-    bak = tmp_path / "se3" / "code-index.md.bak"
+    bak = tmp_path / "tianluo" / "code-index.md.bak"
     bak.write_text("backup old\n")
     (tmp_path / ".gitignore").write_text(
-        "/se3/*\n!/se3/specs/\n!/se3/issues/\n!/se3/version-intents/\n"
-        "!/se3/code-index.md\n!/se3/code-index.md.bak\n"
+        "/tianluo/*\n!/tianluo/specs/\n!/tianluo/issues/\n!/tianluo/version-intents/\n"
+        "!/tianluo/code-index.md\n!/tianluo/code-index.md.bak\n"
     )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "add code index and backup")
@@ -522,7 +522,7 @@ def test_code_index_sibling_is_not_self_managed(
 
     assert report.success is False
     assert report.failure_reason == "dirty_working_tree"
-    assert report.failure_detail and "se3/code-index.md.bak" in report.failure_detail
+    assert report.failure_detail and "tianluo/code-index.md.bak" in report.failure_detail
     # No sync commit, and the sibling is untouched (never staged/committed).
     assert "chore: sync issue state" not in _log_subjects(tmp_path)
     assert bak.read_text() == "backup new\n"
@@ -533,22 +533,22 @@ def test_gitignored_code_index_does_not_abort_issue_sync(
 ) -> None:
     """An existing-but-gitignored whitelist file must not abort the sync.
 
-    On a pre-migrate ``.gitignore`` (``/se3/*`` without ``!/se3/code-index.md``)
+    On a pre-migrate ``.gitignore`` (``/tianluo/*`` without ``!/tianluo/code-index.md``)
     the code-index exists on disk built by ``se3 code-index rebuild`` but is
     ignored+untracked. When the only dirty tracked file is
-    ``se3/issues/.next_id``, the auto-commit must NOT hand git the ignored
+    ``tianluo/issues/.next_id``, the auto-commit must NOT hand git the ignored
     pathspec (which fails with "paths are ignored"): the target list is derived
-    from the dirty tracked paths, so only ``se3/issues`` is added and the sync
+    from the dirty tracked paths, so only ``tianluo/issues`` is added and the sync
     commit succeeds.
     """
     monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
     _init_repo(tmp_path)  # .gitignore here does NOT whitelist code-index.md
     _write_next_id(tmp_path, "3")
-    _git(tmp_path, "add", "se3/issues/.next_id")
+    _git(tmp_path, "add", "tianluo/issues/.next_id")
     _git(tmp_path, "commit", "-m", "add counter")
 
     # code-index.md exists on disk but is gitignored+untracked.
-    ci = tmp_path / "se3" / "code-index.md"
+    ci = tmp_path / "tianluo" / "code-index.md"
     ci.write_text("# Code Index\n\n- built but ignored\n")
 
     default = _default_branch(tmp_path)

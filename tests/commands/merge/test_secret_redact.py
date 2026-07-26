@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.commands.merge.secret_redact import (
+from tianluo.commands.merge.secret_redact import (
     RedactConfig,
     SecretRedactor,
     redact_diff,

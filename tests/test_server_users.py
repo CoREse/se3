@@ -20,7 +20,7 @@ from __future__ import annotations
 import pytest
 
 from _authsrv import authed_app, login
-from se3.server.app import BREAKGLASS_EXTERNAL_ID, BREAKGLASS_PROVIDER
+from tianluo.server.app import BREAKGLASS_EXTERNAL_ID, BREAKGLASS_PROVIDER
 
 
 @pytest.fixture()
@@ -39,7 +39,7 @@ def client_and_app():
 
 def _seed_local(app, username, password="pw", *, is_admin=False) -> str:
     """Seed a local user (owner + (local, username) binding + password hash)."""
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     store = app.state.store
     oid = store.create_owner(username, is_admin=is_admin)
@@ -72,7 +72,7 @@ def _login_breakglass(client, app) -> str:
     admin" — required to exercise the last-real-admin delete/demote guards
     without the self-protection firing first.
     """
-    import se3.server.crypto as crypto
+    import tianluo.server.crypto as crypto
 
     plain, key_hash = crypto.generate_token("bg")
     app.state.store.put_breakglass(key_hash)

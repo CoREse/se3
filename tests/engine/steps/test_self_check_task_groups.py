@@ -12,14 +12,14 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.steps.self_check import (
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.steps.self_check import (
     _TASK_GROUPS_SECTION_INTRO,
     _build_task_groups_section,
     _format_task_groups,
     self_check_handler,
 )
-from se3.engine.truncation import SELF_CHECK_TASK_GROUPS_MAX_CHARS
+from tianluo.engine.truncation import SELF_CHECK_TASK_GROUPS_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -255,7 +255,7 @@ def _make_step(task_groups=None):
 def _call_handler_capture_prompt(step, flow):
     """Run self_check_handler with a mocked LLM, return the prompt passed in."""
     response = json.dumps({"issues": [], "summary": "ok"})
-    with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+    with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
         mock_caller = Mock()
         mock_caller.call.return_value = response
         mock_cls.return_value = mock_caller

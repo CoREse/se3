@@ -19,8 +19,8 @@ import logging
 
 import pytest
 
-from se3.engine.dag_scheduler import DAGScheduler
-from se3.engine.steps.implement import _prune_recovered_dependencies
+from tianluo.engine.dag_scheduler import DAGScheduler
+from tianluo.engine.steps.implement import _prune_recovered_dependencies
 
 
 # ---------------------------------------------------------------------------

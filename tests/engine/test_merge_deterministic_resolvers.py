@@ -14,8 +14,8 @@ from typing import Sequence
 
 import pytest
 
-from se3.engine.merge import deterministic_resolvers as dr
-from se3.engine.merge.deterministic_resolvers import (
+from tianluo.engine.merge import deterministic_resolvers as dr
+from tianluo.engine.merge.deterministic_resolvers import (
     CodeIndexResolver,
     FileBlock,
     NextIdResolver,
@@ -94,9 +94,9 @@ def test_render_is_deterministic_and_marker_free():
 
 
 def test_roundtrip_on_repository_index_is_byte_identical():
-    md_path = Path(__file__).resolve().parents[2] / "se3" / "code-index.md"
+    md_path = Path(__file__).resolve().parents[2] / "tianluo" / "code-index.md"
     if not md_path.exists():
-        pytest.skip("se3/code-index.md has not been built in this checkout")
+        pytest.skip("tianluo/code-index.md has not been built in this checkout")
     source = md_path.read_text(encoding="utf-8")
 
     assert _render(*_parse_md_blocks(source)) == source
@@ -238,8 +238,8 @@ def test_resolve_raises_when_both_sides_are_missing(tmp_path, monkeypatch):
 def test_code_index_resolver_matches_only_its_own_path():
     resolver = CodeIndexResolver()
 
-    assert resolver.matches("se3/code-index.md")
-    assert not resolver.matches("se3/code-index.md.bak")
+    assert resolver.matches("tianluo/code-index.md")
+    assert not resolver.matches("tianluo/code-index.md.bak")
     assert not resolver.matches("docs/code-index.md")
 
 
@@ -455,7 +455,7 @@ def _git(repo: Path, *args: str) -> str:
 
 def _real_fp(text: str) -> str:
     """The content fingerprint code_index would record for a file of *text*."""
-    from se3.engine.code_index import _fp, _sha256_prefix
+    from tianluo.engine.code_index import _fp, _sha256_prefix
 
     return _fp(_sha256_prefix(text.encode("utf-8")))
 
@@ -489,7 +489,7 @@ ADDED_THEIRS_SRC = "def added_theirs():\n    pass\n"
 def conflicted_repo(tmp_path: Path) -> Path:
     """A repo mid-merge, with both deterministic files genuinely conflicted.
 
-    The two sides regenerate ``se3/code-index.md`` the way the real index step
+    The two sides regenerate ``tianluo/code-index.md`` the way the real index step
     does — every entry rewritten, the dir heading reworded — so git's textual
     merge conflicts even though the entries themselves merge cleanly. That is
     the exact shape of the failure this resolver exists to absorb.
@@ -507,8 +507,8 @@ def conflicted_repo(tmp_path: Path) -> Path:
         ("src/edit.py", EDIT_BASE_SRC),
     ]:
         _write(repo, relpath, src)
-    _write(repo, "se3/issues/.next_id", "5\n")
-    _write(repo, "se3/code-index.md", _index_md("base dir", [
+    _write(repo, "tianluo/issues/.next_id", "5\n")
+    _write(repo, "tianluo/code-index.md", _index_md("base dir", [
         ("src/keep.py", "keeps things", _real_fp(KEEP_SRC)),
         ("src/gone.py", "will vanish", _real_fp(GONE_SRC)),
         ("src/edit.py", "base wording", _real_fp(EDIT_BASE_SRC)),
@@ -520,8 +520,8 @@ def conflicted_repo(tmp_path: Path) -> Path:
     # --- ours (master): edits edit.py, adds a file, bumps the counter ---
     _write(repo, "src/edit.py", EDIT_OURS_SRC)
     _write(repo, "src/added_ours.py", ADDED_OURS_SRC)
-    _write(repo, "se3/issues/.next_id", "9\n")
-    _write(repo, "se3/code-index.md", _index_md("ours dir wording", [
+    _write(repo, "tianluo/issues/.next_id", "9\n")
+    _write(repo, "tianluo/code-index.md", _index_md("ours dir wording", [
         ("src/keep.py", "keeps things (ours wording)", _real_fp(KEEP_SRC)),
         ("src/gone.py", "will vanish", _real_fp(GONE_SRC)),
         ("src/edit.py", "returns ours", _real_fp(EDIT_OURS_SRC)),
@@ -534,8 +534,8 @@ def conflicted_repo(tmp_path: Path) -> Path:
     _git(repo, "checkout", "-q", "feature")
     (repo / "src/gone.py").unlink()
     _write(repo, "src/added_theirs.py", ADDED_THEIRS_SRC)
-    _write(repo, "se3/issues/.next_id", "12\n")
-    _write(repo, "se3/code-index.md", _index_md("theirs dir wording", [
+    _write(repo, "tianluo/issues/.next_id", "12\n")
+    _write(repo, "tianluo/code-index.md", _index_md("theirs dir wording", [
         ("src/keep.py", "keeps things (theirs wording)", _real_fp(KEEP_SRC)),
         # A stale entry for edit.py: theirs never saw the ours-side edit.
         ("src/edit.py", "base wording", _real_fp(EDIT_BASE_SRC)),
@@ -558,7 +558,7 @@ def conflicted_repo(tmp_path: Path) -> Path:
 @pytest.fixture
 def no_llm(monkeypatch):
     """Any LLM call from this point on is a test failure."""
-    from se3.engine.llm_caller import LLMCaller
+    from tianluo.engine.llm_caller import LLMCaller
 
     def _forbidden(*args, **kwargs):
         raise AssertionError("the LLM must not be called for deterministic conflicts")
@@ -567,15 +567,15 @@ def no_llm(monkeypatch):
 
 
 def test_real_merge_conflict_is_resolved_without_the_llm(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     conflicts = get_conflicting_files(repo)
-    assert set(conflicts) == {"se3/code-index.md", "se3/issues/.next_id"}
+    assert set(conflicts) == {"tianluo/code-index.md", "tianluo/issues/.next_id"}
 
     outcome = resolve_deterministic(repo, conflicts)
 
-    assert sorted(outcome.resolved) == ["se3/code-index.md", "se3/issues/.next_id"]
+    assert sorted(outcome.resolved) == ["tianluo/code-index.md", "tianluo/issues/.next_id"]
     assert outcome.remaining == []
     assert outcome.failures == {}
     # Both paths left git's index: nothing is unmerged, so a merge commit is possible.
@@ -583,11 +583,11 @@ def test_real_merge_conflict_is_resolved_without_the_llm(conflicted_repo, no_llm
 
 
 def test_resolved_index_unions_entries_and_drops_the_deleted_file(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
-    merged = (repo / "se3/code-index.md").read_text(encoding="utf-8")
+    merged = (repo / "tianluo/code-index.md").read_text(encoding="utf-8")
 
     assert not any(marker in merged for marker in MARKERS)
     # Single-sided entries survive from both sides.
@@ -608,26 +608,26 @@ def test_resolved_index_unions_entries_and_drops_the_deleted_file(conflicted_rep
 
 
 def test_staged_index_matches_the_working_tree(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
 
-    staged = _git(repo, "show", ":se3/code-index.md")
-    assert staged == (repo / "se3/code-index.md").read_text(encoding="utf-8")
+    staged = _git(repo, "show", ":tianluo/code-index.md")
+    assert staged == (repo / "tianluo/code-index.md").read_text(encoding="utf-8")
 
 
 def test_next_id_takes_the_larger_counter(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
 
-    assert (repo / "se3/issues/.next_id").read_text(encoding="utf-8") == "12\n"
+    assert (repo / "tianluo/issues/.next_id").read_text(encoding="utf-8") == "12\n"
 
 
 def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_repo, no_llm):
-    from se3.engine.worktree import get_conflicting_files
+    from tianluo.engine.worktree import get_conflicting_files
 
     repo = conflicted_repo
     resolve_deterministic(repo, get_conflicting_files(repo))
@@ -644,7 +644,7 @@ def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_rep
 # MergeOrchestrator._handle_conflict — the deterministic short-circuit
 #
 # The production failure this whole module exists for was a merge whose only
-# conflict was se3/code-index.md.  These tests drive the orchestrator through
+# conflict was tianluo/code-index.md.  These tests drive the orchestrator through
 # that exact shape, so a regression in the short-circuit condition (or an
 # early-exit added to _apply_resolution) cannot silently route it back to the
 # LLM.
@@ -653,7 +653,7 @@ def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_rep
 @pytest.fixture
 def orchestrator_repo(conflicted_repo, monkeypatch):
     """``conflicted_repo`` with the LLM, guardrails and context-build disarmed."""
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     # The short-circuit must return before any conflict context is built: that
     # call reads merge metadata whose failure would abort a merge with nothing
@@ -669,8 +669,8 @@ def orchestrator_repo(conflicted_repo, monkeypatch):
 
 
 def _handle_conflict(repo: Path, strategy: str):
-    from se3.commands.merge.result_model import MergeReport
-    from se3.engine.merge.orchestrator import MergeOrchestrator
+    from tianluo.commands.merge.result_model import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeOrchestrator
 
     pre_merge_sha = _git(repo, "rev-parse", "HEAD").strip()
     orch = MergeOrchestrator(
@@ -699,14 +699,14 @@ def test_a_fully_deterministic_conflict_merges_without_the_llm(
     assert (repo / "src/added_theirs.py").exists()
     assert (repo / "src/added_ours.py").exists()
     assert _git(repo, "diff", "--name-only", "--diff-filter=U").strip() == ""
-    assert (repo / "se3/issues/.next_id").read_text(encoding="utf-8") == "12\n"
-    merged_index = (repo / "se3/code-index.md").read_text(encoding="utf-8")
+    assert (repo / "tianluo/issues/.next_id").read_text(encoding="utf-8") == "12\n"
+    merged_index = (repo / "tianluo/code-index.md").read_text(encoding="utf-8")
     assert not any(marker in merged_index for marker in MARKERS)
 
 
 def test_a_leftover_conflict_still_reaches_the_context_builder(orchestrator_repo, monkeypatch):
     """One non-deterministic path is enough to keep the whole LLM path alive."""
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     repo = orchestrator_repo
     # Make a third path conflict so ``remaining`` is non-empty.
@@ -722,7 +722,7 @@ def test_a_leftover_conflict_still_reaches_the_context_builder(orchestrator_repo
     monkeypatch.setattr(
         orch_mod.MergeOrchestrator, "_resolve_deterministic_conflicts",
         lambda self: dr.DeterministicOutcome(
-            resolved=["se3/issues/.next_id"], remaining=["src/extra.py"]
+            resolved=["tianluo/issues/.next_id"], remaining=["src/extra.py"]
         ),
     )
 
@@ -743,7 +743,7 @@ def test_a_broken_deterministic_pass_degrades_to_the_pre_change_behaviour(
     the conflicts itself) is the required hand-off — not a half-filled outcome,
     and not an ``AttributeError`` on ``None.remaining``.
     """
-    from se3.engine.merge import orchestrator as orch_mod
+    from tianluo.engine.merge import orchestrator as orch_mod
 
     repo = orchestrator_repo
 

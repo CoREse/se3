@@ -1,30 +1,69 @@
-"""SE 3.0 framework CLI tools."""
+"""Deprecated compatibility shim: the ``se3`` package was renamed ``tianluo``.
+
+Importing ``se3`` aliases the package onto :mod:`tianluo`, and a meta-path
+finder maps every ``se3.<submodule>`` import to the *same* module object as
+its ``tianluo.<submodule>`` counterpart — not a re-executed copy — so
+module-level state (caches, locks, registries) is never duplicated between
+the two names during the 12.x transition window. Removed in 13.0.0.
+"""
+
+import importlib
+import importlib.abc
+import importlib.util
+import sys
+import warnings
+
+_REAL_PACKAGE = "tianluo"
 
 
-def _get_version() -> str:
-    """Get version from package metadata (single source of truth: pyproject.toml)."""
-    try:
-        from importlib.metadata import version, PackageNotFoundError
-        return version("se3")
-    except (ImportError, PackageNotFoundError):
-        # Fallback for Python < 3.8 or if package is not installed
+class _AliasLoader(importlib.abc.Loader):
+    """Loader that resolves an aliased name to the already-real module.
+
+    ``create_module`` returns the imported ``tianluo.*`` module itself;
+    ``exec_module`` is a no-op because that module is already executed.
+    ``module_from_spec`` only fills missing attributes, so the real module's
+    ``__name__`` / ``__spec__`` stay canonical (``tianluo.*``).
+    """
+
+    def __init__(self, real_name):
+        self._real_name = real_name
+
+    def create_module(self, spec):
+        return importlib.import_module(self._real_name)
+
+    def exec_module(self, module):
+        pass
+
+
+class _AliasFinder(importlib.abc.MetaPathFinder):
+    """Meta-path finder aliasing ``se3.*`` imports onto ``tianluo.*``."""
+
+    def find_spec(self, fullname, path=None, target=None):
+        if not fullname.startswith("se3."):
+            return None
+        # ``python -m se3`` needs runpy to *execute* ``se3.__main__`` (via
+        # ``get_code``), which the aliasing loader cannot provide — decline so
+        # the normal path finder resolves it through the aliased package's
+        # ``__path__`` (tianluo/) and executes tianluo/__main__.py afresh.
+        if fullname == "se3.__main__":
+            return None
+        real_name = _REAL_PACKAGE + fullname[len("se3"):]
         try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib
-
-        try:
-            from pathlib import Path
-            pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
-            with open(pyproject_path, "rb") as f:
-                pyproject = tomllib.load(f)
-            return pyproject.get("project", {}).get("version", "unknown")
-        except Exception:
-            return "unknown"
+            if importlib.util.find_spec(real_name) is None:
+                return None
+        except (ImportError, AttributeError, ValueError):
+            return None
+        return importlib.util.spec_from_loader(fullname, _AliasLoader(real_name))
 
 
-# Single source of truth: pyproject.toml
-__version__ = _get_version()
+warnings.warn(
+    "the 'se3' package has been renamed to 'tianluo'; update imports — "
+    "this compatibility shim is removed in 13.0.0",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
-# Backward compatibility alias
-SE3_FRAMEWORK_VERSION = __version__
+if not any(isinstance(finder, _AliasFinder) for finder in sys.meta_path):
+    sys.meta_path.insert(0, _AliasFinder())
+
+sys.modules[__name__] = importlib.import_module(_REAL_PACKAGE)

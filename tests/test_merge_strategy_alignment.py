@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import pytest
 
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     FileResolution,
     HunkResolution,
     LLMResolution,
     MergeStrategy,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider
 
 
 def _make_resolution(
@@ -248,7 +248,7 @@ class TestFastStrategyAcceptOrRejectOnly:
             is_spec=False,
         )
         file_spec = FileResolution(
-            path="se3/specs/test/spec.md",
+            path="tianluo/specs/test/spec.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.HIGH, "high")],
             overall_confidence=Confidence.HIGH,
@@ -277,7 +277,7 @@ class TestFastStrategyAcceptOrRejectOnly:
             is_spec=False,
         )
         file_spec = FileResolution(
-            path="se3/specs/test/spec.md",
+            path="tianluo/specs/test/spec.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.LOW, "low")],
             overall_confidence=Confidence.LOW,

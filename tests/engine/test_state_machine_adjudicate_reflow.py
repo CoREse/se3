@@ -23,15 +23,15 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from se3.config import WorkflowConfig
-from se3.engine.models import (
+from tianluo.config import WorkflowConfig
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 _SELECTED = [
@@ -44,7 +44,7 @@ _SELECTED = [
 
 
 def _make_state_machine(tmp_path, cfg=None):
-    with patch("se3.engine.state_machine.PersistenceManager"):
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     if cfg is None:
         cfg = WorkflowConfig(max_fix_iterations=100, adjudicate_period=0)
@@ -195,7 +195,7 @@ class TestReflow:
         mechanical effects survive (ADJUDICATE slot stripped, benign
         rejected_positions landed)."""
         sm = _make_state_machine(tmp_path)
-        from se3.engine.adjudication import LEDGER_KEY
+        from tianluo.engine.adjudication import LEDGER_KEY
         flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
             tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=2,
         )
@@ -227,7 +227,7 @@ class TestReflow:
         benign rejected_positions still land (that reflow applies ledger effects
         too)."""
         sm = _make_state_machine(tmp_path)
-        from se3.engine.adjudication import LEDGER_KEY
+        from tianluo.engine.adjudication import LEDGER_KEY
         flow, implement, test, self_check, adj = _make_post_adjudicate_flow(
             tmp_path, adj_outputs=dict(_BENIGN), fix_iterations=2,
         )
@@ -298,7 +298,7 @@ class TestReflow:
         )
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -316,7 +316,7 @@ class TestReflow:
         )
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -331,7 +331,7 @@ class TestReflow:
         )
         # A plan-only ruling with no confirmation config → 免确认 → straight reflow.
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -352,7 +352,7 @@ class TestReflow:
         )
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -372,7 +372,7 @@ class TestReflow:
         )
 
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             rerun = sm.transition_to_next(flow)
         assert rerun.step_type == StepType.SELF_CHECK
@@ -404,7 +404,7 @@ class TestConfirmationGate:
         )
         human_cfg = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -432,7 +432,7 @@ class TestConfirmationGate:
         assert _DESC_PATCH["adjudicated_description"] != original_task
         human_cfg = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -458,7 +458,7 @@ class TestConfirmationGate:
             tmp_path, adj_outputs=dict(_DESC_PATCH), fix_iterations=1,
         )
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -471,7 +471,7 @@ class TestConfirmationGate:
             tmp_path, adj_outputs=dict(_PLAN_PATCH), fix_iterations=1,
         )
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=None
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -489,7 +489,7 @@ class TestConfirmationGate:
             "agents": [{"name": "claude", "type": "claude-code", "cmd": "", "priority": 0}],
         }
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=llm_cfg
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=llm_cfg
         ):
             next_step = sm.transition_to_next(flow)
 
@@ -508,7 +508,7 @@ class TestConfirmationGate:
         )
         human_cfg = {"reviewer": "human", "max_iterations": 3, "agents": None}
         with patch(
-            "se3.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
+            "tianluo.engine.state_machine.resolve_confirm_inputs", return_value=human_cfg
         ):
             next_step = sm.transition_to_next(flow)
 

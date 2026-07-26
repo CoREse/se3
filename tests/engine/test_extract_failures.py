@@ -10,7 +10,7 @@ Plus: ERRORS section extraction
 
 from __future__ import annotations
 
-from se3.engine.steps.test import _extract_failures_section
+from tianluo.engine.steps.test import _extract_failures_section
 
 
 # ---------------------------------------------------------------------------

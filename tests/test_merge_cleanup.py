@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.cleanup import (
+from tianluo.engine.merge.cleanup import (
     CleanupManager,
     CleanupReport,
     _get_worktree_path_for_branch,
@@ -352,12 +352,12 @@ class TestCleanupManagerDeleteMergedBranches:
 
         # Mock exists_for_branch so the retry path is considered
         monkeypatch.setattr(
-            "se3.engine.merge.cleanup.exists_for_branch",
+            "tianluo.engine.merge.cleanup.exists_for_branch",
             lambda project_root, branch: True,
         )
         fake_wt_path = tmp_path / "fake_wt"
         monkeypatch.setattr(
-            "se3.engine.merge.cleanup._get_worktree_path_for_branch",
+            "tianluo.engine.merge.cleanup._get_worktree_path_for_branch",
             lambda project_root, branch: fake_wt_path,
         )
 
@@ -382,11 +382,11 @@ class TestCleanupManagerDeleteMergedBranches:
                     stderr = ""
                 return FakeResult()
             # Fallback to real git for everything else
-            import se3.engine.worktree as _wt
+            import tianluo.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
         monkeypatch.setattr(
-            "se3.engine.merge.cleanup._run_git", tracked_run_git
+            "tianluo.engine.merge.cleanup._run_git", tracked_run_git
         )
 
         metadata_cleaned = []
@@ -395,7 +395,7 @@ class TestCleanupManagerDeleteMergedBranches:
             metadata_cleaned.append(branch)
 
         monkeypatch.setattr(
-            "se3.engine.merge.cleanup._cleanup_git_worktree_metadata",
+            "tianluo.engine.merge.cleanup._cleanup_git_worktree_metadata",
             track_metadata_cleanup,
         )
 
@@ -505,7 +505,7 @@ def _write_worktree_engine_json(
     wt_path: Path, flow_id: str, status: str = "completed"
 ) -> Path:
     """Write a worktree-mode ``engine.json`` under *wt_path*."""
-    state_dir = wt_path / "se3" / "state"
+    state_dir = wt_path / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = state_dir / "engine.json"
     engine.write_text(
@@ -530,7 +530,7 @@ class TestPromoteCompletedEngineState:
     """G7: promote a worktree's COMPLETED engine.json into the main archive."""
 
     def test_promotes_completed_state(self, tmp_path: Path) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -542,7 +542,7 @@ class TestPromoteCompletedEngineState:
 
         assert promoted is not None
         assert promoted.name == "engine_flow-abc.json"
-        archive = project_root / "se3" / "state" / "archive" / "engine_flow-abc.json"
+        archive = project_root / "tianluo" / "state" / "archive" / "engine_flow-abc.json"
         assert archive.exists()
         data = json.loads(archive.read_text(encoding="utf-8"))
         assert data["flow_id"] == "flow-abc"
@@ -553,7 +553,7 @@ class TestPromoteCompletedEngineState:
         assert Path(data["project_root"]).resolve() == project_root.resolve()
 
     def test_skips_non_completed_status(self, tmp_path: Path) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -564,10 +564,10 @@ class TestPromoteCompletedEngineState:
         promoted = _promote_completed_engine_state(project_root, wt_path)
 
         assert promoted is None
-        assert not (project_root / "se3" / "state" / "archive").exists()
+        assert not (project_root / "tianluo" / "state" / "archive").exists()
 
     def test_skips_missing_engine_json(self, tmp_path: Path) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -577,12 +577,12 @@ class TestPromoteCompletedEngineState:
         assert _promote_completed_engine_state(project_root, wt_path) is None
 
     def test_skips_missing_flow_id(self, tmp_path: Path) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
 
         project_root = tmp_path / "main"
         project_root.mkdir()
         wt_path = tmp_path / "wt"
-        state_dir = wt_path / "se3" / "state"
+        state_dir = wt_path / "tianluo" / "state"
         state_dir.mkdir(parents=True)
         (state_dir / "engine.json").write_text(
             json.dumps({"status": "completed"}), encoding="utf-8"
@@ -596,8 +596,8 @@ class TestPromoteCompletedEngineState:
         """``delete_merged_branches`` promotes the COMPLETED state, then deletes
         the worktree, recording the promotion in the report."""
         _init_repo(tmp_path)
-        # Gitignore se3/ so the worktree's engine.json does not count as dirty.
-        (tmp_path / ".gitignore").write_text("se3/\n")
+        # Gitignore tianluo/ so the worktree's engine.json does not count as dirty.
+        (tmp_path / ".gitignore").write_text("tianluo/\n")
         subprocess.run(
             ["git", "-C", str(tmp_path), "add", ".gitignore"],
             check=True, capture_output=True,
@@ -629,7 +629,7 @@ class TestPromoteCompletedEngineState:
         # Worktree is gone, but the promoted completed-state snapshot survives
         # in the MAIN project's archive.
         assert not wt_dir.exists()
-        archive = tmp_path / "se3" / "state" / "archive" / "engine_flow-xyz.json"
+        archive = tmp_path / "tianluo" / "state" / "archive" / "engine_flow-xyz.json"
         assert archive.exists()
         data = json.loads(archive.read_text(encoding="utf-8"))
         assert data["status"] == "completed"
@@ -645,14 +645,14 @@ class TestPromoteColdPartition:
     @staticmethod
     def _save_new_format_completed_flow(wt_path: Path) -> str:
         """Save a hot/cold split COMPLETED flow into *wt_path*'s state; return id."""
-        from se3.engine.models import (
+        from tianluo.engine.models import (
             FlowInstance,
             FlowStatus,
             Step,
             StepStatus,
             StepType,
         )
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.persistence import PersistenceManager
 
         flow = FlowInstance(
             task_description="worktree split-format flow",
@@ -673,8 +673,8 @@ class TestPromoteColdPartition:
         return flow.flow_id
 
     def test_promotes_cold_partition_with_header(self, tmp_path: Path) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.persistence import PersistenceManager
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -688,7 +688,7 @@ class TestPromoteColdPartition:
         # The cold partition (per-step inputs/outputs + _context.json) is copied
         # into the MAIN project's archive/steps/<flow_id>/, mirroring clear_state.
         archive_steps = (
-            project_root / "se3" / "state" / "archive" / "steps" / flow_id
+            project_root / "tianluo" / "state" / "archive" / "steps" / flow_id
         )
         assert archive_steps.is_dir()
         assert (archive_steps / "_context.json").exists()
@@ -711,8 +711,8 @@ class TestPromoteColdPartition:
     def test_cold_partition_collision_records_suffixed_partition(
         self, tmp_path: Path
     ) -> None:
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.persistence import PersistenceManager
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -720,7 +720,7 @@ class TestPromoteColdPartition:
         wt_path = tmp_path / "wt"
         wt_path.mkdir()
         flow_id = self._save_new_format_completed_flow(wt_path)
-        prior = project_root / "se3" / "state" / "archive" / "steps" / flow_id
+        prior = project_root / "tianluo" / "state" / "archive" / "steps" / flow_id
         prior.mkdir(parents=True)
         (prior / "sentinel.json").write_text("{}", encoding="utf-8")
 
@@ -735,7 +735,7 @@ class TestPromoteColdPartition:
         partition = data["state"]["cold_partition"]
         assert partition != flow_id and partition.startswith(flow_id)
         suffixed = (
-            project_root / "se3" / "state" / "archive" / "steps" / partition
+            project_root / "tianluo" / "state" / "archive" / "steps" / partition
         )
         assert suffixed.is_dir()
 
@@ -751,7 +751,7 @@ class TestPromoteColdPartition:
     ) -> None:
         """A legacy inline worktree engine.json promotes byte-for-byte with no
         cold partition (nothing to copy) — the pre-#244 behavior is preserved."""
-        from se3.engine.merge.cleanup import _promote_completed_engine_state
+        from tianluo.engine.merge.cleanup import _promote_completed_engine_state
 
         project_root = tmp_path / "main"
         project_root.mkdir()
@@ -762,7 +762,7 @@ class TestPromoteColdPartition:
         promoted = _promote_completed_engine_state(project_root, wt_path)
         assert promoted is not None
         assert not (
-            project_root / "se3" / "state" / "archive" / "steps"
+            project_root / "tianluo" / "state" / "archive" / "steps"
         ).exists()
 
 
@@ -770,7 +770,7 @@ class TestParseWorktreePorcelain:
     """Defect J1: porcelain parser rejects malformed blocks deterministically."""
 
     def test_parses_valid_record(self) -> None:
-        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+        from tianluo.engine.merge.cleanup import _parse_worktree_porcelain
 
         sample = (
             "worktree /path/to/wt\n"
@@ -786,7 +786,7 @@ class TestParseWorktreePorcelain:
         assert records[0].detached is False
 
     def test_parses_detached_record(self) -> None:
-        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+        from tianluo.engine.merge.cleanup import _parse_worktree_porcelain
 
         sample = (
             "worktree /path/to/wt\n"
@@ -807,7 +807,7 @@ class TestParseWorktreePorcelain:
         ever changes, we want a WARNING in the log so the test/operator
         notices instead of a silently mis-parsed record.
         """
-        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+        from tianluo.engine.merge.cleanup import _parse_worktree_porcelain
 
         sample = (
             "worktree /path/to/wt\n"
@@ -823,7 +823,7 @@ class TestParseWorktreePorcelain:
         )
 
     def test_parses_multiple_blocks_one_malformed(self, caplog) -> None:
-        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+        from tianluo.engine.merge.cleanup import _parse_worktree_porcelain
 
         sample = (
             "worktree /good\n"
@@ -847,7 +847,7 @@ class TestParseWorktreePorcelain:
 
     def test_handles_non_heads_ref(self) -> None:
         """A branch ref that is not under refs/heads is preserved verbatim."""
-        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+        from tianluo.engine.merge.cleanup import _parse_worktree_porcelain
 
         sample = (
             "worktree /path\n"
@@ -873,7 +873,7 @@ class TestCleanupLocaleIndependence:
 
     def test_run_git_locale_sets_lc_all_c(self, tmp_path: Path, monkeypatch) -> None:
         """``_run_git_locale`` invocations override LC_ALL to C."""
-        from se3.engine.merge import cleanup
+        from tianluo.engine.merge import cleanup
 
         captured_envs: list[dict] = []
 
@@ -904,7 +904,7 @@ class TestCleanupLocaleIndependence:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """Even when caller env has LANG=zh_CN.UTF-8, cleanup git runs LC_ALL=C."""
-        from se3.engine.merge import cleanup
+        from tianluo.engine.merge import cleanup
 
         # Simulate a localized parent environment.
         monkeypatch.setenv("LANG", "zh_CN.UTF-8")
@@ -972,7 +972,7 @@ class TestAncestorPreCheck:
             check=True, capture_output=True,
         )
 
-        from se3.engine.merge import cleanup as cleanup_mod
+        from tianluo.engine.merge import cleanup as cleanup_mod
 
         # Force the ancestor check to return None (cannot decide).
         monkeypatch.setattr(
@@ -1003,7 +1003,7 @@ class TestWorktreeRemoveFailureResilience:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """Branch is deleted via retry even when worktree removal fails."""
-        from se3.engine.merge import cleanup as cleanup_mod
+        from tianluo.engine.merge import cleanup as cleanup_mod
 
         _init_repo(tmp_path)
         default = _get_default_branch(tmp_path)
@@ -1110,7 +1110,7 @@ class TestWorktreeRemoveFailureResilience:
         Preserves the existing behaviour under defect J3 — the resilience
         addition only changes the case where the retry succeeds.
         """
-        from se3.engine.merge import cleanup as cleanup_mod
+        from tianluo.engine.merge import cleanup as cleanup_mod
 
         _init_repo(tmp_path)
         default = _get_default_branch(tmp_path)

@@ -20,13 +20,13 @@ import json
 import subprocess
 from pathlib import Path
 
-from se3.commands import run
-from se3.commands.merge_cmd import (
+from tianluo.commands import run
+from tianluo.commands.merge_cmd import (
     _backfill_resolved_source_issues,
     _map_branches_to_source_issues,
     run_merge,
 )
-from se3.engine.issue_manager import IssueManager, IssueStatus
+from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
 
 # --------------------------------------------------------------------------
@@ -66,12 +66,12 @@ def _write_worktree_engine_json(
     """Write a worktree engine.json under live or archived worktree state.
 
     Returns the engine.json path. ``archived`` places it under
-    ``se3/worktrees/.archive/<name>/...`` to mimic a GC'd / delete-merged run.
+    ``tianluo/worktrees/.archive/<name>/...`` to mimic a GC'd / delete-merged run.
     """
-    base = root / "se3" / "worktrees"
+    base = root / "tianluo" / "worktrees"
     if archived:
         base = base / ".archive"
-    state_dir = base / name / "se3" / "state"
+    state_dir = base / name / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     data = {
         "flow_id": name,
@@ -99,7 +99,7 @@ def _make_in_progress_issue(project_root: Path, description: str) -> str:
 
 def _make_report(**kwargs):
     """Build a successful MergeReport with sane defaults."""
-    from se3.engine.merge.orchestrator import MergeReport
+    from tianluo.engine.merge.orchestrator import MergeReport
 
     defaults = dict(
         success=True,
@@ -126,7 +126,7 @@ def _patch_merge(monkeypatch, report, captured):
         captured.append({"content": content, "title": title})
 
     monkeypatch.setattr(
-        "se3.commands.merge_cmd.render_text", capture_render_text,
+        "tianluo.commands.merge_cmd.render_text", capture_render_text,
     )
 
     class MockOrchestrator:
@@ -137,17 +137,17 @@ def _patch_merge(monkeypatch, report, captured):
             return report
 
     monkeypatch.setattr(
-        "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+        "tianluo.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
     )
     monkeypatch.setattr(
-        "se3.commands.merge_cmd._branch_exists",
+        "tianluo.commands.merge_cmd._branch_exists",
         lambda _root, _branch: True,
     )
     # Fake branch args + mocked orchestrator: stub the intent-scope scan so it
     # does not git-read a nonexistent ref (which now raises IntentReadError and
     # would flip run_merge to a non-zero exit before the backfill under test).
     monkeypatch.setattr(
-        "se3.engine.version_intent.intent_flow_ids_introduced",
+        "tianluo.engine.version_intent.intent_flow_ids_introduced",
         lambda *_a, **_k: set(),
     )
 
@@ -232,7 +232,7 @@ class TestFindWorktreeSourceIssueByBranch:
     def test_corrupt_engine_json_skipped(self, tmp_path):
         # A corrupt file must not raise; a valid sibling still resolves.
         bad = (
-            tmp_path / "se3" / "worktrees" / "wt-bad" / "se3" / "state"
+            tmp_path / "tianluo" / "worktrees" / "wt-bad" / "tianluo" / "state"
         )
         bad.mkdir(parents=True, exist_ok=True)
         (bad / "engine.json").write_text("{ not valid json")
@@ -284,7 +284,7 @@ class TestMapBranchesToSourceIssues:
         # Now the worktree is gone (post-merge cleanup); scanner would miss it.
         import shutil
 
-        shutil.rmtree(tmp_path / "se3" / "worktrees" / "wt-1")
+        shutil.rmtree(tmp_path / "tianluo" / "worktrees" / "wt-1")
         assert run.find_worktree_source_issue_by_branch(tmp_path, "feat-1") is None
 
         # But the pre-captured map still resolves the issue.
@@ -470,15 +470,15 @@ class TestRunMergeBackfill:
         # Force the stash-pop-incomplete recovery path: pretend the operator
         # had WIP, a stash was taken, and the post-merge pop did not finalize.
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._has_user_uncommitted_changes",
+            "tianluo.commands.merge_cmd._has_user_uncommitted_changes",
             lambda _root: True,
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._fast_stash_dirty",
+            "tianluo.commands.merge_cmd._fast_stash_dirty",
             lambda _root, _msgs: "se3-fast-stash-label",
         )
         monkeypatch.setattr(
-            "se3.commands.merge_cmd._fast_stash_pop",
+            "tianluo.commands.merge_cmd._fast_stash_pop",
             lambda _root, _label, _msgs: True,  # pop did NOT finalize
         )
 

@@ -1,4 +1,4 @@
-"""Tests for the daemon-side history reader (:mod:`se3.daemon.history`)."""
+"""Tests for the daemon-side history reader (:mod:`tianluo.daemon.history`)."""
 
 from __future__ import annotations
 
@@ -7,14 +7,14 @@ import os
 
 import pytest
 
-import se3.daemon.disk_json_cache as disk_cache
-from se3.daemon import history as history_mod
-from se3.daemon.history import (
+import tianluo.daemon.disk_json_cache as disk_cache
+from tianluo.daemon import history as history_mod
+from tianluo.daemon.history import (
     DaemonHistoryReader,
     SessionMeta,
     enumerate_historical_project_roots,
 )
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------
@@ -48,7 +48,7 @@ def _make_reader(*roots):
 
 def _write_engine(root, flow_id, status):
     """Write a minimal active ``engine.json`` for *flow_id* with *status*."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -63,7 +63,7 @@ def _write_engine(root, flow_id, status):
 def test_build_index_enumerates_all_sources(tmp_path):
     """build_index returns metadata for active, archived and history-only flows."""
     # Active flow (engine.json) — running, so it counts as active.
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -94,7 +94,7 @@ def test_build_index_enumerates_all_sources(tmp_path):
     )
 
     # History-only flow (no engine.json).
-    hist_dir = tmp_path / "se3" / "history" / "hist-1"
+    hist_dir = tmp_path / "tianluo" / "history" / "hist-1"
     _write_jsonl(hist_dir / "01_analyze.jsonl", [_msg("user", "explore")])
 
     metas = _make_reader(tmp_path).build_index()
@@ -108,7 +108,7 @@ def test_build_index_enumerates_all_sources(tmp_path):
 
 def test_build_index_distinguishes_active_flows(tmp_path):
     """A non-terminal engine.json flow is active; a completed one is not."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "f1", "status": "RUNNING"}), encoding="utf-8"
@@ -125,7 +125,7 @@ def test_build_index_distinguishes_active_flows(tmp_path):
 
 def test_history_only_flow_metadata_without_engine_json(tmp_path):
     """A history-only flow still yields best-effort metadata when engine.json is gone."""
-    hist_dir = tmp_path / "se3" / "history" / "orphan-1"
+    hist_dir = tmp_path / "tianluo" / "history" / "orphan-1"
     _write_jsonl(
         hist_dir / "01_analyze.jsonl",
         [_msg("user", "Task description:\n----\nrefactor auth\n----\n")],
@@ -146,13 +146,13 @@ def test_history_only_flow_metadata_without_engine_json(tmp_path):
 
 def test_build_index_dedups_by_flow_id(tmp_path):
     """A flow present in both engine.json and history/ appears once (active wins)."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "dup-1", "status": "RUNNING"}), encoding="utf-8"
     )
     _write_jsonl(
-        tmp_path / "se3" / "history" / "dup-1" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "dup-1" / "01_analyze.jsonl",
         [_msg("user", "hi")],
     )
     metas = _make_reader(tmp_path).build_index()
@@ -164,7 +164,7 @@ def test_promoted_worktree_completed_state_reported_as_completed(tmp_path):
     """G7: a promoted worktree COMPLETED engine.json in the main archive is
     reported as ``status=completed`` (not a bare ``history`` directory)."""
     main = tmp_path / "main"
-    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir = main / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_wt-flow.json").write_text(
         json.dumps(
@@ -179,7 +179,7 @@ def test_promoted_worktree_completed_state_reported_as_completed(tmp_path):
     )
     # Tier-A history sync also landed the flow's history directory in main.
     _write_jsonl(
-        main / "se3" / "history" / "wt-flow" / "01_analyze.jsonl",
+        main / "tianluo" / "history" / "wt-flow" / "01_analyze.jsonl",
         [_msg("user", "hi")],
     )
 
@@ -197,7 +197,7 @@ def test_promoted_completed_not_double_counted_with_worktree_active(tmp_path):
     promoted snapshot. It must collapse to a single completed entry and never be
     reported as active."""
     main = tmp_path / "main"
-    archive_dir = main / "se3" / "state" / "archive"
+    archive_dir = main / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_wt-flow.json").write_text(
         json.dumps(
@@ -210,7 +210,7 @@ def test_promoted_completed_not_double_counted_with_worktree_active(tmp_path):
         encoding="utf-8",
     )
     # The worktree (not yet deleted) still carries its own COMPLETED engine.json.
-    worktree = main / "se3" / "worktrees" / "wt-flow-sandbox"
+    worktree = main / "tianluo" / "worktrees" / "wt-flow-sandbox"
     _write_engine(worktree, "wt-flow", "completed")
 
     # The provider mirrors ``all_observable_roots`` during the window: the main
@@ -259,7 +259,7 @@ def test_build_index_carries_waiting_for_lock_on_active_flow(tmp_path):
     history index must carry waiting_for_lock so the web console can render the
     running·waiting-for-lock sub-state — even before any step jsonl exists.
     """
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -286,7 +286,7 @@ def test_archived_flow_never_waiting_for_lock(tmp_path):
     """A terminal/archived snapshot is never reported as waiting, even if the
     flag lingered in its persisted engine.json (defensive: waiting is only a
     live, active-flow sub-state)."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     archive_dir = state_dir / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_20260101_000000.json").write_text(
@@ -314,7 +314,7 @@ def test_archived_flow_never_waiting_for_lock(tmp_path):
 
 def test_read_flow_first_read_is_full(tmp_path):
     """The first read (no cursor) returns a full snapshot of every record."""
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(
         hist_dir / "01_analyze.jsonl",
         [_msg("user", "q1"), _msg("assistant", "a1")],
@@ -335,7 +335,7 @@ def test_read_flow_first_read_is_full(tmp_path):
 def test_read_flow_second_read_appends_only_new(tmp_path):
     """A read with a cursor returns only lines appended since the cursor."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1")])
 
     first = reader.read_flow("f1")
@@ -366,7 +366,7 @@ def test_read_flow_caps_records_and_advances_cursor(tmp_path, monkeypatch):
     """When records exceed the cap the read truncates and the cursor advances partially."""
     monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 2)
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", f"m{i}") for i in range(5)])
 
     first = reader.read_flow("f1")
@@ -384,7 +384,7 @@ def test_read_flow_caps_records_and_advances_cursor(tmp_path, monkeypatch):
 
 def test_read_flow_skips_malformed_lines(tmp_path):
     """Blank and unparseable lines are skipped without aborting the read."""
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     (hist_dir / "01_analyze.jsonl").write_text(
         json.dumps(_msg("user", "ok"))
@@ -406,13 +406,13 @@ def test_read_flow_skips_malformed_lines(tmp_path):
 
 def test_read_active_flows_only_returns_active(tmp_path):
     """read_active_flows reads incrementally for active flows only."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
     )
     _write_jsonl(
-        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "live" / "01_analyze.jsonl",
         [_msg("user", "q1")],
     )
     # An archived (terminal) flow must be ignored by read_active_flows.
@@ -422,7 +422,7 @@ def test_read_active_flows_only_returns_active(tmp_path):
         json.dumps({"flow_id": "done", "status": "completed"}), encoding="utf-8"
     )
     _write_jsonl(
-        tmp_path / "se3" / "history" / "done" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "done" / "01_analyze.jsonl",
         [_msg("user", "old")],
     )
 
@@ -443,7 +443,7 @@ def test_read_active_flows_multi_step_append_incremental_matches_full(tmp_path):
     """Running-flow incremental reads across multiple step files lose no line
     and duplicate no line: the union of every delta equals one full read."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", "a0"), _msg("assistant", "a1")])
 
@@ -486,7 +486,7 @@ def test_read_active_flows_paused_then_resumed_stays_active(tmp_path):
     """A flow that PAUSES (e.g. discovery clarification) and is later resumed
     stays in the active set and keeps streaming incrementally."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_discovery.jsonl"
     _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
 
@@ -515,7 +515,7 @@ def test_read_active_flows_new_step_file_included_with_cursor(tmp_path):
     """A step jsonl that appears after the first read is picked up whole on the
     next read, and its cursor is established without re-delivering old files."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "q1")])
     reader = _make_reader(tmp_path)
 
@@ -541,7 +541,7 @@ def test_read_active_flows_truncation_resumes_without_loss(tmp_path, monkeypatch
     remainder with no lost or duplicated line."""
     monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 2)
     _write_engine(tmp_path, "live", "RUNNING")
-    s1 = tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl"
+    s1 = tmp_path / "tianluo" / "history" / "live" / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", f"m{i}") for i in range(5)])
     reader = _make_reader(tmp_path)
 
@@ -559,7 +559,7 @@ def test_read_active_flows_flushes_tail_after_terminal_transition(tmp_path):
     """Records appended just before a flow goes terminal are flushed once via
     the active stream (not stranded until archival) and never duplicated."""
     _write_engine(tmp_path, "live", "RUNNING")
-    s1 = tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl"
+    s1 = tmp_path / "tianluo" / "history" / "live" / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", "q1")])
     reader = _make_reader(tmp_path)
 
@@ -605,7 +605,7 @@ def test_active_flow_signature_changes_on_jsonl_append(tmp_path):
     """An appended line and a brand-new step file each move the signature,
     even within the filesystem's mtime resolution (size is part of the token)."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", "q1")])
     reader = _make_reader(tmp_path)
@@ -631,7 +631,7 @@ def test_active_flow_signature_stable_when_nothing_changes(tmp_path):
     """Back-to-back signatures over an unchanged tree are equal (debounce)."""
     _write_engine(tmp_path, "live", "RUNNING")
     _write_jsonl(
-        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "live" / "01_analyze.jsonl",
         [_msg("user", "q1")],
     )
     reader = _make_reader(tmp_path)
@@ -672,7 +672,7 @@ def _write_engine_pinned(root, payload, mtime_ns):
     forces the same-``(mtime, size)`` collision a real coarse-mtime in-place
     rewrite produces.
     """
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     engine = state_dir / "engine.json"
     engine.write_text(json.dumps(payload), encoding="utf-8")
@@ -684,7 +684,7 @@ def test_active_engine_same_stat_inplace_rewrite_forces_reparse(tmp_path):
     """A same-``(mtime, size)`` in-place engine.json rewrite must not serve the
     stale parse: the whole-content hash forces a fresh decode so a completed→
     running flip (the DROP hazard) surfaces the *current* status."""
-    engine = tmp_path / "se3" / "state" / "engine.json"
+    engine = tmp_path / "tianluo" / "state" / "engine.json"
     mtime_ns = 1_700_000_000_000_000_000
 
     # ``RUNNING`` + 2-char nonce and ``completed`` + empty nonce serialise to the
@@ -713,7 +713,7 @@ def test_is_still_active_not_dropped_across_same_stat_pause_resume(tmp_path):
     and a pinned mtime, the active flow is never mis-DROPped and read_flow keeps
     advancing."""
     mtime_ns = 1_700_000_000_000_000_000
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_discovery.jsonl"
     _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
 
@@ -824,13 +824,13 @@ def test_each_terminal_step_event_arrives_via_incremental_read(
     """A terminal ``step_completed`` line appended to an active flow's per-step
     jsonl is surfaced by ``read_active_flows`` exactly once, with the cursor
     advancing so it is never re-pushed."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
     )
     step_id = f"01_{step_type}_abc"
-    jsonl = tmp_path / "se3" / "history" / "live" / f"{step_id}.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "live" / f"{step_id}.jsonl"
     _write_jsonl(jsonl, [_msg("assistant", "narrative", step_type=step_type)])
 
     reader = _make_reader(tmp_path)
@@ -868,13 +868,13 @@ def test_each_terminal_step_event_arrives_via_incremental_read(
 def test_step_failed_terminal_event_arrives_via_incremental_read(tmp_path):
     """A ``step_failed`` terminal line is surfaced incrementally just like
     ``step_completed`` and carries the error payload."""
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
     )
     step_id = "03_plan_def"
-    jsonl = tmp_path / "se3" / "history" / "live" / f"{step_id}.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "live" / f"{step_id}.jsonl"
     _write_jsonl(
         jsonl,
         [_step_event_line("step_failed", step_id, "plan", {"error": "boom"})],
@@ -898,7 +898,7 @@ def test_step_failed_terminal_event_arrives_via_incremental_read(tmp_path):
 
 def test_enumerate_returns_root_with_archive(tmp_path):
     """A project root containing an engine_*.json archive is included."""
-    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir = tmp_path / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_20260101_000000.json").write_text(
         json.dumps({"flow_id": "f1", "status": "completed"}),
@@ -910,8 +910,8 @@ def test_enumerate_returns_root_with_archive(tmp_path):
 
 
 def test_enumerate_returns_root_with_history(tmp_path):
-    """A project root containing se3/history/<flow>/ is included."""
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    """A project root containing tianluo/history/<flow>/ is included."""
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     (hist_dir / "01_analyze.jsonl").write_text("", encoding="utf-8")
 
@@ -931,7 +931,7 @@ def test_enumerate_extracts_project_root_field_from_archive(tmp_path):
     other_root = tmp_path / "other-project"
     other_root.mkdir()
 
-    archive_dir = tmp_path / "scanned" / "se3" / "state" / "archive"
+    archive_dir = tmp_path / "scanned" / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_20260101_000000.json").write_text(
         json.dumps(
@@ -954,7 +954,7 @@ def test_enumerate_extracts_project_root_field_from_history_meta(tmp_path):
     other_root = tmp_path / "another"
     other_root.mkdir()
 
-    hist_dir = tmp_path / "scanned" / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "scanned" / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     (hist_dir / "_meta.json").write_text(
         json.dumps({"project_root": str(other_root)}), encoding="utf-8"
@@ -966,7 +966,7 @@ def test_enumerate_extracts_project_root_field_from_history_meta(tmp_path):
 
 def test_enumerate_skips_stale_project_root_directories(tmp_path):
     """A project_root field pointing to a non-existent directory is dropped."""
-    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir = tmp_path / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_20260101_000000.json").write_text(
         json.dumps(
@@ -986,7 +986,7 @@ def test_enumerate_skips_stale_project_root_directories(tmp_path):
 
 def test_enumerate_tolerates_corrupt_json(tmp_path, caplog):
     """A corrupt JSON file logs a warning but does not abort enumeration."""
-    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir = tmp_path / "tianluo" / "state" / "archive"
     archive_dir.mkdir(parents=True)
     (archive_dir / "engine_corrupt.json").write_text(
         "{not valid json", encoding="utf-8"
@@ -996,7 +996,7 @@ def test_enumerate_tolerates_corrupt_json(tmp_path, caplog):
         json.dumps({"flow_id": "f1"}), encoding="utf-8"
     )
 
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         roots = enumerate_historical_project_roots([tmp_path])
 
     assert str(tmp_path.resolve()) in roots
@@ -1008,7 +1008,7 @@ def test_enumerate_dedups_and_sorts(tmp_path):
     a = tmp_path / "a"
     b = tmp_path / "b"
     for p in (a, b):
-        archive_dir = p / "se3" / "state" / "archive"
+        archive_dir = p / "tianluo" / "state" / "archive"
         archive_dir.mkdir(parents=True)
         (archive_dir / "engine_x.json").write_text(
             json.dumps({"flow_id": "f", "project_root": str(a)}),
@@ -1034,12 +1034,12 @@ def test_enumerate_warns_once_per_unreadable_file(tmp_path, caplog):
     # regardless of test ordering.
     history_mod._warned_unreadable_paths.clear()
 
-    flow_dir = tmp_path / "se3" / "history" / "flow-broken"
+    flow_dir = tmp_path / "tianluo" / "history" / "flow-broken"
     flow_dir.mkdir(parents=True)
     meta = flow_dir / "_meta.json"
     meta.write_text("{not valid json", encoding="utf-8")
 
-    with caplog.at_level("DEBUG", logger="se3.daemon.history"):
+    with caplog.at_level("DEBUG", logger="tianluo.daemon.history"):
         enumerate_historical_project_roots([tmp_path])
         enumerate_historical_project_roots([tmp_path])
         enumerate_historical_project_roots([tmp_path])
@@ -1064,13 +1064,13 @@ def test_enumerate_warns_once_per_distinct_file(tmp_path, caplog):
     """Each distinct corrupt file still gets its own first WARNING."""
     history_mod._warned_unreadable_paths.clear()
 
-    history_root = tmp_path / "se3" / "history"
+    history_root = tmp_path / "tianluo" / "history"
     for name in ("flow-a", "flow-b"):
         flow_dir = history_root / name
         flow_dir.mkdir(parents=True)
         (flow_dir / "_meta.json").write_text("{broken", encoding="utf-8")
 
-    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+    with caplog.at_level("WARNING", logger="tianluo.daemon.history"):
         enumerate_historical_project_roots([tmp_path])
 
     warned_files = {
@@ -1098,7 +1098,7 @@ def test_active_flow_signature_changes_when_result_record_appended(tmp_path):
     """Appending a record to a live flow's jsonl changes its signature so the
     daemon pushes the new result within one cycle (thinking -> folded)."""
     _write_engine(tmp_path, "live", "RUNNING")
-    jsonl = tmp_path / "se3" / "history" / "live" / "01_discovery.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "live" / "01_discovery.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1", step_type="discovery")])
 
     reader = _make_reader(tmp_path)
@@ -1121,7 +1121,7 @@ def test_active_flow_signature_changes_on_new_step_file(tmp_path):
     """A brand-new per-step jsonl (e.g. the step_completed report card file)
     also moves the signature forward."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     _write_jsonl(hist / "01_analyze.jsonl", [_msg("assistant", "a0")])
 
     reader = _make_reader(tmp_path)
@@ -1141,7 +1141,7 @@ def test_active_flow_signature_stable_without_changes(tmp_path):
     """No on-disk change -> identical signature (no spurious push)."""
     _write_engine(tmp_path, "live", "RUNNING")
     _write_jsonl(
-        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "live" / "01_analyze.jsonl",
         [_msg("assistant", "a0")],
     )
     reader = _make_reader(tmp_path)
@@ -1152,7 +1152,7 @@ def test_active_flow_signature_excludes_terminal_flow(tmp_path):
     """A completed flow has nothing left to stream and is excluded."""
     _write_engine(tmp_path, "done", "completed")
     _write_jsonl(
-        tmp_path / "se3" / "history" / "done" / "01_analyze.jsonl",
+        tmp_path / "tianluo" / "history" / "done" / "01_analyze.jsonl",
         [_msg("assistant", "a0")],
     )
     reader = _make_reader(tmp_path)
@@ -1164,7 +1164,7 @@ def test_active_flow_signature_tracks_status_flip(tmp_path):
     flip (around a discovery answer) is observed as a change."""
     _write_engine(tmp_path, "live", "PAUSED")
     _write_jsonl(
-        tmp_path / "se3" / "history" / "live" / "01_discovery.jsonl",
+        tmp_path / "tianluo" / "history" / "live" / "01_discovery.jsonl",
         [_msg("user", "q1", step_type="discovery")],
     )
     reader = _make_reader(tmp_path)
@@ -1197,7 +1197,7 @@ def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
     padding_line = json.dumps(_msg("assistant", "y" * 2000)).encode("utf-8")
     num_padding = 500  # ~1.2 MB total padding
 
-    flow_dir = tmp_path / "se3" / "history" / "big"
+    flow_dir = tmp_path / "tianluo" / "history" / "big"
     flow_dir.mkdir(parents=True)
     jsonl_path = flow_dir / "01_analyze.jsonl"
     with open(jsonl_path, "wb") as fh:
@@ -1234,7 +1234,7 @@ def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
 
     monkeypatch.setattr(builtins, "open", tracking_open)
 
-    from se3.daemon.history import _extract_history_summary
+    from tianluo.daemon.history import _extract_history_summary
 
     _extract_history_summary(flow_dir)
 
@@ -1247,7 +1247,7 @@ def test_extract_history_summary_reads_only_first_line(tmp_path, monkeypatch):
 
 def test_dir_signature_changes_on_file_modification(tmp_path):
     """_dir_signature changes when a file's content (size) changes."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1265,7 +1265,7 @@ def test_dir_signature_changes_on_file_modification(tmp_path):
 
 def test_dir_signature_changes_on_file_addition(tmp_path):
     """_dir_signature changes when a new file appears."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1281,7 +1281,7 @@ def test_dir_signature_changes_on_file_addition(tmp_path):
 
 def test_dir_signature_stable_when_unchanged(tmp_path):
     """Back-to-back _dir_signature calls on an unchanged directory are equal."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     flow_dir = tmp_path / "flow"
     flow_dir.mkdir()
@@ -1297,12 +1297,12 @@ def test_meta_cache_skips_reparsing_unchanged_directories(tmp_path, monkeypatch)
     re-call _extract_history_summary (call-count assertion)."""
     # Three history-only directories, no _meta.json.
     for name in ("flow-a", "flow-b", "flow-c"):
-        hist = tmp_path / "se3" / "history" / name
+        hist = tmp_path / "tianluo" / "history" / name
         _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1327,14 +1327,14 @@ def test_meta_cache_skips_reparsing_unchanged_directories(tmp_path, monkeypatch)
 
 def test_meta_cache_reparse_on_directory_change(tmp_path, monkeypatch):
     """When a directory's content changes, that directory is re-parsed."""
-    hist_a = tmp_path / "se3" / "history" / "flow-a"
-    hist_b = tmp_path / "se3" / "history" / "flow-b"
+    hist_a = tmp_path / "tianluo" / "history" / "flow-a"
+    hist_b = tmp_path / "tianluo" / "history" / "flow-b"
     _write_jsonl(hist_a / "01_analyze.jsonl", [_msg("user", "task a")])
     _write_jsonl(hist_b / "01_analyze.jsonl", [_msg("user", "task b")])
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1362,7 +1362,7 @@ def test_meta_cache_equivalence(tmp_path):
     """Cached and uncached paths produce SessionMeta objects that are
     field-for-field equal."""
     for name in ("flow-a", "flow-b"):
-        hist = tmp_path / "se3" / "history" / name
+        hist = tmp_path / "tianluo" / "history" / name
         _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
         (hist / "_meta.json").write_text(
             json.dumps({"created_at": "2026-06-01T00:00:00", "type": "feature"}),
@@ -1385,7 +1385,7 @@ def test_meta_cache_equivalence(tmp_path):
 def test_meta_cache_no_disk_writes(tmp_path):
     """_meta_from_history never writes _meta.json or any other file to the
     flow directory (daemon does not backfill project directories)."""
-    hist = tmp_path / "se3" / "history" / "flow-1"
+    hist = tmp_path / "tianluo" / "history" / "flow-1"
     _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
 
     reader = _make_reader(tmp_path)
@@ -1402,13 +1402,13 @@ def test_meta_cache_survives_invalidate_index_cache(tmp_path):
     """invalidate_index_cache drops the TTL cache but NOT the per-directory
     meta cache, so the next _build_index_fresh still benefits from cached
     directory signatures."""
-    hist = tmp_path / "se3" / "history" / "flow-1"
+    hist = tmp_path / "tianluo" / "history" / "flow-1"
     _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "task")])
 
     reader = _make_reader(tmp_path)
     reader._build_index_fresh()  # populate both caches
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1434,12 +1434,12 @@ def test_meta_cache_after_invalidate_skips_reparsing(tmp_path, monkeypatch):
     """After invalidate_index_cache, _build_index_fresh still skips re-parsing
     unchanged directories thanks to the per-directory signature cache."""
     for name in ("flow-a", "flow-b"):
-        hist = tmp_path / "se3" / "history" / name
+        hist = tmp_path / "tianluo" / "history" / name
         _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", f"task {name}")])
 
     reader = _make_reader(tmp_path)
 
-    import se3.daemon.history as hmod
+    import tianluo.daemon.history as hmod
     real_extract = hmod._extract_history_summary
     call_count = 0
 
@@ -1558,7 +1558,7 @@ def test_read_flow_incremental_reads_only_new_bytes(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "open", tracking_open)
 
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
 
     # Write a large initial batch: 100 records.
     initial_records = [_msg("user", f"msg{i}") for i in range(100)]
@@ -1605,7 +1605,7 @@ def test_read_flow_incremental_records_match_full(tmp_path):
     """The union of incremental reads equals a single full read (content
     equivalence, not byte-level identity)."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1"), _msg("assistant", "a1")])
 
     # Full read (reference).
@@ -1634,7 +1634,7 @@ def test_read_flow_incremental_records_match_full(tmp_path):
 def test_read_flow_incremental_new_jsonl_file(tmp_path):
     """A new step jsonl file that appears between reads is picked up whole."""
     reader = _make_reader(tmp_path)
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "q1")])
 
     first = reader.read_flow("f1")
@@ -1659,7 +1659,7 @@ def test_read_flow_incremental_new_jsonl_file(tmp_path):
 def test_read_flow_incremental_bad_json_skipped(tmp_path):
     """Bad JSON lines and empty lines are skipped without aborting."""
     reader = _make_reader(tmp_path)
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     hist.mkdir(parents=True)
     jsonl = hist / "01_analyze.jsonl"
 
@@ -1686,7 +1686,7 @@ def test_read_flow_incremental_partial_line_not_consumed(tmp_path):
     """A partial line (no trailing newline) is not consumed and left for the
     next round.  Once completed with a newline it is picked up."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
 
     # Write initial content.
     _write_jsonl(jsonl, [_msg("user", "q1")])
@@ -1716,7 +1716,7 @@ def test_read_flow_incremental_file_truncation_fallback(tmp_path):
     """When a file shrinks (truncation/replacement), a full read is performed
     instead of seeking past the old offset."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
 
     # Write initial content.
     _write_jsonl(jsonl, [_msg("user", "q1"), _msg("assistant", "a1")])
@@ -1744,7 +1744,7 @@ def test_read_flow_incremental_file_replace_full_reset(tmp_path):
     """When a file is completely replaced (new inode / different content), the
     offset table resets to a full read."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
 
     _write_jsonl(jsonl, [_msg("user", "old1"), _msg("user", "old2")])
     first = reader.read_flow("f1")
@@ -1773,7 +1773,7 @@ def test_read_flow_truncation_offset_table_consistency(tmp_path, monkeypatch):
     continues from there."""
     monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 3)
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", f"m{i}") for i in range(7)])
 
     first = reader.read_flow("f1")
@@ -1817,13 +1817,13 @@ def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
     ``BOUNDARY_SIGNATURE_BYTES``) fingerprint, which is what keeps the idle
     re-read off the full-file path while staying rewrite-safe."""
     import builtins
-    from se3.daemon import history as history_mod
+    from tianluo.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
 
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1")])
 
     first = reader.read_flow("f1")
@@ -1849,7 +1849,7 @@ def test_read_flow_incremental_multi_step_deltas(tmp_path):
     """Incremental reads across multiple step files produce the same content
     as a full read of the final state."""
     reader = _make_reader(tmp_path)
-    hist = tmp_path / "se3" / "history" / "f1"
+    hist = tmp_path / "tianluo" / "history" / "f1"
     s1 = hist / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", "a0"), _msg("assistant", "a1")])
 
@@ -1893,7 +1893,7 @@ def test_read_flow_incremental_active_flow_simulation(tmp_path):
     """Simulates the daemon's active-flow push loop: full read, then repeated
     incremental reads as records are appended, verifying no loss/duplication."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_discovery.jsonl"
     _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
 
@@ -1931,7 +1931,7 @@ def test_read_flow_incremental_empty_lines_between_records(tmp_path):
     """Empty lines (common in multi-process writes) don't break incremental
     reads and don't inflate the cursor."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1")])
 
     first = reader.read_flow("f1")
@@ -1966,13 +1966,13 @@ def test_read_flow_incremental_large_file_small_delta(tmp_path, monkeypatch):
     the ``~new-bytes`` a bounded-window detector implied — that very implication
     is what let a middle-of-prefix retry rewrite slip through."""
     import builtins
-    from se3.daemon import history as history_mod
+    from tianluo.daemon import history as history_mod
 
     tracking_open, get_bytes = _tracking_open_factory()
     monkeypatch.setattr(builtins, "open", tracking_open)
 
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     initial = [_msg("user", f"msg{i:04d}") for i in range(1000)]
     _write_jsonl(jsonl, initial)
     full_size = jsonl.stat().st_size
@@ -2010,7 +2010,7 @@ def test_read_flow_incremental_bad_lines_in_delta(tmp_path):
     """Bad JSON lines in the appended portion are skipped and don't corrupt
     the offset table."""
     reader = _make_reader(tmp_path)
-    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
     _write_jsonl(jsonl, [_msg("user", "q1")])
 
     first = reader.read_flow("f1")
@@ -2039,7 +2039,7 @@ def test_read_flow_incremental_read_active_flows_equivalence(tmp_path):
     """read_active_flows with incremental read_flow produces the same content
     as a sequence of full reads for the same flow."""
     _write_engine(tmp_path, "live", "RUNNING")
-    hist = tmp_path / "se3" / "history" / "live"
+    hist = tmp_path / "tianluo" / "history" / "live"
     s1 = hist / "01_analyze.jsonl"
     _write_jsonl(s1, [_msg("user", "q1")])
 
@@ -2073,8 +2073,8 @@ def test_read_flow_incremental_read_active_flows_equivalence(tmp_path):
 
 def _make_worktree_run(main_root, *, wt_name, flow_id, status="RUNNING"):
     """Create a ``se3 run --worktree`` isolation subdir under *main_root*."""
-    wt_root = main_root / "se3" / "worktrees" / wt_name
-    state_dir = wt_root / "se3" / "state"
+    wt_root = main_root / "tianluo" / "worktrees" / wt_name
+    state_dir = wt_root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -2091,7 +2091,7 @@ def _make_worktree_run(main_root, *, wt_name, flow_id, status="RUNNING"):
         encoding="utf-8",
     )
     _write_jsonl(
-        wt_root / "se3" / "history" / flow_id / "01_implement_abc.jsonl",
+        wt_root / "tianluo" / "history" / flow_id / "01_implement_abc.jsonl",
         [_msg("user", "go", step_type="implement")],
     )
     return wt_root
@@ -2105,7 +2105,7 @@ def test_history_reader_indexes_active_worktree_run(tmp_path):
     subdirs. The worktree flow must therefore appear in build_index and in the
     active-flow signature during its flow body, not only after the merge.
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
@@ -2138,7 +2138,7 @@ def test_read_active_flows_includes_waiting_flow_with_no_step_records(tmp_path):
     dropped — it stays RUNNING and the daemon must keep reporting it so the web
     console shows the running·waiting-for-lock state instead of "已发布".
     """
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -2146,7 +2146,7 @@ def test_read_active_flows_includes_waiting_flow_with_no_step_records(tmp_path):
         ),
         encoding="utf-8",
     )
-    # Deliberately NO se3/history/queued/*.jsonl — zero step records.
+    # Deliberately NO tianluo/history/queued/*.jsonl — zero step records.
 
     reader = _make_reader(tmp_path)
     reads = reader.read_active_flows({})
@@ -2167,7 +2167,7 @@ def test_full_read_consumes_complete_no_newline_tail(tmp_path):
     ``\\n``.  Such a tail MUST be read (it is complete), not mistaken for a
     mid-write partial.
     """
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     jsonl = hist_dir / "01_discovery_ab.jsonl"
     user_line = json.dumps(_msg("user", "the task", step_type="discovery"))
@@ -2196,7 +2196,7 @@ def test_full_read_does_not_consume_truncated_trailing_line(tmp_path):
     complete records before it must read fine, the truncated tail must be left,
     and once it is completed it must be picked up with no loss.
     """
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     jsonl = hist_dir / "01_discovery_ab.jsonl"
     user_line = json.dumps(_msg("user", "the task", step_type="discovery"))
@@ -2235,7 +2235,7 @@ def test_full_read_truncated_tail_then_full_reread_recovers(tmp_path):
     also takes the full-read branch (with the line now complete).  The first
     assistant body must be present and non-empty.
     """
-    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir = tmp_path / "tianluo" / "history" / "f1"
     hist_dir.mkdir(parents=True)
     jsonl = hist_dir / "01_discovery_ab.jsonl"
     user_line = json.dumps(_msg("user", "task", step_type="discovery"))
@@ -2263,7 +2263,7 @@ def test_full_read_truncated_tail_then_full_reread_recovers(tmp_path):
 def test_final_flush_uses_flow_project_root_across_multiple_roots(tmp_path):
     """The final-flush pass scopes ``read_flow`` to the flow's own root.
 
-    With two tracked roots that both happen to contain a ``se3/history/wt``
+    With two tracked roots that both happen to contain a ``tianluo/history/wt``
     directory, the final flush of a terminal flow must read the root the index
     attributes the flow to (root A), not whichever root a bare all-roots scan
     happens to hit first.
@@ -2273,7 +2273,7 @@ def test_final_flush_uses_flow_project_root_across_multiple_roots(tmp_path):
 
     # Root A: archived (terminal) flow "wt" whose meta records project_root=A,
     # plus its real history with a tail appended after the first read.
-    a_archive = root_a / "se3" / "state" / "archive"
+    a_archive = root_a / "tianluo" / "state" / "archive"
     a_archive.mkdir(parents=True)
     (a_archive / "engine_wt.json").write_text(
         json.dumps(
@@ -2281,11 +2281,11 @@ def test_final_flush_uses_flow_project_root_across_multiple_roots(tmp_path):
         ),
         encoding="utf-8",
     )
-    a_hist = root_a / "se3" / "history" / "wt"
+    a_hist = root_a / "tianluo" / "history" / "wt"
     _write_jsonl(a_hist / "01_discovery_ab.jsonl", [_msg("user", "A-task", step_type="discovery")])
 
     # Root B: a decoy history dir for the SAME flow id with different content.
-    b_hist = root_b / "se3" / "history" / "wt"
+    b_hist = root_b / "tianluo" / "history" / "wt"
     _write_jsonl(b_hist / "01_discovery_ab.jsonl", [_msg("user", "B-DECOY", step_type="discovery")])
 
     reader = _make_reader(root_a, root_b)
@@ -2316,7 +2316,7 @@ def test_final_flush_unknown_flow_falls_back_to_all_roots(tmp_path):
     every tracked root — the pre-fix fallback, preserved.
     """
     root_a = tmp_path / "A"
-    (root_a / "se3" / "state").mkdir(parents=True)
+    (root_a / "tianluo" / "state").mkdir(parents=True)
     reader = _make_reader(root_a)
 
     # A stale cursor for a flow that exists nowhere on disk and is not indexed:
@@ -2345,8 +2345,8 @@ def _make_eager_worktree(main_root, *, wt_name, flow_id, status="INIT"):
     Models the run command's eager save: ``is_worktree_mode`` engine.json is on
     disk at status INIT before any discovery record is written.
     """
-    wt_root = main_root / "se3" / "worktrees" / wt_name
-    state_dir = wt_root / "se3" / "state"
+    wt_root = main_root / "tianluo" / "worktrees" / wt_name
+    state_dir = wt_root / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -2372,7 +2372,7 @@ def test_active_worktree_run_root_admitted_at_init_engine_json(tmp_path):
     """
     import os
 
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
@@ -2395,14 +2395,14 @@ def test_worktree_first_reply_read_live_then_increments(tmp_path):
     complete-but-unterminated first record in full and keep appending — the
     end-to-end fix for "first body empty, then nothing further".
     """
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
     wt_root = _make_eager_worktree(main_root, wt_name="feat-x", flow_id="wt-1")
 
     # Discovery's first record flushed without a trailing newline (complete).
-    hist = wt_root / "se3" / "history" / "wt-1" / "01_discovery_ab.jsonl"
+    hist = wt_root / "tianluo" / "history" / "wt-1" / "01_discovery_ab.jsonl"
     hist.parent.mkdir(parents=True)
     hist.write_text(
         json.dumps(_msg("assistant", "thinking… and result", step_type="discovery")),
@@ -2434,18 +2434,18 @@ def test_worktree_first_reply_read_live_then_increments(tmp_path):
 def test_dag_isolation_worktree_excluded_from_observable(tmp_path):
     """A DAG-isolation worktree (no is_worktree_mode) is never observed.
 
-    It shares the ``se3/worktrees/`` parent but writes no top-level
+    It shares the ``tianluo/worktrees/`` parent but writes no top-level
     ``is_worktree_mode`` record, so the strict gate keeps it out — confirming the
     eager-save fix did not loosen the gate and regress Bug2.
     """
     import os
 
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     main_root = tmp_path / "proj"
     main_root.mkdir()
-    wt_root = main_root / "se3" / "worktrees" / "impl-dag"
-    state_dir = wt_root / "se3" / "state"
+    wt_root = main_root / "tianluo" / "worktrees" / "impl-dag"
+    state_dir = wt_root / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "dag-flow", "status": "RUNNING"}),

@@ -1,7 +1,7 @@
-"""i18n routing for user-visible ``se3 run`` console text (src/se3/commands/run.py).
+"""i18n routing for user-visible ``se3 run`` console text (src/tianluo/commands/run.py).
 
 These assert that run.py's migrated prompts/status text render through the
-``se3.i18n`` catalog — the en-US reference and the zh-CN translation — rather
+``tianluo.i18n`` catalog — the en-US reference and the zh-CN translation — rather
 than a hardcoded English literal. The suite-wide autouse fixture pins the
 language to en-US; each language case flips it explicitly via ``set_language``
 (which overrides the resolution chain) and the fixture resets afterwards.
@@ -13,8 +13,8 @@ import builtins
 
 import pytest
 
-from se3 import i18n
-from se3.commands import run
+from tianluo import i18n
+from tianluo.commands import run
 
 
 class TestPromptUserChoiceNonInteractive:
@@ -46,9 +46,9 @@ class TestResumePickerEmpty:
     """``handle_resume_interactive`` localizes the "no flows" notice."""
 
     def _capture(self, tmp_path, lang):
-        # run.py's get_console() is re-exported from se3.engine.display, so its
+        # run.py's get_console() is re-exported from tianluo.engine.display, so its
         # console is the display module-level one — swap that to capture output.
-        from se3.engine import display
+        from tianluo.engine import display
 
         import io
 
@@ -76,7 +76,7 @@ class TestResumePickerEmpty:
 
 def test_unknown_run_key_falls_back_to_en_us():
     """A run key absent from zh-CN renders the en-US reference, never the raw key."""
-    from se3.i18n.loader import load_catalog
+    from tianluo.i18n.loader import load_catalog
 
     i18n.set_language("zh-CN")
     # Every run key ships in both catalogs today; assert the fallback machinery

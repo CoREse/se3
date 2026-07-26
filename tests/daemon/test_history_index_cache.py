@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-import se3.daemon.disk_json_cache as djc
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
+import tianluo.daemon.disk_json_cache as djc
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import BUILD_INDEX_TTL, DaemonHistoryReader
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def _make_client(**kw) -> DaemonClient:
 
 
 def _write_active_flow(root: Path, flow_id: str) -> None:
-    state = root / "se3" / "state"
+    state = root / "tianluo" / "state"
     state.mkdir(parents=True, exist_ok=True)
     (state / "engine.json").write_text(
         json.dumps(
@@ -72,7 +72,7 @@ def _write_active_flow(root: Path, flow_id: str) -> None:
         ),
         encoding="utf-8",
     )
-    hist = root / "se3" / "history" / flow_id
+    hist = root / "tianluo" / "history" / flow_id
     hist.mkdir(parents=True, exist_ok=True)
     (hist / "01_discovery_ab12.jsonl").write_text(
         json.dumps({"type": "message", "content": "hello"}) + "\n",
@@ -165,7 +165,7 @@ def test_new_history_only_flow_rebuilds_without_explicit_invalidate(
     reader.build_index()
     assert counter["n"] == 1
 
-    hist = tmp_path / "se3" / "history" / "flow-hist-only"
+    hist = tmp_path / "tianluo" / "history" / "flow-hist-only"
     hist.mkdir(parents=True)
     (hist / "01_discovery_ab12.jsonl").write_text(
         json.dumps({"type": "message", "content": "hi"}) + "\n",
@@ -191,7 +191,7 @@ def test_archived_engine_json_rebuilds_via_source_token(
     assert reader.build_index()[0].source == "active"
     assert counter["n"] == 1
 
-    state = tmp_path / "se3" / "state"
+    state = tmp_path / "tianluo" / "state"
     archive = state / "archive"
     archive.mkdir(parents=True)
     (state / "engine.json").rename(archive / "engine_20260717.json")
@@ -254,7 +254,7 @@ def test_push_loop_disk_change_rebuilds_next_tick(tmp_path, monkeypatch) -> None
 
     # A jsonl append moves active_flow_signature → the next tick must
     # invalidate + rebuild rather than serve the (well within TTL) cache.
-    jsonl = tmp_path / "se3" / "history" / "flow-a" / "01_discovery_ab12.jsonl"
+    jsonl = tmp_path / "tianluo" / "history" / "flow-a" / "01_discovery_ab12.jsonl"
     with open(jsonl, "a", encoding="utf-8") as fh:
         fh.write(json.dumps({"type": "message", "content": "more"}) + "\n")
 

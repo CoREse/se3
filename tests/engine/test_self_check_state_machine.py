@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -21,7 +21,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestSelfCheckTransitionToNext:
@@ -29,7 +29,7 @@ class TestSelfCheckTransitionToNext:
 
     @pytest.fixture
     def state_machine(self, tmp_path):
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     def _make_flow_with_self_check(self, status=StepStatus.REVISION_NEEDED):
@@ -157,7 +157,7 @@ class TestTransitionToFixFromSelfCheck:
 
     @pytest.fixture
     def state_machine(self, tmp_path):
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             return StateMachine(project_root=tmp_path)
 
     def test_fix_history_records_self_check_trigger(self, state_machine):
@@ -388,7 +388,7 @@ class TestStepSequencesIncludeSelfCheck:
     """Test that the correct step sequences include SELF_CHECK."""
 
     def test_feature_includes_self_check(self):
-        from se3.engine.models import get_default_step_sequence
+        from tianluo.engine.models import get_default_step_sequence
         seq = get_default_step_sequence("feature")
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
@@ -397,7 +397,7 @@ class TestStepSequencesIncludeSelfCheck:
         assert test_idx < sc_idx < ic_idx
 
     def test_bugfix_includes_self_check(self):
-        from se3.engine.models import get_default_step_sequence
+        from tianluo.engine.models import get_default_step_sequence
         seq = get_default_step_sequence("bugfix")
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
@@ -406,7 +406,7 @@ class TestStepSequencesIncludeSelfCheck:
         assert test_idx < sc_idx < ic_idx
 
     def test_discovery_includes_self_check(self):
-        from se3.engine.models import get_default_step_sequence
+        from tianluo.engine.models import get_default_step_sequence
         seq = get_default_step_sequence("discovery")
         assert StepType.SELF_CHECK in seq
         test_idx = seq.index(StepType.TEST)
@@ -415,12 +415,12 @@ class TestStepSequencesIncludeSelfCheck:
         assert test_idx < sc_idx < ic_idx
 
     def test_small_excludes_self_check(self):
-        from se3.engine.models import get_default_step_sequence
+        from tianluo.engine.models import get_default_step_sequence
         seq = get_default_step_sequence("small")
         assert StepType.SELF_CHECK not in seq
 
     def test_directive_excludes_self_check(self):
-        from se3.engine.models import get_default_step_sequence
+        from tianluo.engine.models import get_default_step_sequence
         seq = get_default_step_sequence("directive")
         assert StepType.SELF_CHECK not in seq
 
@@ -429,13 +429,13 @@ class TestSelfCheckHandlerRegistration:
     """Test that self_check_handler is properly registered."""
 
     def test_handler_in_step_handlers(self):
-        from se3.engine.steps import STEP_HANDLERS
+        from tianluo.engine.steps import STEP_HANDLERS
         assert StepType.SELF_CHECK in STEP_HANDLERS
 
     def test_handler_in_all(self):
-        from se3.engine.steps import __all__
+        from tianluo.engine.steps import __all__
         assert "self_check_handler" in __all__
 
     def test_handler_is_callable(self):
-        from se3.engine.steps import STEP_HANDLERS
+        from tianluo.engine.steps import STEP_HANDLERS
         assert callable(STEP_HANDLERS[StepType.SELF_CHECK])

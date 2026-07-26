@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.protocol import (
+from tianluo.daemon import protocol
+from tianluo.daemon.protocol import (
     MSG_PING,
     MSG_PROJECT_COMMAND,
     MSG_PROJECT_RESULT,

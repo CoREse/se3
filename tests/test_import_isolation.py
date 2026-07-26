@@ -12,23 +12,38 @@ imported by the pytest session do not mask a leaked import.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 
 import pytest
+
+# The worktree's src/ must be importable in the fresh subprocesses these
+# tests spawn: pytest's `pythonpath = ["src"]` applies only to the test
+# session itself, and relying on an *installed* distribution would silently
+# test stale code (or, post-rename, no `tianluo` at all).
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+
+
+def _subprocess_env() -> dict:
+    env = os.environ.copy()
+    existing = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = _SRC_DIR + (os.pathsep + existing if existing else "")
+    return env
 
 # Core modules that a core-only install MUST be able to import without the
 # server extra present.
 CORE_MODULES = [
     "se3",
-    "se3.cli",
-    "se3.commands",
-    "se3.commands.run",
-    "se3.engine",
-    "se3.engine.state_machine",
-    "se3.daemon",
-    "se3.daemon.daemon",
+    "tianluo.cli",
+    "tianluo.commands",
+    "tianluo.commands.run",
+    "tianluo.engine",
+    "tianluo.engine.state_machine",
+    "tianluo.daemon",
+    "tianluo.daemon.daemon",
 ]
 
 # `se3` command-family subcommands whose `--help` must not trigger a server
@@ -42,6 +57,7 @@ def _run_python(code: str) -> subprocess.CompletedProcess:
         [sys.executable, "-c", textwrap.dedent(code)],
         capture_output=True,
         text=True,
+        env=_subprocess_env(),
     )
 
 
@@ -66,14 +82,14 @@ def test_core_modules_import_without_server_modules_leaking() -> None:
 
 
 def test_importing_se3_does_not_import_server_package() -> None:
-    """`import se3` (and the CLI) must not import the `se3.server` package."""
+    """`import tianluo` (and the CLI) must not import the `tianluo.server` package."""
     code = """
         import sys
-        import se3
-        import se3.cli  # building the Typer command tree
-        leaked = [m for m in sys.modules if m == "se3.server"
-                  or m.startswith("se3.server.")]
-        assert not leaked, "se3.server leaked into core import: " + repr(leaked)
+        import tianluo
+        import tianluo.cli  # building the Typer command tree
+        leaked = [m for m in sys.modules if m == "tianluo.server"
+                  or m.startswith("tianluo.server.")]
+        assert not leaked, "tianluo.server leaked into core import: " + repr(leaked)
         print("OK")
     """
     proc = _run_python(code)
@@ -85,9 +101,10 @@ def test_importing_se3_does_not_import_server_package() -> None:
 def test_core_command_help_has_no_import_error(command: str) -> None:
     """`se3 <command> --help` must succeed and never load the server extra."""
     proc = subprocess.run(
-        [sys.executable, "-m", "se3.cli", command, "--help"],
+        [sys.executable, "-m", "tianluo.cli", command, "--help"],
         capture_output=True,
         text=True,
+        env=_subprocess_env(),
     )
     assert proc.returncode == 0, (
         f"`se3 {command} --help` failed: "
@@ -112,7 +129,7 @@ def test_se3_server_reports_clear_hint_when_extra_missing() -> None:
             return _real_import(name, *args, **kwargs)
 
         builtins.__import__ = _blocked
-        from se3.server import main
+        from tianluo.server import main
         try:
             main([])
         except SystemExit as exc:
@@ -122,6 +139,6 @@ def test_se3_server_reports_clear_hint_when_extra_missing() -> None:
     # The friendly hint goes to stderr; exit code is non-zero (1).
     assert "EXITCODE 1" in proc.stdout, f"stdout={proc.stdout}\nstderr={proc.stderr}"
     assert "pip install" in proc.stderr
-    assert "se3[server]" in proc.stderr
+    assert "tianluo[server]" in proc.stderr
     # No raw traceback should reach the user.
     assert "Traceback (most recent call last)" not in proc.stderr

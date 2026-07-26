@@ -29,8 +29,8 @@ from pathlib import Path
 
 import pytest
 
-import se3.engine.merge.version_aggregator as vagg
-from se3.engine.merge.version_aggregator import (
+import tianluo.engine.merge.version_aggregator as vagg
+from tianluo.engine.merge.version_aggregator import (
     AggregateResult,
     VersionNotAdvanced,
     _atomic_write_text,
@@ -38,7 +38,7 @@ from se3.engine.merge.version_aggregator import (
     _safe_write_version,
     aggregate_and_apply,
 )
-from se3.engine.version_bumper import BumpType
+from tianluo.engine.version_bumper import BumpType
 
 
 # ---------- helpers ---------- #

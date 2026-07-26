@@ -23,8 +23,8 @@ import json
 import logging
 from unittest.mock import MagicMock, patch
 
-from se3.config import ImplementConfig
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.config import ImplementConfig
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ def _make_step_flow(tmp_path, groups):
     flow = FlowInstance(
         flow_id="test-flow-edge",
         task_description="test",
-        change_path=tmp_path / "se3",
+        change_path=tmp_path / "tianluo",
     )
     return step, flow
 
@@ -128,7 +128,7 @@ _SEQ_PARSED = {
     "restricted_edits": [],
 }
 
-_IMP = "se3.engine.steps.implement"
+_IMP = "tianluo.engine.steps.implement"
 
 
 # ---------------------------------------------------------------------------
@@ -142,7 +142,7 @@ class TestLinearChainDetectionExceptionPath:
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}._run_dag_parallel", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch(f"{_IMP}.transitive_reduce", side_effect=RuntimeError("boom"))
     @patch.object(
         ImplementConfig,
@@ -162,7 +162,7 @@ class TestLinearChainDetectionExceptionPath:
         """A linear chain that normally short-circuits still runs DAG when
         the linear detector blows up — exception branch is swallowed and
         ``want_dag`` stays True."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, LINEAR_GROUPS)
         result = implement_handler(step, flow)
@@ -184,7 +184,7 @@ class TestHasCommitsFalseFallsThroughToSequential:
     @patch(f"{_IMP}.LLMCaller")
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=False)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -204,7 +204,7 @@ class TestHasCommitsFalseFallsThroughToSequential:
         """Fork DAG + use_worktree=True + has_commits=False: DAG not called,
         falls through the ``if has_commits(...)`` guard into the sequential
         group-by-group loop."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
@@ -231,7 +231,7 @@ class TestSmallLocPathIgnoresUseWorktree:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -250,7 +250,7 @@ class TestSmallLocPathIgnoresUseWorktree:
         """Small total LOC + use_worktree=False: LOC-merge path wins before
         dispatch ever runs, so ``_run_single_llm_call`` is invoked once and
         ``_run_dag_parallel`` is not."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, SMALL_GROUPS)
         result = implement_handler(step, flow)
@@ -272,7 +272,7 @@ class TestSingleGroupNotEligibleForDag:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -290,7 +290,7 @@ class TestSingleGroupNotEligibleForDag:
     ):
         """Single group → ``_should_use_dag`` returns False (len(groups) < 2)
         so dispatch never considers DAG parallel even with use_worktree=True."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, SINGLE_GROUP)
         result = implement_handler(step, flow)
@@ -314,7 +314,7 @@ class TestDispatchLogMessages:
     @patch(f"{_IMP}.LLMCaller")
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -332,14 +332,14 @@ class TestDispatchLogMessages:
         tmp_path,
         caplog,
     ):
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
         mock_caller_cls.return_value = mock_caller
 
         step, flow = _make_step_flow(tmp_path, FORK_GROUPS)
-        with caplog.at_level(logging.INFO, logger="se3.engine.steps.implement"):
+        with caplog.at_level(logging.INFO, logger="tianluo.engine.steps.implement"):
             implement_handler(step, flow)
 
         assert any(
@@ -352,7 +352,7 @@ class TestDispatchLogMessages:
     @patch(f"{_IMP}.LLMCaller")
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch.object(
         ImplementConfig,
         "load",
@@ -370,14 +370,14 @@ class TestDispatchLogMessages:
         tmp_path,
         caplog,
     ):
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
         mock_caller_cls.return_value = mock_caller
 
         step, flow = _make_step_flow(tmp_path, LINEAR_GROUPS)
-        with caplog.at_level(logging.INFO, logger="se3.engine.steps.implement"):
+        with caplog.at_level(logging.INFO, logger="tianluo.engine.steps.implement"):
             implement_handler(step, flow)
 
         assert any(

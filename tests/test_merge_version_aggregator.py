@@ -5,9 +5,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from se3.engine.llm_caller import LLMCallError
-from se3.engine.merge.orchestrator import MergeOrchestrator
-from se3.engine.merge.version_aggregator import (
+from tianluo.engine.llm_caller import LLMCallError
+from tianluo.engine.merge.orchestrator import MergeOrchestrator
+from tianluo.engine.merge.version_aggregator import (
     AggregateResult,
     InferResult,
     _diff_bump,
@@ -18,7 +18,7 @@ from se3.engine.merge.version_aggregator import (
     max_bump,
     read_version_at_ref,
 )
-from se3.engine.version_bumper import BumpType
+from tianluo.engine.version_bumper import BumpType
 
 
 # ---------- Test repo helpers ---------- #
@@ -137,59 +137,59 @@ class TestDiffBump:
     """Direct tests for _diff_bump including prerelease / build metadata."""
 
     def test_major(self):
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("1.2.3")
         branch = Version.parse("2.0.0")
         assert _diff_bump(base, branch) == BumpType.MAJOR
 
     def test_minor(self):
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("1.2.3")
         branch = Version.parse("1.3.0")
         assert _diff_bump(base, branch) == BumpType.MINOR
 
     def test_patch(self):
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("1.2.3")
         branch = Version.parse("1.2.4")
         assert _diff_bump(base, branch) == BumpType.PATCH
 
     def test_no_change_returns_none(self):
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("1.2.3")
         branch = Version.parse("1.2.3")
         assert _diff_bump(base, branch) is None
 
     def test_backward_returns_none(self):
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("1.3.0")
         branch = Version.parse("1.2.3")
         assert _diff_bump(base, branch) is None
 
     def test_prerelease_to_release_returns_patch(self):
         """4.5.0-alpha -> 4.5.0 (release > prerelease per SemVer §11) = PATCH."""
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("4.5.0-alpha")
         branch = Version.parse("4.5.0")
         assert _diff_bump(base, branch) == BumpType.PATCH
 
     def test_release_to_prerelease_returns_none(self):
         """4.5.0 -> 4.5.0-alpha is a backward step in precedence."""
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("4.5.0")
         branch = Version.parse("4.5.0-alpha")
         assert _diff_bump(base, branch) is None
 
     def test_build_metadata_only_returns_none(self):
         """4.5.0 -> 4.5.0+build.42: build metadata ignored in precedence."""
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("4.5.0")
         branch = Version.parse("4.5.0+build.42")
         assert _diff_bump(base, branch) is None
 
     def test_prerelease_bump_with_numeric_change(self):
         """4.5.0-alpha -> 4.6.0: numeric minor change dominates."""
-        from se3.engine.version_bumper import Version
+        from tianluo.engine.version_bumper import Version
         base = Version.parse("4.5.0-alpha")
         branch = Version.parse("4.6.0")
         assert _diff_bump(base, branch) == BumpType.MINOR
@@ -551,7 +551,7 @@ class TestAggregateAndApply:
                     return sp.CompletedProcess(args=args, returncode=1, stdout="", stderr="amend rejected")
             return orig_run_git(project_root, *args, **kwargs)
 
-        import se3.engine.merge.version_aggregator as vagg
+        import tianluo.engine.merge.version_aggregator as vagg
         orig_run_git = vagg._run_git
         monkeypatch.setattr(vagg, "_run_git", fake_run_git)
 
@@ -581,7 +581,7 @@ class TestAggregateAndApply:
                 return sp.CompletedProcess(args=args, returncode=1, stdout="", stderr="index locked")
             return orig_run_git(project_root, *args, **kwargs)
 
-        import se3.engine.merge.version_aggregator as vagg
+        import tianluo.engine.merge.version_aggregator as vagg
         orig_run_git = vagg._run_git
         monkeypatch.setattr(vagg, "_run_git", fake_run_git)
 
@@ -610,7 +610,7 @@ class TestAggregateAndApply:
                 return sp.CompletedProcess(args=args, returncode=1, stdout="", stderr="index error")
             return orig_run_git(project_root, *args, **kwargs)
 
-        import se3.engine.merge.version_aggregator as vagg
+        import tianluo.engine.merge.version_aggregator as vagg
         orig_run_git = vagg._run_git
         monkeypatch.setattr(vagg, "_run_git", fake_run_git)
 
@@ -633,7 +633,7 @@ class TestAggregateAndApply:
                 raise subprocess.TimeoutExpired(cmd=["git", "add"], timeout=15)
             return orig_run_git(project_root, *args, **kwargs)
 
-        import se3.engine.merge.version_aggregator as vagg
+        import tianluo.engine.merge.version_aggregator as vagg
         orig_run_git = vagg._run_git
         monkeypatch.setattr(vagg, "_run_git", fake_run_git)
 
@@ -656,7 +656,7 @@ class TestAggregateAndApply:
                 raise subprocess.TimeoutExpired(cmd=["git", "commit", "--amend"], timeout=30)
             return orig_run_git(project_root, *args, **kwargs)
 
-        import se3.engine.merge.version_aggregator as vagg
+        import tianluo.engine.merge.version_aggregator as vagg
         orig_run_git = vagg._run_git
         monkeypatch.setattr(vagg, "_run_git", fake_run_git)
 
@@ -959,7 +959,7 @@ class TestOrchestratorVersionAggregation:
 
         # Mock LLM to return LOW confidence → HUMAN_CALL
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             return LLMResolution(
@@ -978,7 +978,7 @@ class TestOrchestratorVersionAggregation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
@@ -1013,7 +1013,7 @@ class TestOrchestratorVersionAggregation:
         # Mock the resolver to raise — ``safe`` strategy escalates to
         # human call (the new default ``fast`` does not).
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock")),
         )
 
@@ -1073,7 +1073,7 @@ class TestOrchestratorVersionAggregation:
 
         # Mock resolver to fail on conflict
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock")),
         )
 
@@ -1140,7 +1140,7 @@ class TestOrchestratorVersionAggregation:
             return None
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.infer_branch_bump",
+            "tianluo.engine.merge.orchestrator.infer_branch_bump",
             mock_infer,
         )
 
@@ -1166,7 +1166,7 @@ class TestOrchestratorVersionAggregation:
         _checkout(tmp_path, default_branch)
 
         # Mock _run_git so merge-base returns non-zero
-        import se3.engine.merge.orchestrator as orch_mod
+        import tianluo.engine.merge.orchestrator as orch_mod
         orig_run_git = orch_mod._run_git
 
         def fake_run_git(project_root, *args, **kwargs):
@@ -1236,7 +1236,7 @@ class TestOrchestratorVersionAggregation:
 
         # Mock conflict resolver to accept the pyproject resolution (keep ours)
         def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
+            from tianluo.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
             )
             files = []
@@ -1269,7 +1269,7 @@ class TestOrchestratorVersionAggregation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
         orch = MergeOrchestrator(project_root=tmp_path)
@@ -1314,7 +1314,7 @@ class TestAmendFalseOrchestratorPath:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        from se3.engine.version_bumper import BumpType as _BumpType
+        from tianluo.engine.version_bumper import BumpType as _BumpType
 
         result = aggregate_and_apply(
             tmp_path, [_BumpType.PATCH], "4.4.0", amend=False,
@@ -1380,8 +1380,8 @@ class TestAmendFalseOrchestratorPath:
 
         # Force a non-NONE bump so aggregation actually runs even
         # though the branch did not change pyproject.toml.
-        from se3.engine.merge import orchestrator as orch_mod
-        from se3.engine.merge.version_aggregator import (
+        from tianluo.engine.merge import orchestrator as orch_mod
+        from tianluo.engine.merge.version_aggregator import (
             InferResult as _InferResult,
         )
 
@@ -1443,8 +1443,8 @@ class TestAmendFalseOrchestratorPath:
             lambda self: True,
         )
 
-        from se3.engine.merge import orchestrator as orch_mod
-        from se3.engine.merge.version_aggregator import (
+        from tianluo.engine.merge import orchestrator as orch_mod
+        from tianluo.engine.merge.version_aggregator import (
             InferResult as _InferResult,
         )
 

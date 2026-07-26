@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
-import se3.config as _cfg
-from se3.config import load_agents, load_claude_commands
+import tianluo.config as _cfg
+from tianluo.config import load_agents, load_claude_commands
 
 
 def _which_claude_only():
@@ -22,7 +22,7 @@ def _which_claude_only():
     without this, results would vary with the host's installed agents.
     """
     return patch(
-        "se3.config.shutil.which",
+        "tianluo.config.shutil.which",
         side_effect=lambda cmd, *a, **k: (
             "/fake/bin/claude" if cmd == "claude" else None
         ),
@@ -51,7 +51,7 @@ class TestLoadAgents:
 
     def test_default_when_no_config(self, tmp_path):
         """Should return the available built-in agents when no config exists."""
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
         assert len(agents) == 1
         assert agents[0]["name"] == "claude"
@@ -61,14 +61,14 @@ class TestLoadAgents:
 
     def test_registry_with_explicit_defaults(self, tmp_path):
         """Parse registry + explicit llm_caller.defaults name list."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   main-claude: {cmd: claude, priority: 10}
   backup-claude: {cmd: kclaude, priority: 5}
 llm_caller:
   defaults: [main-claude, backup-claude]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -81,14 +81,14 @@ llm_caller:
 
     def test_claude_commands_fallback(self, tmp_path):
         """Should auto-migrate claude_commands to registry + implicit defaults."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""claude_commands:
   - cmd: claude
     priority: 10
   - cmd: kclaude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -100,7 +100,7 @@ llm_caller:
 
     def test_agents_takes_priority_over_claude_commands(self, tmp_path):
         """When both agents and claude_commands exist, agents wins + warning."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   agent-claude: {cmd: claude, priority: 10}
 llm_caller:
@@ -109,7 +109,7 @@ claude_commands:
   - cmd: legacy-claude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 1
@@ -126,12 +126,12 @@ llm_caller:
   defaults: [global-agent]
 """)
         # Project config
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   project-agent: {cmd: project-claude, priority: 5}
 llm_caller:
   defaults: [project-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 1
@@ -146,7 +146,7 @@ llm_caller:
 llm_caller:
   defaults: [global-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert agents[0]["name"] == "global-agent"
@@ -154,7 +154,7 @@ llm_caller:
     def test_defaults_preserve_written_order(self, tmp_path):
         """Agents follow the written order of llm_caller.defaults; the
         deprecated priority field is ignored for ordering."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   low: {cmd: low-claude, priority: 1}
   high: {cmd: high-claude, priority: 10}
@@ -162,7 +162,7 @@ llm_caller:
 llm_caller:
   defaults: [low, high, mid]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         # Order is the written defaults order, NOT priority descending.
@@ -171,15 +171,15 @@ llm_caller:
     def test_priority_field_emits_deprecation_warning_once(self, tmp_path, caplog):
         """A source carrying agents.<name>.priority warns once (deprecated)."""
         import logging
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   a: {cmd: claude, priority: 1}
   b: {cmd: kclaude, priority: 2}
 llm_caller:
   defaults: [a, b]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 load_agents(tmp_path)
 
         priority_warnings = [
@@ -191,14 +191,14 @@ llm_caller:
 
     def test_string_entries_normalized(self, tmp_path):
         """Bare string entries in agents dict should be normalized to cmd."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   primary: claude
   backup: kclaude
 llm_caller:
   defaults: [primary, backup]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
@@ -209,13 +209,13 @@ llm_caller:
 
     def test_default_type_is_claude_code(self, tmp_path):
         """Agents without type should default to claude-code."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   no-type: {cmd: claude}
 llm_caller:
   defaults: [no-type]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert agents[0]["type"] == "claude-code"
@@ -229,7 +229,7 @@ llm_caller:
 llm_caller:
   defaults: [global-agent]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(None)
 
         assert agents[0]["name"] == "global-agent"
@@ -242,7 +242,7 @@ llm_caller:
   - cmd: global-claude
     priority: 5
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             agents = load_agents(None)
 
         assert agents[0]["type"] == "claude-code"
@@ -255,10 +255,10 @@ llm_caller:
         expose only claude — otherwise the result would vary with whatever
         agents the host running the suite has installed.
         """
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   extra: {cmd: extra-claude}
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             agents = load_agents(tmp_path)
 
         # Without explicit llm_caller.defaults and without legacy
@@ -270,12 +270,12 @@ llm_caller:
 
     def test_unknown_name_in_defaults_raises(self, tmp_path):
         """Unknown agent name in llm_caller.defaults raises ValueError."""
-        (tmp_path / "se3.yaml").write_text("""agents:
+        (tmp_path / "tianluo.yaml").write_text("""agents:
   a: {cmd: claude}
 llm_caller:
   defaults: [a, doesnotexist]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             with pytest.raises(ValueError) as exc_info:
                 load_agents(tmp_path)
         msg = str(exc_info.value)
@@ -288,13 +288,13 @@ class TestLoadClaudeCommandsBackwardCompat:
 
     def test_returns_legacy_format(self, tmp_path):
         """load_claude_commands should return {cmd, priority} dicts."""
-        config = tmp_path / "se3.yaml"
+        config = tmp_path / "tianluo.yaml"
         config.write_text("""agents:
   test: {cmd: my-claude, priority: 10}
 llm_caller:
   defaults: [test]
 """)
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
 
         assert len(commands) == 1
@@ -305,7 +305,7 @@ llm_caller:
 
     def test_default_still_works(self, tmp_path):
         """Default behavior unchanged."""
-        with patch("se3.config.Path.home", return_value=tmp_path), _which_claude_only():
+        with patch("tianluo.config.Path.home", return_value=tmp_path), _which_claude_only():
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"

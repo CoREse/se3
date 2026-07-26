@@ -11,14 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
-from se3.engine.issue_discovery import (
+from tianluo.engine.issue_discovery import (
     IssueDiscovery,
     ISSUE_DISCOVERY_STEPS,
     ISSUE_FORBIDDEN_STEPS,
     ISSUE_DISCOVERY_PROMPT,
 )
-from se3.engine.issue_manager import Issue, IssueManager, IssueStatus
-from se3.engine.models import (
+from tianluo.engine.issue_manager import Issue, IssueManager, IssueStatus
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -31,8 +31,8 @@ from se3.engine.models import (
 @pytest.fixture
 def project_root(tmp_path):
     """Create a minimal project directory."""
-    (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
-    (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "open").mkdir(parents=True)
+    (tmp_path / "tianluo" / "issues" / "closed").mkdir(parents=True)
     return tmp_path
 
 
@@ -148,7 +148,7 @@ class TestCreateFromFixLoopExhaustion:
         issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
 
         assert issue is not None
-        assert f"**History path:** se3/history/{basic_flow.flow_id}" in issue.description
+        assert f"**History path:** tianluo/history/{basic_flow.flow_id}" in issue.description
 
     def test_description_includes_refined_description(self, discovery, basic_flow):
         # Add a completed DISCOVERY step with a refined_description
@@ -475,9 +475,9 @@ class TestStateMachineIntegration:
 
     def test_fix_loop_exhaustion_creates_issue(self, project_root):
         """When fix loop reaches max iterations, state machine creates an issue."""
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.state_machine import StateMachine
 
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=project_root)
 
         # Create a flow at max iterations
@@ -525,9 +525,9 @@ class TestStateMachineIntegration:
 
     def test_step_completion_collects_issues(self, project_root):
         """When a whitelist step completes with discovered_issues, they are collected."""
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.state_machine import StateMachine
 
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=project_root)
 
         flow = FlowInstance(
@@ -561,9 +561,9 @@ class TestStateMachineIntegration:
 
     def test_implement_step_no_issue_collection(self, project_root):
         """Implement step's discovered_issues should not be collected."""
-        from se3.engine.state_machine import StateMachine
+        from tianluo.engine.state_machine import StateMachine
 
-        with patch("se3.engine.state_machine.PersistenceManager"):
+        with patch("tianluo.engine.state_machine.PersistenceManager"):
             sm = StateMachine(project_root=project_root)
 
         flow = FlowInstance(
@@ -668,7 +668,7 @@ class TestSourceSemantics:
     def test_missing_source_defaults_to_system_on_load(self, project_root):
         """Pre-source YAML files (missing source field) load as source='system'."""
         import yaml
-        from se3.engine.issue_manager import Issue
+        from tianluo.engine.issue_manager import Issue
 
         data = {
             "id": "999",

@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.version_bumper import (
+from tianluo.engine.version_bumper import (
     BumpType,
     ProjectType,
     VersionBumper,
@@ -171,7 +171,7 @@ class TestBumpTypeAlwaysValid:
         """Test that 'none' bump_type returns PATCH instead of None."""
         # This test verifies the fix is working by checking the behavior
         # The actual _get_bump_type function is tested through integration
-        from se3.engine.version_bumper import BumpType
+        from tianluo.engine.version_bumper import BumpType
 
         # 'none' should now map to PATCH (not None)
         bump_type_str = "none"
@@ -180,7 +180,7 @@ class TestBumpTypeAlwaysValid:
 
     def test_returns_valid_bump_type_for_invalid_input(self):
         """Test that invalid bump_type returns PATCH."""
-        from se3.engine.version_bumper import BumpType
+        from tianluo.engine.version_bumper import BumpType
 
         # Invalid bump_type should default to PATCH
         bump_type_str = "invalid"

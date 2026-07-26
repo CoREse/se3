@@ -89,7 +89,7 @@ def _is_protected_name(name: str) -> bool:
 def _is_residue_name(name: str) -> bool:
     """Known test-fixture directory names (never used by a real flow)."""
     return (
-        name == "se3"
+        name in ("se3", "tianluo")
         or name.startswith("test-flow")
         or name.startswith("prompt_history")
     )
@@ -208,7 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    history_dir = args.history_dir or (_project_root() / "se3" / "history")
+    if args.history_dir:
+        history_dir = args.history_dir
+    else:
+        root = _project_root()
+        history_dir = root / "tianluo" / "history"
+        if not history_dir.is_dir() and (root / "se3" / "history").is_dir():
+            history_dir = root / "se3" / "history"
     return cleanup(history_dir.resolve(), args.dry_run)
 
 

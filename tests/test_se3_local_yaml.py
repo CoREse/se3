@@ -1,16 +1,16 @@
-"""Tests for se3.local.yaml support.
+"""Tests for tianluo.local.yaml support.
 
 Covers:
 - ``get_project_config_path`` resolution under the four combinations of
-  ``se3.yaml`` and ``se3.local.yaml`` existence.
+  ``tianluo.yaml`` and ``tianluo.local.yaml`` existence.
 - Per-section loaders (``VersionConfig``, ``LanguageConfig``, ``TestConfig``,
   ``ConflictResolverConfig``, ``ImplementConfig``) read from
-  ``se3.local.yaml`` when present, and the local file fully replaces
-  ``se3.yaml`` (no deep merge).
-- ``load_confirmation_config`` source labels switch to ``se3.local.yaml``
+  ``tianluo.local.yaml`` when present, and the local file fully replaces
+  ``tianluo.yaml`` (no deep merge).
+- ``load_confirmation_config`` source labels switch to ``tianluo.local.yaml``
   when local is present (observable via deprecation warning text).
 - Command-layer project-root detection (``is_se3_project_root``) accepts a
-  directory that only contains ``se3.local.yaml``.
+  directory that only contains ``tianluo.local.yaml``.
 - Worktree-aware four-tier config lookup: worktree-local > main-repo-local >
   worktree-yaml > main-repo-yaml.
 """
@@ -28,8 +28,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import se3.config as _cfg  # noqa: E402
-from se3.config import (  # noqa: E402
+import tianluo.config as _cfg  # noqa: E402
+from tianluo.config import (  # noqa: E402
     ConflictResolverConfig,
     DEFAULT_MAX_FIX_ITERATIONS,
     ImplementConfig,
@@ -136,35 +136,35 @@ def make_worktree(tmp_path):
 
 class TestGetProjectConfigPath:
     def test_neither_exists_returns_se3_yaml(self, tmp_path):
-        """When neither file exists the canonical ``se3.yaml`` path is returned."""
+        """When neither file exists the canonical ``tianluo.yaml`` path is returned."""
         result = get_project_config_path(tmp_path)
         assert result == tmp_path / PROJECT_CONFIG_FILENAME
 
     def test_only_se3_yaml_exists(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         result = get_project_config_path(tmp_path)
         assert result == tmp_path / PROJECT_CONFIG_FILENAME
 
     def test_only_local_exists(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text("version:\n  enabled: false\n")
+        (tmp_path / "tianluo.local.yaml").write_text("version:\n  enabled: false\n")
         result = get_project_config_path(tmp_path)
         assert result == tmp_path / PROJECT_LOCAL_CONFIG_FILENAME
 
     def test_both_exist_local_wins(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
-        (tmp_path / "se3.local.yaml").write_text("version:\n  enabled: false\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.local.yaml").write_text("version:\n  enabled: false\n")
         result = get_project_config_path(tmp_path)
         assert result == tmp_path / PROJECT_LOCAL_CONFIG_FILENAME
 
 
 # ---------------------------------------------------------------------------
-# Per-section loaders read from se3.local.yaml when present
+# Per-section loaders read from tianluo.local.yaml when present
 # ---------------------------------------------------------------------------
 
 
 class TestLoadersReadLocal:
     def test_version_config_loads_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "version:\n  enabled: false\n  confidence_threshold: high\n"
         )
         cfg = VersionConfig.load(tmp_path)
@@ -172,7 +172,7 @@ class TestLoadersReadLocal:
         assert cfg.confidence_threshold == "high"
 
     def test_language_config_loads_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
         cfg = LanguageConfig.load(tmp_path)
@@ -180,7 +180,7 @@ class TestLoadersReadLocal:
         assert cfg.spec_language == "en"
 
     def test_test_config_loads_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "test:\n"
             "  command: 'pytest -x'\n"
             "  timeout: 600\n"
@@ -192,14 +192,14 @@ class TestLoadersReadLocal:
         assert cfg.timeout_multiplier == 3.0
 
     def test_conflict_resolver_config_loads_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "conflict_resolver:\n  strategy: llm\n"
         )
         cfg = ConflictResolverConfig.load(tmp_path)
         assert cfg.strategy == "llm"
 
     def test_implement_config_loads_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "implement:\n  group_loc_threshold: 777\n"
         )
         cfg = ImplementConfig.load(tmp_path)
@@ -207,64 +207,64 @@ class TestLoadersReadLocal:
 
 
 # ---------------------------------------------------------------------------
-# When both exist, local fully replaces se3.yaml (no deep merge)
+# When both exist, local fully replaces tianluo.yaml (no deep merge)
 # ---------------------------------------------------------------------------
 
 
 class TestLocalReplacesSe3Yaml:
-    """``se3.local.yaml`` wholesale replaces ``se3.yaml`` — values from
-    ``se3.yaml`` that are absent from local MUST NOT leak through.
+    """``tianluo.local.yaml`` wholesale replaces ``tianluo.yaml`` — values from
+    ``tianluo.yaml`` that are absent from local MUST NOT leak through.
     """
 
     def test_version_config_not_merged(self, tmp_path):
-        # se3.yaml sets distinctive values that local does not redeclare;
+        # tianluo.yaml sets distinctive values that local does not redeclare;
         # local sets its own distinctive values. The two files MUST NOT
-        # be deep-merged — local wholesale replaces se3.yaml.
-        (tmp_path / "se3.yaml").write_text(
+        # be deep-merged — local wholesale replaces tianluo.yaml.
+        (tmp_path / "tianluo.yaml").write_text(
             "version:\n"
             "  enabled: true\n"
             "  confidence_threshold: medium\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "version:\n"
             "  enabled: false\n"
             "  confidence_threshold: high\n"
         )
         cfg = VersionConfig.load(tmp_path)
-        # Values from local win, not merged with se3.yaml.
+        # Values from local win, not merged with tianluo.yaml.
         assert cfg.enabled is False
         assert cfg.confidence_threshold == "high"
 
     def test_language_yaml_shadowed_completely(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "language:\n  language: en\n  spec_language: en\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "language:\n  language: zh-CN\n"
         )
         cfg = LanguageConfig.load(tmp_path)
         assert cfg.language == "zh-CN"
-        # spec_language not declared in local ⇒ must NOT leak from se3.yaml
+        # spec_language not declared in local ⇒ must NOT leak from tianluo.yaml
         assert cfg.spec_language is None
 
     def test_implement_yaml_shadowed_when_local_missing_section(self, tmp_path):
         """When local omits a section entirely, the section defaults —
-        se3.yaml values must not leak through.
+        tianluo.yaml values must not leak through.
         """
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  group_loc_threshold: 999\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "version:\n  enabled: true\n"
         )
         cfg = ImplementConfig.load(tmp_path)
         assert cfg.group_loc_threshold == 300  # built-in default, not 999
 
     def test_conflict_resolver_not_merged(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "conflict_resolver:\n  strategy: llm\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "conflict_resolver:\n  strategy: human\n"
         )
         cfg = ConflictResolverConfig.load(tmp_path)
@@ -272,13 +272,13 @@ class TestLocalReplacesSe3Yaml:
 
 
 # ---------------------------------------------------------------------------
-# Only se3.yaml present — regression: behaviour unchanged
+# Only tianluo.yaml present — regression: behaviour unchanged
 # ---------------------------------------------------------------------------
 
 
 class TestOnlySe3YamlRegression:
     def test_version_config_from_se3_yaml(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "version:\n  enabled: false\n  confidence_threshold: medium\n"
         )
         cfg = VersionConfig.load(tmp_path)
@@ -286,7 +286,7 @@ class TestOnlySe3YamlRegression:
         assert cfg.confidence_threshold == "medium"
 
     def test_test_config_from_se3_yaml(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "test:\n  timeout: 1234\n"
         )
         cfg = _TestConfig.load(tmp_path)
@@ -303,23 +303,23 @@ class TestConfirmationSourceLabel:
         self, tmp_path, isolated_global_home, caplog,
     ):
         """Deprecation warnings for legacy confirmation keys must name the
-        file actually read. When ``se3.local.yaml`` is present it is the
-        source — the warning message must mention ``se3.local.yaml``, not
-        ``se3.yaml``.
+        file actually read. When ``tianluo.local.yaml`` is present it is the
+        source — the warning message must mention ``tianluo.local.yaml``, not
+        ``tianluo.yaml``.
         """
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"  # deprecated key — triggers a warning
             "  steps:\n"
             "    design: {reviewer: human}\n"
         )
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
 
         # Local fully replaces yaml: only 'design' remains, not 'plan'.
@@ -335,7 +335,7 @@ class TestConfirmationSourceLabel:
             f"expected deprecation warning to name {PROJECT_LOCAL_CONFIG_FILENAME!r}; "
             f"got: {messages}"
         )
-        # And it must NOT mislabel the source as se3.yaml.
+        # And it must NOT mislabel the source as tianluo.yaml.
         assert not any(
             msg.startswith(PROJECT_CONFIG_FILENAME + ":")
             and "confirmation.enabled" in msg
@@ -345,13 +345,13 @@ class TestConfirmationSourceLabel:
     def test_source_label_is_yaml_when_only_yaml_exists(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             load_confirmation_config(tmp_path)
 
         messages = [r.getMessage() for r in caplog.records]
@@ -368,15 +368,15 @@ class TestConfirmationSourceLabel:
 
 class TestIsSe3ProjectRootLocalOnly:
     def test_detects_project_with_only_local(self, tmp_path):
-        """A directory containing only ``se3.local.yaml`` is recognised as
+        """A directory containing only ``tianluo.local.yaml`` is recognised as
         an SE3 project root. This matches the parent-walk behaviour used
         by ``se3 run`` / ``se3 issue`` / ``se3 history`` / ``se3 salvage``.
         """
-        (tmp_path / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
         assert is_se3_project_root(tmp_path) is True
 
     def test_detects_project_with_only_yaml(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         assert is_se3_project_root(tmp_path) is True
 
     def test_rejects_directory_without_markers(self, tmp_path):
@@ -390,18 +390,18 @@ class TestParentWalkFindsLocalOnlyRoot:
     for the direct (cwd == project root) case. These tests exercise the
     parent-walk path used by ``se3 run`` / ``se3 salvage``: cwd is a
     nested subdirectory and the nearest ancestor with any SE3 marker has
-    only ``se3.local.yaml``.
+    only ``tianluo.local.yaml``.
     """
 
     def test_salvage_find_project_root_walks_up_to_local_only_parent(
         self, tmp_path, monkeypatch,
     ):
-        from se3.commands.salvage_cmd import _find_project_root
+        from tianluo.commands.salvage_cmd import _find_project_root
 
-        # Project root has only se3.local.yaml; cwd is a nested subdir.
+        # Project root has only tianluo.local.yaml; cwd is a nested subdir.
         project = tmp_path / "proj"
         project.mkdir()
-        (project / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        (project / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
         subdir = project / "src" / "deep"
         subdir.mkdir(parents=True)
 
@@ -411,11 +411,11 @@ class TestParentWalkFindsLocalOnlyRoot:
     def test_run_get_project_root_walks_up_to_local_only_parent(
         self, tmp_path, monkeypatch,
     ):
-        from se3.commands.run import get_project_root
+        from tianluo.commands.run import get_project_root
 
         project = tmp_path / "proj"
         project.mkdir()
-        (project / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        (project / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
         subdir = project / "src" / "deep"
         subdir.mkdir(parents=True)
 
@@ -424,13 +424,13 @@ class TestParentWalkFindsLocalOnlyRoot:
 
 
 # ---------------------------------------------------------------------------
-# StepConfig / apply_step_config — also reads se3.local.yaml
+# StepConfig / apply_step_config — also reads tianluo.local.yaml
 # ---------------------------------------------------------------------------
 
 
 class TestStepConfigLocal:
     def test_step_config_loads_append_from_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "steps:\n  append:\n    - summarize\n"
         )
         cfg = StepConfig.load(tmp_path)
@@ -438,10 +438,10 @@ class TestStepConfigLocal:
 
     def test_step_config_local_replaces_yaml(self, tmp_path):
         """Local must fully replace yaml — yaml's append entry must not leak."""
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "steps:\n  append:\n    - commit\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "steps:\n  append:\n    - summarize\n"
         )
         cfg = StepConfig.load(tmp_path)
@@ -449,11 +449,11 @@ class TestStepConfigLocal:
 
     def test_apply_step_config_uses_local(self, tmp_path):
         """``apply_step_config`` is the user-reachable entrypoint — it must
-        also read from ``se3.local.yaml`` when present.
+        also read from ``tianluo.local.yaml`` when present.
         """
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "steps:\n  append:\n    - summarize\n"
         )
         result = apply_step_config([StepType.PLAN], project_root=tmp_path)
@@ -469,16 +469,16 @@ class TestStepConfigLocal:
 
 class TestMaxFixIterationsLocal:
     def test_get_max_fix_iterations_reads_local(self, tmp_path):
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "workflow:\n  max_fix_iterations: 7\n"
         )
         assert get_max_fix_iterations(tmp_path) == 7
 
     def test_get_max_fix_iterations_local_replaces_yaml(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "workflow:\n  max_fix_iterations: 99\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "workflow:\n  max_fix_iterations: 7\n"
         )
         # local wins — yaml's 99 must NOT leak through.
@@ -486,13 +486,13 @@ class TestMaxFixIterationsLocal:
 
 
 # ---------------------------------------------------------------------------
-# context_builder injection whitelists honour se3.local.yaml
+# context_builder injection whitelists honour tianluo.local.yaml
 # ---------------------------------------------------------------------------
 
 
 class TestContextBuilderLocal:
     def test_issue_discovery_injection_reads_local(self, tmp_path):
-        from se3.engine.context_builder import (
+        from tianluo.engine.context_builder import (
             ISSUE_DISCOVERY_DEFAULT_STEPS,
             get_issue_discovery_injection,
         )
@@ -502,22 +502,22 @@ class TestContextBuilderLocal:
         assert "plan" not in ISSUE_DISCOVERY_DEFAULT_STEPS
         assert get_issue_discovery_injection("plan", tmp_path) == ""
 
-        # Adding 'plan' to issue_discovery.steps in se3.local.yaml MUST
+        # Adding 'plan' to issue_discovery.steps in tianluo.local.yaml MUST
         # take effect — proving the loader reads the local file.
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "issue_discovery:\n  steps:\n    - plan\n"
         )
         injection = get_issue_discovery_injection("plan", tmp_path)
         assert injection != ""
 
     def test_spec_names_injection_reads_local(self, tmp_path):
-        from se3.engine.context_builder import (
+        from tianluo.engine.context_builder import (
             SPEC_NAMES_INJECTION_DEFAULT_STEPS,
             get_spec_names_injection,
         )
 
         # Set up a specs/ dir so the function has something to enumerate.
-        spec_dir = tmp_path / "se3" / "specs" / "alpha"
+        spec_dir = tmp_path / "tianluo" / "specs" / "alpha"
         spec_dir.mkdir(parents=True)
         (spec_dir / "spec.md").write_text("# alpha")
 
@@ -526,15 +526,15 @@ class TestContextBuilderLocal:
         # commit is in the FORBIDDEN set, so even with an override it is
         # short-circuited; pick a step that is neither default nor
         # forbidden — 'analyze' fits.
-        from se3.engine.context_builder import SPEC_NAMES_INJECTION_FORBIDDEN_STEPS
+        from tianluo.engine.context_builder import SPEC_NAMES_INJECTION_FORBIDDEN_STEPS
         assert "analyze" not in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS
         assert "analyze" not in SPEC_NAMES_INJECTION_DEFAULT_STEPS
 
         # Without config, 'analyze' is not in the whitelist → empty.
         assert get_spec_names_injection("analyze", tmp_path) == ""
 
-        # With se3.local.yaml override, 'analyze' is whitelisted.
-        (tmp_path / "se3.local.yaml").write_text(
+        # With tianluo.local.yaml override, 'analyze' is whitelisted.
+        (tmp_path / "tianluo.local.yaml").write_text(
             "spec_names_injection:\n  steps:\n    - analyze\n"
         )
         injection = get_spec_names_injection("analyze", tmp_path)
@@ -542,13 +542,13 @@ class TestContextBuilderLocal:
 
 
 # ---------------------------------------------------------------------------
-# Malformed se3.local.yaml — loaders fall back to defaults AND log a warning
+# Malformed tianluo.local.yaml — loaders fall back to defaults AND log a warning
 # ---------------------------------------------------------------------------
 
 
 class TestMalformedLocalYamlWarnings:
-    """A broken ``se3.local.yaml`` silently shadows the committed
-    ``se3.yaml`` and forces every loader back to built-in defaults. The
+    """A broken ``tianluo.local.yaml`` silently shadows the committed
+    ``tianluo.yaml`` and forces every loader back to built-in defaults. The
     loaders must therefore make this visible by logging a warning, so the
     user can find the typo instead of wondering why their project config
     stopped taking effect.
@@ -560,13 +560,13 @@ class TestMalformedLocalYamlWarnings:
 
     def test_loader_logs_when_local_is_malformed_yaml(self, tmp_path, caplog):
         self._reset_warned_set()
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "version:\n  enabled: false\n"
         )
         # Deliberately broken YAML: an unterminated mapping value.
-        (tmp_path / "se3.local.yaml").write_text("version: {unterminated")
+        (tmp_path / "tianluo.local.yaml").write_text("version: {unterminated")
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             cfg = VersionConfig.load(tmp_path)
 
         # Defaults — yaml's value (False) must NOT leak through.
@@ -580,13 +580,13 @@ class TestMalformedLocalYamlWarnings:
 
     def test_loader_logs_when_local_is_non_mapping(self, tmp_path, caplog):
         self._reset_warned_set()
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "implement:\n  group_loc_threshold: 999\n"
         )
         # A top-level list, not a mapping.
-        (tmp_path / "se3.local.yaml").write_text("- one\n- two\n")
+        (tmp_path / "tianluo.local.yaml").write_text("- one\n- two\n")
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             cfg = ImplementConfig.load(tmp_path)
 
         assert cfg.group_loc_threshold == 300  # built-in default
@@ -605,24 +605,24 @@ class TestMalformedLocalYamlWarnings:
         ``_load_project_yaml``; agent / llm_caller / confirmation loaders
         route through ``_read_yaml`` via ``_load_agent_configs``. Both
         paths must classify a falsy-non-mapping top-level (``[]``, ``0``,
-        ``''``) as malformed — otherwise a broken ``se3.local.yaml`` would
-        silently let the committed ``se3.yaml``'s agents leak through.
+        ``''``) as malformed — otherwise a broken ``tianluo.local.yaml`` would
+        silently let the committed ``tianluo.yaml``'s agents leak through.
         """
         self._reset_warned_set()
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  leaked: {type: claude-code, cmd: claude-leaked}\n"
         )
         # Top-level empty list is falsy and non-mapping — the regression
         # the old ``data or {}`` guard used to miss.
-        (tmp_path / "se3.local.yaml").write_text("[]\n")
+        (tmp_path / "tianluo.local.yaml").write_text("[]\n")
 
-        from se3.config import load_agent_registry
+        from tianluo.config import load_agent_registry
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             registry = load_agent_registry(tmp_path)
 
-        # se3.yaml's agent MUST NOT leak through — registry falls back to
+        # tianluo.yaml's agent MUST NOT leak through — registry falls back to
         # whatever the default chain produces (empty in this isolated home).
         assert "leaked" not in registry
         messages = [r.getMessage() for r in caplog.records]
@@ -634,25 +634,25 @@ class TestMalformedLocalYamlWarnings:
     def test_valid_empty_local_yaml_no_warning(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        """A valid-but-empty ``se3.local.yaml`` (``{}\\n``) is NOT malformed.
+        """A valid-but-empty ``tianluo.local.yaml`` (``{}\\n``) is NOT malformed.
 
         Both read paths — ``_load_project_yaml`` (per-section loaders) and
         ``_read_yaml`` via ``_load_agent_configs`` — must treat it as
-        "no overrides" with zero warnings. And crucially, ``se3.yaml``
+        "no overrides" with zero warnings. And crucially, ``tianluo.yaml``
         values MUST NOT leak through: local fully replaces yaml, even
         when local is empty.
         """
         self._reset_warned_set()
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "version:\n  enabled: false\n"
             "agents:\n"
             "  leaked: {type: claude-code, cmd: claude-leaked}\n"
         )
-        (tmp_path / "se3.local.yaml").write_text("{}\n")
+        (tmp_path / "tianluo.local.yaml").write_text("{}\n")
 
-        from se3.config import load_agent_registry
+        from tianluo.config import load_agent_registry
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             version_cfg = VersionConfig.load(tmp_path)
             registry = load_agent_registry(tmp_path)
 
@@ -669,9 +669,9 @@ class TestMalformedLocalYamlWarnings:
 
     def test_warning_dedup_only_once_per_path(self, tmp_path, caplog):
         self._reset_warned_set()
-        (tmp_path / "se3.local.yaml").write_text("version: {unterminated")
+        (tmp_path / "tianluo.local.yaml").write_text("version: {unterminated")
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             VersionConfig.load(tmp_path)
             VersionConfig.load(tmp_path)
             ImplementConfig.load(tmp_path)
@@ -688,32 +688,32 @@ class TestMalformedLocalYamlWarnings:
 
 
 # ---------------------------------------------------------------------------
-# Non-file se3.local.yaml (directory / dangling symlink) — get_project_config_path
+# Non-file tianluo.local.yaml (directory / dangling symlink) — get_project_config_path
 # must NOT treat them as the active config
 # ---------------------------------------------------------------------------
 
 
 class TestGetProjectConfigPathNonFile:
     def test_directory_at_local_path_falls_back_to_yaml(self, tmp_path):
-        """An ``se3.local.yaml`` directory (created by mistake) must not
-        shadow the committed ``se3.yaml`` — a directory cannot be parsed
+        """An ``tianluo.local.yaml`` directory (created by mistake) must not
+        shadow the committed ``tianluo.yaml`` — a directory cannot be parsed
         as a config file, so falling back keeps the project usable.
         """
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         (tmp_path / PROJECT_LOCAL_CONFIG_FILENAME).mkdir()
         result = get_project_config_path(tmp_path)
         assert result == tmp_path / PROJECT_CONFIG_FILENAME
 
     def test_symlink_to_real_file_is_accepted_as_override(self, tmp_path):
-        """A symlink at ``se3.local.yaml`` pointing to a regular file is
+        """A symlink at ``tianluo.local.yaml`` pointing to a regular file is
         treated as a valid override. ``is_file()`` follows symlinks, so
         the common "share local overrides between clones via a symlink"
         workflow is supported. The loader must therefore read values
-        from the symlink target, and ``se3.yaml`` must NOT leak through.
+        from the symlink target, and ``tianluo.yaml`` must NOT leak through.
         """
         shared = tmp_path / "shared-overrides.yaml"
         shared.write_text("version:\n  enabled: false\n")
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         link = tmp_path / PROJECT_LOCAL_CONFIG_FILENAME
         link.symlink_to(shared)
 
@@ -725,11 +725,11 @@ class TestGetProjectConfigPathNonFile:
         assert cfg.enabled is False
 
     def test_dangling_symlink_at_local_path_falls_back_to_yaml(self, tmp_path):
-        """A dangling symlink at ``se3.local.yaml`` is not a real file —
+        """A dangling symlink at ``tianluo.local.yaml`` is not a real file —
         ``get_project_config_path`` must skip it rather than return a
         path that downstream readers will fail to open.
         """
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         link = tmp_path / PROJECT_LOCAL_CONFIG_FILENAME
         link.symlink_to(tmp_path / "nonexistent.yaml")
         result = get_project_config_path(tmp_path)
@@ -742,7 +742,7 @@ class TestGetProjectConfigPathNonFile:
     def test_unreadable_regular_file_still_selected_and_readers_fall_back(
         self, tmp_path, caplog,
     ):
-        """An ``se3.local.yaml`` that exists as a regular file but is not
+        """An ``tianluo.local.yaml`` that exists as a regular file but is not
         readable (e.g. ``chmod 0o000``) is still selected by
         ``get_project_config_path`` — ``is_file()`` returns True and the
         helper deliberately does not probe read permission. Downstream
@@ -751,7 +751,7 @@ class TestGetProjectConfigPathNonFile:
         """
         _cfg._warned_malformed_local_for.clear()
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "version:\n  enabled: false\n"
         )
         local = tmp_path / PROJECT_LOCAL_CONFIG_FILENAME
@@ -767,7 +767,7 @@ class TestGetProjectConfigPathNonFile:
 
             # The loader swallows the OSError, logs a warning, and falls
             # back to built-in defaults — yaml's False must NOT leak.
-            with caplog.at_level(logging.WARNING, logger="se3.config"):
+            with caplog.at_level(logging.WARNING, logger="tianluo.config"):
                 cfg = VersionConfig.load(tmp_path)
 
             assert cfg.enabled is True  # built-in default
@@ -788,15 +788,15 @@ class TestGetProjectConfigPathNonFile:
 
 
 # ---------------------------------------------------------------------------
-# Global ~/.se3/config.yaml + se3.local.yaml — entry-level merge through
+# Global ~/.se3/config.yaml + tianluo.local.yaml — entry-level merge through
 # _load_agent_configs / load_agents
 # ---------------------------------------------------------------------------
 
 
 class TestGlobalPlusLocalAgentMerge:
-    """Verify that ``~/.se3/config.yaml`` and ``se3.local.yaml`` combine
-    through the same merge rules that apply to ``se3.yaml`` — local is a
-    drop-in replacement for ``se3.yaml`` at the project layer, not a
+    """Verify that ``~/.se3/config.yaml`` and ``tianluo.local.yaml`` combine
+    through the same merge rules that apply to ``tianluo.yaml`` — local is a
+    drop-in replacement for ``tianluo.yaml`` at the project layer, not a
     bypass of the global layer.
     """
 
@@ -805,9 +805,9 @@ class TestGlobalPlusLocalAgentMerge:
     ):
         """Global declares ``primary``; local declares ``backup``. The
         merged registry must contain both — local does NOT erase global's
-        agents the way it erases ``se3.yaml``'s.
+        agents the way it erases ``tianluo.yaml``'s.
         """
-        from se3.config import load_agent_registry
+        from tianluo.config import load_agent_registry
 
         global_cfg = isolated_global_home / ".se3" / "config.yaml"
         global_cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -815,7 +815,7 @@ class TestGlobalPlusLocalAgentMerge:
             "agents:\n"
             "  primary: {type: claude-code, cmd: claude, priority: 10}\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "agents:\n"
             "  backup: {type: claude-code, cmd: claude-dev, priority: 5}\n"
         )
@@ -829,9 +829,9 @@ class TestGlobalPlusLocalAgentMerge:
         self, tmp_path, isolated_global_home,
     ):
         """When global and local declare the same agent name, local wins
-        (entry-level merge), exactly mirroring se3.yaml's behaviour.
+        (entry-level merge), exactly mirroring tianluo.yaml's behaviour.
         """
-        from se3.config import load_agent_registry
+        from tianluo.config import load_agent_registry
 
         global_cfg = isolated_global_home / ".se3" / "config.yaml"
         global_cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -839,7 +839,7 @@ class TestGlobalPlusLocalAgentMerge:
             "agents:\n"
             "  primary: {type: claude-code, cmd: claude-from-global}\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "agents:\n"
             "  primary: {type: claude-code, cmd: claude-from-local}\n"
         )
@@ -851,11 +851,11 @@ class TestGlobalPlusLocalAgentMerge:
         self, tmp_path, isolated_global_home,
     ):
         """``llm_caller.defaults`` whole-replace at the project layer is
-        relative to ``se3.local.yaml`` (when present). When local omits
+        relative to ``tianluo.local.yaml`` (when present). When local omits
         defaults, global defaults still apply — local does not
         accidentally null out the global chain.
         """
-        from se3.config import load_agents
+        from tianluo.config import load_agents
 
         global_cfg = isolated_global_home / ".se3" / "config.yaml"
         global_cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -868,7 +868,7 @@ class TestGlobalPlusLocalAgentMerge:
         )
         # Local declares no llm_caller section at all, only adds an extra
         # agent — the global default chain must remain in effect.
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "agents:\n"
             "  opus: {type: claude-code, cmd: claude-opus, priority: 20}\n"
         )
@@ -882,9 +882,9 @@ class TestGlobalPlusLocalAgentMerge:
     ):
         """When local DOES declare ``llm_caller.defaults``, it whole-
         replaces the global list (no append) — same semantics as
-        se3.yaml vs global.
+        tianluo.yaml vs global.
         """
-        from se3.config import load_agents
+        from tianluo.config import load_agents
 
         global_cfg = isolated_global_home / ".se3" / "config.yaml"
         global_cfg.parent.mkdir(parents=True, exist_ok=True)
@@ -894,7 +894,7 @@ class TestGlobalPlusLocalAgentMerge:
             "llm_caller:\n"
             "  defaults: [primary]\n"
         )
-        (tmp_path / "se3.local.yaml").write_text(
+        (tmp_path / "tianluo.local.yaml").write_text(
             "agents:\n"
             "  opus: {type: claude-code, cmd: claude-opus, priority: 20}\n"
             "llm_caller:\n"
@@ -913,8 +913,8 @@ class TestGlobalPlusLocalAgentMerge:
 
 class TestWorktreeFourTierPriority:
     """When project_root is inside a git worktree, get_project_config_path
-    uses a four-tier lookup so the main repo's se3.local.yaml can override
-    the worktree's tracked se3.yaml (since se3.local.yaml is gitignored and
+    uses a four-tier lookup so the main repo's tianluo.local.yaml can override
+    the worktree's tracked tianluo.yaml (since tianluo.local.yaml is gitignored and
     does not travel into worktrees).
     """
 
@@ -940,7 +940,7 @@ class TestWorktreeFourTierPriority:
         warning leaked into stdout), the function must return None rather
         than misparsing the output.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         clear_main_repo_root_cache()
 
@@ -966,12 +966,12 @@ class TestWorktreeFourTierPriority:
     def test_main_local_overrides_worktree_yaml(
         self, make_worktree, isolated_global_home,
     ):
-        """Tier 2: main repo se3.local.yaml overrides worktree se3.yaml."""
+        """Tier 2: main repo tianluo.local.yaml overrides worktree tianluo.yaml."""
         main_root, worktree_root = make_worktree
-        # Worktree has only se3.yaml
-        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
-        # Main repo has se3.local.yaml
-        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        # Worktree has only tianluo.yaml
+        (worktree_root / "tianluo.yaml").write_text("version:\n  enabled: false\n")
+        # Main repo has tianluo.local.yaml
+        (main_root / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(worktree_root)
         assert path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
@@ -984,10 +984,10 @@ class TestWorktreeFourTierPriority:
     def test_worktree_local_beats_main_local(
         self, make_worktree, isolated_global_home,
     ):
-        """Tier 1: worktree se3.local.yaml wins over main repo se3.local.yaml."""
+        """Tier 1: worktree tianluo.local.yaml wins over main repo tianluo.local.yaml."""
         main_root, worktree_root = make_worktree
-        (main_root / "se3.local.yaml").write_text("version:\n  enabled: false\n")
-        (worktree_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        (main_root / "tianluo.local.yaml").write_text("version:\n  enabled: false\n")
+        (worktree_root / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(worktree_root)
         assert path == worktree_root / PROJECT_LOCAL_CONFIG_FILENAME
@@ -998,10 +998,10 @@ class TestWorktreeFourTierPriority:
     def test_worktree_yaml_beats_main_yaml_when_no_local(
         self, make_worktree, isolated_global_home,
     ):
-        """Tier 3: worktree se3.yaml wins over main repo se3.yaml."""
+        """Tier 3: worktree tianluo.yaml wins over main repo tianluo.yaml."""
         main_root, worktree_root = make_worktree
-        (main_root / "se3.yaml").write_text("version:\n  enabled: false\n")
-        (worktree_root / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (main_root / "tianluo.yaml").write_text("version:\n  enabled: false\n")
+        (worktree_root / "tianluo.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(worktree_root)
         assert path == worktree_root / PROJECT_CONFIG_FILENAME
@@ -1012,9 +1012,9 @@ class TestWorktreeFourTierPriority:
     def test_main_yaml_fallback_when_only_main_has_yaml(
         self, make_worktree, isolated_global_home,
     ):
-        """Tier 4: main repo se3.yaml is used when nothing else exists."""
+        """Tier 4: main repo tianluo.yaml is used when nothing else exists."""
         main_root, worktree_root = make_worktree
-        (main_root / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (main_root / "tianluo.yaml").write_text("version:\n  enabled: true\n")
         # Nothing in worktree
 
         path = get_project_config_path(worktree_root)
@@ -1030,10 +1030,10 @@ class TestWorktreeFourTierPriority:
         main_root, worktree_root = make_worktree
 
         # Create all four files with unique marker values
-        (worktree_root / "se3.local.yaml").write_text("marker: wt_local\n")
-        (main_root / "se3.local.yaml").write_text("marker: main_local\n")
-        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
-        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+        (worktree_root / "tianluo.local.yaml").write_text("marker: wt_local\n")
+        (main_root / "tianluo.local.yaml").write_text("marker: main_local\n")
+        (worktree_root / "tianluo.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "tianluo.yaml").write_text("marker: main_yaml\n")
 
         path = get_project_config_path(worktree_root)
         data, _ = load_project_yaml(worktree_root)
@@ -1045,9 +1045,9 @@ class TestWorktreeFourTierPriority:
         main_root, worktree_root = make_worktree
 
         # No worktree local
-        (main_root / "se3.local.yaml").write_text("marker: main_local\n")
-        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
-        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+        (main_root / "tianluo.local.yaml").write_text("marker: main_local\n")
+        (worktree_root / "tianluo.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "tianluo.yaml").write_text("marker: main_yaml\n")
 
         path = get_project_config_path(worktree_root)
         data, _ = load_project_yaml(worktree_root)
@@ -1058,8 +1058,8 @@ class TestWorktreeFourTierPriority:
         """With no locals at all, worktree-yaml > main-yaml."""
         main_root, worktree_root = make_worktree
 
-        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
-        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+        (worktree_root / "tianluo.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "tianluo.yaml").write_text("marker: main_yaml\n")
 
         path = get_project_config_path(worktree_root)
         data, _ = load_project_yaml(worktree_root)
@@ -1070,15 +1070,15 @@ class TestWorktreeFourTierPriority:
     def test_directory_at_worktree_local_falls_back_to_main_local(
         self, make_worktree, isolated_global_home,
     ):
-        """When worktree/se3.local.yaml is a directory (not a file), the
-        is_file() filter skips it and the main repo's se3.local.yaml is
+        """When worktree/tianluo.local.yaml is a directory (not a file), the
+        is_file() filter skips it and the main repo's tianluo.local.yaml is
         picked up instead (tier 2).
         """
         main_root, worktree_root = make_worktree
-        # Worktree has se3.local.yaml as a directory (user mistake)
+        # Worktree has tianluo.local.yaml as a directory (user mistake)
         (worktree_root / PROJECT_LOCAL_CONFIG_FILENAME).mkdir()
-        # Main repo has a real se3.local.yaml file
-        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        # Main repo has a real tianluo.local.yaml file
+        (main_root / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(worktree_root)
         assert path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
@@ -1105,7 +1105,7 @@ class TestWorktreeFourTierPriority:
         corrupt git layouts where the common-dir parent is not a real
         working tree (e.g. a bare repo that lives inside ``foo.git/``).
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         # Construct two distinct fake paths so common_dir != git_dir →
         # function thinks it's looking at a worktree and tries to verify
@@ -1145,7 +1145,7 @@ class TestWorktreeFourTierPriority:
         success with empty stdout, the function still returns None rather
         than treating an empty path as the main repo.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         fake_common = tmp_path / "main_repo" / ".git"
         fake_git = tmp_path / "worktree" / ".git" / "worktrees" / "wt"
@@ -1176,7 +1176,7 @@ class TestWorktreeFourTierPriority:
         """When the git subprocess hangs (e.g. credential prompt), the
         timeout fires and the function returns None rather than blocking.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         clear_main_repo_root_cache()
 
@@ -1192,24 +1192,24 @@ class TestWorktreeFourTierPriority:
     def test_file_existence_not_cached_mid_process(
         self, make_worktree, isolated_global_home,
     ):
-        """Creating main_repo/se3.local.yaml after an initial lookup is
+        """Creating main_repo/tianluo.local.yaml after an initial lookup is
         observed by subsequent calls even though _resolve_main_repo_root
         remains cached. The file-existence is_file() probes are NOT cached.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         clear_main_repo_root_cache()
         main_root, worktree_root = make_worktree
 
-        # Tier 3/4: only worktree se3.yaml exists initially.
-        (worktree_root / "se3.yaml").write_text("marker: first\n")
+        # Tier 3/4: only worktree tianluo.yaml exists initially.
+        (worktree_root / "tianluo.yaml").write_text("marker: first\n")
 
-        # First lookup: worktree se3.yaml is selected.
+        # First lookup: worktree tianluo.yaml is selected.
         first_path = get_project_config_path(worktree_root)
         assert first_path == worktree_root / PROJECT_CONFIG_FILENAME
 
-        # Mid-process: user creates main_repo/se3.local.yaml.
-        (main_root / "se3.local.yaml").write_text("marker: second\n")
+        # Mid-process: user creates main_repo/tianluo.local.yaml.
+        (main_root / "tianluo.local.yaml").write_text("marker: second\n")
 
         # Second lookup WITHOUT clearing any cache: main_repo local wins.
         second_path = get_project_config_path(worktree_root)
@@ -1228,7 +1228,7 @@ class TestWorktreeFourTierPriority:
         lookup re-runs the git probes rather than returning a stale
         answer.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         call_count = [0]
 
@@ -1263,7 +1263,7 @@ class TestWorktreeFourTierPriority:
         honour GIT_DIR and report the foreign repo's paths instead of the
         on-disk worktree's main repo.
         """
-        from se3.config import clear_main_repo_root_cache
+        from tianluo.config import clear_main_repo_root_cache
 
         clear_main_repo_root_cache()
         main_root, worktree_root = make_worktree
@@ -1303,12 +1303,12 @@ class TestWorktreeFallbackPaths:
         if result.returncode != 0:
             pytest.skip("git not available")
 
-        # Parent has se3.yaml and se3.local.yaml — repo must NOT see them.
-        (parent / "se3.yaml").write_text("version:\n  enabled: false\n")
-        (parent / "se3.local.yaml").write_text("version:\n  enabled: false\n")
+        # Parent has tianluo.yaml and tianluo.local.yaml — repo must NOT see them.
+        (parent / "tianluo.yaml").write_text("version:\n  enabled: false\n")
+        (parent / "tianluo.local.yaml").write_text("version:\n  enabled: false\n")
 
-        # Repo has its own se3.yaml
-        (repo / "se3.yaml").write_text("version:\n  enabled: true\n")
+        # Repo has its own tianluo.yaml
+        (repo / "tianluo.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(repo)
         assert path == repo / PROJECT_CONFIG_FILENAME
@@ -1318,7 +1318,7 @@ class TestWorktreeFallbackPaths:
 
     def test_non_git_directory_behavior_unchanged(self, tmp_path):
         """A plain directory without git uses the existing two-tier logic."""
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: false\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: false\n")
 
         path = get_project_config_path(tmp_path)
         assert path == tmp_path / PROJECT_CONFIG_FILENAME
@@ -1336,7 +1336,7 @@ class TestWorktreeFallbackPaths:
         monkeypatch.setattr(
             _cfg, "_resolve_main_repo_root", lambda _root: None,
         )
-        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+        (tmp_path / "tianluo.yaml").write_text("version:\n  enabled: true\n")
 
         path = get_project_config_path(tmp_path)
         assert path == tmp_path / PROJECT_CONFIG_FILENAME
@@ -1347,7 +1347,7 @@ class TestWorktreeFallbackPaths:
     def test_worktree_none_found_returns_canonical_yaml(
         self, make_worktree, isolated_global_home,
     ):
-        """When no config file exists anywhere, the canonical worktree/se3.yaml
+        """When no config file exists anywhere, the canonical worktree/tianluo.yaml
         is returned (not-found semantics preserved)."""
         main_root, worktree_root = make_worktree
         # Delete any files that might exist in the worktree from the fixture
@@ -1357,10 +1357,10 @@ class TestWorktreeFallbackPaths:
 
     def test_per_section_loaders_use_worktree_lookup(self, make_worktree, isolated_global_home):
         """VersionConfig.load and other per-section loaders correctly read
-        from the main repo's se3.local.yaml when in a worktree."""
+        from the main repo's tianluo.local.yaml when in a worktree."""
         main_root, worktree_root = make_worktree
-        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
-        (main_root / "se3.local.yaml").write_text(
+        (worktree_root / "tianluo.yaml").write_text("version:\n  enabled: false\n")
+        (main_root / "tianluo.local.yaml").write_text(
             "version:\n  enabled: true\n  confidence_threshold: medium\n"
         )
 
@@ -1377,20 +1377,20 @@ class TestWorktreeFallbackPaths:
         This locks in the contract for agent / confirmation paths that
         previously had their own sensitivity to local-vs-yaml shadowing.
         """
-        from se3.config import load_agent_registry
+        from tianluo.config import load_agent_registry
 
         main_root, worktree_root = make_worktree
-        # Worktree has only se3.yaml with one agent
-        (worktree_root / "se3.yaml").write_text(
+        # Worktree has only tianluo.yaml with one agent
+        (worktree_root / "tianluo.yaml").write_text(
             "agents:\n  wt_agent: {type: claude-code, cmd: claude-wt}\n"
         )
-        # Main repo has se3.local.yaml with a different agent
-        (main_root / "se3.local.yaml").write_text(
+        # Main repo has tianluo.local.yaml with a different agent
+        (main_root / "tianluo.local.yaml").write_text(
             "agents:\n  main_agent: {type: claude-code, cmd: claude-main}\n"
         )
 
         registry = load_agent_registry(worktree_root)
-        # main_repo/se3.local.yaml wins (tier 2) over worktree/se3.yaml (tier 3)
+        # main_repo/tianluo.local.yaml wins (tier 2) over worktree/tianluo.yaml (tier 3)
         assert "main_agent" in registry
         assert "wt_agent" not in registry
         assert registry["main_agent"].cmd == "claude-main"
@@ -1401,7 +1401,7 @@ class TestImplementNoConfigReadRegression:
     inside transient per-group worktrees.
 
     Loop mode clears ``_resolve_main_repo_root`` cache once per iteration
-    (at src/se3/commands/run.py:1093-1102). The design assumption is that
+    (at src/tianluo/commands/run.py:1093-1102). The design assumption is that
     config is loaded only at iteration boundaries, NOT inside per-group
     worktrees created by the DAG-parallel implement path. If implement.py
     ever gains a ``load_project_yaml`` or ``get_project_config_path`` call
@@ -1411,7 +1411,7 @@ class TestImplementNoConfigReadRegression:
 
     def test_implement_step_does_not_call_load_project_yaml(self):
         import inspect
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.steps import implement as impl_mod
 
         source = inspect.getsource(impl_mod)
         assert "load_project_yaml" not in source, (
@@ -1421,7 +1421,7 @@ class TestImplementNoConfigReadRegression:
 
     def test_implement_step_does_not_call_get_project_config_path(self):
         import inspect
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.steps import implement as impl_mod
 
         source = inspect.getsource(impl_mod)
         assert "get_project_config_path" not in source, (
@@ -1440,14 +1440,14 @@ class TestWorktreeNestedParentWalkIntegration:
     ):
         """When cwd is <worktree>/src/deep, get_project_root() walks up to
         the worktree root, and get_project_config_path() then ascends to
-        the main repo's se3.local.yaml (tier 2 lookup).
+        the main repo's tianluo.local.yaml (tier 2 lookup).
         """
-        from se3.commands.run import get_project_root
+        from tianluo.commands.run import get_project_root
 
         main_root, worktree_root = make_worktree
-        # Worktree has se3.yaml; main repo has se3.local.yaml
-        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
-        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+        # Worktree has tianluo.yaml; main repo has tianluo.local.yaml
+        (worktree_root / "tianluo.yaml").write_text("version:\n  enabled: false\n")
+        (main_root / "tianluo.local.yaml").write_text("version:\n  enabled: true\n")
 
         # Create nested subdir inside worktree and chdir there.
         nested = worktree_root / "src" / "deep"
@@ -1469,7 +1469,7 @@ class TestWorktreeNestedParentWalkIntegration:
 
 class TestWorktreeWarningDedup:
     """Verify that warning dedup keys collapse worktree-mode prefixed
-    labels (e.g. ``main_repo/se3.local.yaml``) to the same project
+    labels (e.g. ``main_repo/tianluo.local.yaml``) to the same project
     token as their bare counterparts. Otherwise the same deprecated
     key surfaced under different labels in successive loads would
     warn twice.
@@ -1485,13 +1485,13 @@ class TestWorktreeWarningDedup:
 
     def test_dedup_collapses_prefixed_labels_to_project_token(self):
         """Bare and directory-prefixed project labels share one dedup key."""
-        from se3.config import _dedup_source_key, _PROJECT_DEDUP_TOKEN
+        from tianluo.config import _dedup_source_key, _PROJECT_DEDUP_TOKEN
 
         # All four project-label spellings collapse to the project token.
-        assert _dedup_source_key("se3.yaml") == _PROJECT_DEDUP_TOKEN
-        assert _dedup_source_key("se3.local.yaml") == _PROJECT_DEDUP_TOKEN
-        assert _dedup_source_key("main_repo/se3.yaml") == _PROJECT_DEDUP_TOKEN
-        assert _dedup_source_key("main_repo/se3.local.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("tianluo.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("tianluo.local.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("main_repo/tianluo.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("main_repo/tianluo.local.yaml") == _PROJECT_DEDUP_TOKEN
         # Anything else passes through unchanged.
         assert _dedup_source_key("~/.se3/config.yaml") == "~/.se3/config.yaml"
 
@@ -1500,22 +1500,22 @@ class TestWorktreeWarningDedup:
     ):
         """A deprecated ``confirmation.enabled`` key warns at most once
         even when the active project label flips between
-        ``se3.yaml`` (worktree) and ``main_repo/se3.local.yaml``
+        ``tianluo.yaml`` (worktree) and ``main_repo/tianluo.local.yaml``
         across successive loads in the same process.
         """
         self._reset_confirmation_warned_sets()
         main_root, worktree_root = make_worktree
 
-        # Initially only the worktree's se3.yaml exists, with the
-        # deprecated key. First load: warning fires under label "se3.yaml".
-        (worktree_root / "se3.yaml").write_text(
+        # Initially only the worktree's tianluo.yaml exists, with the
+        # deprecated key. First load: warning fires under label "tianluo.yaml".
+        (worktree_root / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
 
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             load_confirmation_config(worktree_root)
         first_warnings = [
             r.getMessage() for r in caplog.records
@@ -1525,11 +1525,11 @@ class TestWorktreeWarningDedup:
             f"expected one deprecation warning on first load; got: {first_warnings}"
         )
 
-        # Now the user adds a main-repo se3.local.yaml that ALSO carries
+        # Now the user adds a main-repo tianluo.local.yaml that ALSO carries
         # the deprecated key. The active label transitions from
-        # "se3.yaml" to "main_repo/se3.local.yaml" — without basename-
+        # "tianluo.yaml" to "main_repo/tianluo.local.yaml" — without basename-
         # aware dedup, the warning fires AGAIN.
-        (main_root / "se3.local.yaml").write_text(
+        (main_root / "tianluo.local.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"
             "  steps:\n"
@@ -1537,7 +1537,7 @@ class TestWorktreeWarningDedup:
         )
 
         caplog.clear()
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             load_confirmation_config(worktree_root)
         second_warnings = [
             r.getMessage() for r in caplog.records
@@ -1547,3 +1547,41 @@ class TestWorktreeWarningDedup:
             f"deprecation warning must dedup across worktree label "
             f"transition; got: {second_warnings}"
         )
+
+
+class TestLegacyFilenameConstants:
+    """Regression guard: the legacy fallback names must stay se3.* (a
+    rename-sweep once clobbered them to the canonical names, silently
+    disabling the 12.x fallback)."""
+
+    def test_legacy_constants_are_legacy(self):
+        from tianluo.config import (
+            LEGACY_PROJECT_CONFIG_FILENAME,
+            LEGACY_PROJECT_LOCAL_CONFIG_FILENAME,
+            PROJECT_CONFIG_FILENAME,
+            PROJECT_LOCAL_CONFIG_FILENAME,
+        )
+
+        assert PROJECT_CONFIG_FILENAME == "tianluo.yaml"
+        assert PROJECT_LOCAL_CONFIG_FILENAME == "tianluo.local.yaml"
+        assert LEGACY_PROJECT_CONFIG_FILENAME == "se3.yaml"
+        assert LEGACY_PROJECT_LOCAL_CONFIG_FILENAME == "se3.local.yaml"
+
+    def test_legacy_local_yaml_still_resolves(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.local.yaml").write_text("a: 1\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "se3.local.yaml"
+
+    def test_legacy_main_yaml_still_resolves(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.yaml").write_text("a: 1\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "se3.yaml"
+
+    def test_canonical_wins_over_legacy(self, tmp_path):
+        from tianluo.config import get_project_config_path
+
+        (tmp_path / "se3.local.yaml").write_text("a: 1\n", encoding="utf-8")
+        (tmp_path / "tianluo.local.yaml").write_text("a: 2\n", encoding="utf-8")
+        assert get_project_config_path(tmp_path).name == "tianluo.local.yaml"

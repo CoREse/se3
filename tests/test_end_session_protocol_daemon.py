@@ -2,13 +2,13 @@
 
 Covers group G2 of the end-session feature:
 
-* protocol: :data:`~se3.daemon.protocol.MSG_END_SESSION` registration and the
-  :func:`~se3.daemon.protocol.make_end_session` constructor (round-trip +
+* protocol: :data:`~tianluo.daemon.protocol.MSG_END_SESSION` registration and the
+  :func:`~tianluo.daemon.protocol.make_end_session` constructor (round-trip +
   optional-field omission).
-* spawner: :meth:`~se3.daemon.spawner.DaemonSpawner.end_session` argv assembly.
-* daemon: :meth:`~se3.daemon.daemon.Daemon.request_end_session` flow lookup and
+* spawner: :meth:`~tianluo.daemon.spawner.DaemonSpawner.end_session` argv assembly.
+* daemon: :meth:`~tianluo.daemon.daemon.Daemon.request_end_session` flow lookup and
   the ValueError on an unknown flow.
-* client: :meth:`~se3.daemon.client.DaemonClient._handle_end_session` routing,
+* client: :meth:`~tianluo.daemon.client.DaemonClient._handle_end_session` routing,
   empty-flow_id ignore, project_root reverse-resolution, and handler-exception
   containment.
 """
@@ -19,11 +19,11 @@ import asyncio
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon import spawner as spawner_mod
-from se3.daemon.client import DaemonClient
-from se3.daemon.daemon import Daemon, DaemonConfig
-from se3.daemon.spawner import DaemonSpawner
+from tianluo.daemon import protocol
+from tianluo.daemon import spawner as spawner_mod
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.daemon import Daemon, DaemonConfig
+from tianluo.daemon.spawner import DaemonSpawner
 
 
 # --------------------------------------------------------------------------
@@ -175,13 +175,13 @@ def test_request_end_session_folds_worktree_root_to_main(tmp_path):
     """A server-supplied *worktree* project_root is normalized to its <main>.
 
     The server reports a worktree session's ``project_root`` as the
-    ``<main>/se3/worktrees/<name>`` sandbox itself. ``request_end_session`` must
+    ``<main>/tianluo/worktrees/<name>`` sandbox itself. ``request_end_session`` must
     fold it back to ``<main>`` so ``se3 end-session -p`` runs against the main
     repo and can locate/archive the worktree.
     """
     main = tmp_path / "main"
-    (main / "se3").mkdir(parents=True)
-    wt = main / "se3" / "worktrees" / "wt_x"
+    (main / "tianluo").mkdir(parents=True)
+    wt = main / "tianluo" / "worktrees" / "wt_x"
     wt.mkdir(parents=True)
     daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
     daemon.spawner = _StubSpawner()  # type: ignore[assignment]

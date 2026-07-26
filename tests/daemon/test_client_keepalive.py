@@ -14,7 +14,7 @@ import asyncio
 
 import pytest
 
-from se3.daemon.client import DaemonClient
+from tianluo.daemon.client import DaemonClient
 
 
 class _AbortSession(Exception):

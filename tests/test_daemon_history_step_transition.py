@@ -32,12 +32,12 @@ from __future__ import annotations
 import asyncio
 import json
 
-import se3.daemon.disk_json_cache as disk_cache
-import se3.daemon.history as history_mod
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
-from se3.daemon.history import DaemonHistoryReader, SessionMeta
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+import tianluo.daemon.disk_json_cache as disk_cache
+import tianluo.daemon.history as history_mod
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.history import DaemonHistoryReader, SessionMeta
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------
@@ -70,7 +70,7 @@ def _make_reader(*roots):
 
 def _write_engine(root, flow_id, status):
     """Write a minimal active ``engine.json`` for *flow_id* with *status*."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -78,7 +78,7 @@ def _write_engine(root, flow_id, status):
 
 
 def _hist(root, flow_id):
-    return root / "se3" / "history" / flow_id
+    return root / "tianluo" / "history" / flow_id
 
 
 def _make_client(provider):
@@ -869,7 +869,7 @@ def test_push_history_resend_is_append_not_full_reread(tmp_path):
 
 def _write_engine_status(root, flow_id, status):
     """Write a realistic active engine.json with a steps table + a status."""
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps(
@@ -1003,7 +1003,7 @@ def test_read_active_flows_advances_cursor_on_steps_first_write_and_new_jsonl(
     # jsonl is created and starts appending.
     steps = {f"{i:02d}_{n}": {"status": "pending", "step_type": n}
              for i, n in enumerate(["analyze", "plan", "commit"], start=2)}
-    state_dir = tmp_path / "se3" / "state"
+    state_dir = tmp_path / "tianluo" / "state"
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "live", "status": "RUNNING",
                     "state": {"steps": steps, "current_step_index": 1},

@@ -1,7 +1,7 @@
 """Tests for the commit-time root-whitelist exclusion guard.
 
 Covers ``_detect_root_whitelist_exclusions`` (and its ``_root_deny_excludes``
-helper) in ``se3.engine.steps.commit``: the soft, diagnostic-only backstop that
+helper) in ``tianluo.engine.steps.commit``: the soft, diagnostic-only backstop that
 warns when a new top-level path is silently excluded by the root ``/*``
 default-deny gitignore rule. The guard must only告警, never touch .gitignore or
 staging, and never raise / block / fail a commit.
@@ -14,13 +14,13 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from se3.engine.models import FlowInstance, State, Step, StepStatus, StepType
-from se3.engine.steps.commit import (
+from tianluo.engine.models import FlowInstance, State, Step, StepStatus, StepType
+from tianluo.engine.steps.commit import (
     _detect_root_whitelist_exclusions,
     _root_deny_excludes,
     commit_handler,
 )
-from se3.engine.version_bumper import VersionConfig
+from tianluo.engine.version_bumper import VersionConfig
 
 
 # --- Repo / fixture helpers -------------------------------------------------
@@ -45,7 +45,7 @@ def _init_git_repo(tmp_path: Path, gitignore: str) -> Path:
 
 # A minimal root default-deny + whitelist .gitignore: everything at root is
 # denied except the handful of explicitly re-admitted top-level entries.
-_ROOT_DENY = "/*\n!/.gitignore\n!/README.md\n!/src.py\n!/se3/\n"
+_ROOT_DENY = "/*\n!/.gitignore\n!/README.md\n!/src.py\n!/tianluo/\n"
 
 
 def _head_tree_files(repo: Path) -> str:
@@ -67,7 +67,7 @@ def _make_flow(repo: Path) -> FlowInstance:
     flow.flow_id = "test-flow"
     flow.task_description = "change"
     flow.task_type = "feature"
-    flow.change_path = repo / "se3.yaml"
+    flow.change_path = repo / "tianluo.yaml"
     flow.baseline_commit = None
     state = MagicMock(spec=State)
     state.selected_steps = [StepType.COMMIT, StepType.SUMMARIZE]
@@ -147,10 +147,10 @@ class TestDetectRootWhitelistExclusions:
         self, tmp_path: Path
     ) -> None:
         repo = _init_git_repo(tmp_path, _ROOT_DENY)
-        # `!/se3/` re-admits se3/; its interior follows normal rules and is not
+        # `!/tianluo/` re-admits tianluo/; its interior follows normal rules and is not
         # a top-level exclusion the guard should surface.
-        (repo / "se3").mkdir()
-        (repo / "se3" / "note.md").write_text("# x\n")
+        (repo / "tianluo").mkdir()
+        (repo / "tianluo" / "note.md").write_text("# x\n")
 
         assert _detect_root_whitelist_exclusions(repo) == []
 
@@ -176,7 +176,7 @@ class TestRootDenyExcludes:
     def test_subprocess_raise_is_swallowed(self, tmp_path: Path) -> None:
         repo = _init_git_repo(tmp_path, _ROOT_DENY)
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             side_effect=OSError("boom"),
         ):
             assert _root_deny_excludes(repo, "stray") is False
@@ -188,7 +188,7 @@ class TestGuardFaultTolerance:
     def test_ls_files_nonzero_returns_empty(self, tmp_path: Path, caplog) -> None:
         repo = _init_git_repo(tmp_path, _ROOT_DENY)
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             return_value=MagicMock(returncode=1, stdout="", stderr="fail"),
         ), caplog.at_level(logging.WARNING):
             result = _detect_root_whitelist_exclusions(repo)
@@ -198,7 +198,7 @@ class TestGuardFaultTolerance:
     def test_ls_files_raise_returns_empty(self, tmp_path: Path, caplog) -> None:
         repo = _init_git_repo(tmp_path, _ROOT_DENY)
         with patch(
-            "se3.engine.steps.commit.subprocess.run",
+            "tianluo.engine.steps.commit.subprocess.run",
             side_effect=OSError("boom"),
         ), caplog.at_level(logging.WARNING):
             result = _detect_root_whitelist_exclusions(repo)
@@ -219,7 +219,7 @@ class TestGuardFaultTolerance:
                 raise OSError("boom")
             return real_run(cmd, *args, **kwargs)
 
-        with patch("se3.engine.steps.commit.subprocess.run", side_effect=flaky):
+        with patch("tianluo.engine.steps.commit.subprocess.run", side_effect=flaky):
             # No exception; check-ignore failures simply yield no confirmed hits.
             assert _detect_root_whitelist_exclusions(repo) == []
 
@@ -230,13 +230,13 @@ class TestCommitHandlerIntegration:
     def _run_commit(self, repo: Path) -> StepStatus:
         flow = _make_flow(repo)
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=_disabled_version_config(),
         ), patch(
-            "se3.engine.steps.commit._generate_commit_message",
+            "tianluo.engine.steps.commit._generate_commit_message",
             return_value="feature: change",
         ), patch(
-            "se3.engine.context_builder.ensure_code_index_fresh",
+            "tianluo.engine.context_builder.ensure_code_index_fresh",
         ):
             return commit_handler(_make_step(), flow)
 
@@ -334,13 +334,13 @@ class TestCommitHandlerIntegration:
         step.step_type = StepType.COMMIT
 
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=_disabled_version_config(),
         ), patch(
-            "se3.engine.steps.commit._generate_commit_message",
+            "tianluo.engine.steps.commit._generate_commit_message",
             return_value="feature: change",
         ), patch(
-            "se3.engine.context_builder.ensure_code_index_fresh",
+            "tianluo.engine.context_builder.ensure_code_index_fresh",
         ) as mock_fresh:
             result = commit_handler(step, flow)
 
@@ -363,15 +363,15 @@ class TestCommitHandlerIntegration:
 
         flow = _make_flow(repo)
         with patch(
-            "se3.engine.steps.commit._load_version_config",
+            "tianluo.engine.steps.commit._load_version_config",
             return_value=_disabled_version_config(),
         ), patch(
-            "se3.engine.steps.commit._generate_commit_message",
+            "tianluo.engine.steps.commit._generate_commit_message",
             return_value="feature: change",
         ), patch(
-            "se3.engine.context_builder.ensure_code_index_fresh",
+            "tianluo.engine.context_builder.ensure_code_index_fresh",
         ), patch(
-            "se3.engine.steps.commit._detect_root_whitelist_exclusions",
+            "tianluo.engine.steps.commit._detect_root_whitelist_exclusions",
             return_value=["phantom-a", "phantom-b"],
         ) as mock_detect:
             result = commit_handler(_make_step(), flow)

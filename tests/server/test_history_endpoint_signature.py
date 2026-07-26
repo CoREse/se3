@@ -30,8 +30,8 @@ import threading
 import pytest
 
 from _authsrv import authed_app, authed_hello, login
-from se3.daemon import protocol
-from se3.server.state import ServerState, bundle_signature, encode_progress
+from tianluo.daemon import protocol
+from tianluo.server.state import ServerState, bundle_signature, encode_progress
 
 
 @pytest.fixture()
@@ -279,7 +279,7 @@ class _ReconcileDaemon:
         self._ctx.__exit__(None, None, None)
 
 
-_WORKTREE_ROOT = "/tmp/repo/se3/worktrees/wt-a"
+_WORKTREE_ROOT = "/tmp/repo/tianluo/worktrees/wt-a"
 _RECORD_1 = {"step_id": "01_discovery", "ordinal": 0, "message": {"content": "q1"}}
 _RECORD_2 = {"step_id": "01_discovery", "ordinal": 1, "message": {"content": "a1"}}
 

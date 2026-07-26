@@ -20,15 +20,15 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine import spec_write_hook
-from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
-from se3.config import (
+from tianluo.engine import spec_write_hook
+from tianluo.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from tianluo.config import (
     ConfigError,
     SpecWriteProtectionConfig,
     load_spec_write_protection_config,
 )
-from se3.claude_runner import ClaudeCodeRunner
-from se3.engine.llm_caller import LLMCaller
+from tianluo.claude_runner import ClaudeCodeRunner
+from tianluo.engine.llm_caller import LLMCaller
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +64,7 @@ def _claude_runner(tmp_path):
 class TestHookDeny:
     @pytest.mark.parametrize("tool_name", ["Write", "Edit"])
     def test_deny_spec_write_via_file_path(self, tmp_path, monkeypatch, capsys, tool_name):
-        spec_file = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_file = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         payload = {
             "tool_name": tool_name,
             "tool_input": {"file_path": str(spec_file)},
@@ -79,10 +79,10 @@ class TestHookDeny:
         assert decision["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
         assert decision["hookSpecificOutput"]["permissionDecisionReason"]
         # Reason also surfaced on stderr (exit-2 blocking protocol).
-        assert "se3/specs" in err
+        assert "tianluo/specs" in err
 
     def test_deny_notebookedit_via_notebook_path(self, tmp_path, monkeypatch, capsys):
-        spec_file = tmp_path / "se3" / "specs" / "flow-engine" / "spec.md"
+        spec_file = tmp_path / "tianluo" / "specs" / "flow-engine" / "spec.md"
         payload = {
             "tool_name": "NotebookEdit",
             "tool_input": {"notebook_path": str(spec_file)},
@@ -95,14 +95,14 @@ class TestHookDeny:
     def test_deny_relative_file_path(self, tmp_path, monkeypatch, capsys):
         payload = {
             "tool_name": "Write",
-            "tool_input": {"file_path": "se3/specs/base/spec.md"},
+            "tool_input": {"file_path": "tianluo/specs/base/spec.md"},
             "cwd": str(tmp_path),
         }
         code, _out, _err = _run_main(payload, monkeypatch, capsys)
         assert code == 2
 
     def test_deny_nested_spec_subdir(self, tmp_path, monkeypatch, capsys):
-        spec_file = tmp_path / "se3" / "specs" / "a" / "b" / "spec.md"
+        spec_file = tmp_path / "tianluo" / "specs" / "a" / "b" / "spec.md"
         payload = {
             "tool_name": "Edit",
             "tool_input": {"file_path": str(spec_file)},
@@ -120,7 +120,7 @@ class TestHookAllow:
     def test_allow_src_write(self, tmp_path, monkeypatch, capsys):
         payload = {
             "tool_name": "Write",
-            "tool_input": {"file_path": str(tmp_path / "src" / "se3" / "foo.py")},
+            "tool_input": {"file_path": str(tmp_path / "src" / "tianluo" / "foo.py")},
             "cwd": str(tmp_path),
         }
         code, out, err = _run_main(payload, monkeypatch, capsys)
@@ -131,7 +131,7 @@ class TestHookAllow:
     def test_allow_se3_state_write(self, tmp_path, monkeypatch, capsys):
         payload = {
             "tool_name": "Write",
-            "tool_input": {"file_path": str(tmp_path / "se3" / "state" / "engine.json")},
+            "tool_input": {"file_path": str(tmp_path / "tianluo" / "state" / "engine.json")},
             "cwd": str(tmp_path),
         }
         code, _out, _err = _run_main(payload, monkeypatch, capsys)
@@ -139,7 +139,7 @@ class TestHookAllow:
 
     def test_allow_specs_lookalike_outside_se3(self, tmp_path, monkeypatch, capsys):
         # A top-level ``specs/`` (legacy fallback path) is NOT the protected
-        # ``se3/specs/`` directory, so a write there is allowed by the hook.
+        # ``tianluo/specs/`` directory, so a write there is allowed by the hook.
         payload = {
             "tool_name": "Write",
             "tool_input": {"file_path": str(tmp_path / "specs" / "base" / "spec.md")},
@@ -184,7 +184,7 @@ class TestHookDefensive:
 class TestEnsureGuardPlugin:
     def test_structure(self, tmp_path):
         plugin_dir = spec_write_hook.ensure_guard_plugin(tmp_path)
-        assert plugin_dir == tmp_path / "se3" / "tmp" / "spec_write_guard_plugin"
+        assert plugin_dir == tmp_path / "tianluo" / "tmp" / "spec_write_guard_plugin"
         assert plugin_dir.is_dir()
 
         manifest_path = plugin_dir / ".claude-plugin" / "plugin.json"
@@ -203,7 +203,7 @@ class TestEnsureGuardPlugin:
         assert pre[0]["matcher"] == "Write|Edit|NotebookEdit"
         inner = pre[0]["hooks"][0]
         assert inner["type"] == "command"
-        assert inner["command"].endswith("-m se3.engine.spec_write_hook")
+        assert inner["command"].endswith("-m tianluo.engine.spec_write_hook")
         assert sys.executable in inner["command"]
         # Carries ONLY the hook — no permissions.deny re-introduced.
         assert "permissions" not in data
@@ -248,7 +248,7 @@ class TestEnsureGuardPlugin:
         # the original interpreter path.
         assert shlex.quote(spaced) in command
         assert shlex.split(command)[0] == spaced
-        assert command.endswith("-m se3.engine.spec_write_hook")
+        assert command.endswith("-m tianluo.engine.spec_write_hook")
 
 
 # ---------------------------------------------------------------------------
@@ -257,13 +257,13 @@ class TestEnsureGuardPlugin:
 
 class TestSnapshotDiff:
     def test_snapshot_and_diff_lifecycle(self, tmp_path):
-        specs = tmp_path / "se3" / "specs" / "base"
+        specs = tmp_path / "tianluo" / "specs" / "base"
         specs.mkdir(parents=True)
         f = specs / "spec.md"
         f.write_text("hello")
 
         before = spec_write_hook.snapshot_spec_files(tmp_path)
-        assert "se3/specs/base/spec.md" in before
+        assert "tianluo/specs/base/spec.md" in before
 
         # No change => empty diff.
         same = spec_write_hook.snapshot_spec_files(tmp_path)
@@ -273,11 +273,11 @@ class TestSnapshotDiff:
         f.write_text("changed")
         after = spec_write_hook.snapshot_spec_files(tmp_path)
         assert spec_write_hook.diff_spec_files(before, after) == [
-            "se3/specs/base/spec.md"
+            "tianluo/specs/base/spec.md"
         ]
 
     def test_diff_detects_add_and_remove(self, tmp_path):
-        specs = tmp_path / "se3" / "specs" / "base"
+        specs = tmp_path / "tianluo" / "specs" / "base"
         specs.mkdir(parents=True)
         (specs / "spec.md").write_text("x")
         before = spec_write_hook.snapshot_spec_files(tmp_path)
@@ -285,14 +285,14 @@ class TestSnapshotDiff:
         # Add a file.
         (specs / "extra.md").write_text("y")
         after_add = spec_write_hook.snapshot_spec_files(tmp_path)
-        assert "se3/specs/base/extra.md" in spec_write_hook.diff_spec_files(
+        assert "tianluo/specs/base/extra.md" in spec_write_hook.diff_spec_files(
             before, after_add
         )
 
         # Remove the original.
         (specs / "spec.md").unlink()
         after_rm = spec_write_hook.snapshot_spec_files(tmp_path)
-        assert "se3/specs/base/spec.md" in spec_write_hook.diff_spec_files(
+        assert "tianluo/specs/base/spec.md" in spec_write_hook.diff_spec_files(
             before, after_rm
         )
 
@@ -306,7 +306,7 @@ class TestSnapshotDiff:
 
 class TestCaptureRestore:
     def _seed(self, tmp_path):
-        spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec.parent.mkdir(parents=True, exist_ok=True)
         spec.write_text("original\n", encoding="utf-8")
         return spec
@@ -314,12 +314,12 @@ class TestCaptureRestore:
     def test_capture_returns_bytes(self, tmp_path):
         spec = self._seed(tmp_path)
         captured = spec_write_hook.capture_spec_contents(tmp_path)
-        assert captured == {"se3/specs/base/spec.md": b"original\n"}
+        assert captured == {"tianluo/specs/base/spec.md": b"original\n"}
         # diff_spec_files works directly on byte maps too.
         spec.write_text("changed\n", encoding="utf-8")
         after = spec_write_hook.capture_spec_contents(tmp_path)
         assert spec_write_hook.diff_spec_files(captured, after) == [
-            "se3/specs/base/spec.md"
+            "tianluo/specs/base/spec.md"
         ]
 
     def test_capture_missing_specs_dir(self, tmp_path):
@@ -330,7 +330,7 @@ class TestCaptureRestore:
         before = spec_write_hook.capture_spec_contents(tmp_path)
         spec.write_text("tampered\n", encoding="utf-8")
         failed = spec_write_hook.restore_spec_files(
-            tmp_path, before, ["se3/specs/base/spec.md"]
+            tmp_path, before, ["tianluo/specs/base/spec.md"]
         )
         assert failed == []
         assert spec.read_text(encoding="utf-8") == "original\n"
@@ -338,11 +338,11 @@ class TestCaptureRestore:
     def test_restore_deletes_newly_created_file(self, tmp_path):
         self._seed(tmp_path)
         before = spec_write_hook.capture_spec_contents(tmp_path)
-        new_spec = tmp_path / "se3" / "specs" / "new" / "spec.md"
+        new_spec = tmp_path / "tianluo" / "specs" / "new" / "spec.md"
         new_spec.parent.mkdir(parents=True, exist_ok=True)
         new_spec.write_text("injected\n", encoding="utf-8")
         failed = spec_write_hook.restore_spec_files(
-            tmp_path, before, ["se3/specs/new/spec.md"]
+            tmp_path, before, ["tianluo/specs/new/spec.md"]
         )
         assert failed == []
         assert not new_spec.exists()
@@ -352,7 +352,7 @@ class TestCaptureRestore:
         before = spec_write_hook.capture_spec_contents(tmp_path)
         spec.unlink()
         failed = spec_write_hook.restore_spec_files(
-            tmp_path, before, ["se3/specs/base/spec.md"]
+            tmp_path, before, ["tianluo/specs/base/spec.md"]
         )
         assert failed == []
         assert spec.read_text(encoding="utf-8") == "original\n"
@@ -365,7 +365,7 @@ class TestCaptureRestore:
 class TestBuildCallArgs:
     def test_plugin_dir_appended_when_provided(self, tmp_path):
         runner = _claude_runner(tmp_path)
-        plugin_dir = tmp_path / "se3" / "tmp" / "spec_write_guard_plugin"
+        plugin_dir = tmp_path / "tianluo" / "tmp" / "spec_write_guard_plugin"
         args = runner.build_call_args(
             "the prompt", read_only=False, spec_guard_plugin=plugin_dir
         )
@@ -436,7 +436,7 @@ class TestResolveSpecGuardSettings:
             assert caller._resolve_spec_guard_settings() is None
 
     def test_hook_disabled_via_config(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_write_protection:\n  hook_enabled: false\n"
         )
         caller = _caller(tmp_path, "implement")
@@ -466,13 +466,13 @@ class TestSpecWriteProtectionConfig:
         assert cfg.diff_fallback_enabled is True
 
     def test_absent_section_defaults(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("workflow:\n  max_fix_iterations: 5\n")
+        (tmp_path / "tianluo.yaml").write_text("workflow:\n  max_fix_iterations: 5\n")
         cfg = load_spec_write_protection_config(tmp_path)
         assert cfg.hook_enabled is True
         assert cfg.diff_fallback_enabled is True
 
     def test_explicit_off(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_write_protection:\n"
             "  hook_enabled: false\n"
             "  diff_fallback_enabled: false\n"
@@ -482,7 +482,7 @@ class TestSpecWriteProtectionConfig:
         assert cfg.diff_fallback_enabled is False
 
     def test_invalid_value_raises(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_write_protection:\n  hook_enabled: maybe\n"
         )
         with pytest.raises(ConfigError) as exc:
@@ -490,7 +490,7 @@ class TestSpecWriteProtectionConfig:
         assert "hook_enabled" in str(exc.value)
 
     def test_non_mapping_section_raises(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("spec_write_protection: [1, 2]\n")
+        (tmp_path / "tianluo.yaml").write_text("spec_write_protection: [1, 2]\n")
         with pytest.raises(ConfigError):
             load_spec_write_protection_config(tmp_path)
 

@@ -25,8 +25,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.run import _check_confirm_response, _interpret_confirm_answer
-from se3.engine.models import (
+from tianluo.commands.run import _check_confirm_response, _interpret_confirm_answer
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
@@ -105,7 +105,7 @@ class TestStructuredPayloadEndToEnd:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
             task_description="Test task",
@@ -143,7 +143,7 @@ class TestStructuredPayloadEndToEnd:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _write_call_and_response(self, response_data):
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,

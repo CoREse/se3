@@ -1,4 +1,34 @@
-# SE3 Framework Version History
+# tianluo (formerly SE3) Framework Version History
+
+## 12.0.0 - 2026-07-26 — the rename release: se3 → tianluo（田螺）
+
+**The project, package, and runtime are renamed to tianluo; the primary command is `luo`. The version lineage continues from se3 11.x — this is a rename, not a rewrite.** The name comes from the Snail Girl (田螺姑娘) of Chinese folklore, who quietly finishes your work while you're away — the same contract as this tool: prompt once, walk away, come back to a finished deliverable. Decision record: issue #270 and `prompts/2026-07-07_rename-tianluo-session.*`.
+
+**Full naming map:**
+
+| Artifact | Old (≤ 11.x) | New (12.0.0) | Legacy honoured through 12.x? |
+|---|---|---|---|
+| PyPI package / project | `se3` (never actually published) | `tianluo` | — (first real release under own name) |
+| Primary command | `se3` | `luo` | yes — `se3` alias prints a migration notice |
+| Full-name command | — | `tianluo` | — |
+| Server command | `se3-server` | `tianluo-server` | yes — alias with notice |
+| Python package | `se3` | `tianluo` | yes — `import se3` shim aliases onto the same modules |
+| `python -m` | `python -m se3` | `python -m tianluo` | yes — via the shim |
+| Runtime directory | `se3/` | `tianluo/` | yes — per-root fallback |
+| Project config | `se3.yaml` / `se3.local.yaml` | `tianluo.yaml` / `tianluo.local.yaml` | yes — per-tier fallback |
+| Methodology name | SE 3.0 / Software Engineering 3.0 | unchanged (concept, not artifact) | — |
+
+**Changes:**
+
+- Rename the Python package `se3` → `tianluo` (git mv, history preserved); ship a 12.x `se3` compatibility shim whose meta-path finder aliases every `se3.*` import onto the *same* `tianluo.*` module objects
+- Install console scripts `luo` (primary), `tianluo` (full name), `tianluo-server`, plus transitional `se3` / `se3-server` aliases that print a one-line stderr migration notice
+- Resolve the project runtime directory per root: canonical `tianluo/` preferred, legacy `se3/` honoured with a one-time migration hint; all engine paths, git pathspecs, globs, spec-path guards, and the version-intent `.gitignore` self-heal are layout-aware
+- Resolve project config per tier: `tianluo.yaml` / `tianluo.local.yaml` canonical, `se3.yaml` / `se3.local.yaml` fallback
+- Add the `rename-to-tianluo` migrator (`luo migrate run rename-to-tianluo`): one reviewable, revertable commit that git-mv's `se3/` → `tianluo/`, renames the config files, and rewrites `.gitignore` rules
+- `luo init` scaffolds the canonical layout; packaged templates, i18n catalogs (en-US/zh-CN), step prompts, injections, and help text all speak `luo` / `tianluo/`
+- Ship `tianluo.example.yaml` as the tracked configuration reference; the live project config (`tianluo.yaml` or `tianluo.local.yaml`) is no longer tracked in this repository
+- Unify the version story: badge, README body, and pyproject now all say 12.0.0 (they had drifted to 11.24.2 / 10.8.1)
+- Deprecation schedule: every `se3` compatibility surface (command aliases, import shim, layout/config fallbacks) is removed in **13.0.0**
 
 ## 11.24.2 - 2026-07-25
 

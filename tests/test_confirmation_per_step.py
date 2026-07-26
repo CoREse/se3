@@ -27,8 +27,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-import se3.config as config_module  # noqa: E402
-from se3.config import (  # noqa: E402
+import tianluo.config as config_module  # noqa: E402
+from tianluo.config import (  # noqa: E402
     insert_confirmation_steps,
     load_confirmation_config,
 )
@@ -69,7 +69,7 @@ def isolated_global_home(monkeypatch, tmp_path):
 
 class TestLoadConfirmationConfigShape:
     def test_returns_steps_dict_only(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -87,12 +87,12 @@ class TestLoadConfirmationConfigShape:
         assert result == {"steps": {}}
 
     def test_empty_section_returns_empty_steps(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text("confirmation: {}\n")
+        (tmp_path / "tianluo.yaml").write_text("confirmation: {}\n")
         result = load_confirmation_config(tmp_path)
         assert result == {"steps": {}}
 
     def test_human_reviewer_parsed(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -101,7 +101,7 @@ class TestLoadConfirmationConfigShape:
         assert result["steps"]["plan"] == {"reviewer": "human", "max_iterations": None}
 
     def test_omitted_reviewer_is_none(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {}\n"
@@ -110,7 +110,7 @@ class TestLoadConfirmationConfigShape:
         assert result["steps"]["plan"] == {"reviewer": None, "max_iterations": None}
 
     def test_max_iterations_parsed(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human, max_iterations: 7}\n"
@@ -121,12 +121,12 @@ class TestLoadConfirmationConfigShape:
     def test_invalid_max_iterations_warned_and_dropped(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human, max_iterations: 0}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
         assert result["steps"]["plan"]["max_iterations"] is None
         assert any("max_iterations" in r.getMessage() for r in caplog.records)
@@ -139,13 +139,13 @@ class TestLoadConfirmationConfigShape:
 
 class TestDeprecatedFieldsIgnored:
     def test_enabled_warned_and_ignored(self, tmp_path, isolated_global_home, caplog):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
         # enabled=false has no effect on the new schema
         assert "plan" in result["steps"]
@@ -157,13 +157,13 @@ class TestDeprecatedFieldsIgnored:
     def test_top_level_reviewer_warned_and_ignored(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  reviewer: human\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
         # No top-level reviewer in the returned shape
         assert "reviewer" not in result
@@ -175,7 +175,7 @@ class TestDeprecatedFieldsIgnored:
     def test_llm_reviewer_warned_and_ignored(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  llm_reviewer:\n"
             "    model: claude-sonnet\n"
@@ -183,7 +183,7 @@ class TestDeprecatedFieldsIgnored:
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
         assert "llm_reviewer" not in result
         # The retained step entry doesn't inherit the deprecated llm_reviewer
@@ -197,11 +197,11 @@ class TestDeprecatedFieldsIgnored:
     def test_list_form_steps_warned_and_ignored(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps: [plan, design]\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             result = load_confirmation_config(tmp_path)
         assert result == {"steps": {}}
         assert any(
@@ -212,13 +212,13 @@ class TestDeprecatedFieldsIgnored:
     def test_dedup_warnings_per_source(
         self, tmp_path, isolated_global_home, caplog,
     ):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  enabled: false\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
         )
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             load_confirmation_config(tmp_path)
             load_confirmation_config(tmp_path)
         enabled_warnings = [
@@ -235,7 +235,7 @@ class TestDeprecatedFieldsIgnored:
 
 class TestUnknownAgentReference:
     def test_unknown_agent_in_reviewer_raises(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  primary: {cmd: claude}\n"
             "confirmation:\n"
@@ -250,7 +250,7 @@ class TestUnknownAgentReference:
         assert "primary" in msg  # available agents listed
 
     def test_known_agent_in_reviewer_succeeds(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  reviewer_bot: {cmd: claude-opus}\n"
             "confirmation:\n"
@@ -264,7 +264,7 @@ class TestUnknownAgentReference:
         self, tmp_path, isolated_global_home,
     ):
         # No agents defined; 'human' must not raise.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -288,7 +288,7 @@ class TestGlobalProjectMerge:
             "    plan: {reviewer: human}\n"
             "    design: {reviewer: human, max_iterations: 5}\n"
         )
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    design: {reviewer: human, max_iterations: 9}\n"
@@ -311,9 +311,9 @@ class TestGlobalProjectMerge:
 
 class TestInsertConfirmationSteps:
     def test_step_in_dict_triggers_confirm(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -326,9 +326,9 @@ class TestInsertConfirmationSteps:
         assert result[plan_idx + 1] == StepType.CONFIRM
 
     def test_step_not_in_dict_no_confirm(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -340,9 +340,9 @@ class TestInsertConfirmationSteps:
         assert StepType.CONFIRM not in result
 
     def test_empty_dict_no_confirm_for_non_plan(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
+        (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
         # plan is always-on, so a sequence without plan is the right probe
         # for "empty dict means no non-plan confirmation".
         result = insert_confirmation_steps(
@@ -351,11 +351,11 @@ class TestInsertConfirmationSteps:
         assert StepType.CONFIRM not in result
 
     def test_empty_dict_still_confirms_plan(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
         # plan-confirm is always-on: an empty confirmation.steps must still
         # insert exactly one CONFIRM after plan.
-        (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
+        (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
         result = insert_confirmation_steps(
             [StepType.PLAN, StepType.IMPLEMENT], tmp_path,
         )
@@ -374,15 +374,15 @@ class TestBuildStepInputsConfirm:
     a CONFIRM step's inputs from per-step config."""
 
     def _make_state_machine(self, project_root):
-        from se3.engine.state_machine import StateMachine
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.persistence import PersistenceManager
 
-        (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
         persistence = PersistenceManager(project_root)
         return StateMachine(project_root, persistence)
 
     def _make_flow_with_plan(self, project_root):
-        from se3.engine.models import (
+        from tianluo.engine.models import (
             FlowInstance,
             Step,
             StepStatus,
@@ -408,9 +408,9 @@ class TestBuildStepInputsConfirm:
         return flow
 
     def test_human_reviewer_path(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -444,11 +444,11 @@ class TestBuildStepInputsConfirm:
         the helper's contract is broken (e.g. by a buggy refactor or by a
         concurrent edit of the YAML between parsing and agent resolution).
         """
-        from se3.engine.models import StepType
-        from se3.engine.state_machine import StateMachineError
-        from se3 import config as config_module
+        from tianluo.engine.models import StepType
+        from tianluo.engine.state_machine import StateMachineError
+        from tianluo import config as config_module
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  reviewer_bot: {cmd: claude-opus}\n"
             "confirmation:\n"
@@ -467,7 +467,7 @@ class TestBuildStepInputsConfirm:
             }
 
         # Patch where the name is looked up (state_machine imports it).
-        from se3.engine import state_machine as sm_module
+        from tianluo.engine import state_machine as sm_module
         monkeypatch.setattr(sm_module, "resolve_confirm_inputs", broken_resolve)
 
         with pytest.raises(StateMachineError) as excinfo:
@@ -478,9 +478,9 @@ class TestBuildStepInputsConfirm:
         assert "plan" in msg
 
     def test_agent_name_reviewer_path(self, tmp_path, isolated_global_home):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  reviewer_bot: {cmd: claude-opus}\n"
             "confirmation:\n"
@@ -503,9 +503,9 @@ class TestBuildStepInputsConfirm:
     def test_omitted_reviewer_falls_back_to_defaults(
         self, tmp_path, isolated_global_home,
     ):
-        from se3.engine.models import StepType
+        from tianluo.engine.models import StepType
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "agents:\n"
             "  primary: {cmd: claude, priority: 10}\n"
             "  backup:  {cmd: claude-dev, priority: 5}\n"
@@ -537,7 +537,7 @@ class TestBuildStepInputsConfirm:
 
 class TestConfirmHandlerDispatch:
     def _make_flow(self, project_root):
-        from se3.engine.models import (
+        from tianluo.engine.models import (
             FlowInstance,
             Step,
             StepStatus,
@@ -560,10 +560,10 @@ class TestConfirmHandlerDispatch:
         return flow
 
     def test_human_reviewer_creates_call_file(self, tmp_path):
-        from se3.engine.models import Step, StepStatus, StepType
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.models import Step, StepStatus, StepType
+        from tianluo.engine.steps.confirm import confirm_handler
 
-        (tmp_path / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
         flow = self._make_flow(tmp_path)
         confirm = Step(
             step_type=StepType.CONFIRM,
@@ -583,13 +583,13 @@ class TestConfirmHandlerDispatch:
         assert "call_file" in confirm.outputs
         assert Path(confirm.outputs["call_file"]).exists()
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_agent_name_reviewer_uses_llm_path(self, MockLLMCaller, tmp_path):
         import json
-        from se3.engine.models import Step, StepStatus, StepType
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.models import Step, StepStatus, StepType
+        from tianluo.engine.steps.confirm import confirm_handler
 
-        (tmp_path / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
         flow = self._make_flow(tmp_path)
 
         mock_caller = MagicMock()
@@ -620,21 +620,21 @@ class TestConfirmHandlerDispatch:
 
         assert result == StepStatus.COMPLETED
         # No call file created
-        call_files = list((tmp_path / "se3" / "calls").glob("confirm_*.json"))
+        call_files = list((tmp_path / "tianluo" / "calls").glob("confirm_*.json"))
         assert call_files == []
         # Verify LLMCaller was constructed with the explicit agents kwarg.
         kwargs = MockLLMCaller.call_args.kwargs
         assert kwargs.get("agents") == agents_list
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_none_reviewer_uses_llm_path_with_passed_agents(
         self, MockLLMCaller, tmp_path,
     ):
         import json
-        from se3.engine.models import Step, StepStatus, StepType
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.models import Step, StepStatus, StepType
+        from tianluo.engine.steps.confirm import confirm_handler
 
-        (tmp_path / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
         flow = self._make_flow(tmp_path)
 
         mock_caller = MagicMock()

@@ -1,9 +1,9 @@
-"""Tests for se3.server.crypto — slow password hashing, token generation,
+"""Tests for tianluo.server.crypto — slow password hashing, token generation,
 constant-time comparison, and redaction helpers (G2)."""
 
 from __future__ import annotations
 
-from se3.server import crypto
+from tianluo.server import crypto
 
 
 # --------------------------------------------------------------------------- #

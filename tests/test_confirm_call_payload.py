@@ -27,15 +27,15 @@ _UNSET = object()
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.daemon.protocol import CALL_KIND_CONFIRM
-from se3.engine.models import (
+from tianluo.daemon.protocol import CALL_KIND_CONFIRM
+from tianluo.engine.models import (
     FlowInstance,
     State,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.steps.confirm import _create_call_file
+from tianluo.engine.steps.confirm import _create_call_file
 
 
 # --------------------------------------------------------------------------- #
@@ -97,7 +97,7 @@ def _add_adjudicate_step(
 @pytest.fixture
 def tmp_project():
     d = Path(tempfile.mkdtemp())
-    (d / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+    (d / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
     yield d
     shutil.rmtree(d, ignore_errors=True)
 
@@ -302,7 +302,7 @@ def test_adjudicate_confirm_payload_drops_only_the_bad_entry(tmp_project):
 
 
 def test_adjudicate_confirm_prompt_mentions_covered_surfaces(tmp_project):
-    from se3.engine.context_builder import build_confirm_prompt
+    from tianluo.engine.context_builder import build_confirm_prompt
 
     assert "cover" in build_confirm_prompt("adjudicate").lower()
     assert "cover" not in build_confirm_prompt("plan").lower()
@@ -315,7 +315,7 @@ def test_adjudicate_confirm_prompt_mentions_covered_surfaces(tmp_project):
 
 def _drive_cli_confirm(monkeypatch, flow, confirm_step, tmp_project, *, approve=True):
     """Drive _handle_confirm_pause past its interactive prompt."""
-    from se3.commands import run as run_mod
+    from tianluo.commands import run as run_mod
 
     monkeypatch.setattr(run_mod, "_drain_pending_interjections", lambda *a, **k: [])
     monkeypatch.setattr(run_mod, "prompt_user_choice", lambda *a, **k: 0 if approve else 2)
@@ -376,7 +376,7 @@ def test_cli_non_adjudicate_confirm_prints_no_surfaces_section(monkeypatch, caps
 
     assert _drive_cli_confirm(monkeypatch, flow, confirm_step, tmp_project) is True
 
-    from se3.i18n import t
+    from tianluo.i18n import t
 
     out = capsys.readouterr().out
     assert t("cli.run.confirm.adjudicate.covered_surfaces_title") not in out
@@ -394,7 +394,7 @@ def test_enriched_call_file_still_consumable_by_check_confirm_response(tmp_proje
     well as the daemon's ``{"response": {...}}`` envelope must both land a
     ``review_result`` and drive COMPLETED / REVISION_NEEDED.
     """
-    from se3.commands.run import _check_confirm_response
+    from tianluo.commands.run import _check_confirm_response
 
     flow = _make_flow(tmp_project)
     adj = _add_adjudicate_step(flow, "adj-001", description="D", rationale="R")
@@ -419,7 +419,7 @@ def test_enriched_call_file_still_consumable_by_check_confirm_response(tmp_proje
 
 
 def test_enriched_call_file_structured_rejection_routes_to_revision(tmp_project):
-    from se3.commands.run import _check_confirm_response
+    from tianluo.commands.run import _check_confirm_response
 
     flow = _make_flow(tmp_project)
     plan_step = Step(step_type=StepType.PLAN, status=StepStatus.COMPLETED, step_id="plan-001")

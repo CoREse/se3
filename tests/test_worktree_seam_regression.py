@@ -29,13 +29,13 @@ import os
 import tempfile
 from pathlib import Path
 
-from se3.daemon import protocol
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.history import DaemonHistoryReader
-from se3.engine.models import FlowStatus
-from se3.engine.persistence import PersistenceManager
-from se3.engine.state_machine import StateMachine
-from se3.server.state import ServerState
+from tianluo.daemon import protocol
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.engine.models import FlowStatus
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.engine.state_machine import StateMachine
+from tianluo.server.state import ServerState
 
 
 def _eager_save_worktree_flow(worktree_root: Path, branch: str = "worktree/feat-x"):
@@ -63,16 +63,16 @@ def _eager_save_worktree_flow(worktree_root: Path, branch: str = "worktree/feat-
 def test_eager_save_persists_is_worktree_mode_at_init(tmp_path):
     """Task 1: the eager save writes is_worktree_mode + worktree_path early.
 
-    Before any discovery LLM call, ``<worktree>/se3/state/engine.json`` must
+    Before any discovery LLM call, ``<worktree>/tianluo/state/engine.json`` must
     already describe an ``is_worktree_mode`` flow at status INIT.
     """
-    wt_root = tmp_path / "proj" / "se3" / "worktrees" / "feat-x"
+    wt_root = tmp_path / "proj" / "tianluo" / "worktrees" / "feat-x"
     wt_root.mkdir(parents=True)
 
     flow = _eager_save_worktree_flow(wt_root)
     assert flow.status == FlowStatus.INIT
 
-    engine_json = wt_root / "se3" / "state" / "engine.json"
+    engine_json = wt_root / "tianluo" / "state" / "engine.json"
     assert engine_json.is_file()
     data = json.loads(engine_json.read_text(encoding="utf-8"))
     assert data["is_worktree_mode"] is True
@@ -91,7 +91,7 @@ def test_worktree_observable_at_discovery_startup_window(tmp_path):
     first step flips it to RUNNING.
     """
     main_root = tmp_path / "proj"
-    wt_root = main_root / "se3" / "worktrees" / "feat-x"
+    wt_root = main_root / "tianluo" / "worktrees" / "feat-x"
     wt_root.mkdir(parents=True)
     _eager_save_worktree_flow(wt_root)
 
@@ -115,7 +115,7 @@ def test_discovery_first_reply_read_live_at_init(tmp_path):
     parseability — must surface the full first reply, then keep appending.
     """
     main_root = tmp_path / "proj"
-    wt_root = main_root / "se3" / "worktrees" / "feat-x"
+    wt_root = main_root / "tianluo" / "worktrees" / "feat-x"
     wt_root.mkdir(parents=True)
     flow = _eager_save_worktree_flow(wt_root)
     flow_id = flow.flow_id
@@ -123,7 +123,7 @@ def test_discovery_first_reply_read_live_at_init(tmp_path):
     # Discovery writes its first record into the worktree's own history dir.
     # The very first snapshot lands while the writer has flushed a COMPLETE
     # record but not yet its trailing newline.
-    hist = wt_root / "se3" / "history" / flow_id / "01_discovery_ab.jsonl"
+    hist = wt_root / "tianluo" / "history" / flow_id / "01_discovery_ab.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
     first = {
         "role": "assistant",
@@ -181,11 +181,11 @@ def test_dag_isolation_worktree_stays_excluded(tmp_path):
 
     A DAG implement-isolation worktree never writes a top-level
     ``is_worktree_mode`` flow record, so the strict gate must keep it out of the
-    observable set even though it shares the ``se3/worktrees/`` parent.
+    observable set even though it shares the ``tianluo/worktrees/`` parent.
     """
     main_root = tmp_path / "proj"
-    wt_root = main_root / "se3" / "worktrees" / "impl-g2"
-    state_dir = wt_root / "se3" / "state"
+    wt_root = main_root / "tianluo" / "worktrees" / "impl-g2"
+    state_dir = wt_root / "tianluo" / "state"
     state_dir.mkdir(parents=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": "impl-flow", "status": "RUNNING"}),
@@ -214,13 +214,13 @@ def test_seam_observable_and_readable_yet_never_registered(tmp_path):
     don't pop out the other" lock.
     """
     main_root = tmp_path / "proj"
-    wt_root = main_root / "se3" / "worktrees" / "feat-x"
+    wt_root = main_root / "tianluo" / "worktrees" / "feat-x"
     wt_root.mkdir(parents=True)
     flow = _eager_save_worktree_flow(wt_root)
     flow_id = flow.flow_id
 
     # Discovery's first reply flushed complete but without a trailing newline.
-    hist = wt_root / "se3" / "history" / flow_id / "01_discovery_ab.jsonl"
+    hist = wt_root / "tianluo" / "history" / flow_id / "01_discovery_ab.jsonl"
     hist.parent.mkdir(parents=True, exist_ok=True)
     hist.write_text(
         json.dumps(
@@ -275,10 +275,10 @@ def test_seam_observable_and_readable_yet_never_registered(tmp_path):
     # -- register-side invariant (Bug2) ------------------------------------
     assert wt_real not in agg.all_project_roots()
     assert main_real in agg.all_project_roots()
-    assert all("/se3/worktrees/" not in r for r in agg.all_project_roots())
+    assert all("/tianluo/worktrees/" not in r for r in agg.all_project_roots())
     assert wt_real not in [os.path.realpath(str(p)) for p in agg.project_roots]
     # The registry callback only ever recorded the main root.
-    assert all("/se3/worktrees/" not in r for r in persisted)
+    assert all("/tianluo/worktrees/" not in r for r in persisted)
     assert main_real in [os.path.realpath(r) for r in persisted]
 
 
@@ -416,14 +416,14 @@ def _make_reader(*roots):
 
 
 def _wt_flow_dir(root, flow_id):
-    d = root / "se3" / "history" / flow_id
+    d = root / "tianluo" / "history" / flow_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _make_worktree(main_root, name="wt__b"):
-    (main_root / "se3").mkdir(parents=True, exist_ok=True)
-    wt = main_root / "se3" / "worktrees" / name
+    (main_root / "tianluo").mkdir(parents=True, exist_ok=True)
+    wt = main_root / "tianluo" / "worktrees" / name
     wt.mkdir(parents=True, exist_ok=True)
     return wt
 

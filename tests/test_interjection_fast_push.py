@@ -3,7 +3,7 @@
 Covers:
 
 * ``DaemonAggregator.pending_calls_signature`` — kind-agnostic stat-based
-  fingerprint of every ``se3/calls/`` file under each tracked project root.
+  fingerprint of every ``tianluo/calls/`` file under each tracked project root.
 * ``DaemonClient._handle_interject`` — sets the ``_fast_push_event`` after
   writing the interjection file so the push loop wakes immediately.
 * ``DaemonClient._calls_changed`` — debounces calls-directory deltas off
@@ -19,12 +19,12 @@ import asyncio
 import json
 from pathlib import Path
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.client import DaemonClient
-from se3.server.ws import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.client import DaemonClient
+from tianluo.server.ws import (
     INTERJECTION_PHASE_CONSUMED,
     INTERJECTION_PHASE_PENDING,
     UI_EVENT_INTERJECTION,
@@ -73,7 +73,7 @@ def test_pending_calls_signature_empty_when_no_calls_dir(tmp_path):
 
 
 def test_pending_calls_signature_lists_each_file_with_stat(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / "interjection_1.json", {"kind": "interjection", "text": "a"})
     _write(calls / "retry_2.json", {"kind": "retry_decision"})
 
@@ -93,7 +93,7 @@ def test_pending_calls_signature_lists_each_file_with_stat(tmp_path):
 
 
 def test_pending_calls_signature_changes_when_file_added(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     agg = DaemonAggregator()
     agg.add_project_root(tmp_path)
@@ -104,7 +104,7 @@ def test_pending_calls_signature_changes_when_file_added(tmp_path):
 
 
 def test_pending_calls_signature_changes_when_file_removed(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     target = calls / "interjection_x.json"
     _write(target, {"kind": "interjection"})
 
@@ -117,7 +117,7 @@ def test_pending_calls_signature_changes_when_file_removed(tmp_path):
 
 
 def test_pending_calls_signature_skips_hidden_files(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / ".tmp.swap", {"kind": "interjection"})
     _write(calls / "real.json", {"kind": "interjection"})
 
@@ -189,7 +189,7 @@ def test_handle_interject_sets_fast_push_event(tmp_path):
 
     assert asyncio.run(scenario()) is True
     # The interjection file actually landed on disk.
-    assert list((tmp_path / "se3" / "calls").glob("interjection_*.json"))
+    assert list((tmp_path / "tianluo" / "calls").glob("interjection_*.json"))
 
 
 def test_handle_interject_no_event_when_text_empty(tmp_path):
@@ -444,14 +444,14 @@ def test_pending_calls_signature_includes_worktree_run_calls(tmp_path):
     """A --worktree run's call dir is covered by the fast call signature.
 
     An isolation run writes its human-call files under
-    ``<worktree>/se3/calls/``; the fast (~1 s) call-change push must see them so
+    ``<worktree>/tianluo/calls/``; the fast (~1 s) call-change push must see them so
     a worktree discovery clarification surfaces promptly, like a sync run.
     """
     main_root = tmp_path / "proj"
     main_root.mkdir()
-    wt_root = main_root / "se3" / "worktrees" / "feat-x-1"
+    wt_root = main_root / "tianluo" / "worktrees" / "feat-x-1"
     _write(
-        wt_root / "se3" / "state" / "engine.json",
+        wt_root / "tianluo" / "state" / "engine.json",
         {
             "flow_id": "wt-flow-1",
             "status": "PAUSED",
@@ -462,7 +462,7 @@ def test_pending_calls_signature_includes_worktree_run_calls(tmp_path):
         },
     )
     _write(
-        wt_root / "se3" / "calls" / "discovery_1.json",
+        wt_root / "tianluo" / "calls" / "discovery_1.json",
         {"kind": "discovery", "prompt": "clarify?", "context": {"flow_id": "wt-flow-1"}},
     )
 
@@ -489,7 +489,7 @@ def test_history_relay_preserves_step_id_and_ordinal_identity():
     per-physical-file ``step_id`` and per-file ``ordinal`` reach the frontend
     bundle verbatim, so a worktree discovery's distinct sidecar streams survive.
     """
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 
@@ -529,7 +529,7 @@ def test_history_append_does_not_dedupe_same_ordinal_records():
     """An append extends the bundle without deduping — a later round carrying an
     ordinal already present under a DISTINCT step id is not mistaken for a
     duplicate frame and dropped."""
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 
@@ -557,7 +557,7 @@ def test_reconcile_full_pull_respects_existing_throttle():
     """The self-heal reconcile is gated on the SAME full-pull throttle the
     cache-miss path uses, so an idle poll cannot fan out one daemon pull per
     tick: right after a full pull the flow reads as throttled."""
-    from se3.server.state import ServerState
+    from tianluo.server.state import ServerState
 
     state = ServerState()
 

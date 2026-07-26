@@ -10,8 +10,8 @@ import logging
 
 import pytest
 
-from se3.server import crypto
-from se3.server.auth import (
+from tianluo.server import crypto
+from tianluo.server.auth import (
     AuthNotConfigured,
     LocalAuthProvider,
     LoginRateLimited,
@@ -23,11 +23,11 @@ from se3.server.auth import (
     build_provider_chain,
     make_require_owner,
 )
-from se3.server.auth.base import AuthProvider
-from se3.server.auth.oidc import OidcProvider, oidc_external_id
-from se3.server.auth.proxy_header import ProxyHeaderProvider
-from se3.server.auth.session import CookieConfig, SessionAuthProvider
-from se3.server.persistence import Store
+from tianluo.server.auth.base import AuthProvider
+from tianluo.server.auth.oidc import OidcProvider, oidc_external_id
+from tianluo.server.auth.proxy_header import ProxyHeaderProvider
+from tianluo.server.auth.session import CookieConfig, SessionAuthProvider
+from tianluo.server.persistence import Store
 
 
 # --------------------------------------------------------------------------- #
@@ -238,7 +238,7 @@ def test_local_login_rate_limit_locks_then_success_resets(store, two_owners, ses
 
 def test_local_credentials_and_session_never_logged(store, two_owners, sessions, caplog):
     provider = LocalAuthProvider(store, sessions)
-    with caplog.at_level(logging.DEBUG, logger="se3.server"):
+    with caplog.at_level(logging.DEBUG, logger="tianluo.server"):
         res = provider.login("alice", "alice-pw")
         provider.login("alice", "super-secret-wrong-pw")
     assert res is not None

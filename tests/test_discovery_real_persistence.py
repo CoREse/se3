@@ -7,7 +7,7 @@ actual step handler — they either mock ``LLMCaller`` wholesale or call
 ``record_prompt`` directly with a hand-rendered prompt.
 
 This module closes that last gap for G4's "用真实 discovery 流程核验" criterion:
-it drives the **real** :func:`se3.engine.steps.discovery.discovery_handler`
+it drives the **real** :func:`tianluo.engine.steps.discovery.discovery_handler`
 end-to-end (real ``LLMCaller.call`` → ``_call_two_phase`` → ``_call_with_retry``
 → ``_record_prompt`` → ``record_prompt``), stubbing only the subprocess
 boundary (``LLMCaller._get_current_runner``) so no real ``claude`` process is
@@ -25,20 +25,20 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.prompt_markers import (
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
 )
-from se3.engine.steps.discovery import discovery_handler
+from tianluo.engine.steps.discovery import discovery_handler
 
 
 # A user-typed initial description with non-ASCII prose and an embedded session
 # reference, so we know unusual characters survive the marker boundary intact.
 _INITIAL_DESCRIPTION = (
     "请帮我把 web running-flow console 的聊天渲染修好，"
-    "参考 se3/history/20260520-142159_30166ecb 这个 session。"
+    "参考 tianluo/history/20260520-142159_30166ecb 这个 session。"
 )
 
 
@@ -67,7 +67,7 @@ class _FakeRunner:
         return _FakeResult(self._output)
 
     def detect_infra_error(self, *args, **kwargs):
-        from se3.agent_runner import InfraErrorType
+        from tianluo.agent_runner import InfraErrorType
 
         return InfraErrorType.NONE
 
@@ -100,7 +100,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
         flow_id=flow_id,
         task_description=_INITIAL_DESCRIPTION,
         task_type="discovery",
-        change_path=project_root / "se3",
+        change_path=project_root / "tianluo",
     )
     step = Step(
         step_type=StepType.DISCOVERY,
@@ -120,7 +120,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
 
     # Stub ONLY the subprocess boundary; everything above it is the real engine.
     with patch(
-        "se3.engine.llm_caller.LLMCaller._get_current_runner",
+        "tianluo.engine.llm_caller.LLMCaller._get_current_runner",
         return_value=fake_runner,
     ):
         result = discovery_handler(step, flow)
@@ -132,7 +132,7 @@ def _run_initial_discovery(tmp_path: Path, flow_id: str, step_id: str):
 
 def _read_user_record(project_root: Path, flow_id: str, step_id: str) -> dict:
     """Return the single persisted ``user`` record from the step jsonl."""
-    path = project_root / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    path = project_root / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
     assert path.exists(), f"history jsonl not written at {path}"
     user_records = []
     for line in path.read_text(encoding="utf-8").splitlines():

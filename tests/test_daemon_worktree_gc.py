@@ -1,6 +1,6 @@
 """Tests for the daemon's periodic worktree-GC tick.
 
-Covers the three behaviours G3 adds to :class:`se3.daemon.daemon.Daemon`:
+Covers the three behaviours G3 adds to :class:`tianluo.daemon.daemon.Daemon`:
 
 * ``_maybe_run_gc`` fires ``_gc_once`` at most once per ``gc_interval`` (runs on
   the first poll, is skipped while still inside the interval, runs again once
@@ -20,9 +20,9 @@ import logging
 
 import pytest
 
-import se3.engine.merge.worktree_gc as gc_mod
-from se3.daemon.daemon import Daemon, DaemonConfig
-from se3.engine.merge.worktree_gc import WorktreeGCReport
+import tianluo.engine.merge.worktree_gc as gc_mod
+from tianluo.daemon.daemon import Daemon, DaemonConfig
+from tianluo.engine.merge.worktree_gc import WorktreeGCReport
 
 
 def _make_daemon(tmp_path, *, gc_interval=3600.0, gc_max_age_seconds=86400.0,
@@ -34,7 +34,7 @@ def _make_daemon(tmp_path, *, gc_interval=3600.0, gc_max_age_seconds=86400.0,
     root = None
     if with_root:
         root = tmp_path / "proj"
-        (root / "se3").mkdir(parents=True)
+        (root / "tianluo").mkdir(parents=True)
         roots = [str(root)]
     config = DaemonConfig(
         pid_dir=pid_dir,
@@ -141,7 +141,7 @@ def test_retained_unmerged_branch_warns(tmp_path, monkeypatch, caplog):
     report = WorktreeGCReport(
         archived=[("wt-run", None, 100)],
         retained_unmerged=[
-            ("se3/worktrees/webui-discovery", "master", "branch has commits not in HEAD (unmerged)"),
+            ("tianluo/worktrees/webui-discovery", "master", "branch has commits not in HEAD (unmerged)"),
         ],
         reclaimed_bytes=100,
     )
@@ -150,7 +150,7 @@ def test_retained_unmerged_branch_warns(tmp_path, monkeypatch, caplog):
         lambda project_root, *, max_age_seconds, dry_run=False: report,
     )
 
-    with caplog.at_level(logging.WARNING, logger="se3.daemon.daemon"):
+    with caplog.at_level(logging.WARNING, logger="tianluo.daemon.daemon"):
         daemon._gc_once()
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
@@ -164,7 +164,7 @@ def test_clean_report_emits_no_warning(tmp_path, monkeypatch, caplog):
         lambda project_root, *, max_age_seconds, dry_run=False: WorktreeGCReport(),
     )
 
-    with caplog.at_level(logging.WARNING, logger="se3.daemon.daemon"):
+    with caplog.at_level(logging.WARNING, logger="tianluo.daemon.daemon"):
         daemon._gc_once()
 
     assert not [r for r in caplog.records if r.levelno == logging.WARNING]

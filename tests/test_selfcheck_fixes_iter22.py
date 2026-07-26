@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.persistence import (
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.persistence import (
     PersistenceManager,
     _canonical_json,
     _content_hash,
@@ -59,7 +59,7 @@ def _make_flow(n_steps: int = 3, payload_size: int = 20_000) -> FlowInstance:
 
 
 def _cold_context_path(tmp_path: Path, flow_id: str) -> Path:
-    return tmp_path / "se3" / "state" / "steps" / flow_id / "_context.json"
+    return tmp_path / "tianluo" / "state" / "steps" / flow_id / "_context.json"
 
 
 @pytest.mark.parametrize("loader", ["lazy", "eager"])
@@ -152,12 +152,12 @@ def test_save_flow_with_mixed_key_step_payload(tmp_path):
 
 def test_pending_calls_signature_snapshots_roots(tmp_path):
     """Iterating a snapshot survives a concurrent root registration."""
-    from se3.daemon.aggregator import DaemonAggregator
+    from tianluo.daemon.aggregator import DaemonAggregator
 
     agg = DaemonAggregator()
     for i in range(20):
         r = tmp_path / f"root{i}"
-        (r / "se3" / "calls").mkdir(parents=True)
+        (r / "tianluo" / "calls").mkdir(parents=True)
         agg.add_project_root(r)
 
     # The snapshot semantics the fix relies on: a list() copy is immune to the
@@ -184,7 +184,7 @@ def test_end_session_handler_dispatched_off_loop():
     """
     import threading
 
-    from se3.daemon.client import DaemonClient
+    from tianluo.daemon.client import DaemonClient
 
     seen = {}
     loop_thread = {}

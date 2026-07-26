@@ -14,8 +14,8 @@ head-blank accumulation in VERSIONS.md:
 
 from __future__ import annotations
 
-from se3.engine import docs_updater
-from se3.engine.docs_updater import DocumentationUpdater
+from tianluo.engine import docs_updater
+from tianluo.engine.docs_updater import DocumentationUpdater
 
 
 def _default_updater(tmp_path, monkeypatch):

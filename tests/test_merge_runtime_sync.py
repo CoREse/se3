@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.runtime_sync import (
+from tianluo.engine.merge.runtime_sync import (
     RuntimeSyncCollision,
     SyncReport,
     sync_branch_runtime,
@@ -25,7 +25,7 @@ def _make_sync_call(source_dir: Path, target_dir: Path, *, strict: bool = False)
     The returned callable accepts ``branch`` and returns a ``SyncReport``.
     """
     def _call(branch: str) -> SyncReport:
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
         original = _rs._get_worktree_path_for_branch
         _rs._get_worktree_path_for_branch = lambda _pr, _br: source_dir
         try:
@@ -41,8 +41,8 @@ class TestTierACopy:
     def test_tier_a_dir_file_copied(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("log content")
@@ -58,8 +58,8 @@ class TestTierACopy:
     def test_tier_a_glob_file_copied(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "summary-abc.md").write_text("summary")
@@ -77,8 +77,8 @@ class TestTierACopy:
     def test_tier_a_nested_file_copied(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state" / "archive" / "sub").mkdir(parents=True)
         (source_se3 / "state" / "archive" / "sub" / "snapshot.md").write_text("snapshot")
@@ -95,7 +95,7 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "logs").mkdir(parents=True)
         src_file = source_se3 / "logs" / "app.log"
@@ -108,7 +108,7 @@ class TestTierACopy:
         call = _make_sync_call(source, target)
         report = call("feature")
 
-        dest_file = target / "se3" / "logs" / "app.log"
+        dest_file = target / "tianluo" / "logs" / "app.log"
         assert dest_file.exists()
         assert stat.S_IMODE(dest_file.stat().st_mode) == 0o640
         assert dest_file.stat().st_mtime == 1234567890
@@ -117,7 +117,7 @@ class TestTierACopy:
         """Every tier A path constant has at least one file in the test."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "h.log").write_text("h")
@@ -142,14 +142,14 @@ class TestTierACopy:
 
     def test_entry_path_symlink_outside_source_skipped(self, tmp_path: Path) -> None:
         """When a TIER_A_DIRS entry itself is a symlink to outside source_se3,
-        the sync skips it entirely without copying anything into target/se3/history.
+        the sync skips it entirely without copying anything into target/tianluo/history.
         """
         import os
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Create a directory outside source_se3 with files
         outside_dir = tmp_path / "outside"
@@ -180,8 +180,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Create an outside directory with a nested structure
         outside_dir = tmp_path / "outside"
@@ -209,8 +209,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Create an outside directory with summary files
         outside_dir = tmp_path / "outside"
@@ -239,8 +239,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Create a tier-C directory with a file
         (source_se3 / "cache").mkdir(parents=True)
@@ -266,8 +266,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Create a tier-C file
         (source_se3 / "cache").mkdir(parents=True)
@@ -295,8 +295,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         real_file = source_se3 / "history" / "real.log"
@@ -323,8 +323,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         real_file = source_se3 / "history" / "real.log"
@@ -355,8 +355,8 @@ class TestTierACopy:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         real_file = source_se3 / "history" / "real.log"
@@ -382,8 +382,8 @@ class TestTierACollision:
     def test_same_relative_path_collision(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -398,8 +398,8 @@ class TestTierACollision:
     def test_glob_collision(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "summary-x.md").write_text("source")
@@ -414,8 +414,8 @@ class TestTierACollision:
     def test_different_subpath_same_name_no_collision(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "same.log").write_text("source")
@@ -437,8 +437,8 @@ class TestLenientCollision:
     def test_collision_bypassed_to_sidecar(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -463,8 +463,8 @@ class TestLenientCollision:
     def test_glob_collision_bypassed(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "summary-x.md").write_text("source")
@@ -490,8 +490,8 @@ class TestLenientCollision:
         """
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "summary-x.md").write_text("source")
@@ -514,8 +514,8 @@ class TestLenientCollision:
         """Branch names containing '/' are safely transformed in sidecar filenames."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -534,8 +534,8 @@ class TestLenientCollision:
         """If sidecar already exists with identical content, treat as idempotent."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("same content")
@@ -566,8 +566,8 @@ class TestLenientCollision:
         """If sidecar exists with different content, use hash-suffix path."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -597,8 +597,8 @@ class TestLenientCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -638,8 +638,8 @@ class TestLenientCollision:
         """In lenient mode, a collision on one file does not block copying other files."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source")
@@ -665,8 +665,8 @@ class TestLenientCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         src_file = source_se3 / "history" / "flow1.log"
@@ -689,8 +689,8 @@ class TestLenientCollision:
         """In lenient mode with multiple collisions, all sidecars are written or none."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "first.log").write_text("first")
@@ -715,8 +715,8 @@ class TestLenientCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         src_file = source_se3 / "history" / "flow1.log"
@@ -760,8 +760,8 @@ class TestLenientCollision:
         """
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Source has both a regular file and a sidecar-named file.  The
         # sidecar-named file represents output left over by a prior
@@ -809,12 +809,12 @@ class TestLenientCollision:
         """When an OSError occurs mid-bypass (e.g. on the second collision),
         the file is skipped and the sync continues — already-copied tier-A
         files and earlier sidecars are preserved."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Tier A files in source:
         #   a.log — no collision (will be copied)
@@ -867,8 +867,8 @@ class TestTierB:
     def test_tier_b_files_discarded(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "state").mkdir(parents=True)
         (source_se3 / "state" / "engine.json").write_text("{}")
@@ -882,8 +882,8 @@ class TestTierB:
     def test_tier_b_dir_discarded(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "calls" / "active").mkdir(parents=True)
         (source_se3 / "calls" / "active" / "call1.json").write_text("c1")
@@ -903,7 +903,7 @@ class TestTierC:
     def test_tier_c_not_copied(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "cache").mkdir(parents=True)
         (source_se3 / "cache" / "idx.json").write_text("cached")
@@ -927,7 +927,7 @@ class TestMissingWorktree:
     """When the source worktree is missing, sync is skipped."""
 
     def test_missing_worktree_returns_skipped(self, tmp_path: Path) -> None:
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         original = _rs._get_worktree_path_for_branch
         _rs._get_worktree_path_for_branch = lambda _pr, _br: None
@@ -941,7 +941,7 @@ class TestMissingWorktree:
 
     def test_worktree_directory_removed_externally_returns_skipped(self, tmp_path: Path) -> None:
         """When git metadata points to a worktree path that was force-removed externally."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         nonexistent_path = tmp_path / "ghost-worktree"
         original = _rs._get_worktree_path_for_branch
@@ -962,8 +962,8 @@ class TestTwoPassValidation:
         """First file is non-colliding, second file collides — nothing is copied."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Set up source with two tier A files
         (source_se3 / "history").mkdir(parents=True)
@@ -989,7 +989,7 @@ class TestEdgeCases:
     def test_empty_source_se3(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        (source / "se3").mkdir(parents=True)
+        (source / "tianluo").mkdir(parents=True)
 
         call = _make_sync_call(source, target)
         report = call("feature")
@@ -1014,14 +1014,14 @@ class TestEdgeCases:
     def test_source_same_as_target_skipped(self, tmp_path: Path) -> None:
         """When source worktree equals project root, sync is skipped to avoid
         spurious RuntimeSyncCollision on every tier A file."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         # Simulate _get_worktree_path_for_branch returning the same path
         original = _rs._get_worktree_path_for_branch
         _rs._get_worktree_path_for_branch = lambda _pr, _br: _pr
         try:
             # Set up a se3 dir with tier A files
-            se3 = tmp_path / "se3"
+            se3 = tmp_path / "tianluo"
             (se3 / "history").mkdir(parents=True)
             (se3 / "history" / "flow1.log").write_text("log content")
 
@@ -1039,7 +1039,7 @@ class TestOSErrorPropagation:
     def test_copy_oserror_skips_file(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("log content")
@@ -1057,14 +1057,14 @@ class TestOSErrorPropagation:
 
         # Sync succeeds; file is skipped rather than aborting
         assert "history/flow1.log" in report.skipped_files
-        assert not (target / "se3" / "history" / "flow1.log").exists()
+        assert not (target / "tianluo" / "history" / "flow1.log").exists()
 
     def test_partial_copy_earlier_files_remain(self, tmp_path: Path) -> None:
         """If copy fails mid-loop, earlier files remain; later files are skipped."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "first.log").write_text("first")
@@ -1104,8 +1104,8 @@ class TestOSErrorPropagation:
         """OSError during copy skips the file; no rollback occurs."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history" / "sub").mkdir(parents=True)
         (source_se3 / "history" / "sub" / "deep.log").write_text("deep")
@@ -1132,12 +1132,12 @@ class TestOSErrorPropagation:
         """When _atomic_write_bytes raises ENOSPC in the copy phase,
         a WARNING is logged (symmetric with the bypass-phase handler)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("log content")
@@ -1147,7 +1147,7 @@ class TestOSErrorPropagation:
 
         monkeypatch.setattr(_rs, "_atomic_write_bytes", _failing_atomic)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target)
             report = call("feature")
 
@@ -1166,12 +1166,12 @@ class TestTOCTOU:
         content, the lenient-mode TOCTOU re-check routes to the bypass loop
         so the source version is preserved as a sidecar (symmetric with the
         pre-validation phase)."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source content")
@@ -1208,12 +1208,12 @@ class TestTOCTOU:
     ) -> None:
         """If dest_file appears between validation and copy with identical
         content, the TOCTOU re-check treats it as idempotent and skips."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("same content")
@@ -1245,12 +1245,12 @@ class TestTOCTOU:
     ) -> None:
         """If dest_file appears between validation and copy with different
         content, the strict-mode TOCTOU re-check raises RuntimeSyncCollision."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source content")
@@ -1282,12 +1282,12 @@ class TestTOCTOU:
         placeholder dest_hash so operators reading ``report.collisions``
         see a uniform row for every collided file.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source content")
@@ -1342,12 +1342,12 @@ class TestTOCTOU:
         _file_hash(dest_file) propagates to the copy-phase ``except OSError``
         rather than routing through the bypass loop.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Same-size, different content (12 bytes each)
         (source_se3 / "history").mkdir(parents=True)
@@ -1395,8 +1395,8 @@ class TestDirectoryCollision:
     def test_dest_directory_raises_collision(self, tmp_path: Path) -> None:
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Source has a file
         (source_se3 / "history").mkdir(parents=True)
@@ -1416,8 +1416,8 @@ class TestDirectoryCollision:
         rather than aborting the entire sync."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1448,8 +1448,8 @@ class TestDirectoryCollision:
         """
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1477,8 +1477,8 @@ class TestDirectoryCollision:
         copying other non-colliding files."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1504,8 +1504,8 @@ class TestDirectoryCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1515,7 +1515,7 @@ class TestDirectoryCollision:
         # Sidecar path is a directory
         (target_se3 / "history" / "flow1.log.from-feature").mkdir(parents=True)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -1542,8 +1542,8 @@ class TestDirectoryCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1557,7 +1557,7 @@ class TestDirectoryCollision:
         short_hash = src_hash[:8]
         (target_se3 / "history" / f"flow1.log.from-feature.{short_hash}").mkdir(parents=True)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -1582,8 +1582,8 @@ class TestDirectoryCollision:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source log")
@@ -1621,7 +1621,7 @@ class TestSkippedFiles:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "first.log").write_text("first")
@@ -1651,7 +1651,7 @@ class TestSkippedFiles:
         # The vanished file should be tracked as skipped
         assert "history/vanishes.log" in report.skipped_files
         # No empty directories should be left behind
-        target_hist = target / "se3" / "history"
+        target_hist = target / "tianluo" / "history"
         assert target_hist.exists()
         assert (target_hist / "first.log").exists()
         # Only first.log should exist; no stray directories for vanishes.log
@@ -1667,8 +1667,8 @@ class TestIdempotentModeSync:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         src_file = source_se3 / "history" / "flow1.log"
@@ -1699,8 +1699,8 @@ class TestIdempotentModeSync:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         real_file = source_se3 / "history" / "real.log"
@@ -1733,7 +1733,7 @@ class TestBrokenSymlinks:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "real.log").write_text("real content")
@@ -1754,7 +1754,7 @@ class TestBrokenSymlinks:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         broken_link = source_se3 / "history" / "broken.log"
@@ -1776,12 +1776,12 @@ class TestValidationPhaseOSError:
     ) -> None:
         """If _file_hash raises OSError on a source file during validation,
         the file is added to skipped_files and the sync continues."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "first.log").write_text("first")
@@ -1817,12 +1817,12 @@ class TestValidationPhaseOSError:
         """If _file_hash raises OSError on an existing destination file during
         collision check, the file is added to skipped_files and the sync
         continues."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "first.log").write_text("first")
@@ -1858,12 +1858,12 @@ class TestBypassOSError:
     def test_bypass_oserror_skipped_not_aborted(self, tmp_path: Path, monkeypatch) -> None:
         """When _atomic_write_bytes raises OSError during sidecar write,
         the file is skipped and the sync continues without full rollback."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source")
@@ -1902,12 +1902,12 @@ class TestBypassOSError:
         BypassedCollision entry alongside the skipped_files entry, so
         operators reading ``report.collisions`` see a uniform row for every
         collided file rather than having to cross-reference logs."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source content")
@@ -1943,12 +1943,12 @@ class TestBypassOSError:
         the bypass loop's ``except OSError`` catches it and records the
         collision with ``dest_hash='unavailable'`` rather than rolling back
         already-copied tier-A files."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("src")
@@ -1992,12 +1992,12 @@ class TestBypassOSError:
         catches it and records a clear ENAMETOOLONG warning rather than
         relying on the OS error at write time."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source content")
@@ -2021,7 +2021,7 @@ class TestBypassOSError:
 
         monkeypatch.setattr(_rs, "_write_sidecar", _preflight_failing_sidecar)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -2037,12 +2037,12 @@ class TestBypassOSError:
         """When _atomic_write_bytes raises ENOSPC during sidecar write,
         a WARNING is logged (symmetric with the copy-phase handler)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source")
@@ -2059,7 +2059,7 @@ class TestBypassOSError:
 
         monkeypatch.setattr(_rs, "_atomic_write_bytes", _failing_atomic)
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             call = _make_sync_call(source, target, strict=False)
             report = call("feature")
 
@@ -2076,10 +2076,10 @@ class TestSafeBranchLabel:
         """When a branch name exceeds 64 chars after safe transformation,
         logger.debug records the truncation."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         long_branch = "feature/" + "a" * 80
-        with caplog.at_level(logging.DEBUG, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.DEBUG, logger="tianluo.engine.merge.runtime_sync"):
             result = _rs._safe_branch_label(long_branch)
 
         assert len(result) == 64
@@ -2095,12 +2095,12 @@ class TestSafeBranchLabel:
         the WARNING-level log surfaces the entropy-loss caveat through normal
         control flow (not just the isolated _safe_branch_label test)."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Source has a file that will collide with the target
         (source_se3 / "history").mkdir(parents=True)
@@ -2124,7 +2124,7 @@ class TestSafeBranchLabel:
         sidecar_path.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # The idempotent sidecar match should be recorded as an idempotent
@@ -2159,12 +2159,12 @@ class TestSafeBranchLabel:
         operators see it in normal-operation logs, not just on idempotent
         retries or debug logs."""
         import logging
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Source has a file that will collide with the target
         (source_se3 / "history").mkdir(parents=True)
@@ -2182,7 +2182,7 @@ class TestSafeBranchLabel:
 
         # NO pre-existing sidecar — the write path (not idempotent) must fire.
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.INFO, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.INFO, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # A sidecar was written
@@ -2205,7 +2205,7 @@ class TestSafeBranchLabel:
 
     def test_safe_branch_label_with_truncation_short_branch(self) -> None:
         """Short branch names are preserved unchanged and truncated is False."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         label, truncated = _rs._safe_branch_label_with_truncation("feature/foo")
         assert label == "feature__foo"
@@ -2214,7 +2214,7 @@ class TestSafeBranchLabel:
     def test_safe_branch_label_with_truncation_long_branch(self) -> None:
         """Long branch names (>64 chars after sanitization) are truncated and
         truncated flag is True."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         long_branch = "feature/" + "a" * 80
         label, truncated = _rs._safe_branch_label_with_truncation(long_branch)
@@ -2225,7 +2225,7 @@ class TestSafeBranchLabel:
     def test_safe_branch_label_with_truncation_exactly_64_chars(self) -> None:
         """A branch name that is exactly 64 characters after sanitization is
         NOT truncated — the boundary is strictly >64."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         # 64 alphanumeric chars — no replacement needed
         exact = "a" * 64
@@ -2236,7 +2236,7 @@ class TestSafeBranchLabel:
 
     def test_safe_branch_label_with_truncation_empty_branch(self) -> None:
         """Empty branch returns 'unnamed' with truncated=False."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         label, truncated = _rs._safe_branch_label_with_truncation("")
         assert label == "unnamed"
@@ -2258,12 +2258,12 @@ class TestWriteSidecarGuards:
         collapse onto the shared sidecar suffix ``.from-unnamed`` for every
         caller, silently merging audit identity across branches.
         """
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
         (source_se3 / "history").mkdir(parents=True)
         (target_se3 / "history").mkdir(parents=True)
 
@@ -2295,12 +2295,12 @@ class TestTOCTOUDirectoryDest:
         """If dest_file becomes a directory between validation and copy,
         lenient mode skips the file and records an audit-only collision row
         (mirrors the pre-validation path's audit-trail uniformity)."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source content")
@@ -2343,12 +2343,12 @@ class TestTOCTOUDirectoryDest:
     ) -> None:
         """If dest_file becomes a directory between validation and copy,
         strict mode raises RuntimeSyncCollision."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("source content")
@@ -2402,8 +2402,8 @@ class TestSafeReadAndStatParentSymlinkBoundary:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
         external_dir = tmp_path / "external"
 
         (source_se3 / "history").mkdir(parents=True)
@@ -2415,7 +2415,7 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         os.symlink(str(external_dir), str(parent_sym))
 
         # sym is a symlink whose target ("parent_sym/leak.txt") lexically
-        # resolves to /source/se3/history/parent_sym/leak.txt — a path that
+        # resolves to /source/tianluo/history/parent_sym/leak.txt — a path that
         # passes a string-only normpath check yet actually escapes
         # source_se3 because parent_sym is itself a symlink.
         sym = source_se3 / "history" / "sym.log"
@@ -2429,7 +2429,7 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         # rejects the entry. sym.log is filtered out at collection time.
         assert "history/sym.log" not in report.copied
         # If a regression bypassed the boundary check at collection,
-        # leaked content would land at target/se3/history/sym.log — assert
+        # leaked content would land at target/tianluo/history/sym.log — assert
         # absence so the regression is caught at a separate layer than
         # the report-list inspection.
         assert not (target_se3 / "history" / "sym.log").exists()
@@ -2455,8 +2455,8 @@ class TestSafeReadAndStatParentSymlinkBoundary:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (target_se3 / "history").mkdir(parents=True)
@@ -2501,10 +2501,10 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         """
         import os
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
-        source_se3 = source / "se3"
+        source_se3 = source / "tianluo"
         external_dir = tmp_path / "external"
 
         (source_se3 / "history").mkdir(parents=True)
@@ -2549,10 +2549,10 @@ class TestAtomicWriteBytesDestinationSymlinkSwap:
         import errno
         import os
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         target = tmp_path / "target"
-        target_se3 = target / "se3" / "history"
+        target_se3 = target / "tianluo" / "history"
         target_se3.mkdir(parents=True)
 
         # External file outside the destination tree; the symlink points
@@ -2601,12 +2601,12 @@ class TestSafeBranchLabelTruncationPaths:
         """
         import logging
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source content")
@@ -2637,7 +2637,7 @@ class TestSafeBranchLabelTruncationPaths:
         hash_sidecar.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # Idempotent hash-suffix match recorded (no new collision row,
@@ -2670,12 +2670,12 @@ class TestSafeBranchLabelTruncationPaths:
         import hashlib
         import logging
 
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "collides.log").write_text("source content")
@@ -2708,7 +2708,7 @@ class TestSafeBranchLabelTruncationPaths:
         long_sidecar.write_text("source content")
 
         call = _make_sync_call(source, target, strict=False)
-        with caplog.at_level(logging.WARNING, logger="se3.engine.merge.runtime_sync"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.merge.runtime_sync"):
             report = call(long_branch)
 
         # Idempotent long-hash match recorded
@@ -2739,8 +2739,8 @@ class TestSafeBranchLabelTruncationPaths:
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Use a long source filename: 200 chars of base name. Combined
         # with ".from-<truncated 64-char label>" the total exceeds the
@@ -2790,12 +2790,12 @@ class TestLenientModePreservesSyncedFilesOnUnexpectedException:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """RuntimeSyncCollision escaping the copy loop preserves prior copies."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         # Two tier A files in source
         (source_se3 / "history").mkdir(parents=True)
@@ -2838,12 +2838,12 @@ class TestLenientModePreservesSyncedFilesOnUnexpectedException:
         self, tmp_path: Path, monkeypatch
     ) -> None:
         """In strict mode, the same exception triggers rollback of all copies."""
-        import se3.engine.merge.runtime_sync as _rs
+        import tianluo.engine.merge.runtime_sync as _rs
 
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("log1")
@@ -2891,8 +2891,8 @@ class TestIdempotentBypassRecordsSeparation:
         """Exact sidecar content match is recorded only in idempotent lists."""
         source = tmp_path / "source"
         target = tmp_path / "target"
-        source_se3 = source / "se3"
-        target_se3 = target / "se3"
+        source_se3 = source / "tianluo"
+        target_se3 = target / "tianluo"
 
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("same content")

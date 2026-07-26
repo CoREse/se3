@@ -19,7 +19,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -27,8 +27,8 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.engine.state_machine import StateMachine
 
 
 class TestConfirmStepHandler:
@@ -38,8 +38,8 @@ class TestConfirmStepHandler:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/calls directory
-        calls_dir = self.project_root / "se3" / "calls"
+        # Create tianluo/calls directory
+        calls_dir = self.project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a CONFIRM step
@@ -80,7 +80,7 @@ class TestConfirmStepHandler:
 
     def test_confirm_handler_no_response_returns_paused(self):
         """Test that confirm handler returns PAUSED when no response exists."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         result = confirm_handler(self.confirm_step, self.flow)
 
@@ -90,7 +90,7 @@ class TestConfirmStepHandler:
 
     def test_confirm_handler_paused_creates_call_file(self):
         """Test that PAUSED creates a call file for the run loop to find."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         result = confirm_handler(self.confirm_step, self.flow)
 
@@ -101,10 +101,10 @@ class TestConfirmStepHandler:
 
     def test_confirm_handler_existing_approval_response(self):
         """Test that existing approval response is used without waiting."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         # First create a call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{self.confirm_step.step_id}_12345.json"
         call_data = {
             "step": self.confirm_step.step_id,
@@ -132,10 +132,10 @@ class TestConfirmStepHandler:
 
     def test_confirm_handler_existing_revision_response(self):
         """Test that existing revision response is used without waiting."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         # First create a call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{self.confirm_step.step_id}_12345.json"
         call_data = {
             "step": self.confirm_step.step_id,
@@ -176,7 +176,7 @@ class TestConfirmResponseChecker:
 
     def test_check_existing_response_returns_none_when_no_response(self):
         """Should return None when response file doesn't exist."""
-        from se3.engine.steps.confirm import _check_existing_response
+        from tianluo.engine.steps.confirm import _check_existing_response
 
         call_file = self.calls_dir / "confirm_test.json"
         call_file.write_text('{"step": "test"}')
@@ -187,7 +187,7 @@ class TestConfirmResponseChecker:
 
     def test_check_existing_response_approval(self):
         """Should return approved=True when response indicates approval."""
-        from se3.engine.steps.confirm import _check_existing_response
+        from tianluo.engine.steps.confirm import _check_existing_response
 
         call_file = self.calls_dir / "confirm_test.json"
         call_file.write_text('{"step": "test"}')
@@ -203,7 +203,7 @@ class TestConfirmResponseChecker:
 
     def test_check_existing_response_changes_requested(self):
         """Should return approved=False when response indicates changes needed."""
-        from se3.engine.steps.confirm import _check_existing_response
+        from tianluo.engine.steps.confirm import _check_existing_response
 
         call_file = self.calls_dir / "confirm_test.json"
         call_file.write_text('{"step": "test"}')
@@ -219,7 +219,7 @@ class TestConfirmResponseChecker:
 
     def test_check_existing_response_invalid_json(self):
         """Should return None when response file has invalid JSON."""
-        from se3.engine.steps.confirm import _check_existing_response
+        from tianluo.engine.steps.confirm import _check_existing_response
 
         call_file = self.calls_dir / "confirm_test.json"
         call_file.write_text('{"step": "test"}')
@@ -333,8 +333,8 @@ class TestRunCommandConfirmHandling:
         self.project_root = Path(self.tmpdir)
 
         # Create se3 directory structure
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a CONFIRM step
         self.flow = FlowInstance(
@@ -378,10 +378,10 @@ class TestRunCommandConfirmHandling:
 
     def test_check_confirm_response_with_approval(self):
         """Test that _check_confirm_response returns COMPLETED when approved."""
-        from se3.commands.run import _check_confirm_response
+        from tianluo.commands.run import _check_confirm_response
 
         # Create call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -402,10 +402,10 @@ class TestRunCommandConfirmHandling:
 
     def test_check_confirm_response_with_changes(self):
         """Test that _check_confirm_response returns REVISION_NEEDED when changes requested."""
-        from se3.commands.run import _check_confirm_response
+        from tianluo.commands.run import _check_confirm_response
 
         # Create call file
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -426,10 +426,10 @@ class TestRunCommandConfirmHandling:
 
     def test_check_confirm_response_no_response_file(self):
         """Test that _check_confirm_response returns None when no response exists."""
-        from se3.commands.run import _check_confirm_response
+        from tianluo.commands.run import _check_confirm_response
 
         # Create call file but no response
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / "confirm_test.json"
         call_file.write_text(json.dumps({
             "step": self.confirm_step.step_id,
@@ -448,8 +448,8 @@ class TestConfirmationStepInsertion:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3.yaml using the per-step confirmation schema.
-        se3_yaml = self.project_root / "se3.yaml"
+        # Create tianluo.yaml using the per-step confirmation schema.
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps:
@@ -492,7 +492,7 @@ confirmation:
         """Empty confirmation.steps confirms only plan (always-on), nothing else."""
         # Empty confirmation.steps means no NON-plan step gets confirmed;
         # plan-confirm is always-on and is therefore unaffected.
-        se3_yaml = self.project_root / "se3.yaml"
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps: {}
@@ -519,11 +519,11 @@ class TestEndToEndConfirmationFlow:
         self.project_root = Path(self.tmpdir)
 
         # Create directory structure
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
-        # Create se3.yaml using the per-step confirmation schema.
-        se3_yaml = self.project_root / "se3.yaml"
+        # Create tianluo.yaml using the per-step confirmation schema.
+        se3_yaml = self.project_root / "tianluo.yaml"
         se3_yaml.write_text("""
 confirmation:
   steps:
@@ -536,7 +536,7 @@ confirmation:
 
     def test_full_flow_approval_resumes_forward(self):
         """Full flow: human approves, flow continues forward."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         # change_path must be a child of project_root so that
         # change_path.parent resolves back to project_root
@@ -574,7 +574,7 @@ confirmation:
         flow.state.current_step_id = "confirm-001"
 
         # Simulate human response file already exists (approval)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{confirm_step.step_id}_12345.json"
         call_file.write_text(json.dumps({
             "step": confirm_step.step_id,
@@ -600,7 +600,7 @@ confirmation:
 
     def test_full_flow_changes_requested_returns_to_previous(self):
         """Full flow: human requests changes, flow returns to previous step."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         # change_path must be a child of project_root so that
         # change_path.parent resolves back to project_root
@@ -638,7 +638,7 @@ confirmation:
         flow.state.current_step_id = "confirm-001"
 
         # Simulate human response file (changes requested)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_file = calls_dir / f"confirm_{confirm_step.step_id}_12345.json"
         call_file.write_text(json.dumps({
             "step": confirm_step.step_id,
@@ -669,7 +669,7 @@ class TestLLMReviewerNoCallFile:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
@@ -706,10 +706,10 @@ class TestLLMReviewerNoCallFile:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_llm_reviewer_does_not_create_call_file(self, MockLLMCaller):
         """LLM reviewer path must not create any call files."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = '{"approved": true, "feedback": "Looks good"}'
@@ -717,14 +717,14 @@ class TestLLMReviewerNoCallFile:
 
         confirm_handler(self.confirm_step, self.flow)
 
-        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir = self.project_root / "tianluo" / "calls"
         call_files = list(calls_dir.glob("confirm_*.json"))
         assert len(call_files) == 0, f"Expected no call files but found: {call_files}"
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_llm_reviewer_never_returns_paused(self, MockLLMCaller):
         """LLM reviewer path must never return PAUSED."""
-        from se3.engine.steps.confirm import confirm_handler
+        from tianluo.engine.steps.confirm import confirm_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = '{"approved": true, "feedback": "OK"}'

@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 from _authsrv import recv_daemon_frame
-from se3.daemon.aggregator import DaemonAggregator
-from se3.daemon.client import DaemonClient
-from se3.daemon.protocol import (
+from tianluo.daemon.aggregator import DaemonAggregator
+from tianluo.daemon.client import DaemonClient
+from tianluo.daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
     CALL_KIND_CONFIRM,
@@ -89,7 +89,7 @@ def _write(path: Path, payload: object) -> None:
 
 
 def test_enumerate_calls_parses_kind_and_display_fields(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(
         calls / "retry_42.json",
         {
@@ -117,7 +117,7 @@ def test_enumerate_calls_parses_kind_and_display_fields(tmp_path):
 
 
 def test_enumerate_calls_cli_confirm_kind(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / "cli_1.json", {"kind": "cli_confirm", "prompt": "Press 1 to confirm"})
     [call] = DaemonAggregator()._enumerate_calls(tmp_path)
     assert call.kind == CALL_KIND_CLI_CONFIRM
@@ -126,7 +126,7 @@ def test_enumerate_calls_cli_confirm_kind(tmp_path):
 
 def test_enumerate_calls_legacy_file_falls_back_to_call(tmp_path):
     """An old-style call file with no ``kind`` metadata reports kind=call."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / "confirm_legacy.json", {"step_to_review_id": "s1"})
 
     [call] = DaemonAggregator()._enumerate_calls(tmp_path)
@@ -138,14 +138,14 @@ def test_enumerate_calls_legacy_file_falls_back_to_call(tmp_path):
 
 
 def test_enumerate_calls_unknown_kind_falls_back_to_call(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / "weird.json", {"kind": "totally_unknown", "prompt": "p"})
     [call] = DaemonAggregator()._enumerate_calls(tmp_path)
     assert call.kind == CALL_KIND_CALL
 
 
 def test_enumerate_calls_non_json_file_does_not_error(tmp_path):
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     calls.mkdir(parents=True)
     (calls / "broken.json").write_text("not json at all", encoding="utf-8")
     [call] = DaemonAggregator()._enumerate_calls(tmp_path)
@@ -155,7 +155,7 @@ def test_enumerate_calls_non_json_file_does_not_error(tmp_path):
 
 def test_enumerate_calls_answered_still_skipped(tmp_path):
     """A call with a sibling .response file is still skipped regardless of kind."""
-    calls = tmp_path / "se3" / "calls"
+    calls = tmp_path / "tianluo" / "calls"
     _write(calls / "answered.json", {"kind": "interjection", "prompt": "p"})
     _write(calls / "answered.response", {"ok": True})
     assert DaemonAggregator()._enumerate_calls(tmp_path) == []
@@ -197,7 +197,7 @@ def test_dispatch_interject_writes_request_file(tmp_path):
         )
 
     asyncio.run(scenario())
-    requests_dir = tmp_path / "se3" / "calls"
+    requests_dir = tmp_path / "tianluo" / "calls"
     files = list(requests_dir.glob("interjection_*.json"))
     assert len(files) == 1
     payload = json.loads(files[0].read_text())
@@ -221,7 +221,7 @@ def test_dispatch_interject_resolves_root_from_snapshot(tmp_path):
         )
 
     asyncio.run(scenario())
-    files = list((tmp_path / "se3" / "calls").glob("interjection_*.json"))
+    files = list((tmp_path / "tianluo" / "calls").glob("interjection_*.json"))
     assert len(files) == 1
 
 
@@ -247,7 +247,7 @@ def test_dispatch_interject_ignores_empty_text(tmp_path):
         )
 
     asyncio.run(scenario())
-    assert not list((tmp_path / "se3" / "calls").glob("interjection_*.json"))
+    assert not list((tmp_path / "tianluo" / "calls").glob("interjection_*.json"))
 
 
 # --------------------------------------------------------------------------

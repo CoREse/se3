@@ -1,4 +1,4 @@
-"""Tests for plan-confirm always-on wiring in ``se3.config``.
+"""Tests for plan-confirm always-on wiring in ``tianluo.config``.
 
 plan-confirm is a mechanical requirement-coverage guarantee that must run
 regardless of whether ``confirmation.steps`` contains a ``plan`` entry (or
@@ -25,18 +25,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.config import (  # noqa: E402
+from tianluo.config import (  # noqa: E402
     _CONFIRM_DEFAULT_MAX_ITERATIONS,
     insert_confirmation_steps,
     resolve_confirm_inputs,
 )
-from se3.engine.models import StepType  # noqa: E402
+from tianluo.engine.models import StepType  # noqa: E402
 
 
 @pytest.fixture
 def isolated_global_home(monkeypatch, tmp_path):
     """Neutralize the real ``~/.se3/config.yaml`` by pointing home at a
-    clean temp dir, so only the project's se3.yaml (if any) is in play."""
+    clean temp dir, so only the project's tianluo.yaml (if any) is in play."""
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
@@ -50,7 +50,7 @@ def isolated_global_home(monkeypatch, tmp_path):
 
 class TestInsertPlanAlwaysOn:
     def test_no_se3_yaml_still_confirms_plan(self, tmp_path, isolated_global_home):
-        # No se3.yaml at all → confirmation.steps is empty, yet plan must
+        # No tianluo.yaml at all → confirmation.steps is empty, yet plan must
         # still be confirmed.
         result = insert_confirmation_steps(
             [StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT], tmp_path,
@@ -60,7 +60,7 @@ class TestInsertPlanAlwaysOn:
         assert result.count(StepType.CONFIRM) == 1
 
     def test_empty_steps_dict_still_confirms_plan(self, tmp_path, isolated_global_home):
-        (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
+        (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
         result = insert_confirmation_steps(
             [StepType.PLAN, StepType.IMPLEMENT], tmp_path,
         )
@@ -73,7 +73,7 @@ class TestInsertPlanAlwaysOn:
     ):
         # confirmation.steps lists a non-plan step; plan has no entry but is
         # still confirmed, and the configured non-plan step is confirmed too.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    implement: {reviewer: human}\n"
@@ -92,7 +92,7 @@ class TestInsertPlanAlwaysOn:
     ):
         # An explicit plan entry must not stack a second CONFIRM on top of
         # the always-on one.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human}\n"
@@ -108,7 +108,7 @@ class TestInsertPlanAlwaysOn:
         self, tmp_path, isolated_global_home
     ):
         # No plan in the sequence and an empty config → no CONFIRM at all.
-        (tmp_path / "se3.yaml").write_text("confirmation: {steps: {}}\n")
+        (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
         result = insert_confirmation_steps(
             [StepType.IMPLEMENT, StepType.TEST], tmp_path,
         )
@@ -124,14 +124,14 @@ class TestResolvePlanInputs:
     def test_plan_unconfigured_synthesizes_default_llm_entry(
         self, tmp_path, isolated_global_home
     ):
-        # No se3.yaml → plan must resolve to the default LLM chain, NOT None
+        # No tianluo.yaml → plan must resolve to the default LLM chain, NOT None
         # (which would trip state_machine's human fallback).
         #
         # The builtin chain probes PATH, so pin which commands resolve; without
         # this the assertion would silently track whichever agents happen to be
         # installed on the host.
         with patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
         ):
             resolved = resolve_confirm_inputs(tmp_path, "plan")
@@ -154,7 +154,7 @@ class TestResolvePlanInputs:
         # is present-but-empty or absent.
         no_entry = resolve_confirm_inputs(tmp_path, "plan")
 
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {}\n"
@@ -167,7 +167,7 @@ class TestResolvePlanInputs:
     ):
         # A human reviewer + custom max_iterations must be honored — the
         # always-on default never clobbers an explicit operator choice.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    plan: {reviewer: human, max_iterations: 5}\n"
@@ -190,7 +190,7 @@ class TestResolvePlanInputs:
     ):
         # Sanity: explicit non-plan config still resolves normally and is not
         # affected by the plan special-casing.
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "confirmation:\n"
             "  steps:\n"
             "    implement: {reviewer: human}\n"

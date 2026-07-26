@@ -33,14 +33,14 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge.merge_lock import MergeLock, MergeLockBusy
-from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-from se3.engine.persistence import PersistenceManager
+from tianluo.commands.merge.merge_lock import MergeLock, MergeLockBusy
+from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+from tianluo.engine.persistence import PersistenceManager
 
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
-    (tmp_path / "se3" / "state").mkdir(parents=True)
+    (tmp_path / "tianluo" / "state").mkdir(parents=True)
     return tmp_path
 
 
@@ -54,7 +54,7 @@ def _make_flow(step_type: StepType) -> tuple[FlowInstance, Step]:
 
 
 def _jsonl_path(project: Path, flow_id: str, step_id: str) -> Path:
-    return project / "se3" / "history" / flow_id / f"{step_id}.jsonl"
+    return project / "tianluo" / "history" / flow_id / f"{step_id}.jsonl"
 
 
 def _read_records(project: Path, flow_id: str, step_id: str) -> list[dict]:
@@ -65,7 +65,7 @@ def _read_records(project: Path, flow_id: str, step_id: str) -> list[dict]:
 
 
 def _read_engine(project: Path) -> dict:
-    return json.loads((project / "se3" / "state" / "engine.json").read_text())
+    return json.loads((project / "tianluo" / "state" / "engine.json").read_text())
 
 
 # --------------------------------------------------------------------------
@@ -73,7 +73,7 @@ def _read_engine(project: Path) -> dict:
 # --------------------------------------------------------------------------
 
 def test_contended_acquire_emits_lock_acquired_clear_event(project: Path) -> None:
-    from se3.commands.run import _ensure_main_lock_for_step
+    from tianluo.commands.run import _ensure_main_lock_for_step
 
     persistence = PersistenceManager(project)
     flow, step = _make_flow(StepType.ANALYZE)
@@ -142,7 +142,7 @@ def test_contended_acquire_emits_lock_acquired_clear_event(project: Path) -> Non
 
 
 def test_free_acquire_writes_no_clear_event(project: Path) -> None:
-    from se3.commands.run import _ensure_main_lock_for_step
+    from tianluo.commands.run import _ensure_main_lock_for_step
 
     persistence = PersistenceManager(project)
     flow, step = _make_flow(StepType.ANALYZE)
@@ -159,13 +159,13 @@ def test_free_acquire_writes_no_clear_event(project: Path) -> None:
 
 
 def test_stale_reclaim_writes_no_clear_event(project: Path) -> None:
-    from se3.commands.run import _ensure_main_lock_for_step
+    from tianluo.commands.run import _ensure_main_lock_for_step
 
     persistence = PersistenceManager(project)
     flow, step = _make_flow(StepType.ANALYZE)
 
     # Stale lock recording a dead PID — reclaimed silently, no wait surfaced.
-    lock_file = project / "se3" / "state" / "merge.lock"
+    lock_file = project / "tianluo" / "state" / "merge.lock"
     dead_pid = 2 ** 22 - 1
     lock_file.write_text(f"{dead_pid:016d}\n")
 
@@ -180,7 +180,7 @@ def test_stale_reclaim_writes_no_clear_event(project: Path) -> None:
 
 
 def test_record_lock_acquired_is_idempotent(project: Path) -> None:
-    from se3.engine.chat_history import record_lock_acquired
+    from tianluo.engine.chat_history import record_lock_acquired
 
     flow, step = _make_flow(StepType.ANALYZE)
     args = (project, flow.flow_id, step.step_id, step.step_type.value)
@@ -196,7 +196,7 @@ def test_record_lock_acquired_is_idempotent(project: Path) -> None:
 
 def test_record_lock_acquired_skipped_by_get_step_history(project: Path) -> None:
     """The clear anchor must not pollute CLI history / retry context."""
-    from se3.engine.chat_history import record_lock_acquired, get_step_history
+    from tianluo.engine.chat_history import record_lock_acquired, get_step_history
 
     flow, step = _make_flow(StepType.ANALYZE)
     record_lock_acquired(project, flow.flow_id, step.step_id, step.step_type.value)
@@ -225,7 +225,7 @@ def test_merge_lock_held_through_retry_not_released_until_flow_exit(
     exited and the lock stays held — excluding merge-lock release as the freeze
     root cause. The freeze lives in the display/push path instead.
     """
-    from se3.commands import run as run_mod
+    from tianluo.commands import run as run_mod
 
     persistence = PersistenceManager(project)
     flow, step = _make_flow(StepType.ANALYZE)

@@ -31,8 +31,8 @@ from __future__ import annotations
 
 import json
 
-from se3.daemon.history import DaemonHistoryReader, _cross_root_step_key
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon.history import DaemonHistoryReader, _cross_root_step_key
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 # ``_merge_flow_jsonl`` is a staticmethod on the reader; alias it for the copy-
 # selection assertions below.
@@ -66,14 +66,14 @@ def _make_reader(*roots):
 
 
 def _flow_dir(root, flow_id):
-    d = root / "se3" / "history" / flow_id
+    d = root / "tianluo" / "history" / flow_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def _make_worktree(main_root, name="wt__b"):
-    (main_root / "se3").mkdir(parents=True, exist_ok=True)
-    wt = main_root / "se3" / "worktrees" / name
+    (main_root / "tianluo").mkdir(parents=True, exist_ok=True)
+    wt = main_root / "tianluo" / "worktrees" / name
     wt.mkdir(parents=True, exist_ok=True)
     return wt
 

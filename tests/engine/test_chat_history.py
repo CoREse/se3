@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import patch
 
-from se3.engine.chat_history import (
+from tianluo.engine.chat_history import (
     ChatMessage,
     ChatSession,
     format_history_for_retry,
@@ -86,7 +86,7 @@ def _make_session(messages: list) -> ChatSession:
 class TestFormatHistoryForRetryMode:
     """Tests for the mode parameter of format_history_for_retry."""
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_default_mode_is_continue(self, mock_get):
         """Default mode should be 'continue'."""
         mock_get.return_value = _make_session([
@@ -98,7 +98,7 @@ class TestFormatHistoryForRetryMode:
         assert "Continue from where the previous attempt stopped" in result
         assert "Do NOT redo completed work" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_retry_mode_uses_restart_instruction(self, mock_get):
         """Retry mode should use the restart instruction."""
         mock_get.return_value = _make_session([
@@ -110,7 +110,7 @@ class TestFormatHistoryForRetryMode:
         assert "Please try again with the same task" in result
         assert "Continue from where" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_continue_mode_user_prompt_not_truncated(self, mock_get):
         """In continue mode, user prompts should NOT be truncated."""
         long_prompt = "x" * 5000
@@ -124,7 +124,7 @@ class TestFormatHistoryForRetryMode:
         assert "x" * 5000 in result
         assert "[truncated]" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_retry_mode_user_prompt_not_truncated(self, mock_get):
         """In retry mode, user prompts should NOT be truncated."""
         long_prompt = "x" * 3000
@@ -138,7 +138,7 @@ class TestFormatHistoryForRetryMode:
         assert "x" * 3000 in result
         assert "[truncated]" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_continue_mode_preserves_tool_call_responses(self, mock_get):
         """In continue mode, assistant responses with tool calls should not be truncated."""
         mock_get.return_value = _make_session([
@@ -151,7 +151,7 @@ class TestFormatHistoryForRetryMode:
         assert "Read" in result
         assert "file contents here" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_retry_mode_truncates_long_assistant_responses(self, mock_get):
         """In retry mode, long assistant responses use head+tail truncation at 2000."""
         long_response = "y" * 3000
@@ -167,21 +167,21 @@ class TestFormatHistoryForRetryMode:
         assert "y" * 1500 in result
         assert "y" * 1501 not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_no_history_returns_none(self, mock_get):
         """Should return None if no history exists."""
         mock_get.return_value = None
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="continue")
         assert result is None
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_empty_messages_returns_none(self, mock_get):
         """Should return None if session has empty messages."""
         mock_get.return_value = _make_session([])
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="continue")
         assert result is None
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_continue_mode_short_prompts_not_truncated(self, mock_get):
         """Short prompts should not be truncated in either mode."""
         mock_get.return_value = _make_session([
@@ -193,7 +193,7 @@ class TestFormatHistoryForRetryMode:
         assert "Short prompt" in result
         assert "[truncated]" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_user_prompt_preserved_verbatim_regardless_of_size(self, mock_get):
         """User prompts are no longer truncated per-message in format_history_for_retry.
 
@@ -212,7 +212,7 @@ class TestFormatHistoryForRetryMode:
         assert "user prompt truncated for retry context safety" not in result
         assert "hit safety limit" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_user_prompt_at_50k_not_truncated(self, mock_get):
         """User prompts at 50K chars pass through unchanged (regression guard)."""
         exact_prompt = "y" * 50_000
@@ -239,7 +239,7 @@ class TestRecordUserInterjection:
             attempt=2,
             source="webui",
         )
-        path = tmp_path / "se3" / "history" / "flow-1" / "01_implement_abc.jsonl"
+        path = tmp_path / "tianluo" / "history" / "flow-1" / "01_implement_abc.jsonl"
         assert path.exists()
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 1
@@ -263,7 +263,7 @@ class TestRecordUserInterjection:
                 "test",
                 f"interjection {i}",
             )
-        path = tmp_path / "se3" / "history" / "flow-2" / "02_test_def.jsonl"
+        path = tmp_path / "tianluo" / "history" / "flow-2" / "02_test_def.jsonl"
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 5
         for i, line in enumerate(lines):
@@ -275,20 +275,20 @@ class TestRecordUserInterjection:
         """Empty flow_id is a warning + no-op, not an exception."""
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.chat_history"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.chat_history"):
             record_user_interjection(tmp_path, "", "step-id", "implement", "hi")
         # No history dir / file should have been created
-        assert not (tmp_path / "se3" / "history").exists() or not list(
-            (tmp_path / "se3" / "history").iterdir()
+        assert not (tmp_path / "tianluo" / "history").exists() or not list(
+            (tmp_path / "tianluo" / "history").iterdir()
         )
         assert any("missing flow_id" in rec.message for rec in caplog.records)
 
     def test_missing_step_id_is_noop(self, tmp_path, caplog):
         import logging
 
-        with caplog.at_level(logging.WARNING, logger="se3.engine.chat_history"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.chat_history"):
             record_user_interjection(tmp_path, "flow", "", "implement", "hi")
-        assert not (tmp_path / "se3" / "history" / "flow").exists()
+        assert not (tmp_path / "tianluo" / "history" / "flow").exists()
         assert any("missing flow_id" in rec.message or "step_id" in rec.message
                    for rec in caplog.records)
 
@@ -313,7 +313,7 @@ class TestFormatHistorySkipsInterjections:
     """Interjection records are kept in jsonl for display but excluded
     from the retry context passed back to the LLM."""
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_interjection_not_included_in_retry_context(self, mock_get):
         interjection = ChatMessage(
             role="user",
@@ -338,7 +338,7 @@ class TestFormatHistorySkipsInterjections:
         # to the LLM as another [User Prompt]: turn
         assert "please use shorter variable names" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_only_interjections_returns_none(self, mock_get):
         """If filtering removes every message, return None (matches the
         existing `if not filtered: return None` contract)."""

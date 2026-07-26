@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from se3.engine.models import Step, StepStatus, StepType
+from tianluo.engine.models import Step, StepStatus, StepType
 
 
 def _make_step(outputs: dict) -> Step:
@@ -23,7 +23,7 @@ def _make_step(outputs: dict) -> Step:
 class TestSummaryFallback:
     """summary should fall back to outputs['verification_result']['summary']."""
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_reads_from_nested_verification_result(self, mock_render):
         step = _make_step({
             "verified": True,
@@ -32,13 +32,13 @@ class TestSummaryFallback:
                 "summary": "All scenarios verified successfully",
             },
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         assert "All scenarios verified successfully" in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_toplevel_takes_precedence(self, mock_render):
         step = _make_step({
             "verified": True,
@@ -47,7 +47,7 @@ class TestSummaryFallback:
                 "summary": "Nested summary loses",
             },
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
@@ -55,24 +55,24 @@ class TestSummaryFallback:
         # Nested should NOT appear when top-level exists
         assert "Nested summary loses" not in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_no_summary_anywhere(self, mock_render):
         step = _make_step({"verified": True})
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         # Should still render without error
         assert "PASSED" in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_verification_result_not_dict(self, mock_render):
         """When verification_result is a string, don't crash."""
         step = _make_step({
             "verified": True,
             "verification_result": "some string",
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
@@ -82,7 +82,7 @@ class TestSummaryFallback:
 class TestRecommendationsFallback:
     """recommendations should fall back to verification_result dict."""
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_reads_from_nested_verification_result(self, mock_render):
         step = _make_step({
             "verified": True,
@@ -90,14 +90,14 @@ class TestRecommendationsFallback:
                 "recommendations": ["Add integration tests", "Update changelog"],
             },
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         assert "Add integration tests" in content
         assert "Update changelog" in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_toplevel_takes_precedence(self, mock_render):
         step = _make_step({
             "verified": True,
@@ -106,7 +106,7 @@ class TestRecommendationsFallback:
                 "recommendations": ["Nested rec B"],
             },
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
@@ -117,46 +117,46 @@ class TestRecommendationsFallback:
 class TestRichCloseTag:
     """Rich close tags must not have extra ] characters."""
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_red_close_tag_for_high_priority(self, mock_render):
         step = _make_step({
             "verified": False,
             "issues": [{"priority": "high", "scope": "in_scope", "message": "broken"}],
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         assert "[/red]" in content
         assert "[/red]]" not in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_yellow_close_tag_for_medium_priority(self, mock_render):
         step = _make_step({
             "verified": False,
             "issues": [{"priority": "medium", "scope": "in_scope", "message": "risky"}],
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         assert "[/yellow]" in content
         assert "[/yellow]]" not in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_dim_close_tag_for_low_priority(self, mock_render):
         step = _make_step({
             "verified": False,
             "issues": [{"priority": "low", "scope": "in_scope", "message": "note"}],
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]
         assert "[/dim]" in content
         assert "[/dim]]" not in content
 
-    @patch("se3.engine.step_renderers.render_full")
+    @patch("tianluo.engine.step_renderers.render_full")
     def test_all_priorities_correct_tags(self, mock_render):
         """All priority levels produce correct close tags."""
         step = _make_step({
@@ -168,7 +168,7 @@ class TestRichCloseTag:
                 {"priority": "low", "scope": "in_scope", "message": "info"},
             ],
         })
-        from se3.engine.step_renderers import _render_verify_spec
+        from tianluo.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
 
         content = mock_render.call_args[0][0]

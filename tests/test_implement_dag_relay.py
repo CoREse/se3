@@ -11,12 +11,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.dag_scheduler import GroupResult, RelayContext, RelayPlan
-from se3.engine.steps.implement import (
+from tianluo.engine.dag_scheduler import GroupResult, RelayContext, RelayPlan
+from tianluo.engine.steps.implement import (
     _compute_total_loc,
     _merge_leaf_branch,
 )
-from se3.engine.worktree import resolve_merge_conflicts_with_context
+from tianluo.engine.worktree import resolve_merge_conflicts_with_context
 
 
 # ---------------------------------------------------------------------------
@@ -82,16 +82,16 @@ class TestComputeTotalLoc:
 class TestLocThresholdRouting:
     """Verify LOC threshold routes small multi-group tasks to single LLM call."""
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._run_single_llm_call")
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._run_single_llm_call")
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
     def test_below_threshold_single_call(
         self, mock_has_commits, mock_dag, mock_single, mock_inj, tmp_path,
     ):
         """Total LOC below threshold routes to single LLM call, not DAG."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_single.return_value = StepStatus.COMPLETED
 
@@ -113,7 +113,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)
@@ -122,15 +122,15 @@ class TestLocThresholdRouting:
         mock_single.assert_called_once()
         mock_dag.assert_not_called()
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
     def test_above_threshold_uses_dag(
         self, mock_has_commits, mock_dag, mock_inj, tmp_path,
     ):
         """Total LOC above threshold routes to DAG parallel."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_dag.return_value = StepStatus.COMPLETED
 
@@ -156,7 +156,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)
@@ -164,16 +164,16 @@ class TestLocThresholdRouting:
         assert result == StepStatus.COMPLETED
         mock_dag.assert_called_once()
 
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._run_single_llm_call")
-    @patch("se3.engine.steps.implement._run_dag_parallel")
-    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.steps.implement._run_single_llm_call")
+    @patch("tianluo.engine.steps.implement._run_dag_parallel")
+    @patch("tianluo.engine.steps.implement.has_commits", return_value=True)
     def test_no_estimated_loc_defaults_to_50(
         self, mock_has_commits, mock_dag, mock_single, mock_inj, tmp_path,
     ):
         """Tasks without estimated_loc default to 50 LOC each, routing via threshold."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_single.return_value = StepStatus.COMPLETED
 
@@ -196,7 +196,7 @@ class TestLocThresholdRouting:
         )
         flow = FlowInstance(
             task_description="Test",
-            change_path=tmp_path / "se3",
+            change_path=tmp_path / "tianluo",
         )
 
         result = implement_handler(step, flow)
@@ -214,10 +214,10 @@ class TestLocThresholdRouting:
 class TestMergeLeafBranch:
     """Tests for _merge_leaf_branch function."""
 
-    @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement.get_conflicting_files")
+    @patch("tianluo.engine.steps.implement.resolve_merge_conflicts_with_context")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_clean_merge(self, mock_branch, mock_git, mock_resolve, mock_conflict):
         """Clean merge (no stashable changes, no conflict) returns True."""
         mock_branch.return_value = "main"
@@ -234,10 +234,10 @@ class TestMergeLeafBranch:
         assert result is True
         mock_resolve.assert_not_called()
 
-    @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement.get_conflicting_files")
+    @patch("tianluo.engine.steps.implement.resolve_merge_conflicts_with_context")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_conflict_resolved_by_llm(self, mock_branch, mock_git, mock_resolve, mock_conflict):
         """Conflict resolved by LLM returns True; take-theirs fallback not invoked."""
         mock_branch.return_value = "main"
@@ -256,11 +256,11 @@ class TestMergeLeafBranch:
         assert result is True
         mock_resolve.assert_called_once()
 
-    @patch("se3.engine.steps.implement._record_take_theirs_event")
-    @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement._record_take_theirs_event")
+    @patch("tianluo.engine.steps.implement.get_conflicting_files")
+    @patch("tianluo.engine.steps.implement.resolve_merge_conflicts_with_context")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_llm_exhausted_falls_back_to_take_theirs(
         self, mock_branch, mock_git, mock_resolve, mock_conflict, mock_audit,
     ):
@@ -292,11 +292,11 @@ class TestMergeLeafBranch:
         assert commit_call, f"expected commit, got {args_list}"
         mock_audit.assert_called_once()
 
-    @patch("se3.engine.steps.implement._record_take_theirs_event")
-    @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement._record_take_theirs_event")
+    @patch("tianluo.engine.steps.implement.get_conflicting_files")
+    @patch("tianluo.engine.steps.implement.resolve_merge_conflicts_with_context")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_take_theirs_commit_failure_aborts(
         self, mock_branch, mock_git, mock_resolve, mock_conflict, mock_audit,
     ):
@@ -323,9 +323,9 @@ class TestMergeLeafBranch:
         # Audit issue NOT recorded when commit fails
         mock_audit.assert_not_called()
 
-    @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement.get_conflicting_files")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_non_conflict_failure(self, mock_branch, mock_git, mock_conflict):
         """Non-conflict merge failure aborts and returns False."""
         mock_branch.return_value = "main"
@@ -345,8 +345,8 @@ class TestMergeLeafBranch:
         assert result is False
         mock_conflict.assert_not_called()
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.get_current_branch")
+    @patch("tianluo.engine.steps.implement._run_git")
+    @patch("tianluo.engine.steps.implement.get_current_branch")
     def test_checkout_to_original_branch(self, mock_branch, mock_git):
         """Checks out original_branch if not already there.
 
@@ -379,8 +379,8 @@ class TestMergeLeafBranch:
 class TestResolveLeafMergeConflicts:
     """Tests for resolve_merge_conflicts_with_context function (worktree.py)."""
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_successful_resolution(self, mock_caller_cls, mock_git, tmp_path):
         """LLM resolves all conflicts on first attempt."""
         conflict_file = tmp_path / "conflict.py"
@@ -402,8 +402,8 @@ class TestResolveLeafMergeConflicts:
         assert result is True
         assert conflict_file.read_text() == "resolved content"
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_markers_in_output_triggers_retry(self, mock_caller_cls, mock_git, tmp_path):
         """LLM output with markers triggers retry."""
         conflict_file = tmp_path / "conflict.py"
@@ -429,8 +429,8 @@ class TestResolveLeafMergeConflicts:
         assert result is True
         assert mock_caller.call.call_count == 2
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_all_retries_fail_returns_false(self, mock_caller_cls, mock_git, tmp_path):
         """All retries failing returns False (no --theirs fallback)."""
         conflict_file = tmp_path / "conflict.py"
@@ -452,8 +452,8 @@ class TestResolveLeafMergeConflicts:
         # Should have tried 3 times
         assert mock_caller.call.call_count == 3
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_llm_exception_triggers_retry(self, mock_caller_cls, mock_git, tmp_path):
         """LLM exception triggers retry."""
         conflict_file = tmp_path / "conflict.py"
@@ -476,7 +476,7 @@ class TestResolveLeafMergeConflicts:
 
         assert result is True
 
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_missing_file_returns_false(self, mock_caller_cls, tmp_path):
         """Missing conflict file returns False."""
         result = resolve_merge_conflicts_with_context(
@@ -486,8 +486,8 @@ class TestResolveLeafMergeConflicts:
 
         assert result is False
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_already_resolved_file_skipped(self, mock_caller_cls, mock_git, tmp_path):
         """Files without conflict markers are skipped."""
         clean_file = tmp_path / "clean.py"
@@ -504,8 +504,8 @@ class TestResolveLeafMergeConflicts:
         # LLM should not be called for already-resolved files
         mock_caller_cls.assert_not_called()
 
-    @patch("se3.engine.worktree._run_git")
-    @patch("se3.engine.llm_caller.LLMCaller")
+    @patch("tianluo.engine.worktree._run_git")
+    @patch("tianluo.engine.llm_caller.LLMCaller")
     def test_rich_context_in_prompt(self, mock_caller_cls, mock_git, tmp_path):
         """Verify the LLM prompt includes task description and group summaries."""
         conflict_file = tmp_path / "file.py"
@@ -543,21 +543,21 @@ class TestResolveLeafMergeConflicts:
 class TestDagParallelRelayIntegration:
     """Test that _run_dag_parallel integrates transitive reduction and relay plan."""
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._salvage_history_from_worktree")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement.classify_chains")
-    @patch("se3.engine.steps.implement.transitive_reduce")
-    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._salvage_history_from_worktree")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement.classify_chains")
+    @patch("tianluo.engine.steps.implement.transitive_reduce")
+    @patch("tianluo.engine.steps.implement.delete_branch")
     def test_transitive_reduce_called(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
     ):
         """_run_dag_parallel calls transitive_reduce before classify_chains."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],
@@ -602,21 +602,21 @@ class TestDagParallelRelayIntegration:
         mock_reduce.assert_called_once_with(groups)
         mock_classify.assert_called_once_with(reduced_groups)
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._salvage_history_from_worktree")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement.classify_chains")
-    @patch("se3.engine.steps.implement.transitive_reduce")
-    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._salvage_history_from_worktree")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement.classify_chains")
+    @patch("tianluo.engine.steps.implement.transitive_reduce")
+    @patch("tianluo.engine.steps.implement.delete_branch")
     def test_relay_plan_passed_to_scheduler(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
     ):
         """DAGScheduler receives relay_plan from classify_chains."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],
@@ -653,21 +653,21 @@ class TestDagParallelRelayIntegration:
             len(call_kwargs[0]) >= 3 and call_kwargs[0][2] is relay_plan
         )
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._salvage_history_from_worktree")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement.classify_chains")
-    @patch("se3.engine.steps.implement.transitive_reduce")
-    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._salvage_history_from_worktree")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement.classify_chains")
+    @patch("tianluo.engine.steps.implement.transitive_reduce")
+    @patch("tianluo.engine.steps.implement.delete_branch")
     def test_only_leaf_branches_merged(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
     ):
         """Only leaf node branches are merged back, not intermediate nodes."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],
@@ -711,21 +711,21 @@ class TestDagParallelRelayIntegration:
         # Only one merge call (for the leaf G3's branch, which is shared)
         assert mock_merge.call_count == 1
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._salvage_history_from_worktree")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement.classify_chains")
-    @patch("se3.engine.steps.implement.transitive_reduce")
-    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._salvage_history_from_worktree")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement.classify_chains")
+    @patch("tianluo.engine.steps.implement.transitive_reduce")
+    @patch("tianluo.engine.steps.implement.delete_branch")
     def test_fallback_leaves_merged_on_failure(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
     ):
         """Fallback leaves from partial failure are merged back."""
-        from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],
@@ -771,21 +771,21 @@ class TestDagParallelRelayIntegration:
         assert step.outputs["completion_status"] == "partial"
         assert result == StepStatus.PARTIAL
 
-    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
-    @patch("se3.engine.steps.implement.get_current_branch", return_value="main")
-    @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement._salvage_history_from_worktree")
-    @patch("se3.engine.steps.implement.DAGScheduler")
-    @patch("se3.engine.steps.implement.classify_chains")
-    @patch("se3.engine.steps.implement.transitive_reduce")
-    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("tianluo.engine.steps.implement._merge_leaf_branch", return_value=True)
+    @patch("tianluo.engine.steps.implement.get_current_branch", return_value="main")
+    @patch("tianluo.engine.steps.implement.force_cleanup_worktree")
+    @patch("tianluo.engine.steps.implement._salvage_history_from_worktree")
+    @patch("tianluo.engine.steps.implement.DAGScheduler")
+    @patch("tianluo.engine.steps.implement.classify_chains")
+    @patch("tianluo.engine.steps.implement.transitive_reduce")
+    @patch("tianluo.engine.steps.implement.delete_branch")
     def test_worktree_cleanup_deduplicated(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
     ):
         """Relay chains sharing worktrees only clean up once."""
-        from se3.engine.models import FlowInstance, Step, StepType
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.models import FlowInstance, Step, StepType
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],

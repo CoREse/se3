@@ -15,14 +15,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.version_script_interface import (
+from tianluo.engine.version_script_interface import (
     VersionScriptRunner,
     find_version_script,
     validate_script,
     generate_version_script,
     _validate_generated_script,
 )
-from se3.engine.version_bumper import Version, VersionBumper, VersionConfig, BumpType
+from tianluo.engine.version_bumper import Version, VersionBumper, VersionConfig, BumpType
 
 
 # ---------------------------------------------------------------------------
@@ -216,22 +216,22 @@ class TestFindVersionScript:
     """Tests for find_version_script."""
 
     def test_find_default_py_path(self, tmp_path):
-        script = tmp_path / "se3" / "scripts" / "version.py"
+        script = tmp_path / "tianluo" / "scripts" / "version.py"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# placeholder")
         result = find_version_script(tmp_path)
         assert result == script
 
     def test_find_default_sh_path(self, tmp_path):
-        script = tmp_path / "se3" / "scripts" / "version.sh"
+        script = tmp_path / "tianluo" / "scripts" / "version.sh"
         script.parent.mkdir(parents=True, exist_ok=True)
         script.write_text("# placeholder")
         result = find_version_script(tmp_path)
         assert result == script
 
     def test_py_preferred_over_sh(self, tmp_path):
-        py_script = tmp_path / "se3" / "scripts" / "version.py"
-        sh_script = tmp_path / "se3" / "scripts" / "version.sh"
+        py_script = tmp_path / "tianluo" / "scripts" / "version.py"
+        sh_script = tmp_path / "tianluo" / "scripts" / "version.sh"
         py_script.parent.mkdir(parents=True, exist_ok=True)
         py_script.write_text("# py")
         sh_script.write_text("# sh")
@@ -338,7 +338,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_detection(self, tmp_path):
         """When version script exists, VersionBumper uses script mode."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         result = bumper.detect_version_file(tmp_path)
@@ -360,7 +360,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_read_version(self, tmp_path):
         """Script mode read_version delegates to runner."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "3.1.4")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "3.1.4")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -369,7 +369,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_bump_version(self, tmp_path):
         """Script mode bump_version delegates to runner."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -378,7 +378,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_rollback(self, tmp_path):
         """Script mode rollback uses set command to restore version."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "2.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "2.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -392,7 +392,7 @@ class TestVersionBumperScriptMode:
 
     def test_script_mode_clear_backup(self, tmp_path):
         """Clear backup works in script mode."""
-        _write_test_script(tmp_path / "se3" / "scripts" / "version.py", "1.0.0")
+        _write_test_script(tmp_path / "tianluo" / "scripts" / "version.py", "1.0.0")
         config = self._make_bumper_config()
         bumper = VersionBumper(config)
         bumper.detect_version_file(tmp_path)
@@ -411,13 +411,13 @@ class TestVersionConfigNewFields:
     """Tests for new VersionConfig fields."""
 
     def test_defaults(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         config = AppVersionConfig()
         assert config.script_path is None
         assert config.auto_generate_script is True
 
     def test_from_dict(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         data = {
             "version": {
                 "script_path": "tools/ver.py",
@@ -429,7 +429,7 @@ class TestVersionConfigNewFields:
         assert config.auto_generate_script is False
 
     def test_from_dict_defaults(self):
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
         config = AppVersionConfig.from_dict({})
         assert config.script_path is None
         assert config.auto_generate_script is True
@@ -439,7 +439,7 @@ class TestVersionConfigNewFields:
         deprecation warning; the rest of the section still loads."""
         import logging
 
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
 
         data = {
             "version": {
@@ -448,7 +448,7 @@ class TestVersionConfigNewFields:
                 "confidence_threshold": "high",
             }
         }
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             config = AppVersionConfig.from_dict(data)
 
         assert not hasattr(config, "bump_rules")
@@ -461,7 +461,7 @@ class TestVersionConfigNewFields:
         a deprecation warning."""
         import logging
 
-        from se3.config import VersionConfig as AppVersionConfig
+        from tianluo.config import VersionConfig as AppVersionConfig
 
         data = {
             "version": {
@@ -469,7 +469,7 @@ class TestVersionConfigNewFields:
                 "smart_version_analysis": False,
             }
         }
-        with caplog.at_level(logging.WARNING, logger="se3.config"):
+        with caplog.at_level(logging.WARNING, logger="tianluo.config"):
             config = AppVersionConfig.from_dict(data)
 
         assert not hasattr(config, "smart_version_analysis")

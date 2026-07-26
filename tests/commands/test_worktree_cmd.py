@@ -23,8 +23,8 @@ from typer.testing import CliRunner
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.cli import app
-from se3.engine.merge.worktree_gc import WorktreeGCReport
+from tianluo.cli import app
+from tianluo.engine.merge.worktree_gc import WorktreeGCReport
 
 runner = CliRunner()
 
@@ -46,9 +46,9 @@ def _invoke(args, project_root, report):
     gc_mock = MagicMock(return_value=report)
     wide_console = Console(width=200)
     with patch(
-        "se3.commands.run.get_project_root", return_value=project_root
-    ), patch("se3.commands.worktree_cmd.gc_worktree_runs", gc_mock), patch(
-        "se3.commands.worktree_cmd.console", wide_console
+        "tianluo.commands.run.get_project_root", return_value=project_root
+    ), patch("tianluo.commands.worktree_cmd.gc_worktree_runs", gc_mock), patch(
+        "tianluo.commands.worktree_cmd.console", wide_console
     ):
         result = runner.invoke(app, ["worktree", "gc"] + args)
     return result, gc_mock
@@ -96,7 +96,7 @@ def test_report_three_sections_and_unmerged_warning(project_root):
     """The rendered report shows archived, retained-unmerged (with a loud
     warning), and skipped sections — all three."""
     report = WorktreeGCReport(
-        archived=[("wt-merged", Path("/p/se3/worktrees/.archive/wt-merged-1"), 1024)],
+        archived=[("wt-merged", Path("/p/tianluo/worktrees/.archive/wt-merged-1"), 1024)],
         retained_unmerged=[
             ("feat-x", "master", "branch has commits not in HEAD (unmerged)")
         ],
@@ -122,7 +122,7 @@ def test_report_three_sections_and_unmerged_warning(project_root):
 def test_errors_map_to_nonzero_exit(project_root):
     """Any errored run makes the command exit non-zero."""
     report = WorktreeGCReport(
-        errors=[("wt-bad", "archive to se3/worktrees/.archive/ failed: OSError")],
+        errors=[("wt-bad", "archive to tianluo/worktrees/.archive/ failed: OSError")],
     )
     result, _ = _invoke([], project_root, report)
 

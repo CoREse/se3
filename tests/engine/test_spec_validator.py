@@ -1,4 +1,4 @@
-"""Unit tests for ``se3.engine.spec_validator.validate_spec_structure``.
+"""Unit tests for ``tianluo.engine.spec_validator.validate_spec_structure``.
 
 Covers each of the five v1 structural rules (positive + negative case
 each), plus the high-priority documentation-updater meta-summary
@@ -7,7 +7,7 @@ fixture that motivated the validator.
 
 from __future__ import annotations
 
-from se3.engine.spec_validator import (
+from tianluo.engine.spec_validator import (
     V1_MARKER,
     ValidationResult,
     extract_spec_body,
@@ -42,7 +42,7 @@ def _good_spec(name: str = "auth") -> str:
 # be detected as invalid.
 _DOCUMENTATION_UPDATER_META = (
     "I have explored the documentation-updater module. The main file is "
-    "src/se3/engine/docs_updater.py. The class DocumentationUpdater "
+    "src/tianluo/engine/docs_updater.py. The class DocumentationUpdater "
     "manages README.md and VERSIONS.md updates. It has methods for "
     "updating version badges and inserting changelog entries. The "
     "module exposes a Template helper and three regexes for badge "

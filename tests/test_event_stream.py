@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from se3.engine import (
+from tianluo.engine import (
     CliSink,
     Event,
     EventEmitter,
@@ -204,7 +204,7 @@ def test_json_sink_falls_back_to_str_for_non_serializable():
 def captured_console():
     from rich.console import Console
 
-    from se3.engine import display
+    from tianluo.engine import display
 
     prev = display.get_console()
     console = Console(record=True, force_terminal=False, width=100)
@@ -247,7 +247,7 @@ def test_cli_sink_step_started_is_noop(captured_console):
 
 
 def test_cli_sink_renders_completed_step(captured_console):
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="s1", step_type=StepType.SUMMARIZE)
     step.status = StepStatus.COMPLETED
@@ -273,7 +273,7 @@ def test_cli_sink_completed_step_without_step_object_is_safe(captured_console):
 
 
 def _make_step(step_id: str = "07_test", step_type_value: str = "test"):
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id=step_id, step_type=StepType(step_type_value))
     step.status = StepStatus.COMPLETED
@@ -292,7 +292,7 @@ def test_history_sink_writes_step_completed_to_jsonl(tmp_path):
         step=step,
     ))
 
-    path = tmp_path / "se3" / "history" / "flow-1" / "07_test.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-1" / "07_test.jsonl"
     assert path.exists()
     lines = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     assert len(lines) == 1
@@ -304,7 +304,7 @@ def test_history_sink_writes_step_completed_to_jsonl(tmp_path):
 
 
 def test_history_sink_writes_step_failed(tmp_path):
-    from se3.engine.models import StepStatus
+    from tianluo.engine.models import StepStatus
 
     step = _make_step(step_id="04_implement", step_type_value="implement")
     step.status = StepStatus.FAILED
@@ -319,7 +319,7 @@ def test_history_sink_writes_step_failed(tmp_path):
         step=step,
     ))
 
-    path = tmp_path / "se3" / "history" / "flow-2" / "04_implement.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-2" / "04_implement.jsonl"
     rec = json.loads(path.read_text().splitlines()[0])
     assert rec["type"] == "step_failed"
     assert rec["data"]["step"]["error_message"] == "boom"
@@ -340,21 +340,21 @@ def test_history_sink_ignores_non_step_events(tmp_path):
     # STEP_OUTPUT without a step payload is also a no-op.
     sink.consume(new_event(EventType.STEP_OUTPUT, flow_id="f", step_id="s"))
     # No files written.
-    assert not (tmp_path / "se3").exists()
+    assert not (tmp_path / "tianluo").exists()
 
 
 def test_history_sink_no_op_when_step_payload_missing(tmp_path):
     HistorySink(tmp_path).consume(
         new_event(EventType.STEP_COMPLETED, flow_id="f", step_id="s")
     )
-    assert not (tmp_path / "se3").exists()
+    assert not (tmp_path / "tianluo").exists()
 
 
 def test_history_reader_surfaces_step_event_records(tmp_path):
     """End-to-end: HistorySink writes a line; the daemon's history reader picks
     it up as an unmodified ``{step_id, message}`` record so the frontend's
     normalizeRecord can route it to renderStepReport."""
-    from se3.daemon.history import DaemonHistoryReader
+    from tianluo.daemon.history import DaemonHistoryReader
 
     step = _make_step()
     HistorySink(tmp_path).consume(new_event(
@@ -375,7 +375,7 @@ def test_history_reader_surfaces_step_event_records(tmp_path):
 
 def test_get_step_history_skips_step_event_lines(tmp_path):
     """CLI history viewer must ignore step_event records mixed into the jsonl."""
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         ChatMessage,
         get_step_history,
         record_step_event,
@@ -383,7 +383,7 @@ def test_get_step_history_skips_step_event_lines(tmp_path):
 
     # Write one assistant ChatMessage and one step_event record into the same
     # jsonl, then verify the CLI viewer surfaces only the chat message.
-    flow_dir = tmp_path / "se3" / "history" / "flow-y"
+    flow_dir = tmp_path / "tianluo" / "history" / "flow-y"
     flow_dir.mkdir(parents=True)
     jsonl = flow_dir / "07_test.jsonl"
     msg = ChatMessage(
@@ -405,13 +405,13 @@ def test_get_step_history_skips_step_event_lines(tmp_path):
 def test_get_step_history_skips_step_output_lines(tmp_path):
     """CLI history viewer must skip step_output records (non-terminal usage
     snapshots) so they do not inflate retry context or trigger warnings."""
-    from se3.engine.chat_history import (
+    from tianluo.engine.chat_history import (
         ChatMessage,
         get_step_history,
         record_step_event,
     )
 
-    flow_dir = tmp_path / "se3" / "history" / "flow-z"
+    flow_dir = tmp_path / "tianluo" / "history" / "flow-z"
     flow_dir.mkdir(parents=True)
     jsonl = flow_dir / "06_self_check.jsonl"
     msg = ChatMessage(
@@ -449,7 +449,7 @@ def test_get_step_history_skips_step_output_lines(tmp_path):
 
 
 def _completed_step(step_type_value: str, step_id: str):
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id=step_id, step_type=StepType(step_type_value))
     step.status = StepStatus.COMPLETED
@@ -488,7 +488,7 @@ def test_history_sink_persists_terminal_event_for_every_step_type(
         step=step,
     ))
 
-    path = tmp_path / "se3" / "history" / "flow-all" / f"{step_id}.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-all" / f"{step_id}.jsonl"
     assert path.exists(), f"no report line persisted for step type {step_type_value}"
     rec = json.loads(path.read_text().splitlines()[0])
     assert rec["type"] == "step_completed"
@@ -605,7 +605,7 @@ def test_cli_skips_but_history_persists_same_interactive_event(tmp_path, capture
     # CLI rendered nothing.
     assert captured_console.export_text() == ""
     # History persisted the report record.
-    path = tmp_path / "se3" / "history" / "flow-z" / "00_discovery_zz.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-z" / "00_discovery_zz.jsonl"
     assert path.exists()
     rec = json.loads(path.read_text().splitlines()[0])
     assert rec["type"] == "step_completed"
@@ -615,7 +615,7 @@ def test_cli_skips_but_history_persists_same_interactive_event(tmp_path, capture
 def test_history_sink_persists_partial_completion_as_step_completed(tmp_path):
     """A PARTIAL terminal result is persisted as a step_completed record (only
     FAILED maps to step_failed); the report card still renders."""
-    from se3.engine.models import StepStatus
+    from tianluo.engine.models import StepStatus
 
     step = _completed_step("implement", "04_implement_partial")
     step.status = StepStatus.PARTIAL
@@ -626,7 +626,7 @@ def test_history_sink_persists_partial_completion_as_step_completed(tmp_path):
         step_type="implement",
         step=step,
     ))
-    path = tmp_path / "se3" / "history" / "flow-p" / "04_implement_partial.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-p" / "04_implement_partial.jsonl"
     rec = json.loads(path.read_text().splitlines()[0])
     assert rec["type"] == "step_completed"
     assert rec["data"]["step"]["status"] == "partial"
@@ -642,7 +642,7 @@ def test_history_sink_persists_partial_completion_as_step_completed(tmp_path):
 
 def test_cli_sink_step_output_renders_usage(captured_console):
     """STEP_OUTPUT events carrying a step with token_usage render the usage block."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="07_test", step_type=StepType.SELF_CHECK)
     step.status = StepStatus.REVISION_NEEDED
@@ -667,7 +667,7 @@ def test_cli_sink_step_output_renders_usage(captured_console):
 
 def test_cli_sink_step_output_without_usage_renders_nothing(captured_console):
     """STEP_OUTPUT events carrying a step with no token_usage render nothing."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="07_test", step_type=StepType.SELF_CHECK)
     step.status = StepStatus.REVISION_NEEDED
@@ -681,7 +681,7 @@ def test_cli_sink_step_output_without_usage_renders_nothing(captured_console):
 
 def test_history_sink_persists_step_output_event(tmp_path):
     """STEP_OUTPUT events carrying a step are persisted to jsonl with type='step_output'."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="07_test", step_type=StepType.SELF_CHECK)
     step.status = StepStatus.REVISION_NEEDED
@@ -704,7 +704,7 @@ def test_history_sink_persists_step_output_event(tmp_path):
         step=step,
     ))
 
-    path = tmp_path / "se3" / "history" / "flow-nt" / "07_test.jsonl"
+    path = tmp_path / "tianluo" / "history" / "flow-nt" / "07_test.jsonl"
     assert path.exists()
     lines = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
     assert len(lines) == 1
@@ -720,13 +720,13 @@ def test_history_sink_step_output_without_step_is_noop(tmp_path):
     HistorySink(tmp_path).consume(
         new_event(EventType.STEP_OUTPUT, flow_id="f", step_id="s")
     )
-    assert not (tmp_path / "se3").exists()
+    assert not (tmp_path / "tianluo").exists()
 
 
 def test_cli_sink_discovery_step_output_renders_cumulative_usage(captured_console):
     """STEP_OUTPUT for discovery must render the cumulative usage line (not the
     big 'Step Token Usage' block) — the same per-type rule as terminal events."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="01_discovery", step_type=StepType.DISCOVERY)
     step.status = StepStatus.PAUSED
@@ -753,7 +753,7 @@ def test_cli_sink_discovery_step_output_renders_cumulative_usage(captured_consol
 def test_cli_sink_confirm_step_output_renders_compact_footer(captured_console):
     """STEP_OUTPUT for confirm must render the compact dim footer (not the big
     'Step Token Usage' block) — the same per-type rule as terminal events."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="03_confirm", step_type=StepType.CONFIRM)
     step.status = StepStatus.REVISION_NEEDED
@@ -791,7 +791,7 @@ def test_cli_sink_confirm_step_output_renders_compact_footer(captured_console):
 def test_discovery_resume_does_not_emit_stale_step_output():
     """When a discovery step is resumed without calling run_step (step_ran_llm=False),
     no STEP_OUTPUT event should be emitted for stale token_usage."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     emitter = EventEmitter()
     recording_sink = _RecordingSink()
@@ -865,7 +865,7 @@ def test_paused_discovery_does_not_emit_step_output():
     emitting STEP_OUTPUT would duplicate the cumulative usage on the CLI and
     persist a redundant web usage chip.  The fix in run.py excludes
     (discovery, PAUSED) from the STEP_OUTPUT emission branch."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     emitter = EventEmitter()
     recording_sink = _RecordingSink()

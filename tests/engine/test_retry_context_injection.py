@@ -13,14 +13,14 @@ import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from se3.engine.llm_caller import LLMCaller
-from se3.engine.chat_history import (
+from tianluo.engine.llm_caller import LLMCaller
+from tianluo.engine.chat_history import (
     ChatMessage,
     ChatSession,
     extract_conversation_from_ndjson,
     format_history_for_retry,
 )
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 # ---------------------------------------------------------------------------
@@ -30,10 +30,10 @@ from se3.engine.models import FlowInstance, Step, StepStatus, StepType
 class TestImplementPassesRetryCount:
     """Verify implement step reads retry_count and passes it to LLMCaller."""
 
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
     def test_implement_passes_retry_count(self, mock_caller_cls):
         """On retry, implement handler should pass retry_count as external_attempt."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -68,10 +68,10 @@ class TestImplementPassesRetryCount:
         assert call_kwargs[1].get("external_attempt") == 2 or \
             (len(call_kwargs[0]) > 0 and call_kwargs[1].get("external_attempt") == 2)
 
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("tianluo.engine.steps.implement.LLMCaller")
     def test_implement_defaults_retry_count_to_zero(self, mock_caller_cls):
         """Without retry_count in inputs, external_attempt should be 0."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -120,9 +120,9 @@ class TestGetRetryContextWarning:
             step_type="implement",
         )
 
-        with patch("se3.engine.chat_history.format_history_for_retry",
+        with patch("tianluo.engine.chat_history.format_history_for_retry",
                     side_effect=ValueError("malformed data")):
-            import se3.engine.chat_history as ch_mod
+            import tianluo.engine.chat_history as ch_mod
             original_fn = ch_mod.format_history_for_retry
 
             # Patch at module level used by _get_retry_context
@@ -130,7 +130,7 @@ class TestGetRetryContextWarning:
                 side_effect=ValueError("malformed data")
             )
             try:
-                with caplog.at_level(logging.WARNING, logger="se3.engine.llm_caller"):
+                with caplog.at_level(logging.WARNING, logger="tianluo.engine.llm_caller"):
                     result = caller._get_retry_context()
 
                 assert result is None
@@ -157,7 +157,7 @@ def _make_session(messages):
 class TestFormatHistoryMalformedNDJSON:
     """Verify format_history_for_retry handles malformed raw_json gracefully."""
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_malformed_raw_json_falls_back_to_content(self, mock_get):
         """If raw_json entries are malformed, should fall back to simplified content."""
         # Create a message with malformed raw_json (non-dict items)
@@ -189,7 +189,7 @@ class TestFormatHistoryMalformedNDJSON:
         assert result is not None
         assert "I did some work on the task" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_partial_valid_ndjson_returns_partial_context(self, mock_get):
         """If some raw_json entries are valid and some aren't, should return partial context."""
         raw_json = [
@@ -234,7 +234,7 @@ class TestFormatHistoryMalformedNDJSON:
         # The valid entries should be present
         assert "Reading the file now" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_completely_broken_raw_json_falls_back(self, mock_get, caplog):
         """If extract_conversation_from_ndjson raises, should fall back and log warning."""
         msg = ChatMessage(
@@ -327,7 +327,7 @@ class TestFormatHistoryFixIterationBoundary:
             fix_iteration=fix_iteration,
         )
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_filters_to_current_iteration_when_set(self, mock_get):
         """Messages with mismatching non-zero fix_iteration must be excluded."""
         sess = _make_session([
@@ -349,7 +349,7 @@ class TestFormatHistoryFixIterationBoundary:
         assert "iter1 reply" not in result
         assert "iter3 user" not in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_zero_fix_iteration_messages_act_as_wildcard(self, mock_get):
         """Legacy / unmarked messages (fix_iteration=0) are included regardless
         of current_fix_iteration so a chat_history written before the upgrade
@@ -370,7 +370,7 @@ class TestFormatHistoryFixIterationBoundary:
         assert "legacy reply" in result
         assert "iter5 user" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_current_zero_means_no_filtering(self, mock_get):
         """When current_fix_iteration=0 (default / non-fix-loop callers), no
         iteration filter applies — all messages included.
@@ -390,7 +390,7 @@ class TestFormatHistoryFixIterationBoundary:
         assert "b" in result
         assert "c" in result
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_returns_none_when_filter_drops_everything(self, mock_get):
         """If the iteration filter excludes every message, return None
         (caller treats None as 'no retry context')."""
@@ -405,7 +405,7 @@ class TestFormatHistoryFixIterationBoundary:
         )
         assert result is None
 
-    @patch("se3.engine.chat_history.get_step_history")
+    @patch("tianluo.engine.chat_history.get_step_history")
     def test_default_argument_preserves_pre_upgrade_behavior(self, mock_get):
         """Callers that don't pass current_fix_iteration get all messages
         (default 0 acts as wildcard)."""
@@ -430,7 +430,7 @@ class TestRecordAPIAcceptsFixIteration:
     """Verify record_prompt / record_response persist fix_iteration."""
 
     def test_record_prompt_persists_fix_iteration(self, tmp_path):
-        from se3.engine.chat_history import record_prompt, get_step_history
+        from tianluo.engine.chat_history import record_prompt, get_step_history
 
         record_prompt(
             tmp_path, "f1", "s1", "implement",
@@ -442,7 +442,7 @@ class TestRecordAPIAcceptsFixIteration:
         assert sess.messages[0].fix_iteration == 7
 
     def test_record_response_persists_fix_iteration(self, tmp_path):
-        from se3.engine.chat_history import record_response, get_step_history
+        from tianluo.engine.chat_history import record_response, get_step_history
 
         record_response(
             tmp_path, "f1", "s2", "implement",
@@ -456,7 +456,7 @@ class TestRecordAPIAcceptsFixIteration:
 
     def test_record_prompt_default_fix_iteration_zero(self, tmp_path):
         """Old callers passing positional/kwargs without fix_iteration get 0."""
-        from se3.engine.chat_history import record_prompt, get_step_history
+        from tianluo.engine.chat_history import record_prompt, get_step_history
 
         record_prompt(tmp_path, "f1", "s3", "analyze", prompt="x", attempt=0)
         sess = get_step_history(tmp_path, "f1", "s3")

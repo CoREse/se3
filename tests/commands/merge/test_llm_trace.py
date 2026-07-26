@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge.llm_trace import LLMCallRecord, LLMTrace
+from tianluo.commands.merge.llm_trace import LLMCallRecord, LLMTrace
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ class TestLLMTraceRotation:
         granular) matched. We pin ``datetime.now`` to a fixed instant
         and force three rotations to verify uniqueness.
         """
-        import se3.commands.merge.llm_trace as trace_mod
+        import tianluo.commands.merge.llm_trace as trace_mod
 
         # Freeze the clock so every _new_file_path() sees the same ts.
         class _FrozenDatetime:

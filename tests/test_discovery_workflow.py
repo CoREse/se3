@@ -5,7 +5,7 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -14,8 +14,8 @@ from se3.engine.models import (
     StepType,
     get_default_step_sequence,
 )
-from se3.engine.state_machine import StateMachine
-from se3.engine.steps.discovery import (
+from tianluo.engine.state_machine import StateMachine
+from tianluo.engine.steps.discovery import (
     discovery_handler,
     PROGRAMMATIC_CONFIRM_SENTINEL,
     _format_conversation_history,
@@ -36,7 +36,7 @@ class TestDiscoveryStepType:
 
     def test_discovery_in_step_pool(self):
         """DISCOVERY should be in the step pool."""
-        from se3.engine.models import STEP_POOL
+        from tianluo.engine.models import STEP_POOL
 
         assert StepType.DISCOVERY in STEP_POOL
         info = STEP_POOL[StepType.DISCOVERY]
@@ -74,7 +74,7 @@ class TestDiscoveryHandler:
         assert result == StepStatus.FAILED
         assert "No initial description" in step.error_message
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_initial_round_asks_questions(self, mock_caller_class):
         """Initial discovery round should ask questions."""
         # Setup mock
@@ -104,7 +104,7 @@ class TestDiscoveryHandler:
         assert "questions" in step.outputs
         assert step.outputs["questions"] == ["Who is the target user?", "What are the key features?"]
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_synthesis_needs_confirmation(self, mock_caller_class):
         """Synthesis mode should pause for user confirmation."""
         mock_caller = Mock()
@@ -134,7 +134,7 @@ class TestDiscoveryHandler:
         # Internal state stored in discovery_state
         assert step.inputs["discovery_state"]["mode"] == "synthesis"
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_confirmation_pauses_for_programmatic_confirm(self, mock_caller_class):
         """Confirmation with ready_to_proceed should PAUSE for programmatic confirmation."""
         mock_caller = Mock()
@@ -165,7 +165,7 @@ class TestDiscoveryHandler:
         assert step.outputs["awaiting_programmatic_confirm"] is True
         assert step.outputs["refined_description"] == "Build a user authentication system"
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_high_round_with_user_confirmation(self, mock_caller_class):
         """Should pause for programmatic confirm at any round number."""
         mock_caller = Mock()
@@ -232,7 +232,7 @@ class TestProgrammaticConfirmation:
         # awaiting flag should be cleared
         assert "awaiting_programmatic_confirm" not in step.outputs
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_programmatic_confirm_continue(self, mock_caller_class):
         """When awaiting flag cleared and new user_response given, should continue discovery."""
         mock_caller = Mock()
@@ -277,10 +277,10 @@ class TestProgrammaticConfirmGate:
     by mocking _read_multiline_input.
     """
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_1_confirms(self, mock_read):
         """Strict '1' confirms and returns sentinel."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -295,10 +295,10 @@ class TestProgrammaticConfirmGate:
         assert result == PROGRAMMATIC_CONFIRM_SENTINEL
         assert step.inputs["programmatic_confirmed"] is True
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_1_with_newline_confirms(self, mock_read):
         """'1\\n' confirms (trailing newline artifact from multiline UI)."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -313,10 +313,10 @@ class TestProgrammaticConfirmGate:
         assert result == PROGRAMMATIC_CONFIRM_SENTINEL
         assert step.inputs["programmatic_confirmed"] is True
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_1_with_crlf_confirms(self, mock_read):
         """'1\\r\\n' confirms (trailing CRLF artifact from multiline UI)."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -331,10 +331,10 @@ class TestProgrammaticConfirmGate:
         assert result == PROGRAMMATIC_CONFIRM_SENTINEL
         assert step.inputs["programmatic_confirmed"] is True
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_1_dot_rejected(self, mock_read):
         """'1.' is not strict '1' — clears flag and returns input for continued discovery."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -351,10 +351,10 @@ class TestProgrammaticConfirmGate:
         assert "awaiting_programmatic_confirm" not in step.outputs
         assert "programmatic_confirmed" not in step.inputs
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_whitespace_1_rejected(self, mock_read):
         """' 1 ' is not strict '1' — clears flag and returns input."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -370,10 +370,10 @@ class TestProgrammaticConfirmGate:
         assert result == " 1 "
         assert "awaiting_programmatic_confirm" not in step.outputs
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_yes_rejected(self, mock_read):
         """'yes' is not strict '1' — clears flag and returns input."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -389,10 +389,10 @@ class TestProgrammaticConfirmGate:
         assert result == "yes"
         assert "awaiting_programmatic_confirm" not in step.outputs
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_input_foo_rejected(self, mock_read):
         """'foo' clears flag and returns input for continued discovery."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -408,11 +408,11 @@ class TestProgrammaticConfirmGate:
         assert result == "foo"
         assert "awaiting_programmatic_confirm" not in step.outputs
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_empty_input_redisplays(self, mock_read, mock_display):
         """Empty input loops with re-display, then '1' breaks the loop."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -428,11 +428,11 @@ class TestProgrammaticConfirmGate:
         assert mock_display.call_count == 1  # re-displayed after empty input
         assert mock_read.call_count == 2
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_whitespace_only_redisplays(self, mock_read, mock_display):
         """Whitespace-only input loops with re-display, then '1' breaks."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -448,10 +448,10 @@ class TestProgrammaticConfirmGate:
         assert mock_display.call_count == 1
         assert mock_read.call_count == 2
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_none_cancels_and_saves(self, mock_read):
         """None (Ctrl+C / EOF) returns None after saving flow."""
-        from se3.commands.run import _handle_discovery_programmatic_confirm
+        from tianluo.commands.run import _handle_discovery_programmatic_confirm
 
         step = Step(step_type=StepType.DISCOVERY, inputs={})
         step.outputs["message"] = "msg"
@@ -495,7 +495,7 @@ class TestStateMachineIntegration:
 
     def test_create_flow_with_discovery_type(self, tmp_path):
         """State machine should create flow with discovery steps."""
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.persistence import PersistenceManager
 
         persistence = PersistenceManager(tmp_path)
         state_machine = StateMachine(tmp_path, persistence)
@@ -513,7 +513,7 @@ class TestStateMachineIntegration:
 
     def test_discovery_outputs_passed_to_analyze(self, tmp_path):
         """Discovery outputs should be available to analyze step."""
-        from se3.engine.persistence import PersistenceManager
+        from tianluo.engine.persistence import PersistenceManager
 
         persistence = PersistenceManager(tmp_path)
         state_machine = StateMachine(tmp_path, persistence)
@@ -622,11 +622,11 @@ class TestDiscoveryPromptTemplates:
 class TestDiscoveryLLMCallErrorHandling:
     """Test that LLMCallError is caught with friendly messages."""
 
-    @patch("se3.engine.output.render_full")
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.output.render_full")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_llm_json_extraction_failure(self, mock_caller_class, mock_render):
         """JSON extraction failure should return FAILED with friendly error message and panel."""
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
 
         mock_caller = Mock()
         mock_caller_class.return_value = mock_caller
@@ -651,11 +651,11 @@ class TestDiscoveryLLMCallErrorHandling:
         rendered_text = mock_render.call_args[0][0]
         assert "JSON" in rendered_text
 
-    @patch("se3.engine.output.render_full")
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.output.render_full")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_other_llm_error(self, mock_caller_class, mock_render):
         """Other LLMCallError should return FAILED with concise error description and panel."""
-        from se3.engine.llm_caller import LLMCallError
+        from tianluo.engine.llm_caller import LLMCallError
 
         mock_caller = Mock()
         mock_caller_class.return_value = mock_caller
@@ -669,7 +669,7 @@ class TestDiscoveryLLMCallErrorHandling:
 
         result = discovery_handler(step, flow)
 
-        from se3.i18n import t
+        from tianluo.i18n import t
 
         assert result == StepStatus.FAILED
         assert "API timeout" in step.error_message
@@ -680,7 +680,7 @@ class TestDiscoveryLLMCallErrorHandling:
         # Verify render_full was called to show friendly panel
         mock_render.assert_called_once()
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_discovery_non_llm_error(self, mock_caller_class):
         """Non-LLMCallError exceptions should still go through generic except path."""
         mock_caller = Mock()
@@ -703,8 +703,8 @@ class TestDiscoveryLLMCallErrorHandling:
 class TestDiscoveryEmptyResponseRejection:
     """LLM responses with no user-visible fields must be rejected, not rendered as a blank panel."""
 
-    @patch("se3.engine.output.render_full")
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.output.render_full")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_all_empty_fields_raise_llm_error(self, mock_caller_class, mock_render):
         """content=='' AND refined_description=='' AND questions==[] → LLMCallError → FAILED with JSON-style friendly message."""
         mock_caller = Mock()
@@ -730,7 +730,7 @@ class TestDiscoveryEmptyResponseRejection:
         assert step.error_message  # non-empty
         mock_render.assert_called_once()
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_content_only_is_accepted(self, mock_caller_class):
         """content non-empty with empty refined/questions is still a valid response."""
         mock_caller = Mock()
@@ -748,13 +748,13 @@ class TestDiscoveryEmptyResponseRejection:
         )
         flow = FlowInstance(task_description="I want something")
 
-        with patch("se3.engine.steps.discovery._display_discovery_message"):
+        with patch("tianluo.engine.steps.discovery._display_discovery_message"):
             result = discovery_handler(step, flow)
 
         assert result == StepStatus.PAUSED
         assert step.outputs.get("message") == "Let me clarify something first."
 
-    @patch("se3.engine.steps.discovery.LLMCaller")
+    @patch("tianluo.engine.steps.discovery.LLMCaller")
     def test_questions_only_is_accepted(self, mock_caller_class):
         """Empty content but with questions is a valid response."""
         mock_caller = Mock()
@@ -772,7 +772,7 @@ class TestDiscoveryEmptyResponseRejection:
         )
         flow = FlowInstance(task_description="I want something")
 
-        with patch("se3.engine.steps.discovery._display_discovery_message"):
+        with patch("tianluo.engine.steps.discovery._display_discovery_message"):
             result = discovery_handler(step, flow)
 
         assert result == StepStatus.PAUSED
@@ -788,7 +788,7 @@ class TestExtractionPromptSynthesis:
         """Prompt must NOT instruct the LLM to copy/prefer embedded JSON when
         present — that's exactly the behavior that fails on thin-but-valid
         Phase 1 JSON."""
-        from se3.engine.json_extractor import EXTRACTION_PROMPT
+        from tianluo.engine.json_extractor import EXTRACTION_PROMPT
 
         rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
         # Anti-pattern: prompt must not say "use that JSON" / "preferred source".
@@ -798,20 +798,20 @@ class TestExtractionPromptSynthesis:
 
     def test_prompt_requires_schema_complete_output(self):
         """Prompt must explicitly ask for schema-complete output, not just "some JSON"."""
-        from se3.engine.json_extractor import EXTRACTION_PROMPT
+        from tianluo.engine.json_extractor import EXTRACTION_PROMPT
 
         rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
         assert "schema-complete" in rendered or "matches the expected schema" in rendered
 
     def test_prompt_forbids_empty_object(self):
-        from se3.engine.json_extractor import EXTRACTION_PROMPT
+        from tianluo.engine.json_extractor import EXTRACTION_PROMPT
 
         rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
         assert "empty object" in rendered or "{}" in rendered
 
     def test_prompt_renders_without_format_errors(self):
         """Sanity: prompt template must .format() with both placeholders without KeyError."""
-        from se3.engine.json_extractor import EXTRACTION_PROMPT
+        from tianluo.engine.json_extractor import EXTRACTION_PROMPT
 
         # Should not raise KeyError or IndexError.
         out = EXTRACTION_PROMPT.format(content="x", schema_hint="y")
@@ -822,10 +822,10 @@ class TestExtractionPromptSynthesis:
 class TestRestoreDiscoveryDisplay:
     """Test _restore_discovery_display re-renders discovery content correctly on resume."""
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
     def test_restore_confirmation_mode_passes_is_confirmation(self, mock_display):
         """On resume from confirmation phase, is_confirmation=True must be passed."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         step = Step(
             step_type=StepType.DISCOVERY,
@@ -851,10 +851,10 @@ class TestRestoreDiscoveryDisplay:
         assert args[1] == "Build a user authentication system"  # refined_description
         assert args[2] is None  # questions
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
     def test_restore_synthesis_mode_shows_proposed_description(self, mock_display):
         """On resume from synthesis phase, proposed_description must be displayed."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         step = Step(
             step_type=StepType.DISCOVERY,
@@ -878,10 +878,10 @@ class TestRestoreDiscoveryDisplay:
         assert kwargs.get("is_confirmation") is False
         assert args[1] == "Build a user authentication system"
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
     def test_restore_question_mode_shows_questions(self, mock_display):
         """On resume from question phase, questions must be displayed."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         step = Step(
             step_type=StepType.DISCOVERY,
@@ -905,10 +905,10 @@ class TestRestoreDiscoveryDisplay:
         assert args[2] == ["Who is the target user?", "What are the key features?"]
         assert kwargs.get("is_confirmation") is False
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
     def test_restore_falls_back_to_history_content_when_no_message(self, mock_display):
         """When message is not in outputs, fall back to last assistant history content."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         step = Step(
             step_type=StepType.DISCOVERY,
@@ -930,10 +930,10 @@ class TestRestoreDiscoveryDisplay:
         args, kwargs = mock_display.call_args
         assert args[0] == "Fallback content"
 
-    @patch("se3.commands.run.get_console")
+    @patch("tianluo.commands.run.get_console")
     def test_restore_no_history_shows_generic_notice(self, mock_console):
         """When no assistant history exists, show generic resume notice."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         step = Step(
             step_type=StepType.DISCOVERY,
@@ -1086,7 +1086,7 @@ class TestExtractNarrativeFromRaw:
     def test_cross_assertion_with_parse_json_response(self):
         """The unescaped-quote sample that parse_json_response recovers must
         also be recognized by the narrative extractor (semantic symmetry)."""
-        from se3.engine.utils.json_parser import parse_json_response
+        from tianluo.engine.utils.json_parser import parse_json_response
 
         raw = '```json\n{"content": "是否重写"discovery"步骤"}\n```'
         # Verify parse_json_response can recover it
@@ -1281,7 +1281,7 @@ class TestExtractNarrativeFromRaw:
 class TestDisplayDiscoveryMessageWithNarrative:
     """Test _display_discovery_message renders narrative from raw_result_text."""
 
-    @patch("se3.engine.display.get_console")
+    @patch("tianluo.engine.display.get_console")
     def test_narrative_rendered_first_when_present(self, mock_console):
         """When raw_result_text contains narrative, it should be first renderable."""
         from rich.console import Group
@@ -1301,7 +1301,7 @@ class TestDisplayDiscoveryMessageWithNarrative:
         assert isinstance(group.renderables[0], Markdown)
         assert "Additional narrative text." in str(group.renderables[0].markup)
 
-    @patch("se3.engine.display.get_console")
+    @patch("tianluo.engine.display.get_console")
     def test_no_narrative_when_raw_is_none(self, mock_console):
         """When raw_result_text is None, Group should match current behavior."""
         from rich.console import Group
@@ -1316,7 +1316,7 @@ class TestDisplayDiscoveryMessageWithNarrative:
         assert isinstance(group.renderables[0], Markdown)
         assert "Hello" in str(group.renderables[0].markup)
 
-    @patch("se3.engine.display.get_console")
+    @patch("tianluo.engine.display.get_console")
     def test_no_narrative_when_raw_is_pure_json(self, mock_console):
         """When raw_result_text is pure JSON, no extra narrative renderable."""
         from rich.console import Group
@@ -1340,7 +1340,7 @@ class TestProposedDescriptionBlock:
         """Helper returns cyan title, Markdown, and cyan footer in se3 layout."""
         from rich.markdown import Markdown
         from rich.text import Text
-        from se3.engine.steps.discovery import _proposed_description_block
+        from tianluo.engine.steps.discovery import _proposed_description_block
 
         block = _proposed_description_block("# My refined task")
 
@@ -1400,7 +1400,7 @@ class TestDisplayDiscoveryMessageProposedBlock:
             if cls._is_cyan(r) and r.plain.strip() == ""
         ]
 
-    @patch("se3.engine.display.get_console")
+    @patch("tianluo.engine.display.get_console")
     def test_confirmation_mode_has_cyan_block(self, mock_console):
         from rich.console import Group
         from rich.markdown import Markdown
@@ -1432,7 +1432,7 @@ class TestDisplayDiscoveryMessageProposedBlock:
               and "refined task here" in str(r.markup)]
         assert len(md) == 1
 
-    @patch("se3.engine.display.get_console")
+    @patch("tianluo.engine.display.get_console")
     def test_synthesis_with_questions_has_cyan_block(self, mock_console):
         from rich.console import Group
         from rich.markdown import Markdown
@@ -1481,10 +1481,10 @@ class TestDisplayDiscoveryMessageProposedBlock:
 class TestRestoreDiscoveryDisplayWithRawText:
     """Test _restore_discovery_display passes raw_result_text from history."""
 
-    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("tianluo.engine.steps.discovery._display_discovery_message")
     def test_restore_passes_raw_result_text_from_history(self, mock_display):
         """Resume should pass last assistant's content as raw_result_text."""
-        from se3.commands.run import _restore_discovery_display
+        from tianluo.commands.run import _restore_discovery_display
 
         raw_text = "Narrative here.\n```json\n{\"mode\":\"confirmation\"}\n```"
         step = Step(

@@ -20,12 +20,12 @@ components, nodes declared out of topological order, and trailing forks.
 
 from __future__ import annotations
 
-from se3.engine.dag_scheduler import (
+from tianluo.engine.dag_scheduler import (
     RelayPlan,
     _relay_plan_is_linear,
     classify_chains,
 )
-from se3.engine.transitive_reduction import transitive_reduce
+from tianluo.engine.transitive_reduction import transitive_reduce
 
 
 # ---------------------------------------------------------------------------

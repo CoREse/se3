@@ -110,15 +110,15 @@ def _synth_heavy_root(base: Path) -> Path:
     dirs + a multi-MB busy active flow — the realistic load that starves the
     daemon push loop."""
     root = base / "heavy_project"
-    (root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     flow_id = "20260101-000000_heavyflow"
     # ~1MB engine.json (parsed SYNC on the event loop by active_flow_signature
     # every tick).
     big_steps = {f"{i:02d}_step_{i:08x}": {"status": "RUNNING", "blob": "x" * 600}
                  for i in range(1200)}
-    (root / "se3" / "state" / "engine.json").write_text(json.dumps(
+    (root / "tianluo" / "state" / "engine.json").write_text(json.dumps(
         {"flow_id": flow_id, "status": "RUNNING", "state": {"steps": big_steps}}))
-    hist = root / "se3" / "history"
+    hist = root / "tianluo" / "history"
     # the busy active flow with multi-MB jsonl
     af = hist / flow_id
     af.mkdir(parents=True, exist_ok=True)
@@ -175,12 +175,12 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
 
     procs = []
     try:
-        subprocess.run([PY, "-m", "se3.cli", "init", "-p", str(project)],
+        subprocess.run([PY, "-m", "tianluo.cli", "init", "-p", str(project)],
                        env=env(), cwd=str(project), capture_output=True, timeout=120)
         fa = tmp / "fake_agent.py"
         fa.write_text(FAKE_AGENT)
         fa.chmod(0o755)
-        y = project / "se3.yaml"
+        y = project / "tianluo.yaml"
         y.write_text(y.read_text() +
                      f"\nagents:\n  fake: {{type: claude-code, cmd: {fa}, priority: 10}}\n"
                      "llm_caller:\n  defaults: [fake]\n")
@@ -193,8 +193,8 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         else:
             print("[repro] CLEAN mode — temp project only")
 
-        import se3.server.crypto as crypto
-        from se3.server.persistence import Store
+        import tianluo.server.crypto as crypto
+        from tianluo.server.persistence import Store
         store = Store(str(db_path))
         owner = store.create_owner("admin", is_admin=True)
         store.link_identity(owner, "local", "admin")
@@ -203,8 +203,8 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         store.issue_daemon_key(owner, kh)
 
         sfh = open(tmp / "server.out", "wb")
-        launcher = ("import uvicorn;from se3.server.app import create_app;"
-                    "from se3.server.auth.session import SessionStore,CookieConfig;"
+        launcher = ("import uvicorn;from tianluo.server.app import create_app;"
+                    "from tianluo.server.auth.session import SessionStore,CookieConfig;"
                     f"app=create_app(db_path={str(db_path)!r},"
                     "session_store=SessionStore(cookie_config=CookieConfig(secure=False)));"
                     f"uvicorn.run(app,host='127.0.0.1',port={port},log_level='warning')")
@@ -216,7 +216,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
 
         roots_lit = ", ".join(repr(r) for r in roots)
         dfh = open(tmp / "daemon.out", "wb")
-        dl = ("from se3.daemon.daemon import Daemon,DaemonConfig;"
+        dl = ("from tianluo.daemon.daemon import Daemon,DaemonConfig;"
               f"d=Daemon(DaemonConfig(server_url='ws://127.0.0.1:{port}',pid_dir=r'{daemon_dir}',"
               f"project_roots=[{roots_lit}],machine_id='{machine_id}',daemon_key={kp!r},poll_interval=0.4));"
               "d.supervisor.discover_flows=lambda *a,**k: [];"
@@ -247,7 +247,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
                 # exceed the default limit and *close this stand-in client*
                 # (1009), so it would receive nothing thereafter — a harness
                 # artifact that masks the daemon-side fix as a false "freeze".
-                from se3.daemon import protocol as _protocol
+                from tianluo.daemon import protocol as _protocol
 
                 async with websockets.connect(
                     url,
@@ -280,7 +280,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         e = env()
         e["FAKE_AGENT_LOG"] = str(tmp / "agent.log")
         mfd, sfd = pty.openpty()
-        run_p = subprocess.Popen([PY, "-m", "se3.cli", "run", "--discover", "Add a health endpoint"],
+        run_p = subprocess.Popen([PY, "-m", "tianluo.cli", "run", "--discover", "Add a health endpoint"],
                                  env=e, cwd=str(project), stdin=sfd, stdout=sfd, stderr=sfd, close_fds=True)
         procs.append(run_p)
         os.close(sfd)
@@ -297,7 +297,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
                     break
         threading.Thread(target=bgdrain, daemon=True).start()
 
-        ej = project / "se3" / "state" / "engine.json"
+        ej = project / "tianluo" / "state" / "engine.json"
 
         def flow_id():
             if not ej.exists():
@@ -327,7 +327,7 @@ def run(loaded: bool, heavy_root: str | None, wait_after: float) -> int:
         confirm_t = time.time()
 
         def analyze_on_disk():
-            hd = project / "se3" / "history" / fid
+            hd = project / "tianluo" / "history" / fid
             return hd.exists() and any("analyze" in f.name for f in hd.iterdir())
         _poll(analyze_on_disk, 200, 0.2)
         time.sleep(wait_after)

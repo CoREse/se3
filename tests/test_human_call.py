@@ -19,23 +19,23 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     ConflictFile,
     ConflictHunk,
 )
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     FileResolution,
     HunkResolution,
     LLMResolution,
 )
-from se3.engine.merge.human_call import (
+from tianluo.engine.merge.human_call import (
     HumanCallWriter,
     _atomic_write_json,
     _generate_call_filename,
 )
-from se3.engine.merge.strategy import DecisionAction, StrategyDecision
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecision
 
 
 # --------- helpers ---------
@@ -324,7 +324,7 @@ class TestOrphanFileHandling:
             check=True, capture_output=True,
         )
 
-        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir = tmp_path / "tianluo" / "specs" / "base"
         spec_dir.mkdir(parents=True)
         spec_file = spec_dir / "spec.md"
         spec_file.write_text(
@@ -363,7 +363,7 @@ class TestOrphanFileHandling:
         res = _make_resolution(
             _make_file_resolution(path="foo.txt"),
             _make_file_resolution(
-                path="se3/specs/base/spec.md",
+                path="tianluo/specs/base/spec.md",
                 resolved_content="## Requirement\n\n- SHOULD validate all inputs.\n",
                 is_spec=True,
             ),
@@ -423,7 +423,7 @@ class TestOrphanFileHandling:
         # Orphan spec file that does NOT exist in HEAD
         res = _make_resolution(
             _make_file_resolution(
-                path="se3/specs/new/spec.md",
+                path="tianluo/specs/new/spec.md",
                 resolved_content="## Requirement\n\n- SHALL do something.\n",
                 is_spec=True,
             ),
@@ -448,7 +448,7 @@ class TestGuardrailCallViolationValidation:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
                 "message": "SHALL weakened to SHOULD",
             }
@@ -459,7 +459,7 @@ class TestGuardrailCallViolationValidation:
             pre_merge_sha="abc123",
         )
         data = json.loads(call_file.read_text(encoding="utf-8"))
-        assert data["violations"][0]["file_path"] == "se3/specs/base/spec.md"
+        assert data["violations"][0]["file_path"] == "tianluo/specs/base/spec.md"
         assert data["violations"][0]["violation_type"] == "WEAKENING"
         assert data["violations"][0]["message"] == "SHALL weakened to SHOULD"
 
@@ -484,7 +484,7 @@ class TestGuardrailCallViolationValidation:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "message": "SHALL weakened to SHOULD",
             }
         ]
@@ -500,7 +500,7 @@ class TestGuardrailCallViolationValidation:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
             }
         ]
@@ -527,7 +527,7 @@ class TestGuardrailCallViolationValidation:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 # missing violation_type AND message
             }
         ]
@@ -544,7 +544,7 @@ class TestGuardrailCallViolationValidation:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
                 "message": "SHALL weakened to SHOULD",
                 "evidence": {"strong_line": "SHALL x", "weak_line": "SHOULD x"},
@@ -571,7 +571,7 @@ class TestNamingConvention:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
                 "message": "SHALL weakened to SHOULD",
             }

@@ -8,7 +8,7 @@ propagation), so its output must be deterministic.
 
 from __future__ import annotations
 
-from se3.engine.task_description import compose_task_description_with_interjections
+from tianluo.engine.task_description import compose_task_description_with_interjections
 
 
 def test_empty_interjections_returns_base_unchanged():

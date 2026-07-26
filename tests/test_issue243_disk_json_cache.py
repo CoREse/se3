@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import disk_json_cache as djc
-from se3.daemon.aggregator import DaemonAggregator
+from tianluo.daemon import disk_json_cache as djc
+from tianluo.daemon.aggregator import DaemonAggregator
 
 
 @pytest.fixture(autouse=True)
@@ -139,8 +139,8 @@ def test_degraded_extraction_failure_warns_once(tmp_path, monkeypatch):
 
 
 def _make_worktree_run(base: Path, name: str, flow_id: str, *, giant: bool) -> Path:
-    wt = base / "se3" / "worktrees" / name
-    eng = wt / "se3" / "state" / "engine.json"
+    wt = base / "tianluo" / "worktrees" / name
+    eng = wt / "tianluo" / "state" / "engine.json"
     _write_engine(
         eng,
         flow_id=flow_id,
@@ -172,8 +172,8 @@ def test_worktree_scan_no_full_parse_on_giant_files(tmp_path, monkeypatch):
 
 def test_snapshot_for_root_reads_new_format_header_only(tmp_path, monkeypatch):
     """A new-format engine.json yields flow_id/status without touching cold files."""
-    from se3.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
-    from se3.engine.persistence import PersistenceManager
+    from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
+    from tianluo.engine.persistence import PersistenceManager
 
     root = tmp_path / "proj"
     pm = PersistenceManager(root)

@@ -30,10 +30,10 @@ from pathlib import Path
 
 import pytest
 
-from se3.daemon import protocol
-from se3.daemon.history import DaemonHistoryReader
-from se3.server.state import ServerState
-from se3.server.ws import (
+from tianluo.daemon import protocol
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.server.state import ServerState
+from tianluo.server.ws import (
     ConnectionManager,
     HistoryRequestRegistry,
     UiHub,
@@ -361,7 +361,7 @@ def test_appends_after_bundle_keep_applied_and_stable_generation():
 # This locks the long-standing running-flow *freeze* regression end-to-end, for
 # BOTH triggering scenarios (discovery→analyze confirmation transition, and a
 # step failure → manual retry). It exercises the REAL daemon ``DaemonHistoryReader``
-# over a REAL on-disk ``se3/history/<flow>/<step>.jsonl`` + ``engine.json``
+# over a REAL on-disk ``tianluo/history/<flow>/<step>.jsonl`` + ``engine.json``
 # evolution, feeds every incremental ``FlowRead`` delta through the REAL server
 # ``_handle_message`` (cache write + ``/ws/ui`` broadcast), and asserts that the
 # records broadcast to a subscribed live console — with NO ``mode: full`` reload —
@@ -399,7 +399,7 @@ def _append_jsonl(path: Path, lines: list) -> None:
 
 
 def _write_engine(root: Path, flow_id: str, status: str) -> None:
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "engine.json").write_text(
         json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
@@ -407,7 +407,7 @@ def _write_engine(root: Path, flow_id: str, status: str) -> None:
 
 
 def _hist(root: Path, flow_id: str) -> Path:
-    return root / "se3" / "history" / flow_id
+    return root / "tianluo" / "history" / flow_id
 
 
 # ---- on-disk jsonl line builders (mirror what chat_history writes) ---------

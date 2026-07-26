@@ -25,26 +25,26 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3 import i18n
-from se3.cli import app
-from se3.i18n import loader
+from tianluo import i18n
+from tianluo.cli import app
+from tianluo.i18n import loader
 
 # Repo ``src/`` root (this file is tests/commands/, so up two + /src).
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
 # Every module migrated in group G2 (tasks 5 & 6).
 MIGRATED_MODULES = [
-    "se3/cli.py",
-    "se3/commands/end_session_cmd.py",
-    "se3/commands/salvage_cmd.py",
-    "se3/commands/migrate_cmd.py",
-    "se3/commands/merge_respond.py",
-    "se3/commands/merge_cmd.py",
-    "se3/commands/history_cmd.py",
-    "se3/commands/issue_cmd.py",
-    "se3/commands/init_cmd.py",
-    "se3/commands/code_index_cmd.py",
-    "se3/commands/worktree_cmd.py",
+    "tianluo/cli.py",
+    "tianluo/commands/end_session_cmd.py",
+    "tianluo/commands/salvage_cmd.py",
+    "tianluo/commands/migrate_cmd.py",
+    "tianluo/commands/merge_respond.py",
+    "tianluo/commands/merge_cmd.py",
+    "tianluo/commands/history_cmd.py",
+    "tianluo/commands/issue_cmd.py",
+    "tianluo/commands/init_cmd.py",
+    "tianluo/commands/code_index_cmd.py",
+    "tianluo/commands/worktree_cmd.py",
 ]
 
 
@@ -110,7 +110,7 @@ def test_missing_zh_key_falls_back_to_en_per_key():
         # command binds the project root).
         (["merge"], "At least one branch name is required", "至少需要提供一个分支名称"),
         # cli.version.
-        (["--version"], "se3 version", "se3 版本"),
+        (["--version"], "luo version", "luo 版本"),
     ],
 )
 def test_command_output_switches_language(args, en_substr, zh_substr, monkeypatch):
@@ -165,7 +165,7 @@ def test_multiline_prompt_chrome_is_resolved_at_call_time(monkeypatch):
     import inspect
     import io
 
-    from se3 import cli
+    from tianluo import cli
 
     sig = inspect.signature(cli._read_multiline_input)
     assert sig.parameters["prompt_title"].default is None
@@ -214,8 +214,8 @@ def test_issue_list_and_show_localize_status_values(tmp_path, monkeypatch):
     table: the status token is user-facing text and must follow the UI language."""
     from unittest.mock import patch
 
-    from se3.commands import issue_cmd
-    from se3.engine.issue_manager import IssueManager
+    from tianluo.commands import issue_cmd
+    from tianluo.engine.issue_manager import IssueManager
 
     (tmp_path / ".git").mkdir()
     mgr = IssueManager(tmp_path)
@@ -238,7 +238,7 @@ def test_issue_list_and_show_localize_status_values(tmp_path, monkeypatch):
 def test_history_tables_localize_status_values(monkeypatch):
     """Flow-list and step-detail tables render engine status tokens; under zh-CN
     they must show translated text, not the raw enum value."""
-    from se3.commands import history_cmd
+    from tianluo.commands import history_cmd
 
     monkeypatch.setenv("SE3_LANG", "zh-CN")
     i18n.reset_language()

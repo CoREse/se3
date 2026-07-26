@@ -17,14 +17,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 # ---------------------------------------------------------------------------
@@ -60,9 +60,9 @@ class TestStartBaselineCapture:
         sm = StateMachine(tmp_path)
         flow = _make_flow()
 
-        with patch("se3.engine.test_baseline.compute_baseline_key", return_value="k1"), \
-             patch("se3.engine.test_baseline.load_cached", return_value={"tests/test_a.py::test_x"}), \
-             patch("se3.engine.test_baseline.BaselineCapture") as MockCapture:
+        with patch("tianluo.engine.test_baseline.compute_baseline_key", return_value="k1"), \
+             patch("tianluo.engine.test_baseline.load_cached", return_value={"tests/test_a.py::test_x"}), \
+             patch("tianluo.engine.test_baseline.BaselineCapture") as MockCapture:
             sm._start_baseline_capture(flow)
 
         # Cache hit: baseline written from cache, no background capture launched.
@@ -75,9 +75,9 @@ class TestStartBaselineCapture:
         flow = _make_flow()
         cap = _fake_capture({"tests/test_b.py::test_y"})
 
-        with patch("se3.engine.test_baseline.compute_baseline_key", return_value="k2"), \
-             patch("se3.engine.test_baseline.load_cached", return_value=None), \
-             patch("se3.engine.test_baseline.BaselineCapture", return_value=cap):
+        with patch("tianluo.engine.test_baseline.compute_baseline_key", return_value="k2"), \
+             patch("tianluo.engine.test_baseline.load_cached", return_value=None), \
+             patch("tianluo.engine.test_baseline.BaselineCapture", return_value=cap):
             sm._start_baseline_capture(flow)
 
         # Cache miss: background capture launched, state still un-measured (None)
@@ -92,8 +92,8 @@ class TestStartBaselineCapture:
         flow = _make_flow()
         flow.state.baseline_failures = []  # measured, zero failures
 
-        with patch("se3.engine.test_baseline.compute_baseline_key") as mock_key, \
-             patch("se3.engine.test_baseline.BaselineCapture") as MockCapture:
+        with patch("tianluo.engine.test_baseline.compute_baseline_key") as mock_key, \
+             patch("tianluo.engine.test_baseline.BaselineCapture") as MockCapture:
             sm._start_baseline_capture(flow)
 
         mock_key.assert_not_called()
@@ -104,7 +104,7 @@ class TestStartBaselineCapture:
         sm = StateMachine(tmp_path)
         flow = _make_flow()
 
-        with patch("se3.engine.test_baseline.compute_baseline_key", side_effect=RuntimeError("boom")):
+        with patch("tianluo.engine.test_baseline.compute_baseline_key", side_effect=RuntimeError("boom")):
             sm._start_baseline_capture(flow)  # must not raise
 
         assert flow.state.baseline_failures is None
@@ -133,7 +133,7 @@ class TestEnsureBaselineReady:
         sm._baseline_capture = _fake_capture({"b::2", "a::1"})
         sm._baseline_key = "k"
 
-        with patch("se3.engine.test_baseline.save_cache") as mock_save:
+        with patch("tianluo.engine.test_baseline.save_cache") as mock_save:
             sm._ensure_baseline_ready(flow)
 
         assert flow.state.baseline_failures == ["a::1", "b::2"]
@@ -149,8 +149,8 @@ class TestEnsureBaselineReady:
         sm._baseline_key = "k"
 
         sync_cap = _fake_capture({"tests/test_d.py::test_real"})
-        with patch("se3.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
-             patch("se3.engine.test_baseline.save_cache"):
+        with patch("tianluo.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
+             patch("tianluo.engine.test_baseline.save_cache"):
             sm._ensure_baseline_ready(flow)
 
         # Synchronous fallback ran and produced the authoritative baseline.
@@ -164,8 +164,8 @@ class TestEnsureBaselineReady:
         sm._baseline_key = "k"
 
         sync_cap = _fake_capture({"tests/test_e.py::test_f"})
-        with patch("se3.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
-             patch("se3.engine.test_baseline.save_cache"):
+        with patch("tianluo.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
+             patch("tianluo.engine.test_baseline.save_cache"):
             sm._ensure_baseline_ready(flow)
 
         sync_cap.launch.assert_called_once()
@@ -178,8 +178,8 @@ class TestEnsureBaselineReady:
         sm._baseline_key = "k"
 
         sync_cap = _fake_capture(None)  # sync fallback also fails
-        with patch("se3.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
-             patch("se3.engine.test_baseline.save_cache"):
+        with patch("tianluo.engine.test_baseline.BaselineCapture", return_value=sync_cap), \
+             patch("tianluo.engine.test_baseline.save_cache"):
             sm._ensure_baseline_ready(flow)
 
         # Last resort: empty baseline (never None — so introduced detection runs).
@@ -197,8 +197,8 @@ class TestEnsureBaselineReady:
         sm._baseline_capture = _fake_capture(None, timed_out=True)
         sm._baseline_key = "k"
 
-        with patch("se3.engine.test_baseline.BaselineCapture") as MockCapture, \
-             patch("se3.engine.test_baseline.save_cache"):
+        with patch("tianluo.engine.test_baseline.BaselineCapture") as MockCapture, \
+             patch("tianluo.engine.test_baseline.save_cache"):
             sm._ensure_baseline_ready(flow)
 
         # No synchronous fallback was constructed after a timeout.
@@ -211,7 +211,7 @@ class TestEnsureBaselineReady:
         sm._baseline_capture = _fake_capture({"x::1"})
         sm._baseline_key = "mykey"
 
-        with patch("se3.engine.test_baseline.save_cache") as mock_save:
+        with patch("tianluo.engine.test_baseline.save_cache") as mock_save:
             sm._ensure_baseline_ready(flow)
 
         mock_save.assert_called_once()
@@ -254,7 +254,7 @@ class TestCleanupBaselineCapture:
         flow = _make_flow()
         sm._baseline_capture = _fake_capture({"a::1"})
         sm._baseline_key = "k"
-        with patch("se3.engine.test_baseline.save_cache"):
+        with patch("tianluo.engine.test_baseline.save_cache"):
             sm._ensure_baseline_ready(flow)
         assert sm._baseline_capture is None
 
@@ -321,7 +321,7 @@ class TestRunStepBaselineWiring:
         flow.state.add_step(step)
         flow.state.current_step_id = step.step_id
 
-        with patch("se3.engine.test_baseline.BaselineCapture") as MockCapture:
+        with patch("tianluo.engine.test_baseline.BaselineCapture") as MockCapture:
             sm.run_step(flow, step)  # _ensure_baseline_ready runs but hits guard
 
         MockCapture.assert_not_called()

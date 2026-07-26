@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
-from se3.engine.models import (
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     State,
@@ -25,8 +25,8 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
-from se3.commands.run import run_flow
+from tianluo.engine.persistence import PersistenceManager
+from tianluo.commands.run import run_flow
 
 
 class TestResumeDetection:
@@ -37,8 +37,8 @@ class TestResumeDetection:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/state directory structure
-        state_dir = self.project_root / "se3" / "state"
+        # Create tianluo/state directory structure
+        state_dir = self.project_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with an IMPLEMENT step in RUNNING state
@@ -105,9 +105,9 @@ class TestResumeDetection:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_detects_running_step_and_transitions_to_pending(
         self, mock_sm_class, mock_pm_class
     ):
@@ -127,8 +127,8 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume (flow_id provided)
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
@@ -137,9 +137,9 @@ class TestResumeDetection:
         # Verify step status was changed from RUNNING to PENDING
         assert self.implement_step.status == StepStatus.PENDING
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_rejects_completed_active_flow(
         self, mock_sm_class, mock_pm_class
     ):
@@ -156,8 +156,8 @@ class TestResumeDetection:
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 rc = run_flow(
                     project_root=self.project_root,
                     flow_id="test-flow-001",
@@ -167,9 +167,9 @@ class TestResumeDetection:
         # The completed flow is never dispatched to the state machine.
         mock_sm.run_step.assert_not_called()
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_rejects_completed_snapshot_flow(
         self, mock_sm_class, mock_pm_class
     ):
@@ -181,7 +181,7 @@ class TestResumeDetection:
         # engine.json no longer holds this flow (overwritten by a later run).
         mock_pm.load_flow.return_value = None
         mock_pm._peek_active_flow_id.return_value = None
-        # ...but a stale completed snapshot survives under se3/state/resumable/.
+        # ...but a stale completed snapshot survives under tianluo/state/resumable/.
         mock_pm.load_resumable_snapshot.return_value = self.flow
         # load_flow_by_id resolves the snapshot when engine.json lacks the flow.
         mock_pm.load_flow_by_id.return_value = self.flow
@@ -189,8 +189,8 @@ class TestResumeDetection:
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 rc = run_flow(
                     project_root=self.project_root,
                     flow_id="test-flow-001",
@@ -202,9 +202,9 @@ class TestResumeDetection:
         mock_pm.save_flow.assert_not_called()
         mock_sm.run_step.assert_not_called()
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_injects_resumed_flag_into_step_inputs(
         self, mock_sm_class, mock_pm_class
     ):
@@ -224,8 +224,8 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
@@ -235,8 +235,8 @@ class TestResumeDetection:
         assert "resumed" in self.implement_step.inputs
         assert self.implement_step.inputs["resumed"] is True
 
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_normal_run_does_not_trigger_resume_logic(
         self, mock_sm_class
     ):
@@ -261,8 +261,8 @@ class TestResumeDetection:
         mock_sm.persistence.save_flow = MagicMock()
 
         # Call run_flow without flow_id (new flow)
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         task_description="New task",
@@ -272,9 +272,9 @@ class TestResumeDetection:
         assert len(created_flows) == 1
         assert created_flows[0].task_description == "New task"
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_preserves_existing_step_outputs(
         self, mock_sm_class, mock_pm_class
     ):
@@ -300,8 +300,8 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
@@ -314,9 +314,9 @@ class TestResumeDetection:
         # And resumed flag was added to inputs, not outputs
         assert self.implement_step.inputs.get("resumed") is True
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_with_non_running_step_does_not_modify_status(
         self, mock_sm_class, mock_pm_class
     ):
@@ -341,8 +341,8 @@ class TestResumeDetection:
         original_status = self.implement_step.status
 
         # Call run_flow with resume
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
@@ -353,9 +353,9 @@ class TestResumeDetection:
         # And no resumed flag was injected
         assert "resumed" not in self.implement_step.inputs
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_logs_interrupted_step_info(
         self, mock_sm_class, mock_pm_class, caplog
     ):
@@ -377,8 +377,8 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.engine.step_renderers.render_step_output"):
-                with patch("se3.commands.run.render_full"):
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
                     run_flow(
                             project_root=self.project_root,
                             flow_id="test-flow-001",
@@ -397,8 +397,8 @@ class TestResumeFailedFlow:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3/state directory structure
-        state_dir = self.project_root / "se3" / "state"
+        # Create tianluo/state directory structure
+        state_dir = self.project_root / "tianluo" / "state"
         state_dir.mkdir(parents=True, exist_ok=True)
 
         # Create a flow with a FAILED step
@@ -447,9 +447,9 @@ class TestResumeFailedFlow:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_step_transitions_to_pending(
         self, mock_sm_class, mock_pm_class
     ):
@@ -466,8 +466,8 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
@@ -475,9 +475,9 @@ class TestResumeFailedFlow:
 
         assert self.implement_step.status == StepStatus.PENDING
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_resets_flow_status_to_running(
         self, mock_sm_class, mock_pm_class
     ):
@@ -494,8 +494,8 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
@@ -511,9 +511,9 @@ class TestResumeFailedFlow:
             for call in save_calls
         )
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_resets_retry_count(
         self, mock_sm_class, mock_pm_class
     ):
@@ -530,8 +530,8 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
@@ -540,9 +540,9 @@ class TestResumeFailedFlow:
         # retry_count on the step model should be reset to 0
         assert self.implement_step.retry_count == 0
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_increments_input_retry_count(
         self, mock_sm_class, mock_pm_class
     ):
@@ -559,8 +559,8 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.engine.step_renderers.render_step_output"):
-            with patch("se3.commands.run.render_full"):
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
@@ -571,9 +571,9 @@ class TestResumeFailedFlow:
         # resumed flag should be set
         assert self.implement_step.inputs["resumed"] is True
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_logs_retry_info(
         self, mock_sm_class, mock_pm_class, caplog
     ):
@@ -593,8 +593,8 @@ class TestResumeFailedFlow:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.engine.step_renderers.render_step_output"):
-                with patch("se3.commands.run.render_full"):
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
                     run_flow(
                             project_root=self.project_root,
                             flow_id="test-flow-002",
@@ -607,9 +607,9 @@ class TestResumeFailedFlow:
 class TestHandleResumeInteractiveFailedFlows:
     """Test that handle_resume_interactive includes FAILED flows."""
 
-    @patch("se3.commands.run.find_existing_flows")
-    @patch("se3.commands.run.render_full")
-    @patch("se3.commands.run.prompt_user_choice")
+    @patch("tianluo.commands.run.find_existing_flows")
+    @patch("tianluo.commands.run.render_full")
+    @patch("tianluo.commands.run.prompt_user_choice")
     def test_failed_flow_appears_in_resume_menu(
         self, mock_choice, mock_render, mock_find
     ):
@@ -625,13 +625,13 @@ class TestHandleResumeInteractiveFailedFlows:
         ]
         mock_choice.return_value = 0  # Select first option
 
-        from se3.commands.run import handle_resume_interactive
+        from tianluo.commands.run import handle_resume_interactive
         result = handle_resume_interactive(Path("/tmp"))
 
         assert result == "flow-001"
 
-    @patch("se3.commands.run.find_existing_flows")
-    @patch("se3.commands.run.render_full")
+    @patch("tianluo.commands.run.find_existing_flows")
+    @patch("tianluo.commands.run.render_full")
     def test_completed_flow_excluded_from_resume_menu(
         self, mock_render, mock_find
     ):
@@ -646,14 +646,14 @@ class TestHandleResumeInteractiveFailedFlows:
             }
         ]
 
-        from se3.commands.run import handle_resume_interactive
+        from tianluo.commands.run import handle_resume_interactive
         result = handle_resume_interactive(Path("/tmp"))
 
         assert result is None
 
-    @patch("se3.commands.run.find_existing_flows")
-    @patch("se3.commands.run.render_full")
-    @patch("se3.commands.run.prompt_user_choice")
+    @patch("tianluo.commands.run.find_existing_flows")
+    @patch("tianluo.commands.run.render_full")
+    @patch("tianluo.commands.run.prompt_user_choice")
     def test_failed_flow_shows_retry_label(
         self, mock_choice, mock_render, mock_find
     ):
@@ -669,7 +669,7 @@ class TestHandleResumeInteractiveFailedFlows:
         ]
         mock_choice.return_value = 0
 
-        from se3.commands.run import handle_resume_interactive
+        from tianluo.commands.run import handle_resume_interactive
         handle_resume_interactive(Path("/tmp"))
 
         # Check render was called with "failed" label
@@ -700,14 +700,14 @@ class TestHandleStepInterrupt:
         flow.state.step_history.append(step.step_id)
         return flow, step
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_user_input_persists_to_context_and_step_inputs(
         self, mock_read, tmp_path,
     ):
         """A non-empty interjection writes into both the durable
         ``flow.state.context["user_interjections"]`` and the current step's
         ``inputs["task_description"]`` (so the immediate re-run sees it)."""
-        from se3.commands.run import _handle_step_interrupt
+        from tianluo.commands.run import _handle_step_interrupt
 
         mock_read.return_value = "actually use Postgres not SQLite"
         flow, step = self._make_flow_and_step()
@@ -735,14 +735,14 @@ class TestHandleStepInterrupt:
         # Exactly one section header (no doubling).
         assert td.count("## Additional Instructions") == 1
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_repeated_interjections_compose_against_original_base(
         self, mock_read, tmp_path,
     ):
         """A second Ctrl-C must not produce nested
         ``## Additional Instructions`` sections — the second composer call
         sees the original base, not the post-first-interjection prose."""
-        from se3.commands.run import _handle_step_interrupt
+        from tianluo.commands.run import _handle_step_interrupt
 
         flow, step = self._make_flow_and_step()
         persistence = MagicMock(spec=PersistenceManager)
@@ -765,14 +765,14 @@ class TestHandleStepInterrupt:
         pos2 = td.find("second instruction")
         assert 0 < pos1 < pos2
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_empty_input_does_not_persist_or_modify(
         self, mock_read, tmp_path,
     ):
         """An empty user_input (just Enter / Esc-Enter with no text) reverts
         to "retry as-is": no interjection persisted, no task_description
         change, but step still reset to PENDING for retry."""
-        from se3.commands.run import _handle_step_interrupt
+        from tianluo.commands.run import _handle_step_interrupt
 
         mock_read.return_value = ""
         flow, step = self._make_flow_and_step()
@@ -787,7 +787,7 @@ class TestHandleStepInterrupt:
         # task_description unchanged
         assert step.inputs["task_description"] == "do the thing"
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_interrupt_on_later_step_does_not_double_section(
         self, mock_read, tmp_path,
     ):
@@ -797,7 +797,7 @@ class TestHandleStepInterrupt:
         first interjection) must NOT produce a doubled
         ``## Additional Instructions`` section.
         """
-        from se3.commands.run import _handle_step_interrupt
+        from tianluo.commands.run import _handle_step_interrupt
 
         flow = FlowInstance(
             flow_id="iflow-2",
@@ -814,7 +814,7 @@ class TestHandleStepInterrupt:
         # Step B was built via _build_step_inputs, which composed the
         # task_description with the existing first interjection. We
         # simulate that here directly.
-        from se3.engine.task_description import compose_task_description_with_interjections
+        from tianluo.engine.task_description import compose_task_description_with_interjections
         step_b_td = compose_task_description_with_interjections(
             "do the thing", flow.state.context["user_interjections"],
         )
@@ -845,11 +845,11 @@ class TestHandleStepInterrupt:
         pos2 = td.find("second instruction")
         assert 0 < pos1 < pos2
 
-    @patch("se3.commands.run._read_multiline_input")
+    @patch("tianluo.commands.run._read_multiline_input")
     def test_cancelled_input_returns_none(self, mock_read, tmp_path):
         """user_input is None when user cancels with Ctrl-C inside the input
         prompt. _handle_step_interrupt saves and returns None to exit."""
-        from se3.commands.run import _handle_step_interrupt
+        from tianluo.commands.run import _handle_step_interrupt
 
         mock_read.return_value = None
         flow, step = self._make_flow_and_step()
@@ -875,7 +875,7 @@ class TestOutputFormatEventStream:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
             flow_id="evt-flow-001",
@@ -923,16 +923,16 @@ class TestOutputFormatEventStream:
         mock_sm.transition_to_next.side_effect = (
             lambda flow: setattr(flow, "status", FlowStatus.COMPLETED)
         )
-        with patch("se3.commands.run.render_full"):
+        with patch("tianluo.commands.run.render_full"):
             return run_flow(
                 project_root=self.project_root,
                 flow_id="evt-flow-001",
                 output_format=output_format,
             )
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_json_mode_emits_valid_ndjson(
         self, mock_sm_class, mock_pm_class, capsys
     ):
@@ -958,28 +958,28 @@ class TestOutputFormatEventStream:
         assert "step_completed" in events
         assert "flow_completed" in events
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_cli_mode_routes_step_output_through_renderer(
         self, mock_sm_class, mock_pm_class
     ):
         """CLI mode (default) renders step output via the existing
         step_renderers.render_step_output entry point (byte-identical path)."""
-        with patch("se3.engine.step_renderers.render_step_output") as mock_render:
+        with patch("tianluo.engine.step_renderers.render_step_output") as mock_render:
             exit_code = self._run(mock_sm_class, mock_pm_class, "cli")
 
         assert exit_code == 0
         mock_render.assert_called_once_with(self.step)
 
-    @patch("se3.commands.run.PersistenceManager")
-    @patch("se3.commands.run.StateMachine")
-    @patch("se3.commands.run.STEP_HANDLERS", {})
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_json_mode_does_not_call_cli_renderer(
         self, mock_sm_class, mock_pm_class
     ):
         """JSON mode does not route through the Rich step renderer."""
-        with patch("se3.engine.step_renderers.render_step_output") as mock_render:
+        with patch("tianluo.engine.step_renderers.render_step_output") as mock_render:
             self._run(mock_sm_class, mock_pm_class, "json")
 
         mock_render.assert_not_called()
@@ -996,7 +996,7 @@ class TestDiscoverFromIssueCombination:
     """
 
     def _make_project_with_issue(self, tmp_path, description="Add caching layer"):
-        from se3.engine.issue_manager import IssueManager
+        from tianluo.engine.issue_manager import IssueManager
 
         (tmp_path / ".git").mkdir()
         mgr = IssueManager(tmp_path)
@@ -1005,10 +1005,10 @@ class TestDiscoverFromIssueCombination:
 
     def _invoke(self, args, project_root, run_flow_mock):
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
-        with patch("se3.commands.run.get_project_root", return_value=project_root), patch(
-            "se3.commands.run.run_flow", run_flow_mock
+        with patch("tianluo.commands.run.get_project_root", return_value=project_root), patch(
+            "tianluo.commands.run.run_flow", run_flow_mock
         ):
             return CliRunner().invoke(app, ["run"] + args)
 
@@ -1054,7 +1054,7 @@ class TestDiscoverFromIssueCombination:
         run_flow mocked out here the issue therefore stays in-progress: the
         wrapper only advances it OPEN→in-progress.
         """
-        from se3.engine.issue_manager import IssueManager, IssueStatus
+        from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
         issue = self._make_project_with_issue(tmp_path)
         rf = MagicMock(return_value=0)
@@ -1070,7 +1070,7 @@ class TestDiscoverFromIssueCombination:
 
     def test_from_issue_help_mentions_discover_combination(self):
         from typer.testing import CliRunner
-        from se3.cli import app
+        from tianluo.cli import app
 
         result = CliRunner().invoke(
             app, ["run", "--help"], env={"COLUMNS": "200"}

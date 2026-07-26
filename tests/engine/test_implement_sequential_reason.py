@@ -20,8 +20,8 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock, patch
 
-from se3.config import ImplementConfig
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.config import ImplementConfig
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 FORK_GROUPS = [
@@ -91,7 +91,7 @@ _PARSED = {
     "restricted_edits": [],
 }
 
-_IMP = "se3.engine.steps.implement"
+_IMP = "tianluo.engine.steps.implement"
 
 
 def _make_step_flow(tmp_path, groups):
@@ -109,7 +109,7 @@ def _make_step_flow(tmp_path, groups):
     flow = FlowInstance(
         flow_id="test-flow",
         task_description="test",
-        change_path=tmp_path / "se3",
+        change_path=tmp_path / "tianluo",
     )
     return step, flow
 
@@ -143,7 +143,7 @@ class TestSequentialReasonPropagation:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
     @patch(
-        "se3.engine.context_builder.get_issue_discovery_injection",
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
     @patch.object(
@@ -166,7 +166,7 @@ class TestSequentialReasonPropagation:
         tmp_path,
     ):
         """use_worktree=False short-circuit sets reason ``use_worktree=False``."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_PARSED)
@@ -187,7 +187,7 @@ class TestSequentialReasonPropagation:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
     @patch(
-        "se3.engine.context_builder.get_issue_discovery_injection",
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
     @patch.object(
@@ -210,7 +210,7 @@ class TestSequentialReasonPropagation:
         tmp_path,
     ):
         """Linear-chain short-circuit sets reason ``linear chain``."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_PARSED)
@@ -231,7 +231,7 @@ class TestSequentialReasonPropagation:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=False)
     @patch(
-        "se3.engine.context_builder.get_issue_discovery_injection",
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
     @patch.object(
@@ -254,7 +254,7 @@ class TestSequentialReasonPropagation:
         tmp_path,
     ):
         """has_commits=False fallback sets reason ``no commits``."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps(_PARSED)
@@ -276,7 +276,7 @@ class TestSequentialReasonPropagation:
     @patch(f"{_IMP}._run_dag_parallel")
     @patch(f"{_IMP}.has_commits", return_value=True)
     @patch(
-        "se3.engine.context_builder.get_issue_discovery_injection",
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
     @patch.object(
@@ -300,7 +300,7 @@ class TestSequentialReasonPropagation:
         tmp_path,
     ):
         """Small multi-group merges via ``single`` path; no sequential display."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, SMALL_GROUPS)
         result = implement_handler(step, flow)
@@ -322,7 +322,7 @@ class TestSequentialReasonPropagation:
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}.has_commits", return_value=True)
     @patch(
-        "se3.engine.context_builder.get_issue_discovery_injection",
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
     @patch.object(
@@ -343,7 +343,7 @@ class TestSequentialReasonPropagation:
         tmp_path,
     ):
         """Fork DAG takes the DAG parallel path; sequential display not triggered."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         step, flow = _make_step_flow(tmp_path, FORK_GROUPS)
         result = implement_handler(step, flow)
@@ -363,7 +363,7 @@ class TestDisplayTaskPlanForwards:
 
     def test_forwards_sequential_reason_to_formatter(self):
         """_display_task_plan passes sequential_reason to format_implement_plan."""
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.steps import implement as impl_mod
 
         groups = [
             {
@@ -395,9 +395,9 @@ class TestDisplayTaskPlanForwards:
                 return None
 
         with patch(
-            "se3.engine.formatters.TaskFormatter", _FakeFormatter,
+            "tianluo.engine.formatters.TaskFormatter", _FakeFormatter,
         ), patch(
-            "se3.engine.display.get_console", return_value=_FakeConsole(),
+            "tianluo.engine.display.get_console", return_value=_FakeConsole(),
         ):
             impl_mod._display_task_plan(
                 groups,
@@ -412,7 +412,7 @@ class TestDisplayTaskPlanForwards:
 
     def test_default_sequential_reason_is_none(self):
         """Omitting sequential_reason forwards None to the formatter."""
-        from se3.engine.steps import implement as impl_mod
+        from tianluo.engine.steps import implement as impl_mod
 
         groups = [
             {
@@ -438,9 +438,9 @@ class TestDisplayTaskPlanForwards:
                 return None
 
         with patch(
-            "se3.engine.formatters.TaskFormatter", _FakeFormatter,
+            "tianluo.engine.formatters.TaskFormatter", _FakeFormatter,
         ), patch(
-            "se3.engine.display.get_console", return_value=_FakeConsole(),
+            "tianluo.engine.display.get_console", return_value=_FakeConsole(),
         ):
             impl_mod._display_task_plan(groups, "single", 100, 0)
 

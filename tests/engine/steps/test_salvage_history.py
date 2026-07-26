@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.engine.steps.implement import (
+from tianluo.engine.steps.implement import (
     _restore_history_to_worktree,
     _salvage_history_from_worktree,
     _salvage_results_history,
@@ -35,7 +35,7 @@ class TestSalvageHistoryFromWorktree:
     def test_skips_non_group_files(self, tmp_path: Path):
         """Files like discovery.jsonl, analyze.jsonl are NOT copied."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -45,7 +45,7 @@ class TestSalvageHistoryFromWorktree:
 
         _salvage_history_from_worktree(worktree, main_repo)
 
-        target_flow_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        target_flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         # None of the non-group files should have been copied
         for name in ("discovery.jsonl", "analyze.jsonl", "plan.jsonl", "confirm.jsonl"):
             assert not (target_flow_dir / name).exists(), f"{name} should not be copied"
@@ -53,7 +53,7 @@ class TestSalvageHistoryFromWorktree:
     def test_copies_group_files(self, tmp_path: Path):
         """Files matching _G<n>.jsonl are copied to the main repo."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -65,17 +65,17 @@ class TestSalvageHistoryFromWorktree:
 
         _salvage_history_from_worktree(worktree, main_repo)
 
-        target_flow_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        target_flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         assert (target_flow_dir / "_G1.jsonl").read_text() == content_g1
         assert (target_flow_dir / "_G2.jsonl").read_text() == content_g2
 
     def test_appends_when_target_exists(self, tmp_path: Path):
         """If the target file already exists, new content is appended (not overwritten)."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
-        target_flow_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        target_flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         target_flow_dir.mkdir(parents=True)
 
         existing_content = '{"existing": true}\n'
@@ -91,7 +91,7 @@ class TestSalvageHistoryFromWorktree:
         assert result == existing_content + new_content
 
     def test_no_history_dir_is_noop(self, tmp_path: Path):
-        """If the worktree has no se3/history directory, function returns silently."""
+        """If the worktree has no tianluo/history directory, function returns silently."""
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         main_repo = tmp_path / "main"
@@ -101,12 +101,12 @@ class TestSalvageHistoryFromWorktree:
         _salvage_history_from_worktree(worktree, main_repo)
 
         # Main repo should be untouched
-        assert not (main_repo / "se3" / "history").exists()
+        assert not (main_repo / "tianluo" / "history").exists()
 
     def test_mixed_files_only_group_copied(self, tmp_path: Path):
         """A flow dir with both shared and group files: only group files are copied."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -118,7 +118,7 @@ class TestSalvageHistoryFromWorktree:
 
         _salvage_history_from_worktree(worktree, main_repo)
 
-        target_flow_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        target_flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         assert not (target_flow_dir / "discovery.jsonl").exists()
         assert not (target_flow_dir / "analyze.jsonl").exists()
         assert (target_flow_dir / "_G1.jsonl").exists()
@@ -128,7 +128,7 @@ class TestSalvageHistoryFromWorktree:
         """Calling the function twice for the same worktree (simulating relay chains)
         should only append content once if target already exists after first call."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -138,7 +138,7 @@ class TestSalvageHistoryFromWorktree:
 
         # First call: copies the file
         _salvage_history_from_worktree(worktree, main_repo)
-        target = main_repo / "se3" / "history" / "20260413-flow1" / "_G1.jsonl"
+        target = main_repo / "tianluo" / "history" / "20260413-flow1" / "_G1.jsonl"
         assert target.read_text() == content
 
         # Second call (as would happen with un-deduplicated relay chains): appends again
@@ -156,7 +156,7 @@ class TestSalvageResultsHistory:
         """Two GroupResult-like objects sharing the same worktree_path must only
         trigger one salvage call, so group files are not doubled in main."""
         worktree = tmp_path / "worktree"
-        flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
         main_repo = tmp_path / "main"
         main_repo.mkdir()
@@ -172,7 +172,7 @@ class TestSalvageResultsHistory:
 
         _salvage_results_history([r1, r2], main_repo)
 
-        target = main_repo / "se3" / "history" / "20260413-flow1" / "_G1.jsonl"
+        target = main_repo / "tianluo" / "history" / "20260413-flow1" / "_G1.jsonl"
         assert target.exists(), "_G1.jsonl should have been salvaged"
         assert target.read_text(encoding="utf-8") == content, (
             "content should appear exactly once — dedup guard fired"
@@ -183,7 +183,7 @@ class TestSalvageResultsHistory:
         wt1 = tmp_path / "wt1"
         wt2 = tmp_path / "wt2"
         for wt, gname in ((wt1, "_G1.jsonl"), (wt2, "_G2.jsonl")):
-            fd = wt / "se3" / "history" / "20260413-flow1"
+            fd = wt / "tianluo" / "history" / "20260413-flow1"
             fd.mkdir(parents=True)
             (fd / gname).write_text(f'{{"g":"{gname}"}}\n', encoding="utf-8")
 
@@ -197,7 +197,7 @@ class TestSalvageResultsHistory:
 
         _salvage_results_history([r1, r2], main_repo)
 
-        target_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        target_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         assert (target_dir / "_G1.jsonl").exists()
         assert (target_dir / "_G2.jsonl").exists()
 
@@ -211,7 +211,7 @@ class TestSalvageResultsHistory:
 
         # Should not raise
         _salvage_results_history([r], main_repo)
-        assert not (main_repo / "se3" / "history").exists()
+        assert not (main_repo / "tianluo" / "history").exists()
 
 
 class TestRestoreHistoryToWorktree:
@@ -224,7 +224,7 @@ class TestRestoreHistoryToWorktree:
         time to the already-existing files in main, doubling their content.
         """
         main_repo = tmp_path / "main"
-        flow_dir = main_repo / "se3" / "history" / "20260413-flow1"
+        flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
 
         (flow_dir / "discovery.jsonl").write_text('{"step":"discovery"}\n', encoding="utf-8")
@@ -237,7 +237,7 @@ class TestRestoreHistoryToWorktree:
 
         _restore_history_to_worktree(main_repo, worktree, "20260413-flow1")
 
-        wt_flow_dir = worktree / "se3" / "history" / "20260413-flow1"
+        wt_flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         # Shared context files should be restored
         assert (wt_flow_dir / "discovery.jsonl").exists()
         assert (wt_flow_dir / "analyze.jsonl").exists()
@@ -254,4 +254,4 @@ class TestRestoreHistoryToWorktree:
 
         _restore_history_to_worktree(main_repo, worktree, "20260413-missing")
 
-        assert not (worktree / "se3" / "history").exists()
+        assert not (worktree / "tianluo" / "history").exists()

@@ -1,7 +1,7 @@
 """Pytest-side checks for the web console's running-flow rendering rules.
 
 Most of the running-flow rendering logic lives in DOM-free helpers inside
-``src/se3/server/static/app.js``; the deeper behavioural assertions for those
+``src/tianluo/server/static/app.js``; the deeper behavioural assertions for those
 helpers live in ``tests/frontend/test_app_pure.mjs`` (a Node assertion
 suite). This pytest module pulls those checks into the pytest run as well,
 and supplements them with three static-source guardrails that codify the
@@ -30,7 +30,7 @@ import pytest
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-STATIC_DIR = REPO_ROOT / "src" / "se3" / "server" / "static"
+STATIC_DIR = REPO_ROOT / "src" / "tianluo" / "server" / "static"
 APP_JS = STATIC_DIR / "app.js"
 STYLE_CSS = STATIC_DIR / "style.css"
 FRONTEND_TEST = REPO_ROOT / "tests" / "frontend" / "test_app_pure.mjs"
@@ -634,22 +634,22 @@ def test_every_step_prompt_template_carries_marker_pair():
     live in ``tests/engine/test_prompt_markers.py``; this test is a higher-
     level health check that no step prompt module silently drops the pair.
     """
-    from se3.engine.prompt_markers import TEMPLATE_PREFIX_END, USER_CONTENT_BEGIN
-    from se3.engine.steps.analyze import ANALYZE_PROMPT
-    from se3.engine.steps.discovery import (
+    from tianluo.engine.prompt_markers import TEMPLATE_PREFIX_END, USER_CONTENT_BEGIN
+    from tianluo.engine.steps.analyze import ANALYZE_PROMPT
+    from tianluo.engine.steps.discovery import (
         CONTINUE_DISCOVERY_PROMPT,
         INITIAL_DISCOVERY_PROMPT,
     )
-    from se3.engine.steps.implement import (
+    from tianluo.engine.steps.implement import (
         FIX_PROMPT,
         IMPLEMENT_GROUP_PROMPT,
         IMPLEMENT_PROMPT,
     )
-    from se3.engine.steps.plan import PLAN_PROMPT_HEADER
-    from se3.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
-    from se3.engine.steps.self_check import SELF_CHECK_PROMPT
-    from se3.engine.steps.summarize import SUMMARIZE_PROMPT
-    from se3.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
+    from tianluo.engine.steps.plan import PLAN_PROMPT_HEADER
+    from tianluo.engine.steps.plan_tasks import PLAN_TASKS_PROMPT
+    from tianluo.engine.steps.self_check import SELF_CHECK_PROMPT
+    from tianluo.engine.steps.summarize import SUMMARIZE_PROMPT
+    from tianluo.engine.steps.version_analyze import VERSION_ANALYZE_PROMPT
 
     all_prompts = {
         "IMPLEMENT_PROMPT": IMPLEMENT_PROMPT,

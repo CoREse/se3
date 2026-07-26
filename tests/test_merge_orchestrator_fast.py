@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_resolver import MergeStrategy
-from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
-from se3.engine.merge.orchestrator import (
+from tianluo.engine.merge.conflict_resolver import MergeStrategy
+from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+from tianluo.engine.merge.orchestrator import (
     GuardrailRepairExhausted,
     GuardrailRepairFailed,
     GuardrailRepairStalled,
@@ -53,7 +53,7 @@ def _current_branch(path: Path) -> str:
 def _setup_spec_repo(tmp_path: Path) -> str:
     """Init repo with a spec file. Returns default branch name."""
     _init_repo(tmp_path)
-    spec_dir = tmp_path / "se3" / "specs" / "base"
+    spec_dir = tmp_path / "tianluo" / "specs" / "base"
     spec_dir.mkdir(parents=True)
     (spec_dir / "spec.md").write_text(
         "## Requirement: Auth\n\n"
@@ -78,7 +78,7 @@ class TestRunGuardrailsFastRepairLoop:
 
         # Create feature branch that weakens spec
         _git(tmp_path, "checkout", "-b", "feature-stall")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -94,14 +94,14 @@ class TestRunGuardrailsFastRepairLoop:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix the weakening",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -111,7 +111,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -126,7 +126,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -175,7 +175,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -191,14 +191,14 @@ class TestRunGuardrailsFastRepairLoop:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix the weakening",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -222,7 +222,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -231,7 +231,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -242,7 +242,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         # Should exhaust at iteration 2 (max iterations)
-        from se3.commands.merge.failure_reason import FailureReason
+        from tianluo.commands.merge.failure_reason import FailureReason
         assert exc_info.value.iteration_count == 2
         assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_REPAIR_EXHAUSTED
         assert exc_info.value.last_violation_hash != ""
@@ -284,7 +284,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -300,14 +300,14 @@ class TestRunGuardrailsFastRepairLoop:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -339,7 +339,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -348,7 +348,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -375,7 +375,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-fix")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -394,7 +394,7 @@ class TestRunGuardrailsFastRepairLoop:
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             repair_call_count[0] += 1
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             if repair_call_count[0] == 1:
                 return RepairResult(
                     success=False,
@@ -402,11 +402,11 @@ class TestRunGuardrailsFastRepairLoop:
                 )
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -423,7 +423,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -434,7 +434,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="MUST weakened to SHOULD",
                         ),
@@ -443,7 +443,7 @@ class TestRunGuardrailsFastRepairLoop:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -472,7 +472,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-side-effect")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -489,14 +489,14 @@ class TestRunGuardrailsFastRepairLoop:
         # Mock repairer: always reports failure
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="repairer claims failure",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer"
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer"
             ".repair_violations",
             mock_repair,
         )
@@ -511,7 +511,7 @@ class TestRunGuardrailsFastRepairLoop:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -520,7 +520,7 @@ class TestRunGuardrailsFastRepairLoop:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck"
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck"
             ".check_merge_result",
             mock_check,
         )
@@ -543,7 +543,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-rollback")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -559,11 +559,11 @@ class TestRunGuardrailsFastRepairLoop:
 
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -572,7 +572,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -580,7 +580,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -588,7 +588,7 @@ class TestRunGuardrailsFastRepairLoop:
             raise RuntimeError("simulated rollback failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback_to,
         )
 
@@ -612,7 +612,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-rollback")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -628,11 +628,11 @@ class TestRunGuardrailsFastRepairLoop:
 
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -649,7 +649,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -658,7 +658,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -666,7 +666,7 @@ class TestRunGuardrailsFastRepairLoop:
             raise RuntimeError("simulated rollback failure")
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback_to,
         )
 
@@ -696,7 +696,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-type")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -712,11 +712,11 @@ class TestRunGuardrailsFastRepairLoop:
 
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="LLM could not fix")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -730,7 +730,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -749,7 +749,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -777,7 +777,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-topo")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -797,11 +797,11 @@ class TestRunGuardrailsFastRepairLoop:
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             repair_invoked[0] = True
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="should not be called")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -825,7 +825,7 @@ class TestRunGuardrailsFastRepairLoop:
                     ),
                     # Plus a normal spec violation
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -833,7 +833,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -863,7 +863,7 @@ class TestRunGuardrailsFastRepairLoop:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-incomplete")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -883,11 +883,11 @@ class TestRunGuardrailsFastRepairLoop:
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             repair_invoked[0] = True
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=False, error="should not be called")
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -896,7 +896,7 @@ class TestRunGuardrailsFastRepairLoop:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="CHECK_INCOMPLETE",
                         message="Spec file iteration error: OSError",
                         evidence={"exception_type": "OSError"},
@@ -906,7 +906,7 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -939,7 +939,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -952,14 +952,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -969,7 +969,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -977,7 +977,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1017,7 +1017,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-change-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1030,14 +1030,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1069,7 +1069,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1078,7 +1078,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1113,7 +1113,7 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
-        from se3.commands.merge.failure_reason import FailureReason
+        from tianluo.commands.merge.failure_reason import FailureReason
         assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_MISSING_POST_SHA
         assert "missing post_sha" in str(exc_info.value)
         # No rollback needed when post_sha is missing (nothing to roll back to).
@@ -1136,7 +1136,7 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
-        from se3.commands.merge.failure_reason import FailureReason
+        from tianluo.commands.merge.failure_reason import FailureReason
         assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_MISSING_PRE_SHA
         assert "missing pre_sha" in str(exc_info.value)
         # No rollback attempted because pre_merge_sha is missing.
@@ -1161,7 +1161,7 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
-        from se3.commands.merge.failure_reason import FailureReason
+        from tianluo.commands.merge.failure_reason import FailureReason
         assert (
             exc_info.value.failure_reason
             is FailureReason.GUARDRAIL_MISSING_PRE_AND_POST_SHA
@@ -1175,7 +1175,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-success-exec")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1188,14 +1188,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to succeed immediately
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=True,
-                repaired_files=["se3/specs/base/spec.md"],
+                repaired_files=["tianluo/specs/base/spec.md"],
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1209,7 +1209,7 @@ class TestExecuteFastStalledEscalation:
                     passed=False,
                     violations=[
                         GuardrailViolation(
-                            file_path="se3/specs/base/spec.md",
+                            file_path="tianluo/specs/base/spec.md",
                             violation_type="WEAKENING",
                             message="SHALL weakened to SHOULD",
                         ),
@@ -1218,7 +1218,7 @@ class TestExecuteFastStalledEscalation:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1242,7 +1242,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-call-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1255,14 +1255,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1272,7 +1272,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1280,7 +1280,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1291,7 +1291,7 @@ class TestExecuteFastStalledEscalation:
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -1323,7 +1323,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-keyboard")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1336,14 +1336,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1353,7 +1353,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                     ),
@@ -1361,7 +1361,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1372,7 +1372,7 @@ class TestExecuteFastStalledEscalation:
             raise KeyboardInterrupt("user pressed Ctrl+C")
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -1397,7 +1397,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1410,14 +1410,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1436,7 +1436,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1445,7 +1445,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1478,7 +1478,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-call-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1491,14 +1491,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1517,7 +1517,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1526,7 +1526,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1546,7 +1546,7 @@ class TestExecuteFastStalledEscalation:
                                    call_type=call_type, iteration_count=iteration_count)
 
         monkeypatch.setattr(
-            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
             mock_write_guardrail_call,
         )
 
@@ -1577,7 +1577,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-stall-rollback-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1590,14 +1590,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1607,7 +1607,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence={
@@ -1620,7 +1620,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1631,7 +1631,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback_to,
         )
 
@@ -1667,7 +1667,7 @@ class TestExecuteFastStalledEscalation:
         default_branch = _setup_spec_repo(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-exhaust-rollback-fail")
-        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
         spec_path.write_text(
             "## Requirement: Auth\n\n"
             "The system SHOULD validate all user inputs.\n"
@@ -1680,14 +1680,14 @@ class TestExecuteFastStalledEscalation:
         # Mock repairer to always fail
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
-            from se3.engine.merge.guardrail_repair import RepairResult
+            from tianluo.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
                 success=False,
                 error="LLM could not fix",
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
             mock_repair,
         )
 
@@ -1706,7 +1706,7 @@ class TestExecuteFastStalledEscalation:
                 passed=False,
                 violations=[
                     GuardrailViolation(
-                        file_path="se3/specs/base/spec.md",
+                        file_path="tianluo/specs/base/spec.md",
                         violation_type="WEAKENING",
                         message="SHALL weakened to SHOULD",
                         evidence=evidence,
@@ -1715,7 +1715,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
             mock_check,
         )
 
@@ -1726,7 +1726,7 @@ class TestExecuteFastStalledEscalation:
             )
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
             mock_rollback_to,
         )
 
@@ -1773,11 +1773,11 @@ class TestMaxRepairIterationsClamp:
         # Force the loader to return 0 — emulates a future refactor
         # that drops the loader's own ``< 1`` clamp.
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            "tianluo.engine.merge.orchestrator._load_max_repair_iterations",
             lambda project_root: 0,
         )
 
-        from se3.engine.merge.orchestrator import (
+        from tianluo.engine.merge.orchestrator import (
             _DEFAULT_MAX_REPAIR_ITERATIONS,
         )
 
@@ -1797,7 +1797,7 @@ class TestMaxRepairIterationsClamp:
         _setup_spec_repo(tmp_path)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            "tianluo.engine.merge.orchestrator._load_max_repair_iterations",
             lambda project_root: -3,
         )
 
@@ -1812,7 +1812,7 @@ class TestMaxRepairIterationsClamp:
         _setup_spec_repo(tmp_path)
 
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            "tianluo.engine.merge.orchestrator._load_max_repair_iterations",
             lambda project_root: 7,
         )
 

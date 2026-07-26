@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.engine.llm_caller import InfraErrorType, LLMCallError, LLMCaller
+from tianluo.engine.llm_caller import InfraErrorType, LLMCallError, LLMCaller
 
 
 class _FailingRunner:

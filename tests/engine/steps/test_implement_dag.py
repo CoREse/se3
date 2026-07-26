@@ -13,14 +13,14 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from se3.engine.dag_scheduler import (
+from tianluo.engine.dag_scheduler import (
     ConvergenceInfo,
     GroupResult,
     RelayContext,
     RelayPlan,
 )
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
-from se3.engine.steps.implement import _run_dag_parallel
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.steps.implement import _run_dag_parallel
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ def _make_flow(tmp_path=None, **kwargs):
         "flow_id": "test-flow",
     }
     if tmp_path:
-        defaults["change_path"] = tmp_path / "se3"
+        defaults["change_path"] = tmp_path / "tianluo"
     defaults.update(kwargs)
     return FlowInstance(**defaults)
 
@@ -74,7 +74,7 @@ def _make_groups(specs):
 
 
 # Common patch paths
-_IMP = "se3.engine.steps.implement"
+_IMP = "tianluo.engine.steps.implement"
 
 
 # ---------------------------------------------------------------------------
@@ -86,14 +86,14 @@ class TestLocThresholdRouting:
     """Total estimated_loc determines single-call vs DAG path."""
 
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch(f"{_IMP}._run_single_llm_call")
     @patch(f"{_IMP}._run_dag_parallel")
     def test_below_threshold_routes_to_single_call(
         self, mock_dag, mock_single, mock_inj, mock_commits, tmp_path,
     ):
         """total_loc ≤ 300 → single LLM call, not DAG."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_single.return_value = StepStatus.COMPLETED
 
@@ -116,13 +116,13 @@ class TestLocThresholdRouting:
         mock_dag.assert_not_called()
 
     @patch(f"{_IMP}.has_commits", return_value=True)
-    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
     @patch(f"{_IMP}._run_dag_parallel")
     def test_above_threshold_routes_to_dag(
         self, mock_dag, mock_inj, mock_commits, tmp_path,
     ):
         """total_loc > 300 → DAG parallel path."""
-        from se3.engine.steps.implement import implement_handler
+        from tianluo.engine.steps.implement import implement_handler
 
         mock_dag.return_value = StepStatus.COMPLETED
 
@@ -168,7 +168,7 @@ class TestTransitiveReductionIntegration:
         mock_salvage, mock_cleanup, mock_branch, mock_merge, mock_del,
     ):
         """transitive_reduce output feeds into classify_chains then DAGScheduler."""
-        from se3.engine.steps.implement import _run_dag_parallel
+        from tianluo.engine.steps.implement import _run_dag_parallel
 
         # G3 depends_on [G1, G2], G2 depends_on [G1] → G3→G1 is redundant
         groups = _make_groups([
@@ -924,7 +924,7 @@ class TestConflictResolution:
         (an indiscriminate --theirs that ran instead of LLM resolution) is
         still gone.
         """
-        import se3.engine.steps.implement as impl_module
+        import tianluo.engine.steps.implement as impl_module
 
         assert hasattr(impl_module, "_take_theirs_fallback"), (
             "_take_theirs_fallback must exist as the merge-robustness "
@@ -1023,7 +1023,7 @@ class TestClassifyChainsUnit:
 
     def test_linear_chain(self):
         """G1→G2→G3: all relay, G3 is leaf."""
-        from se3.engine.dag_scheduler import classify_chains
+        from tianluo.engine.dag_scheduler import classify_chains
 
         groups = _make_groups([
             ("G1", 1, [], 100),
@@ -1040,7 +1040,7 @@ class TestClassifyChainsUnit:
 
     def test_fork(self):
         """G1→{G2,G3}: G2 relays (smaller order), G3 forks."""
-        from se3.engine.dag_scheduler import classify_chains
+        from tianluo.engine.dag_scheduler import classify_chains
 
         groups = _make_groups([
             ("G1", 1, [], 100),
@@ -1058,7 +1058,7 @@ class TestClassifyChainsUnit:
 
     def test_diamond(self):
         """G1→{G2,G3}→G4: G4 is convergence point."""
-        from se3.engine.dag_scheduler import classify_chains
+        from tianluo.engine.dag_scheduler import classify_chains
 
         groups = _make_groups([
             ("G1", 1, [], 100),
@@ -1076,7 +1076,7 @@ class TestClassifyChainsUnit:
 
     def test_independent_groups(self):
         """G1, G2 independent: both roots, both leaves."""
-        from se3.engine.dag_scheduler import classify_chains
+        from tianluo.engine.dag_scheduler import classify_chains
 
         groups = _make_groups([
             ("G1", 1, [], 100),
@@ -1091,7 +1091,7 @@ class TestClassifyChainsUnit:
 
     def test_empty_groups(self):
         """Empty input → empty plan."""
-        from se3.engine.dag_scheduler import classify_chains
+        from tianluo.engine.dag_scheduler import classify_chains
 
         plan = classify_chains([])
 
@@ -1109,7 +1109,7 @@ class TestGetFallbackLeaves:
 
     def test_no_failure_no_fallback(self):
         """All completed → no fallback leaves."""
-        from se3.engine.dag_scheduler import DAGScheduler
+        from tianluo.engine.dag_scheduler import DAGScheduler
 
         groups = _make_groups([
             ("G1", 1, [], 100),
@@ -1137,7 +1137,7 @@ class TestGetFallbackLeaves:
 
     def test_downstream_failure_creates_fallback(self):
         """G1 completed, G2 fails → G1 is fallback leaf."""
-        from se3.engine.dag_scheduler import DAGScheduler
+        from tianluo.engine.dag_scheduler import DAGScheduler
 
         groups = _make_groups([
             ("G1", 1, [], 100),

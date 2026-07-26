@@ -15,7 +15,7 @@ import path from "node:path";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const app = require(path.join(here, "..", "..", "src", "se3", "server", "static", "app.js"));
+const app = require(path.join(here, "..", "..", "src", "tianluo", "server", "static", "app.js"));
 
 let passed = 0;
 function check(name, fn) {
@@ -4902,7 +4902,7 @@ check("collectJsonRegions: real fixture from new bug session (record 36 shape)",
     refined_description: "fix se3 web UI assistant rendering structural robustness bug",
     questions: [],
   });
-  const text = "[Read: src/se3/server/static/app.js:3380-3500]\n```json\n" +
+  const text = "[Read: src/tianluo/server/static/app.js:3380-3500]\n```json\n" +
     innerJson + "\n```";
   const regions = app.collectJsonRegions(text);
   assert.equal(regions.length, 1, "real-shape fixture must yield exactly one region");

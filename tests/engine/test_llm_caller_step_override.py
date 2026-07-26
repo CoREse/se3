@@ -16,8 +16,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.agent_runner import InfraErrorType
-from se3.engine.llm_caller import LLMCaller, LLMCallError
+from tianluo.agent_runner import InfraErrorType
+from tianluo.engine.llm_caller import LLMCaller, LLMCallError
 
 
 def _make_fail_result(returncode=1, output="usage limit", cmd_used="claude"):
@@ -41,7 +41,7 @@ def _make_success_result(output="ok"):
 
 
 def _write_override(tmp_path, step, agents_yaml, registry=None):
-    """Helper to write se3.yaml with a registry + step override.
+    """Helper to write tianluo.yaml with a registry + step override.
 
     ``agents_yaml`` is the YAML body below the step key (a list of
     agent name references). ``registry`` defines the top-level agents
@@ -55,7 +55,7 @@ def _write_override(tmp_path, step, agents_yaml, registry=None):
             "  override-b: {cmd: claude-b, priority: 5}\n"
             "  solo-override: {cmd: override-claude, priority: 10}\n"
         )
-    (tmp_path / "se3.yaml").write_text(
+    (tmp_path / "tianluo.yaml").write_text(
         f"{registry}llm_caller:\n  steps:\n    {step}:\n{agents_yaml}"
     )
 
@@ -67,7 +67,7 @@ class TestStepOverrideChain:
             "      - override-a\n"
             "      - override-b\n",
         )
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path,
                 step_type="implement",
@@ -86,12 +86,12 @@ class TestStepOverrideChain:
             "      - override-a\n",
         )
         which_claude_only = patch(
-            "se3.config.shutil.which",
+            "tianluo.config.shutil.which",
             side_effect=lambda cmd, *a, **k: (
                 "/fake/bin/claude" if cmd == "claude" else None
             ),
         )
-        with patch("se3.config.Path.home", return_value=tmp_path), which_claude_only:
+        with patch("tianluo.config.Path.home", return_value=tmp_path), which_claude_only:
             # Running the 'plan' step — no override declared — gets the
             # built-in default chain. which() is pinned to claude only so the
             # chain does not vary with the host's installed agents.
@@ -103,7 +103,7 @@ class TestStepOverrideChain:
 
 
 class TestExhaustionDoesNotFallBack:
-    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    @patch("tianluo.engine.llm_caller.ClaudeCodeRunner")
     def test_override_exhaustion_raises_without_falling_back(
         self, MockRunner, tmp_path,
     ):
@@ -135,7 +135,7 @@ class TestExhaustionDoesNotFallBack:
         mock_runner.detect_infra_error.return_value = InfraErrorType.USAGE_LIMIT
         MockRunner.return_value = mock_runner
 
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path,
                 step_type="implement",
@@ -175,7 +175,7 @@ class TestExplicitAgentsArgHighestPriority:
                 "priority": 0,
             }
         ]
-        with patch("se3.config.Path.home", return_value=tmp_path):
+        with patch("tianluo.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
                 project_root=tmp_path,
                 step_type="implement",

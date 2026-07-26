@@ -8,7 +8,7 @@ back to the tighter 15/45 that evicted daemons on transient PONG loss.
 
 from __future__ import annotations
 
-from se3.server import ws
+from tianluo.server import ws
 
 
 def test_heartbeat_constants_relaxed() -> None:

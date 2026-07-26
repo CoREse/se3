@@ -19,8 +19,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from se3.engine.context_builder import build_plan_confirm_prompt
-from se3.engine.models import FlowInstance, Step, StepStatus, StepType
+from tianluo.engine.context_builder import build_plan_confirm_prompt
+from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
 TASK_DESCRIPTION = (
@@ -100,7 +100,7 @@ class TestLlmReviewDispatch:
     def setup_method(self):
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
-        (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
+        (self.project_root / "tianluo" / "calls").mkdir(parents=True, exist_ok=True)
 
         self.flow = FlowInstance(
             task_description=TASK_DESCRIPTION,
@@ -137,11 +137,11 @@ class TestLlmReviewDispatch:
         self.flow.state.current_step_id = "confirm-001"
         return confirm
 
-    @patch("se3.engine.steps.confirm.build_llm_review_prompt")
-    @patch("se3.engine.steps.confirm.build_plan_confirm_prompt")
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.build_llm_review_prompt")
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_plan_uses_plan_confirm_prompt(self, MockLLMCaller, mock_plan, mock_generic):
-        from se3.engine.steps.confirm import _llm_review
+        from tianluo.engine.steps.confirm import _llm_review
 
         mock_plan.return_value = "PLAN_PROMPT"
         mock_generic.return_value = "GENERIC_PROMPT"
@@ -157,11 +157,11 @@ class TestLlmReviewDispatch:
         assert caller.call.call_args.kwargs["prompt"] == "PLAN_PROMPT"
         assert status == StepStatus.COMPLETED
 
-    @patch("se3.engine.steps.confirm.build_llm_review_prompt")
-    @patch("se3.engine.steps.confirm.build_plan_confirm_prompt")
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.build_llm_review_prompt")
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_non_plan_uses_generic_prompt(self, MockLLMCaller, mock_plan, mock_generic):
-        from se3.engine.steps.confirm import _llm_review
+        from tianluo.engine.steps.confirm import _llm_review
 
         mock_plan.return_value = "PLAN_PROMPT"
         mock_generic.return_value = "GENERIC_PROMPT"
@@ -176,9 +176,9 @@ class TestLlmReviewDispatch:
         assert not mock_plan.called
         assert caller.call.call_args.kwargs["prompt"] == "GENERIC_PROMPT"
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_plan_approved_false_returns_revision_needed(self, MockLLMCaller):
-        from se3.engine.steps.confirm import _llm_review
+        from tianluo.engine.steps.confirm import _llm_review
 
         caller = MagicMock()
         caller.call.return_value = '{"approved": false, "feedback": "audit log requirement uncovered"}'
@@ -190,9 +190,9 @@ class TestLlmReviewDispatch:
         assert status == StepStatus.REVISION_NEEDED
         assert result["approved"] is False
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_plan_approved_true_returns_completed(self, MockLLMCaller):
-        from se3.engine.steps.confirm import _llm_review
+        from tianluo.engine.steps.confirm import _llm_review
 
         caller = MagicMock()
         caller.call.return_value = '{"approved": true, "feedback": "every requirement covered"}'
@@ -204,10 +204,10 @@ class TestLlmReviewDispatch:
         assert status == StepStatus.COMPLETED
         assert result["approved"] is True
 
-    @patch("se3.engine.steps.confirm.LLMCaller")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
     def test_max_iterations_auto_approves_without_calling_llm(self, MockLLMCaller):
         """Cross-revision counter at the cap auto-approves before any LLM call."""
-        from se3.engine.steps.confirm import _llm_review
+        from tianluo.engine.steps.confirm import _llm_review
 
         caller = MagicMock()
         MockLLMCaller.return_value = caller

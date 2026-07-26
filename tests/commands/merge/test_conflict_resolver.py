@@ -22,7 +22,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     ConflictFile,
     ConflictHunk,
@@ -33,7 +33,7 @@ from se3.engine.merge.conflict_context import (
     _read_gitattributes_binary_paths,
     _resolve_sha,
 )
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     ConflictResolver,
     DEFAULT_MAX_RESOLVED_CONTENT_BYTES,
@@ -334,7 +334,7 @@ class TestUtf8LossyDecode:
         self, tmp_path: Path,
     ) -> None:
         # Run the file builder with bytes that don't decode cleanly.
-        from se3.engine.merge.conflict_context import _build_conflict_file
+        from tianluo.engine.merge.conflict_context import _build_conflict_file
 
         # Set up a real (mid-merge) state would be a lot — instead we
         # test the helpers directly to confirm propagation works.
@@ -516,7 +516,7 @@ class TestSharedLLMCaller:
         assert r._llm_caller is None
 
     def test_repairer_uses_injected_caller(self, tmp_path: Path) -> None:
-        from se3.engine.merge.guardrail_repair import GuardrailRepairer
+        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
 
         stub = MagicMock()
         repairer = GuardrailRepairer(tmp_path, llm_caller=stub)
@@ -525,7 +525,7 @@ class TestSharedLLMCaller:
     def test_repairer_lazy_caller_when_none_injected(
         self, tmp_path: Path,
     ) -> None:
-        from se3.engine.merge.guardrail_repair import GuardrailRepairer
+        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
 
         repairer = GuardrailRepairer(tmp_path)
         assert repairer._llm_caller is None
@@ -534,7 +534,7 @@ class TestSharedLLMCaller:
         self, tmp_path: Path,
     ) -> None:
         # The orchestrator pattern: one stub passed to both consumers.
-        from se3.engine.merge.guardrail_repair import GuardrailRepairer
+        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
 
         shared = MagicMock()
         resolver = ConflictResolver(tmp_path, llm_caller=shared)

@@ -10,7 +10,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
-from se3.agent_runner import AgentRunner, InfraErrorType, RunResult
+from tianluo.agent_runner import AgentRunner, InfraErrorType, RunResult
 
 
 class TestInfraErrorType:

@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch
 
-from se3.engine.context_builder import (
+from tianluo.engine.context_builder import (
     SPEC_WRITE_ALLOWED_STEPS,
     _ALL_SYNC_STEPS,
     _READ_ONLY_SYNC_STEPS,
@@ -113,7 +113,7 @@ class TestGetSpecWriteProtectionInjection:
 
     def test_constraint_forbids_spec_writes(self):
         injection = get_spec_write_protection_injection("implement")
-        assert "se3/specs" in injection
+        assert "tianluo/specs" in injection
         for tool in ("Write", "Edit", "NotebookEdit", "Bash"):
             assert tool in injection
 
@@ -146,7 +146,7 @@ class TestIsSpecWriteProtectedStep:
 
 class TestLLMCallerSpecWriteIntegration:
     def _make_caller(self, step_type: str):
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         return LLMCaller(
             project_root="/tmp/test_project",
@@ -154,7 +154,7 @@ class TestLLMCallerSpecWriteIntegration:
             agents=[{"name": "test", "type": "claude-code", "cmd": "echo test"}],
         )
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_protected_step_prompt_contains_constraint(self, mock_call):
         mock_call.return_value = "test output"
         caller = self._make_caller("implement")
@@ -162,7 +162,7 @@ class TestLLMCallerSpecWriteIntegration:
         called_prompt = mock_call.call_args[1]["prompt"]
         assert "SPEC FILE WRITE PROTECTION" in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_update_spec_prompt_has_no_constraint(self, mock_call):
         mock_call.return_value = "test output"
         caller = self._make_caller("update_spec")
@@ -170,7 +170,7 @@ class TestLLMCallerSpecWriteIntegration:
         called_prompt = mock_call.call_args[1]["prompt"]
         assert "SPEC FILE WRITE PROTECTION" not in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_read_only_step_prompt_has_no_spec_write_constraint(self, mock_call):
         mock_call.return_value = "test output"
         caller = self._make_caller("analyze")
@@ -180,7 +180,7 @@ class TestLLMCallerSpecWriteIntegration:
         # The read-only constraint still applies to analyze.
         assert "READ-ONLY STEP CONSTRAINT" in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_two_phase")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_two_phase")
     def test_protected_step_two_phase_mode(self, mock_call):
         mock_call.return_value = '{"result": "ok"}'
         caller = self._make_caller("implement")

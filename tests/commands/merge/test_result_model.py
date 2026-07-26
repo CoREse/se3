@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge.failure_reason import FailureReason
-from se3.commands.merge.result_model import MergeOutcome, MergeReport
+from tianluo.commands.merge.failure_reason import FailureReason
+from tianluo.commands.merge.result_model import MergeOutcome, MergeReport
 
 
 class TestMergeOutcome:
@@ -214,7 +214,7 @@ class TestMergeReportLegacyCompatibility:
 
     def test_to_legacy_dict_committed_issue_renumbers(self) -> None:
         """Committed-issue renumbers survive serialization as plain dicts."""
-        from se3.engine.merge.runtime_sync import IssueMergeRecord
+        from tianluo.engine.merge.runtime_sync import IssueMergeRecord
 
         r = MergeReport()
         r.committed_issue_renumbers.append(

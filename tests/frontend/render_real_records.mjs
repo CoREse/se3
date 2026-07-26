@@ -36,7 +36,7 @@ import "./render_in_browser.mjs";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
-const appPath = path.join(here, "..", "..", "src", "se3", "server", "static", "app.js");
+const appPath = path.join(here, "..", "..", "src", "tianluo", "server", "static", "app.js");
 
 class FakeNode {
   constructor(tag) {

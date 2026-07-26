@@ -8,13 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from se3.engine.merge.conflict_context import (
+from tianluo.engine.merge.conflict_context import (
     ConflictContext,
     ConflictFile,
     ConflictHunk,
     build,
 )
-from se3.engine.merge.conflict_resolver import (
+from tianluo.engine.merge.conflict_resolver import (
     Confidence,
     ConflictResolver,
     FileResolution,
@@ -22,8 +22,8 @@ from se3.engine.merge.conflict_resolver import (
     LLMResolution,
     MergeStrategy,
 )
-from se3.engine.merge.human_call import HumanCallWriter
-from se3.engine.merge.strategy import DecisionAction, StrategyDecider, StrategyDecision
+from tianluo.engine.merge.human_call import HumanCallWriter
+from tianluo.engine.merge.strategy import DecisionAction, StrategyDecider, StrategyDecision
 
 
 # --------- helpers ---------
@@ -321,7 +321,7 @@ class TestStrategyDeciderFast:
         )
         # Spec file with high confidence
         file_spec = FileResolution(
-            path="se3/specs/test/spec.md",
+            path="tianluo/specs/test/spec.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.HIGH, "high")],
             overall_confidence=Confidence.HIGH,
@@ -410,7 +410,7 @@ class TestHumanCallWriter:
 
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
                 "message": "SHALL weakened to SHOULD",
             }
@@ -458,7 +458,7 @@ class TestHumanCallWriter:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": "se3/specs/base/spec.md",
+                "file_path": "tianluo/specs/base/spec.md",
                 "violation_type": "WEAKENING",
                 "message": "SHALL weakened to SHOULD",
             }
@@ -471,7 +471,7 @@ class TestHumanCallWriter:
         )
         writer.print_instructions(call_file)
         captured = capsys.readouterr()
-        assert "[WEAKENING] se3/specs/base/spec.md" in captured.out
+        assert "[WEAKENING] tianluo/specs/base/spec.md" in captured.out
         assert "Message: SHALL weakened to SHOULD" in captured.out
 
     def test_print_instructions_many_violations_trailing_once(
@@ -481,7 +481,7 @@ class TestHumanCallWriter:
         writer = HumanCallWriter(tmp_path)
         violations = [
             {
-                "file_path": f"se3/specs/base/spec{i}.md",
+                "file_path": f"tianluo/specs/base/spec{i}.md",
                 "violation_type": "WEAKENING",
                 "message": f"msg {i}",
                 "evidence": {

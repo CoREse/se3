@@ -1,7 +1,7 @@
 """``se3 code-index search`` — grep-style search over the code-index item lines.
 
 These tests drive the CLI through Typer's ``CliRunner`` against a hand-authored
-``se3/code-index.md``. Writing the md by hand (rather than running a real build)
+``tianluo/code-index.md``. Writing the md by hand (rather than running a real build)
 keeps the item set — directory / file / symbol lines, their kinds and summaries,
 and deliberately embedded ``<!--#...-->`` fingerprint comments — fully under the
 test's control, so each grep-semantics assertion is exact and deterministic.
@@ -14,9 +14,9 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from se3.cli import app
-from se3.commands import code_index_cmd
-from se3.engine import code_index
+from tianluo.cli import app
+from tianluo.commands import code_index_cmd
+from tianluo.engine import code_index
 
 runner = CliRunner()
 
@@ -43,7 +43,7 @@ _MD = """\
 
 @pytest.fixture
 def built_project(tmp_path: Path, monkeypatch) -> Path:
-    """A project whose se3/code-index.md is the hand-authored map above, with
+    """A project whose tianluo/code-index.md is the hand-authored map above, with
     ``get_project_root`` pointed at it so the CLI resolves here."""
     root = tmp_path / "proj"
     md = code_index.md_path(root)

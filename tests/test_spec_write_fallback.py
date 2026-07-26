@@ -1,7 +1,7 @@
 """G5 task 3 — the hard fallback layer (post-step spec-diff guard).
 
 The PreToolUse hook (the primary hard layer) only matches Write/Edit/NotebookEdit,
-so a step that writes ``se3/specs/**`` via a ``Bash`` redirect / ``sed`` / ``tee``
+so a step that writes ``tianluo/specs/**`` via a ``Bash`` redirect / ``sed`` / ``tee``
 slips past it. ``StateMachine.run_step`` therefore snapshots every spec file's
 content hash before a non-exempt step and diffs after the handler returns,
 failing the step when any spec file changed.
@@ -25,15 +25,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from se3.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
-from se3.engine.models import (
+from tianluo.engine.context_builder import SPEC_WRITE_ALLOWED_STEPS
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.state_machine import StateMachine
+from tianluo.engine.state_machine import StateMachine
 
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ from se3.engine.state_machine import StateMachine
 
 def _make_project(tmp_path):
     """Lay down a minimal project with one committed spec file."""
-    spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+    spec = tmp_path / "tianluo" / "specs" / "base" / "spec.md"
     spec.parent.mkdir(parents=True, exist_ok=True)
     spec.write_text("# base Specification\n\n## Purpose\nx\n", encoding="utf-8")
     return spec
@@ -58,7 +58,7 @@ def _make_flow(tmp_path):
         task_description="t",
         task_type="feature",
         status=FlowStatus.RUNNING,
-        change_path=tmp_path / "se3" / "changes" / "test",
+        change_path=tmp_path / "tianluo" / "changes" / "test",
     )
     # Pre-seed the baseline so run_step's IMPLEMENT pre-hook
     # (_ensure_baseline_ready) is a no-op and never runs the test suite.
@@ -91,7 +91,7 @@ class TestBashBypassCaught:
         status = machine.run_step(flow, step)
 
         assert status == StepStatus.FAILED
-        assert "se3/specs/base/spec.md" in (step.error_message or "")
+        assert "tianluo/specs/base/spec.md" in (step.error_message or "")
         # The illegal write must be reverted on disk, not just flagged — else it
         # survives a later `se3 run --resume`.
         assert spec.read_text(encoding="utf-8") == (
@@ -124,7 +124,7 @@ class TestBashBypassCaught:
         flow = _make_flow(tmp_path)
         step = _step(StepType.IMPLEMENT)
 
-        new_spec = tmp_path / "se3" / "specs" / "new" / "spec.md"
+        new_spec = tmp_path / "tianluo" / "specs" / "new" / "spec.md"
 
         def handler(_step, _flow):
             new_spec.parent.mkdir(parents=True, exist_ok=True)
@@ -135,7 +135,7 @@ class TestBashBypassCaught:
         machine.run_step(flow, step)
 
         assert step.status == StepStatus.FAILED
-        assert "se3/specs/new/spec.md" in step.error_message
+        assert "tianluo/specs/new/spec.md" in step.error_message
         # The newly-created illegal spec file must be removed, not left on disk.
         assert not new_spec.exists()
 
@@ -210,7 +210,7 @@ class TestGuardDecisionExemption:
 class TestConfigDisable:
     def test_disabled_guard_does_not_flag_bash_write(self, tmp_path):
         spec = _make_project(tmp_path)
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_write_protection:\n  diff_fallback_enabled: false\n",
             encoding="utf-8",
         )
@@ -227,7 +227,7 @@ class TestConfigDisable:
         assert status == StepStatus.COMPLETED
 
     def test_decision_helper_off_when_disabled(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text(
+        (tmp_path / "tianluo.yaml").write_text(
             "spec_write_protection:\n  diff_fallback_enabled: false\n",
             encoding="utf-8",
         )

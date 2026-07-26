@@ -1,8 +1,8 @@
 """Tests for the daemon history reader's multi-root merge (worktree split).
 
 A ``se3 run --worktree`` flow runs its discovery step in the main repo *before*
-the fork (writing ``<main>/se3/history/<flow_id>/01_discovery_*.jsonl``) and
-every later step in the worktree (writing ``<worktree>/se3/history/<flow_id>/``,
+the fork (writing ``<main>/tianluo/history/<flow_id>/01_discovery_*.jsonl``) and
+every later step in the worktree (writing ``<worktree>/tianluo/history/<flow_id>/``,
 which usually also clones the discovery file). The reader's directory
 resolution previously walked the registered roots and returned the *first*
 match — the main repo, holding only the discovery record — so the WebUI showed
@@ -25,8 +25,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from se3.daemon.history import DaemonHistoryReader
-from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from tianluo.daemon.history import DaemonHistoryReader
+from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
 # --------------------------------------------------------------------------
@@ -56,7 +56,7 @@ def _make_reader(*roots):
 
 
 def _flow_dir(root, flow_id):
-    d = root / "se3" / "history" / flow_id
+    d = root / "tianluo" / "history" / flow_id
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -64,12 +64,12 @@ def _flow_dir(root, flow_id):
 def _make_worktree(main_root, name="wt__b"):
     """Create and return a worktree isolation dir under *main_root*.
 
-    ``resolve_worktree_main_root`` only attributes a ``<main>/se3/worktrees/<name>``
+    ``resolve_worktree_main_root`` only attributes a ``<main>/tianluo/worktrees/<name>``
     path back to ``<main>`` when ``<main>/se3`` exists, so the main repo must
     carry an ``se3`` directory.
     """
-    (main_root / "se3").mkdir(parents=True, exist_ok=True)
-    wt = main_root / "se3" / "worktrees" / name
+    (main_root / "tianluo").mkdir(parents=True, exist_ok=True)
+    wt = main_root / "tianluo" / "worktrees" / name
     wt.mkdir(parents=True, exist_ok=True)
     return wt
 
@@ -91,8 +91,8 @@ def test_resolve_flow_dirs_worktree_returns_both_roots(tmp_path):
     dirs = reader._resolve_flow_dirs(flow_id, str(wt))
 
     # Authoritative (worktree) root first, then the owning main repo.
-    assert dirs[0] == (wt / "se3" / "history" / flow_id).resolve()
-    assert (main / "se3" / "history" / flow_id).resolve() in dirs
+    assert dirs[0] == (wt / "tianluo" / "history" / flow_id).resolve()
+    assert (main / "tianluo" / "history" / flow_id).resolve() in dirs
     assert len(dirs) == 2
 
 
@@ -105,7 +105,7 @@ def test_resolve_flow_dirs_main_root_only_self(tmp_path):
     reader = _make_reader(main)
     dirs = reader._resolve_flow_dirs(flow_id, str(main))
 
-    assert dirs == [(main / "se3" / "history" / flow_id).resolve()]
+    assert dirs == [(main / "tianluo" / "history" / flow_id).resolve()]
 
 
 def test_resolve_flow_dirs_skips_missing_main_dir(tmp_path):
@@ -119,7 +119,7 @@ def test_resolve_flow_dirs_skips_missing_main_dir(tmp_path):
     reader = _make_reader(main, wt)
     dirs = reader._resolve_flow_dirs(flow_id, str(wt))
 
-    assert dirs == [(wt / "se3" / "history" / flow_id).resolve()]
+    assert dirs == [(wt / "tianluo" / "history" / flow_id).resolve()]
 
 
 def test_resolve_flow_dirs_empty_project_root_legacy_heuristic(tmp_path):
@@ -136,8 +136,8 @@ def test_resolve_flow_dirs_empty_project_root_legacy_heuristic(tmp_path):
     # Legacy behaviour: a single first-match directory.
     assert len(dirs) == 1
     assert dirs[0] in (
-        main / "se3" / "history" / flow_id,
-        other / "se3" / "history" / flow_id,
+        main / "tianluo" / "history" / flow_id,
+        other / "tianluo" / "history" / flow_id,
     )
 
 
@@ -377,7 +377,7 @@ def test_read_flow_dedups_discovery_with_differing_hash(tmp_path):
 
 
 def _write_engine(root, flow_id, status, *, is_worktree_mode=False):
-    state_dir = root / "se3" / "state"
+    state_dir = root / "tianluo" / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     payload = {"flow_id": flow_id, "status": status}
     if is_worktree_mode:
@@ -412,7 +412,7 @@ def test_index_records_worktree_root_for_split_active_flow(tmp_path):
     _write_jsonl(wt_flow / "02_analyze_cd.jsonl", [_msg("assistant", "analyze body")])
 
     # Provider order mirrors the real ``all_observable_roots`` sorted order:
-    # the main repo sorts before its ``se3/worktrees/<name>`` subdir.
+    # the main repo sorts before its ``tianluo/worktrees/<name>`` subdir.
     reader = _make_reader(main, wt)
     index = reader.build_index()
     meta = next(m for m in index if m.flow_id == flow_id)
@@ -454,8 +454,8 @@ def test_read_flow_main_root_forward_expands_into_worktree(tmp_path):
     # in the worktree subdir's later steps.
     dirs = reader._resolve_flow_dirs(flow_id, str(main))
     resolved = {d.resolve() for d in dirs}
-    assert (main / "se3" / "history" / flow_id).resolve() in resolved
-    assert (wt / "se3" / "history" / flow_id).resolve() in resolved
+    assert (main / "tianluo" / "history" / flow_id).resolve() in resolved
+    assert (wt / "tianluo" / "history" / flow_id).resolve() in resolved
 
     read = reader.read_flow(flow_id, project_root=str(main))
     assert [r["message"]["content"] for r in read.records] == [

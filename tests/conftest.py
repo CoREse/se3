@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the se3 test suite.
 
-Clears every ``_warned_*_for`` dedup set in ``se3.config`` between tests
+Clears every ``_warned_*_for`` dedup set in ``tianluo.config`` between tests
 so that warning-related caplog assertions are order-independent, regardless
 of which warnings a given test happens to trigger.
 """
@@ -45,24 +45,24 @@ _wire_browser_test_libs()
 # Pin the UI language to en-US at conftest *import* time, before any test module
 # is collected. Typer freezes each command/option ``help=`` string when the
 # module defining it is imported (the value is a plain ``t(...)`` result bound
-# into the Option/command at decoration). Test modules import ``se3.cli`` during
+# into the Option/command at decoration). Test modules import ``tianluo.cli`` during
 # collection — earlier than any autouse fixture can run — so under the repo's own
-# ``se3.yaml`` (``language: zh-CN``) the help text would freeze in Chinese and
+# ``tianluo.yaml`` (``language: zh-CN``) the help text would freeze in Chinese and
 # every English help-text assertion would break. The per-test autouse fixtures
 # below re-pin en-US for runtime ``t()`` rendering; this line covers the one-shot
 # import-time freeze they cannot reach. Resolution-chain tests clear SE3_LANG via
 # their own ``monkeypatch.delenv`` and are unaffected.
 os.environ["SE3_LANG"] = "en-US"
 
-import se3.config as _cfg  # noqa: E402
+import tianluo.config as _cfg  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
 def _force_en_us_ui_language(monkeypatch):
     """Pin the i18n UI language to en-US for every test.
 
-    ``se3.i18n`` resolves the active UI language lazily from ``Path.cwd()`` — and
-    the suite runs from the repo root, whose ``se3.yaml`` sets ``language: zh-CN``.
+    ``tianluo.i18n`` resolves the active UI language lazily from ``Path.cwd()`` — and
+    the suite runs from the repo root, whose ``tianluo.yaml`` sets ``language: zh-CN``.
     Without this, any test that exercises a ``t()``-rendered CLI/display string
     would see Chinese and its English assertion would break, making output
     determinism depend on the repo's own config and the host locale. Forcing
@@ -72,7 +72,7 @@ def _force_en_us_ui_language(monkeypatch):
     ``monkeypatch.setenv``/``set_language`` (applied after this fixture) and a
     reset — e.g. the i18n precedence-chain tests, which ``delenv`` it entirely.
     """
-    import se3.i18n as _i18n
+    import tianluo.i18n as _i18n
 
     monkeypatch.setenv("SE3_LANG", "en-US")
     _i18n.reset_language()
@@ -84,7 +84,7 @@ def _force_en_us_ui_language(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _reset_config_warning_dedup_sets():
-    """Clear all ``_warned_*_for`` sets in se3.config around each test.
+    """Clear all ``_warned_*_for`` sets in tianluo.config around each test.
 
     Discovered dynamically so newly added dedup sets are covered without
     having to touch this fixture.
@@ -106,8 +106,8 @@ def _reset_config_warning_dedup_sets():
 def _pin_ui_language_en():
     """Pin CLI UI text to en-US so command-output assertions are deterministic.
 
-    ``se3.i18n.t()``'s active language is a process-wide singleton resolved from
-    ``Path.cwd()``; the se3 repo's own ``se3.yaml`` sets ``language: zh-CN``, so
+    ``tianluo.i18n.t()``'s active language is a process-wide singleton resolved from
+    ``Path.cwd()``; the se3 repo's own ``tianluo.yaml`` sets ``language: zh-CN``, so
     without an explicit pin the language a test observes would depend on cwd and
     on which test happened to trigger the first render. Pinning to en-US keeps
     every existing English-substring assertion stable regardless of host locale
@@ -117,7 +117,7 @@ def _pin_ui_language_en():
     never leaks. Intentionally does NOT touch ``SE3_LANG``/locale env vars so the
     dedicated resolution-chain tests in ``test_i18n.py`` remain unaffected.
     """
-    from se3 import i18n
+    from tianluo import i18n
 
     i18n.set_language("en-US")
     yield
@@ -130,9 +130,9 @@ def _no_real_code_index_refresh(monkeypatch):
 
     Two step handlers (``analyze`` read-side, ``commit`` write-side) call
     ``context_builder.ensure_code_index_fresh(project_root)`` to lazily rebuild
-    ``se3/code-index.md``. In tests a ``FlowInstance`` usually has no
+    ``tianluo/code-index.md``. In tests a ``FlowInstance`` usually has no
     ``change_path``, so ``project_root`` falls back to ``Path.cwd()`` — the real
-    se3 repo, which now ships a committed ``se3/code-index.md``. The hook's
+    se3 repo, which now ships a committed ``tianluo/code-index.md``. The hook's
     "no map yet → skip" guard then no longer fires, and it runs a *real*
     incremental build against the live repo: it takes an exclusive ``flock``
     (so concurrent test processes deadlock on it) and spawns a real LLM
@@ -145,7 +145,7 @@ def _no_real_code_index_refresh(monkeypatch):
     unaffected; a test that specifically wants the real hook can re-patch it.
     """
     monkeypatch.setattr(
-        "se3.engine.context_builder.ensure_code_index_fresh",
+        "tianluo.engine.context_builder.ensure_code_index_fresh",
         lambda *args, **kwargs: None,
     )
 
@@ -154,7 +154,7 @@ def _no_real_code_index_refresh(monkeypatch):
 # handler that resolves ``project_root`` to ``flow.change_path.parent`` when the
 # flow has no ``change_path`` falls back to ``Path.cwd()`` — the live se3 repo —
 # so ``_record_test_history`` (test step) and any other same-suite caller would
-# otherwise append fake conversation jsonl into the real ``se3/history/``. The
+# otherwise append fake conversation jsonl into the real ``tianluo/history/``. The
 # repo root is derived from this file's location (``tests/`` sits directly under
 # it) and ``Path.cwd()`` is included too since that is exactly the fallback path.
 def _real_history_roots() -> set:
@@ -179,20 +179,20 @@ def _install_chat_history_guard(monkeypatch, real_roots: set, redirect_root: Pat
     ``record_step_event`` / ``record_stream_progress`` /
     ``record_user_interjection`` and every other ``record_*``. Wrapping only
     ``_append_message`` (the old guard) therefore missed those siblings, which
-    append straight into ``se3/history/<flow_id>/*.jsonl``. Patching the single
+    append straight into ``tianluo/history/<flow_id>/*.jsonl``. Patching the single
     ``_history_dir`` resolution point instead covers ALL writers at once: when a
     test's resolved ``project_root`` equals a real repo root the path is
     rerouted under ``redirect_root`` (a per-test tmp dir), so nothing can leak
-    into the committed ``se3/history/`` through any writer; a ``project_root``
+    into the committed ``tianluo/history/`` through any writer; a ``project_root``
     under a tmp dir passes straight through, so ``tests/test_chat_history.py``
     and any tmp-scoped caller keep working, and production (no fixture
     installed) is untouched.
 
-    ``se3.engine.state_machine`` binds ``_history_dir`` at import time (a
+    ``tianluo.engine.state_machine`` binds ``_history_dir`` at import time (a
     module-level ``from ... import _history_dir``), so its reference bypasses the
     module-attribute patch above and is repatched directly.
     """
-    from se3.engine import chat_history
+    from tianluo.engine import chat_history
 
     original = chat_history._history_dir
 
@@ -207,7 +207,7 @@ def _install_chat_history_guard(monkeypatch, real_roots: set, redirect_root: Pat
 
     monkeypatch.setattr(chat_history, "_history_dir", _redirected)
     try:
-        from se3.engine import state_machine
+        from tianluo.engine import state_machine
 
         monkeypatch.setattr(
             state_machine, "_history_dir", _redirected, raising=False
@@ -220,7 +220,7 @@ def _install_chat_history_guard(monkeypatch, real_roots: set, redirect_root: Pat
 def _no_chat_history_leak_to_real_repo(tmp_path, monkeypatch):
     """Neutralise chat-history writes aimed at the live repo for every test.
 
-    Twin of the fixture in ``src/se3/engine/conftest.py`` (kept in sync). See
+    Twin of the fixture in ``src/tianluo/engine/conftest.py`` (kept in sync). See
     :func:`_install_chat_history_guard` for the rationale.
     """
     _install_chat_history_guard(
@@ -264,7 +264,7 @@ def _isolate_se3_daemon_home(tmp_path, monkeypatch):
     ``scripts/cleanup_project_roots.py`` to prune any pytest-tempdir residue —
     not by anything this fixture can do.
     """
-    from se3.daemon.supervisor import EXTERNAL_SCAN_IGNORE_ENV
+    from tianluo.daemon.supervisor import EXTERNAL_SCAN_IGNORE_ENV
 
     monkeypatch.setenv("SE3_DAEMON_DIR", str(tmp_path / ".se3-daemon-home"))
     monkeypatch.setenv(EXTERNAL_SCAN_IGNORE_ENV, "1")

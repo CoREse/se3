@@ -30,18 +30,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from se3.commands import run
-from se3.commands.run import run_flow
-from se3.daemon import protocol
-from se3.engine import interaction_calls
-from se3.engine.models import (
+from tianluo.commands import run
+from tianluo.commands.run import run_flow
+from tianluo.daemon import protocol
+from tianluo.engine import interaction_calls
+from tianluo.engine.models import (
     FlowInstance,
     FlowStatus,
     Step,
     StepStatus,
     StepType,
 )
-from se3.engine.persistence import PersistenceManager
+from tianluo.engine.persistence import PersistenceManager
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ from se3.engine.persistence import PersistenceManager
 
 
 def _build_failed_flow(project_root: Path, retry_count: int = 0) -> FlowInstance:
-    (project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+    (project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
     flow = FlowInstance(
         flow_id="dc-flow-001",
         task_description="dual-channel task",
@@ -88,12 +88,12 @@ def _run_failed_flow(
     """
     captured = {}
 
-    with patch("se3.commands.run.PersistenceManager") as mock_pm_class, patch(
-        "se3.commands.run.StateMachine"
-    ) as mock_sm_class, patch("se3.commands.run.STEP_HANDLERS", {}), patch(
-        "se3.commands.run._stdin_is_interactive", return_value=False
+    with patch("tianluo.commands.run.PersistenceManager") as mock_pm_class, patch(
+        "tianluo.commands.run.StateMachine"
+    ) as mock_sm_class, patch("tianluo.commands.run.STEP_HANDLERS", {}), patch(
+        "tianluo.commands.run._stdin_is_interactive", return_value=False
     ), patch(
-        "se3.commands.run.render_full"
+        "tianluo.commands.run.render_full"
     ):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm

@@ -16,13 +16,13 @@ import time
 import pytest
 
 from _authsrv import authed_hello, login
-from se3.daemon import protocol
-from se3.server.state import (
+from tianluo.daemon import protocol
+from tianluo.server.state import (
     ServerState,
     decode_progress,
     encode_progress,
 )
-from se3.server.ws import HistoryRequestRegistry, request_history
+from tianluo.server.ws import HistoryRequestRegistry, request_history
 
 
 # --------------------------------------------------------------------------
@@ -565,7 +565,7 @@ def test_history_request_registry_fail_pull_releases_followers():
     ``HISTORY_PULL_TIMEOUT`` on a request that was never sent and every later
     request joined the abandoned pull instead of leading a replacement.
     """
-    from se3.server.ws import _PullAbandoned
+    from tianluo.server.ws import _PullAbandoned
 
     async def scenario():
         registry = HistoryRequestRegistry()
@@ -1079,7 +1079,7 @@ def test_get_history_backfills_generation_for_old_bundle():
 def client_and_app(monkeypatch):
     from fastapi.testclient import TestClient
 
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     from _authsrv import authed_app, login
 
@@ -1229,7 +1229,7 @@ def test_history_detail_unknown_flow_404s_without_fleet_refresh(
     an indexed lookup.
     """
     client, app = client_and_app
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     refreshes = {"n": 0}
     real = app_module.broadcast_index_refresh
@@ -1260,8 +1260,8 @@ def test_history_detail_cross_owner_404s_without_fleet_refresh(
     churn.
     """
     client, app = client_and_app  # admin session
-    import se3.server.app as app_module
-    import se3.server.crypto as crypto
+    import tianluo.server.app as app_module
+    import tianluo.server.crypto as crypto
 
     store = app.state.store
     vid = store.create_owner("viewer", is_admin=False)
@@ -1378,7 +1378,7 @@ def test_append_resolving_waiter_is_still_broadcast_to_ui():
     through ``_handle_message`` so the resolved-waiter + append combination is
     exact.
     """
-    from se3.server.ws import UiHub, _handle_message
+    from tianluo.server.ws import UiHub, _handle_message
 
     class _UiWS:
         def __init__(self):
@@ -1511,7 +1511,7 @@ def test_history_detail_no_daemon_404(client_and_app):
 
 def test_history_detail_pull_timeout(client_and_app, monkeypatch):
     """When the owning daemon never replies, the pull times out with 504."""
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     monkeypatch.setattr(app_module, "HISTORY_PULL_TIMEOUT", 0.5)
     client, app = client_and_app
@@ -1789,7 +1789,7 @@ class _FakeServerWS:
 
 
 def test_index_refresh_registry_resolve_and_discard():
-    from se3.server.ws import IndexRefreshRegistry
+    from tianluo.server.ws import IndexRefreshRegistry
 
     async def scenario():
         reg = IndexRefreshRegistry()
@@ -1809,7 +1809,7 @@ def test_index_refresh_registry_resolve_and_discard():
 
 
 def test_broadcast_index_refresh_sends_to_connected_and_returns_waiters():
-    from se3.server.ws import (
+    from tianluo.server.ws import (
         ConnectionManager,
         IndexRefreshRegistry,
         broadcast_index_refresh,
@@ -1836,7 +1836,7 @@ def test_broadcast_index_refresh_sends_to_connected_and_returns_waiters():
 
 
 def test_broadcast_index_refresh_no_daemon_returns_empty():
-    from se3.server.ws import (
+    from tianluo.server.ws import (
         ConnectionManager,
         IndexRefreshRegistry,
         broadcast_index_refresh,
@@ -1852,7 +1852,7 @@ def test_broadcast_index_refresh_no_daemon_returns_empty():
 
 
 def test_broadcast_index_refresh_discards_waiter_on_send_failure():
-    from se3.server.ws import (
+    from tianluo.server.ws import (
         ConnectionManager,
         IndexRefreshRegistry,
         broadcast_index_refresh,
@@ -2147,7 +2147,7 @@ def test_history_detail_rejects_cache_replaced_after_pinned_pull(
     A same-flow cache replacement between the daemon reply and the final read
     fails closed instead of returning the registry's unvalidated raw payload.
     """
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
@@ -2213,7 +2213,7 @@ def test_history_detail_serves_full_after_same_owner_daemon_reconnect(
     valid full records that ``get_history_snapshot`` (bound to the owning
     machine + owner) validates. The route MUST return that full snapshot rather
     than reject it just because the socket object changed."""
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:
@@ -2284,7 +2284,7 @@ def test_history_detail_fails_closed_when_snapshot_validation_fails(
     """When the post-pull snapshot validation actually fails (the bundle's
     machine/owner changed), the route fails closed with 409 rather than leaking
     records from a different machine that reused the same flow id."""
-    import se3.server.app as app_module
+    import tianluo.server.app as app_module
 
     client, app = client_and_app
     with client.websocket_connect("/ws") as daemon:

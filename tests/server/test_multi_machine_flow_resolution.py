@@ -25,7 +25,7 @@ The invariants locked here:
 * owner scoping is never bypassed by the reachability preference;
 * ``get_history_index`` collapses the resulting multi-machine duplicates of one
   ``flow_id`` to a single row, picking the same machine resolution would;
-* the issue mirror — the parallel resolution behind ``se3/issues/*.yaml``, which
+* the issue mirror — the parallel resolution behind ``tianluo/issues/*.yaml``, which
   every ISSUE_COMMAND and "start flow from issue" SPAWN_FLOW routes off — obeys
   the same preference and the same ``(project_root, id)`` collapse. Nothing ages
   a dead machine's issue mirror out, so there the mis-resolution is permanent
@@ -41,7 +41,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, List, Optional
 
-from se3.server.state import ServerState
+from tianluo.server.state import ServerState
 
 
 FLOW_ID = "flow-shared-fs"
@@ -809,7 +809,7 @@ def _flow_with_call(
 def test_pending_call_resolves_to_the_reachable_mirror():
     """``find_call_owner`` must route the detail pull at a live daemon.
 
-    Both nodes mirror the same ``se3/calls/<id>`` file off the shared disk, so
+    Both nodes mirror the same ``tianluo/calls/<id>`` file off the shared disk, so
     the reachable one serves byte-identical content; picking the unreachable
     first-registered machine made ``GET /api/calls/{id}/detail`` answer 503
     permanently.
@@ -1314,8 +1314,8 @@ def test_history_index_single_machine_deployment_is_untouched():
 # the active-worktree predicate reads off the resolved machine
 # --------------------------------------------------------------------------- #
 
-WORKTREE_ROOT_A = "/shared/proj/se3/worktrees/node007-run"
-WORKTREE_ROOT_B = "/shared/proj/se3/worktrees/node008-run"
+WORKTREE_ROOT_A = "/shared/proj/tianluo/worktrees/node007-run"
+WORKTREE_ROOT_B = "/shared/proj/tianluo/worktrees/node008-run"
 
 
 def _worktree_flow(project_root: str, status: str) -> Dict[str, Any]:

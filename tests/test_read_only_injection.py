@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 from unittest.mock import patch, MagicMock
 
-from se3.engine.models import STEP_POOL, StepType, get_step_info
-from se3.engine.context_builder import get_read_only_injection, is_step_read_only
+from tianluo.engine.models import STEP_POOL, StepType, get_step_info
+from tianluo.engine.context_builder import get_read_only_injection, is_step_read_only
 
 
 # --- STEP_POOL completeness tests ---
@@ -112,7 +112,7 @@ class TestGetReadOnlyInjection:
 
 class TestSyncStepReadOnly:
     """sync_scan/sync_analyze are read-only sync pseudo-steps; sync_resolve
-    is writable (its Way-A path edits se3/specs in place)."""
+    is writable (its Way-A path edits tianluo/specs in place)."""
 
     def test_is_step_read_only_sync_scan_and_analyze(self):
         assert is_step_read_only("sync_scan") is True
@@ -161,7 +161,7 @@ class TestLLMCallerReadOnlyIntegration:
 
     def _make_caller(self, step_type: str):
         """Create an LLMCaller with mocked runner for testing."""
-        from se3.engine.llm_caller import LLMCaller
+        from tianluo.engine.llm_caller import LLMCaller
 
         caller = LLMCaller(
             project_root="/tmp/test_project",
@@ -170,7 +170,7 @@ class TestLLMCallerReadOnlyIntegration:
         )
         return caller
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_read_only_step_prompt_contains_constraint(self, mock_call):
         """For read-only steps, the prompt passed to _call_with_retry should contain the constraint."""
         mock_call.return_value = "test output"
@@ -182,7 +182,7 @@ class TestLLMCallerReadOnlyIntegration:
         assert "READ-ONLY STEP CONSTRAINT" in called_prompt
         assert "MUST NOT modify" in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_non_read_only_step_prompt_has_no_constraint(self, mock_call):
         """For non-read-only steps, no read-only constraint should be in the prompt."""
         mock_call.return_value = "test output"
@@ -193,7 +193,7 @@ class TestLLMCallerReadOnlyIntegration:
         called_prompt = mock_call.call_args[1]["prompt"]
         assert "READ-ONLY STEP CONSTRAINT" not in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_strict")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_strict")
     def test_read_only_injection_with_strict_mode(self, mock_call):
         """Read-only constraint is injected before mode dispatch, including strict mode."""
         mock_call.return_value = '{"result": "ok"}'
@@ -204,7 +204,7 @@ class TestLLMCallerReadOnlyIntegration:
         called_prompt = mock_call.call_args[1]["prompt"]
         assert "READ-ONLY STEP CONSTRAINT" in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_two_phase")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_two_phase")
     def test_read_only_injection_with_two_phase_mode(self, mock_call):
         """Read-only constraint is injected before mode dispatch, including two_phase mode."""
         mock_call.return_value = '{"result": "ok"}'
@@ -215,10 +215,10 @@ class TestLLMCallerReadOnlyIntegration:
         called_prompt = mock_call.call_args[1]["prompt"]
         assert "READ-ONLY STEP CONSTRAINT" in called_prompt
 
-    @patch("se3.engine.llm_caller.LLMCaller._call_with_retry")
+    @patch("tianluo.engine.llm_caller.LLMCaller._call_with_retry")
     def test_read_only_injection_after_extra_prompt(self, mock_call):
         """Read-only constraint should appear after extra_prompt injection."""
-        from se3.engine.llm_caller import set_extra_prompt
+        from tianluo.engine.llm_caller import set_extra_prompt
         mock_call.return_value = "test output"
 
         try:
@@ -233,5 +233,5 @@ class TestLLMCallerReadOnlyIntegration:
                 "Read-only constraint should appear after extra_prompt"
             )
         finally:
-            from se3.engine.llm_caller import clear_extra_prompt
+            from tianluo.engine.llm_caller import clear_extra_prompt
             clear_extra_prompt()

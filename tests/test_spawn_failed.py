@@ -18,8 +18,8 @@ from __future__ import annotations
 
 import asyncio
 
-from se3.daemon import protocol
-from se3.daemon.client import DaemonClient
+from tianluo.daemon import protocol
+from tianluo.daemon.client import DaemonClient
 
 
 # --------------------------------------------------------------------------
@@ -206,8 +206,8 @@ def test_empty_task_does_not_report_spawn_failed():
 
 
 def test_handle_message_routes_spawn_failed_to_owner_ui():
-    from se3.server.state import ServerState
-    from se3.server.ws import UiHub, _handle_message
+    from tianluo.server.state import ServerState
+    from tianluo.server.ws import UiHub, _handle_message
 
     class _UiWS:
         def __init__(self):

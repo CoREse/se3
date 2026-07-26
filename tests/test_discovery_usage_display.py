@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.engine import CliSink, EventType, new_event
+from tianluo.engine import CliSink, EventType, new_event
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +31,7 @@ def _make_discovery_step(
     extra_outputs: dict | None = None,
 ):
     """Build a discovery step with optional token_usage in outputs."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="00_discovery_abc", step_type=StepType.DISCOVERY)
     step.status = StepStatus.COMPLETED
@@ -62,7 +62,7 @@ def captured_console():
     """Install a recording Rich console for the duration of the test."""
     from rich.console import Console
 
-    from se3.engine import display
+    from tianluo.engine import display
 
     prev = display.get_console()
     console = Console(record=True, force_terminal=False, width=100)
@@ -102,7 +102,7 @@ def test_discovery_cumulative_usage_renders_all_fields(captured_console):
 
 def test_discovery_cumulative_usage_line_format(captured_console):
     """Verify the exact format matches what format_usage_line produces."""
-    from se3.engine.token_usage import UsageTotals, format_usage_line
+    from tianluo.engine.token_usage import UsageTotals, format_usage_line
 
     usage = {
         "input_tokens": 10000,
@@ -164,7 +164,7 @@ def test_multi_round_carried_usage_equals_sum_of_rounds():
     """Simulate the discovery multi-round carried-token-usage mechanism:
     each round's increment is added to carried_token_usage, and the final
     step.outputs['token_usage'] equals the cumulative sum."""
-    from se3.engine.token_usage import UsageTotals
+    from tianluo.engine.token_usage import UsageTotals
 
     # Simulate 3 rounds of LLM calls with these increments:
     round_increments = [
@@ -226,7 +226,7 @@ def test_confirm_round_without_llm_does_not_affect_usage():
     """The programmatic confirmation round issues no LLM call, so its
     round increment is zero. The cumulative remains unchanged from the
     previous round. Verify this does not introduce spurious zeros."""
-    from se3.engine.token_usage import UsageTotals
+    from tianluo.engine.token_usage import UsageTotals
 
     # After the last LLM round, carried_token_usage is:
     carried = UsageTotals(
@@ -250,7 +250,7 @@ def test_confirm_round_without_llm_does_not_affect_usage():
 
 
 def _make_step_with_usage(step_type_value: str, usage: dict | None = None):
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(
         step_id=f"00_{step_type_value}_test",
@@ -332,7 +332,7 @@ def test_plan_no_usage_renders_nothing(captured_console):
 def test_discovery_step_failed_with_usage_renders_cumulative(captured_console):
     """A FAILED discovery step with token_usage still renders the cumulative
     line (the data is valid even if the step failed)."""
-    from se3.engine.models import StepStatus
+    from tianluo.engine.models import StepStatus
 
     usage = {
         "input_tokens": 500,
@@ -361,7 +361,7 @@ def test_discovery_step_failed_with_usage_renders_cumulative(captured_console):
 
 def test_discovery_missing_outputs_renders_nothing(captured_console):
     """A discovery step with None outputs is safe and renders nothing."""
-    from se3.engine.models import Step, StepStatus, StepType
+    from tianluo.engine.models import Step, StepStatus, StepType
 
     step = Step(step_id="00_discovery_x", step_type=StepType.DISCOVERY)
     step.status = StepStatus.COMPLETED

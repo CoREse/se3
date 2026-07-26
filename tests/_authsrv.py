@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Tuple
 
-from se3.daemon import protocol
+from tianluo.daemon import protocol
 
 
 def authed_app(**create_app_kwargs) -> Tuple[object, str]:
@@ -25,9 +25,9 @@ def authed_app(**create_app_kwargs) -> Tuple[object, str]:
     the plain-HTTP TestClient transmits it. ``app.state.test_daemon_key`` and
     ``app.state.test_owner_id`` are also set for convenience.
     """
-    import se3.server.crypto as crypto
-    from se3.server.app import create_app
-    from se3.server.auth.session import CookieConfig, SessionStore
+    import tianluo.server.crypto as crypto
+    from tianluo.server.app import create_app
+    from tianluo.server.auth.session import CookieConfig, SessionStore
 
     app = create_app(
         session_store=SessionStore(cookie_config=CookieConfig(secure=False)),
