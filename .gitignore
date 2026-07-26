@@ -19,7 +19,7 @@
 !/tianluo.example.yaml
 !/docs/
 !/scripts/
-!/se3/
+!/tianluo/
 !/tianluo/
 !/src/
 !/tests/
@@ -46,7 +46,7 @@ e2e
 materials
 
 # tianluo runtime dir (post-rename layout): ignore runtime content,
-# whitelist committed artifacts. Mirrors the legacy /se3/* block below so
+# whitelist committed artifacts. Mirrors the legacy /tianluo/* block below so
 # `luo migrate run rename-to-tianluo` on this repo needs no gitignore edit.
 /tianluo/*
 !/tianluo/code-index.md
@@ -58,18 +58,18 @@ materials
 !/tianluo/version-intents/
 
 # SE3: ignore runtime content, whitelist committed artifacts (legacy layout)
-/se3/*
-!/se3/code-index.md
-!/se3/charter.md
-!/se3/issues/
-!/se3/scripts/
-!/se3/prompts/
-!/se3/version-rules.md
+/tianluo/*
+!/tianluo/code-index.md
+!/tianluo/charter.md
+!/tianluo/issues/
+!/tianluo/scripts/
+!/tianluo/prompts/
+!/tianluo/version-rules.md
 # Version-reconcile intent metadata: written by a worktree session's commit
 # step and committed on the flow branch so the merge-side reconcile step can
 # read every merged-in branch's intent from master. Must be tracked, unlike
-# the rest of se3/state runtime content that /se3/* ignores.
-!/se3/version-intents/
+# the rest of tianluo/state runtime content that /tianluo/* ignores.
+!/tianluo/version-intents/
 tmp*.prompt
 
 # SE3 session file
@@ -78,7 +78,7 @@ tmp*.prompt
 # tianluo local/live project config (not checked in; tianluo.example.yaml
 # is the shipped reference). Legacy se3.* names honoured through 12.x.
 tianluo.local.yaml
-se3.local.yaml
+tianluo.local.yaml
 src/tianluo/__pycache__/
 *.egg-info/
 
