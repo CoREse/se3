@@ -23,7 +23,7 @@ Components:
   default (v1 keeps the schema/接缝 open without forcing implementation).
 
 Only :mod:`registry` touches FastAPI, and it does so behind a deferred import,
-so the rest of the package (and its tests) load without the ``se3[server]``
+so the rest of the package (and its tests) load without the ``tianluo[server]``
 extra's web dependencies.
 """
 

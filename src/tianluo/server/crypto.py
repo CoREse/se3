@@ -17,7 +17,7 @@ Security baseline (see the multi-tenant server design):
   produce safe, non-reversible display forms.
 
 Heavy hashing backends (``argon2-cffi`` / ``bcrypt``) ship only in the
-``se3[server]`` optional-dependency extra. Their imports are deferred into the
+``tianluo[server]`` optional-dependency extra. Their imports are deferred into the
 functions that need them, so merely importing this module — or any
 ``tianluo.server`` submodule that transitively pulls it in — never raises on a
 core-only install; the missing-backend error only surfaces when password
@@ -46,7 +46,7 @@ _BCRYPT_PREFIXES = ("$2a$", "$2b$", "$2y$")
 class PasswordBackendUnavailable(RuntimeError):
     """Raised when neither argon2-cffi nor bcrypt is importable.
 
-    Indicates the ``se3[server]`` extra (which ships ``argon2-cffi``) is not
+    Indicates the ``tianluo[server]`` extra (which ships ``argon2-cffi``) is not
     installed. The core CLI never triggers this; it only fires on the server
     auth path when a password hash/verify is actually attempted.
     """
@@ -109,7 +109,7 @@ def hash_password(password: str) -> str:
         return bcrypt.hashpw(_bcrypt_prep(password), bcrypt.gensalt()).decode("ascii")
 
     raise PasswordBackendUnavailable(
-        "no password-hashing backend available; install the se3[server] "
+        "no password-hashing backend available; install the tianluo[server] "
         "extra (argon2-cffi) — passwords must never be stored without a slow hash"
     )
 

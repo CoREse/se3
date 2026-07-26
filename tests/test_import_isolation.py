@@ -1,4 +1,4 @@
-"""Import-isolation tests for the ``se3[server]`` optional extra.
+"""Import-isolation tests for the ``tianluo[server]`` optional extra.
 
 These tests verify the dependency-isolation hard constraint of the
 daemon/server feature: a core-only ``pip install se3`` (without the

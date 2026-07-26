@@ -18,7 +18,7 @@ daemons and exposes it to the web frontend:
 * ``/`` and ``/static`` — the bundled web frontend (static files).
 
 The heavy web dependencies (``fastapi``, ``uvicorn``) are isolated in the
-``se3[server]`` optional-dependency extra. Nothing in the core ``se3`` CLI
+``tianluo[server]`` optional-dependency extra. Nothing in the core ``luo`` CLI
 imports this module, so a core-only install never loads FastAPI. The
 ``se3-server`` console script (see :func:`tianluo.server.main`) is the only entry
 point and checks for the extra before importing this module.

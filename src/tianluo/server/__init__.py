@@ -6,7 +6,7 @@ a REST API plus a bundled web frontend. Daemons dial *out* to the server, so
 SE3 machines never need an inbound port — the architecture is NAT-friendly.
 
 This is a deliberately *separate* package from the core ``se3`` CLI. Its heavy
-web dependencies (``fastapi``, ``uvicorn``) live in the ``se3[server]`` optional
+web dependencies (``fastapi``, ``uvicorn``) live in the ``tianluo[server]`` optional
 extra. The core ``se3`` command never imports this package, so a core-only
 install stays dependency-clean. The server is reached only through the
 standalone ``tianluo-server`` console script, whose :func:`main` is the single

@@ -20,7 +20,7 @@ Responsibilities:
   re-HELLO + push a full status snapshot after every reconnect.
 
 The ``websockets`` library is an *optional* dependency (it ships in the
-``se3[server]`` extra). The client imports it lazily: a daemon started without
+``tianluo[server]`` extra). The client imports it lazily: a daemon started without
 ``--server-url`` never touches it, and one started *with* a server URL but
 without ``websockets`` installed logs a clear install hint and degrades to
 local-only operation rather than crashing.
@@ -479,7 +479,7 @@ class DaemonClient:
         except Exception:  # pragma: no cover - exercised via degraded path
             logger.warning(
                 "Cannot dial central server %s: the 'websockets' package is not "
-                "installed. Install it with: pip install 'se3[server]'. "
+                "installed. Install it with: pip install 'tianluo[server]'. "
                 "The daemon continues in local-only mode.",
                 self.server_url,
             )

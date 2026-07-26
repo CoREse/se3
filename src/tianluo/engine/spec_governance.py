@@ -1,4 +1,4 @@
-"""Single authoritative source for se3's spec **volume / content governance**.
+"""Single authoritative source for tianluo's spec **volume / content governance**.
 
 This module is the prompt-and-tooling source of truth for the rules that keep
 spec files from bloating the LLM context: what the ``base`` spec is allowed to

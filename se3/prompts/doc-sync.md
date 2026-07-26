@@ -36,18 +36,19 @@ README is the standard SE3 document and carries the established
 item-by-item reconciliation contract. Bring `README.md` and
 `README.zh.md` (and any other localized siblings) into agreement with:
 
-- **CLI surface** — every `se3` command and subcommand currently
-  registered in `src/se3/cli.py` and `src/se3/commands/` (`run`, `init`,
-  `sync`, `merge`, `history`, `issue`, `daemon`, `guardrails`,
-  `salvage`, and their flags). Remove docs for anything removed; add
-  anything missing; correct any drifted behavior (e.g. `--preset`,
-  `--output-format`, task-type defaults).
-- **Specs** — the documented behavior under `se3/specs/`. The README's
-  description of capabilities must not contradict the specs
-  (flow-engine, se3-commands, se3-config, se3-scaffold, se3-versioning,
-  se3-workflows, preset-prompts, etc.).
-- **Directory / project structure** — the `src/se3/` package layout and
-  the `se3/` runtime directory tree shown in the docs must match disk.
+- **CLI surface** — every `luo` command and subcommand currently
+  registered in `src/tianluo/cli.py` and `src/tianluo/commands/` (`run`, `init`,
+  `code-index`, `migrate`, `guardrails`, `merge`, `merge-respond`,
+  `merge-unlock`, `history`, `issue`, `daemon`, `worktree`,
+  `end-session`, `salvage`, and their flags). Remove docs for anything
+  removed; add anything missing; correct any drifted behavior (e.g.
+  `--preset`, `--output-format`, task-type defaults).
+- **Knowledge system** — the README's description of capabilities must
+  not contradict the code-first knowledge system's actual artifacts
+  (`tianluo/code-index.md`, `tianluo/charter.md`, colocated
+  why-comments) and their documented behavior.
+- **Directory / project structure** — the `src/tianluo/` package layout and
+  the `tianluo/` runtime directory tree shown in the docs must match disk.
 - **Version display** — the version badge and any version reference must
   match the version recorded in `pyproject.toml`. Only correct a
   *displayed* version so it matches; never bump the version — the
