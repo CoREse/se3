@@ -38,3 +38,7 @@ jobs:
           fi
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # A re-pushed or pre-published tag (like v12.0.0, which was first
+          # uploaded via twine) must no-op instead of failing the run.
+          skip-existing: true
