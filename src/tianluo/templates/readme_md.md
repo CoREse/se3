@@ -22,13 +22,13 @@
 
 ```
 {project_name}/
-├── tianluo/                    # SE3 runtime directory
+├── tianluo/                    # tianluo runtime directory
 │   └── specs/              # Project specifications
 ├── src/                    # Source code
 ├── tests/                  # Test files
 ├── README.md               # This file
 ├── VERSIONS.md             # Version history
-└── tianluo.yaml                # SE3 configuration
+└── tianluo.yaml                # tianluo configuration
 ```
 
 ## Documentation

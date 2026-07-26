@@ -34,8 +34,8 @@ def _render_template(template_name: str, **values: str) -> str:
         content = content.replace("{" + key + "}", value)
     return content
 
-DEFAULT_SE3_YAML = """# SE3 Project Configuration
-# https://github.com/Fission-AI/SE3
+DEFAULT_SE3_YAML = """# tianluo Project Configuration
+# https://github.com/CoREse/tianluo
 #
 # For local-only overrides, create tianluo.local.yaml in the project root.
 # When present, it fully replaces this file at load time and is
@@ -153,7 +153,7 @@ env/
 *~
 .DS_Store
 
-# SE3: ignore runtime content, whitelist committed artifacts.
+# tianluo: ignore runtime content, whitelist committed artifacts.
 # `!/tianluo/` above un-ignores the tianluo/ directory so git descends into it;
 # `/tianluo/*` then re-applies default-deny one level down, tracking only the
 # committable artifacts whitelisted below.
@@ -169,7 +169,7 @@ env/
 # the rest of tianluo/ runtime content that /tianluo/* ignores.
 !/tianluo/version-intents/
 
-# SE3: local-only config overrides (never committed). Redundant under the
+# tianluo: local-only config overrides (never committed). Redundant under the
 # root default-deny, but kept explicit so the intent survives manual edits
 # that whitelist tianluo.local.yaml's siblings.
 tianluo.local.yaml
@@ -231,7 +231,7 @@ _PROJECT_CONFIG_PATTERN = "tianluo.yaml"
 # asymmetric "zero vs one trailing newline → one vs two blank lines"
 # artefact the old layout produced.
 LOCAL_CONFIG_APPEND_BLOCK = (
-    "# SE3: local-only config overrides (never committed)\n"
+    "# tianluo: local-only config overrides (never committed)\n"
     f"{LOCAL_CONFIG_PATTERN}\n"
 )
 

@@ -501,17 +501,17 @@ check("applyDocumentTitle localizes the browser tab title", () => {
   const savedDicts = I18N.dicts;
   const savedLang = I18N.lang;
   try {
-    globalThis.document = { title: "SE3 Control Plane", getElementById: () => null };
+    globalThis.document = { title: "tianluo Control Plane", getElementById: () => null };
     I18N.dicts = {
-      "en-US": { "topbar.title": "SE3 Control Plane" },
-      "zh-CN": { "topbar.title": "SE3 控制台" },
+      "en-US": { "topbar.title": "tianluo Control Plane" },
+      "zh-CN": { "topbar.title": "tianluo 控制台" },
     };
     I18N.lang = "zh-CN";
     app.applyDocumentTitle();
-    assert.equal(globalThis.document.title, "SE3 控制台");
+    assert.equal(globalThis.document.title, "tianluo 控制台");
     I18N.lang = "en-US";
     app.applyDocumentTitle();
-    assert.equal(globalThis.document.title, "SE3 Control Plane");
+    assert.equal(globalThis.document.title, "tianluo Control Plane");
   } finally {
     if (savedDoc === undefined) delete globalThis.document;
     else globalThis.document = savedDoc;

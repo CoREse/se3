@@ -1,5 +1,12 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.0.1 - 2026-07-27
+
+- Replace leftover 'SE3' product references with 'tianluo' across CLI --help and runtime i18n catalogs (en-US and zh-CN), keeping 'SE 3.0' only where it denotes the methodology
+- Fix WebUI zh-CN top bar title to show 'tianluo 控制台' and clean up product naming in static assets (style.css, index.html)
+- Strip 'SE3/se3' branding from `luo init` scaffold templates so newly initialized projects no longer carry the old product name
+- Sync the frontend i18n switch test fixture to the corrected locale strings
+- Preserve behavioral identifiers (env vars, daemon dirs, DOM ids) and intentional se3 compatibility references for the future 13.0 compat-layer removal
 ## 12.0.0 - 2026-07-26 — the rename release: se3 → tianluo（田螺）
 
 **The project, package, and runtime are renamed to tianluo; the primary command is `luo`. The version lineage continues from se3 11.x — this is a rename, not a rewrite.** The name comes from the Snail Girl (田螺姑娘) of Chinese folklore, who quietly finishes your work while you're away — the same contract as this tool: prompt once, walk away, come back to a finished deliverable. Decision record: issue #270 and `prompts/2026-07-07_rename-tianluo-session.*`.

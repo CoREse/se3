@@ -32,7 +32,7 @@ whether or not they keep a docs tree.
 
 ### README reconciliation (baseline — preserved in full)
 
-README is the standard SE3 document and carries the established
+README is the standard tianluo document and carries the established
 item-by-item reconciliation contract. Bring the README (and its
 localized siblings) into agreement with:
 

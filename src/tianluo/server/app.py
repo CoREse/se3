@@ -445,7 +445,7 @@ def create_app(
             debouncer.shutdown()
 
     app = FastAPI(
-        title="SE3 Central Server",
+        title="tianluo Central Server",
         version=protocol.PROTOCOL_VERSION,
         lifespan=_lifespan,
     )
