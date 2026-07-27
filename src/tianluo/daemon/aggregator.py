@@ -13,13 +13,13 @@ before the daemon did.
 
 from __future__ import annotations
 from tianluo.runtime_paths import runtime_dir
+from tianluo.core.machine_id import stable_machine_id
 
 import json
 import logging
 import os
 import socket
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -296,9 +296,10 @@ class ProjectRegistryError(RuntimeError):
     """
 
 
-def _stable_machine_id() -> str:
-    """Return a process-stable machine id (hostname plus a short uuid tail)."""
-    return f"{socket.gethostname()}-{uuid.getnode():x}"
+# Re-exported thin alias: the implementation now lives in core.machine_id so
+# engine/commands share one source of truth (see that module). Kept here so
+# existing references / tests to aggregator._stable_machine_id stay valid.
+_stable_machine_id = stable_machine_id
 
 
 class DaemonAggregator:
