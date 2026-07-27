@@ -58,7 +58,11 @@ class TestMergeLockAcquireRelease:
     def test_lock_file_contains_pid(self, tmp_project: Path) -> None:
         lock = MergeLock(tmp_project)
         with lock:
-            pid_str = lock._resolved_path.read_text(encoding="utf-8").strip()
+            # The holder record is now multi-line (PID line + machine-id
+            # line + padding); the PID is always the first line.
+            pid_str = lock._resolved_path.read_text(
+                encoding="utf-8"
+            ).splitlines()[0].strip()
             assert int(pid_str) == os.getpid()
 
     def test_idempotent_start(self, tmp_project: Path) -> None:
@@ -121,7 +125,7 @@ class TestMergeLockStale:
         lock = MergeLock(tmp_project)
         lock.acquire(break_stale=True)
         assert lock._fd is not None
-        pid_str = lock_path.read_text(encoding="utf-8").strip()
+        pid_str = lock_path.read_text(encoding="utf-8").splitlines()[0].strip()
         assert int(pid_str) == os.getpid()
         lock.release()
 
@@ -134,11 +138,16 @@ class TestMergeLockStale:
         lock_path.write_text("not-a-number\n", encoding="utf-8")
 
         # Hold the lock in a subprocess so the main-process acquire fails.
+        # Leave a genuinely unparseable record: the first line is non-numeric,
+        # so the holder-record decoder reports corruption (pid=None) rather
+        # than mistaking it for a foreign-machine holder. ftruncate first so
+        # no bytes from a differently-sized prior record survive.
         script = f"""
 import fcntl, os, time
 fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT)
 fcntl.flock(fd, fcntl.LOCK_EX)
-os.write(fd, b"999999\\n")
+os.ftruncate(fd, 0)
+os.write(fd, b"not-a-number\\n")
 os.fsync(fd)
 time.sleep(5)
 """
@@ -206,7 +215,7 @@ class TestMergeLockBlocking:
                 # _write_pid recorded OUR pid after acquiring.
                 pid_str = lock2._resolved_path.read_text(
                     encoding="utf-8"
-                ).strip()
+                ).splitlines()[0].strip()
                 assert int(pid_str) == os.getpid()
             finally:
                 lock2.release()
@@ -239,7 +248,9 @@ class TestMergeLockBlocking:
         lock.acquire(blocking=True)
         try:
             assert lock._fd is not None
-            assert int(lock_path.read_text(encoding="utf-8").strip()) == os.getpid()
+            assert int(
+                lock_path.read_text(encoding="utf-8").splitlines()[0].strip()
+            ) == os.getpid()
         finally:
             lock.release()
 

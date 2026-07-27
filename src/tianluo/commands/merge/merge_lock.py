@@ -21,10 +21,25 @@ Staleness detection (non-blocking mode) is based on the lock-holder's
 PID: if the PID stored in the lock file no longer exists, the lock is
 considered stale and can be broken. The blocking mode does not need this
 because the kernel guarantees exclusivity on return from ``flock``.
+
+WHY: On a shared filesystem the lock file may be held by a process on a
+*different* machine, whose PID is meaningless in the local process table —
+probing it with ``kill(0)`` would spuriously report "dead" and break a lock
+that is in fact still held elsewhere (the confirmed root cause of a flow
+being executed concurrently by two engines). Every holder record therefore
+carries the writer's :func:`stable_machine_id`; PID-based staleness and
+``break_stale`` breaking are gated on :func:`is_local_machine`, so a holder
+on another host is always reported as busy (never stale, never broken).
+Legacy records that predate the machine-id field carry ``None`` and are
+treated as local, preserving the pre-upgrade behaviour. INVARIANT: a foreign
+(remote-machine) holder is never judged stale and never force-broken by the
+acquisition path — the only remaining eviction route is the explicit
+operator command ``luo merge-unlock --force``.
 """
 
 from __future__ import annotations
 from tianluo.runtime_paths import runtime_dir
+from tianluo.core.machine_id import is_local_machine, stable_machine_id
 
 import errno
 import fcntl
@@ -91,15 +106,90 @@ def _stale_break_jitter() -> float:
     return random.random()
 
 
-class MergeLockBusy(RuntimeError):
-    """Another ``luo merge`` process holds the lock."""
+# Fixed-width holder record: a 16-digit zero-padded PID line followed by a
+# machine-id line, then space-padded to a constant width. Keeping the record
+# length constant is what makes the pwrite-prefix-overwrite atomic for
+# concurrent readers (see MergeLock._write_pid / _read_holder_pid).
+_PID_FIELD_LEN = 16                 # zero-padded PID digits
+_PID_LINE_LEN = _PID_FIELD_LEN + 1  # + newline == 17 bytes (legacy record width)
+_HOLDER_RECORD_LEN = 128            # PID line + machine-id line + padding
+# Bytes available for the machine id (record minus the PID line minus the
+# machine line's own terminating newline). A longer id is truncated so the
+# record stays fixed-width rather than corrupting the pwrite overwrite.
+_MACHINE_FIELD_LEN = _HOLDER_RECORD_LEN - _PID_LINE_LEN - 1
 
-    def __init__(self, lock_file: Path, holder_pid: Optional[int] = None) -> None:
+
+def _encode_holder_record(pid: int, machine_id: Optional[str]) -> bytes:
+    """Encode ``(pid, machine_id)`` into the fixed-width holder record.
+
+    Layout: ``<pid:016d>\\n<machine_id>\\n`` right-padded with spaces to
+    exactly ``_HOLDER_RECORD_LEN`` bytes. The machine id is truncated at the
+    byte level to ``_MACHINE_FIELD_LEN`` so an unexpectedly long id cannot
+    push the record past its fixed width (which would break the concurrent-read
+    invariant). Spaces are stripped on read, so padding is invisible to
+    :func:`_decode_holder_record`.
+    """
+    pid_line = f"{pid:0{_PID_FIELD_LEN}d}\n".encode("utf-8")
+    mid_bytes = (machine_id or "").encode("utf-8")[:_MACHINE_FIELD_LEN]
+    record = pid_line + mid_bytes + b"\n"
+    record = record.ljust(_HOLDER_RECORD_LEN, b" ")
+    if len(record) != _HOLDER_RECORD_LEN:
+        raise RuntimeError(
+            f"Holder record length mismatch: {len(record)} != {_HOLDER_RECORD_LEN}"
+        )
+    return record
+
+
+def _decode_holder_record(data: bytes) -> tuple[Optional[int], Optional[str], bool]:
+    """Decode a holder record into ``(pid, machine_id, corrupt)``.
+
+    * A legacy 17-byte pure-PID record decodes to ``(pid, None, False)`` — a
+      single line with no machine id means "written before the machine-id
+      field existed", which callers treat as the local machine.
+    * A missing / empty machine line yields ``machine_id=None`` (also local).
+    * A first line present but unparseable as an int yields
+      ``(None, machine_id, True)`` so the caller can flag corruption.
+    """
+    text = data.decode("utf-8", errors="ignore")
+    lines = text.splitlines()
+    pid_text = lines[0].strip() if lines else ""
+    machine_id = lines[1].strip() if len(lines) > 1 else ""
+    machine_id = machine_id or None
+    if not pid_text:
+        return None, machine_id, False
+    try:
+        return int(pid_text), machine_id, False
+    except ValueError:
+        return None, machine_id, True
+
+
+class MergeLockBusy(RuntimeError):
+    """Another ``luo merge`` process holds the lock.
+
+    ``holder_machine`` is the :func:`stable_machine_id` recorded by the
+    holder, or ``None`` for a legacy record with no machine id. When the
+    holder is on another machine this exception (rather than
+    :class:`MergeLockStale`) is raised so the contended lock is treated as
+    busy and never force-broken.
+    """
+
+    def __init__(
+        self,
+        lock_file: Path,
+        holder_pid: Optional[int] = None,
+        *,
+        holder_machine: Optional[str] = None,
+    ) -> None:
         self.lock_file = lock_file
         self.holder_pid = holder_pid
+        self.holder_machine = holder_machine
         msg = f"Merge lock is held by another process: {lock_file}"
         if holder_pid is not None:
             msg += f" (pid={holder_pid})"
+        # Only echo the machine when it is a *foreign* holder — for a local
+        # holder the machine id is noise that clutters the common message.
+        if holder_machine is not None and not is_local_machine(holder_machine):
+            msg += f" on machine {holder_machine}"
         super().__init__(msg)
 
 
@@ -116,9 +206,14 @@ class MergeLockStale(RuntimeError):
         holder_pid: Optional[int] = None,
         *,
         corrupt: bool = False,
+        holder_machine: Optional[str] = None,
     ) -> None:
         self.lock_file = lock_file
         self.holder_pid = holder_pid
+        # Staleness is only ever judged for a local-machine holder, so the
+        # recorded machine (when present) is this machine — kept for symmetry
+        # with MergeLockBusy and to let callers surface it uniformly.
+        self.holder_machine = holder_machine
         # Distinguish "no PID recorded" (legitimately empty file) from
         # "PID record present but unparseable" so operators can see in
         # the error message whether the lock file is corrupt and needs
@@ -174,6 +269,12 @@ class MergeLock:
     # corruption-specific diagnostics in ``MergeLockStale`` rather than
     # conflating it with "no PID recorded".
     _last_read_corrupt: bool = False
+    # Sticky machine id from the most recent ``_read_holder_pid`` call (the
+    # holder's :func:`stable_machine_id`, or ``None`` for a legacy record with
+    # no machine field). ``acquire`` / ``inspect_lock`` read it to gate
+    # PID-based staleness on :func:`is_local_machine` — a foreign holder is
+    # never probed with the local process table.
+    _last_read_machine_id: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.lock_path.is_absolute():
@@ -181,11 +282,13 @@ class MergeLock:
         else:
             self._resolved_path = self.project_root / self.lock_path
 
-    # PID record is fixed-width: 16-digit zero-padded PID + newline = 17 bytes.
-    # Readers and writers BOTH respect this length so a single os.pwrite that
-    # overwrites the prefix produces a fully consistent record without ever
-    # going through a transient empty state.
-    _PID_RECORD_LEN = 17
+    # Holder record is fixed-width (``_HOLDER_RECORD_LEN`` bytes: a 16-digit
+    # zero-padded PID line + a machine-id line + space padding). Readers and
+    # writers BOTH respect this length so a single os.pwrite that overwrites
+    # the prefix produces a fully consistent record without ever going through
+    # a transient empty state. A legacy 17-byte pure-PID record is a valid
+    # prefix and decodes to ``machine_id=None`` (treated as local).
+    _HOLDER_RECORD_LEN = _HOLDER_RECORD_LEN
 
     # Bounded retry policy for the stale-lock break path.  Multiple
     # processes that simultaneously detect the same stale lock could
@@ -212,18 +315,20 @@ class MergeLock:
     def _read_holder_pid(self) -> Optional[int]:
         """Return the PID stored in the lock file, or None.
 
-        Side effect: clears ``self._last_read_corrupt`` at the start of
-        the call and sets it to ``True`` if the on-disk bytes could not
-        be parsed as an integer.  Callers that distinguish "no PID
-        recorded" from "corrupt PID" SHOULD inspect this flag after the
-        call returns ``None``.
+        Side effect: clears ``self._last_read_corrupt`` and
+        ``self._last_read_machine_id`` at the start of the call and sets
+        them from the decoded record.  Callers that distinguish "no PID
+        recorded" from "corrupt PID" SHOULD inspect ``_last_read_corrupt``
+        after the call returns ``None``; callers gating staleness on the
+        holder's machine read ``_last_read_machine_id`` after any call.
 
-        Reads at most ``_PID_RECORD_LEN`` bytes so that any trailing
-        bytes left over from a longer legacy record (or from the brief
-        window inside ``_write_pid`` between the prefix overwrite and
-        the truncation) cannot poison the integer parse.  Combined with
-        ``_write_pid``'s fixed-width prefix overwrite, this gives the
-        reader an atomic view of the PID even when contended.
+        Reads at most ``_HOLDER_RECORD_LEN`` bytes so that any trailing
+        bytes left over from a longer record (or from the brief window
+        inside ``_write_pid`` between the prefix overwrite and the
+        truncation) cannot poison the parse.  Combined with ``_write_pid``'s
+        fixed-width prefix overwrite, this gives the reader an atomic view
+        of the PID even when contended.  A legacy 17-byte pure-PID record is
+        a valid short prefix and decodes to ``machine_id=None``.
 
         Uses ``O_NOFOLLOW`` for TOCTOU consistency with ``acquire()``:
         if a symlink exists at the lock-file path, refuse to follow it
@@ -242,8 +347,9 @@ class MergeLock:
         except previously swallowed silently and could mask legitimate
         I/O errors and trigger unwarranted stale-lock-break paths).
         """
-        # Reset corruption flag so callers see only THIS read's status.
+        # Reset sticky read state so callers see only THIS read's status.
         self._last_read_corrupt = False
+        self._last_read_machine_id = None
         try:
             fd = os.open(
                 str(self._resolved_path),
@@ -267,52 +373,54 @@ class MergeLock:
         # Do NOT call os.close(fd) anywhere below — the with block handles it.
         try:
             with file_obj as f:
-                data = f.read(self._PID_RECORD_LEN)
+                data = f.read(self._HOLDER_RECORD_LEN)
         except OSError:
             return None
 
-        try:
-            text = data.decode("utf-8", errors="ignore").strip()
-            if text:
-                return int(text)
-        except ValueError:
-            # Unparseable PID record (legacy format, partial write, etc.).
-            # Distinguish this from "no PID recorded" by setting a
-            # sticky flag the caller (acquire()) can read so the
-            # surfaced ``MergeLockStale`` message points at corruption
-            # rather than the legitimate "fresh file" case.  Without
-            # this, a corrupted lock file becomes indistinguishable
-            # from "no PID recorded" and operators have no signal to
-            # act on.
+        pid, machine_id, corrupt = _decode_holder_record(data)
+        self._last_read_machine_id = machine_id
+        if corrupt:
+            # Unparseable PID record (partial write, non-numeric first line,
+            # etc.).  Distinguish this from "no PID recorded" by setting a
+            # sticky flag the caller (acquire()) can read so the surfaced
+            # ``MergeLockStale`` message points at corruption rather than the
+            # legitimate "fresh file" case.  Without this, a corrupted lock
+            # file becomes indistinguishable from "no PID recorded" and
+            # operators have no signal to act on.
             self._last_read_corrupt = True
             logger.warning(
                 "Merge lock PID record at %s is corrupt and could not be "
                 "parsed as an integer: data=%r — treating as stale. "
                 "Operators may need to delete this file manually.",
-                self._resolved_path, text,
+                self._resolved_path, data,
             )
-            return None
-        return None
+        return pid
 
     def _write_pid(self) -> None:
-        """Update the PID inside the lock file via the held fd.
+        """Update the PID + machine id inside the lock file via the held fd.
 
-        Writes the fixed-width PID record at offset 0 BEFORE truncating
+        Writes the fixed-width holder record at offset 0 BEFORE truncating
         any trailing bytes from a previous longer record.  Because the
-        record length is constant (``_PID_RECORD_LEN`` = 17 bytes) and
+        record length is constant (``_HOLDER_RECORD_LEN`` bytes) and
         ``_read_holder_pid`` reads at most that many bytes, a concurrent
         reader never sees a partial state:
 
           * Before our write begins: reader sees the full previous record.
-          * After ``os.pwrite`` returns: the first ``_PID_RECORD_LEN``
+          * After ``os.pwrite`` returns: the first ``_HOLDER_RECORD_LEN``
             bytes are the new record; trailing bytes (if any) are stale,
-            but readers cap their read at ``_PID_RECORD_LEN`` so they
+            but readers cap their read at ``_HOLDER_RECORD_LEN`` so they
             never observe them.
           * After ``os.ftruncate`` returns: trailing bytes are gone.
 
         This eliminates the truncate-then-write window where a reader
         could observe an empty file (``""`` → ``int("")`` raises and
         the holder appears stale).
+
+        WHY the machine id is stamped here: a shared-filesystem holder whose
+        PID lives in another host's process table must be identifiable as
+        foreign so the acquisition path refuses to treat it as stale. The id
+        comes from :func:`stable_machine_id` — the single source of truth
+        shared with ``run.pid`` and the daemon.
 
         Writing through the held fd preserves the ``flock`` binding
         (a temp-file + rename approach would replace the inode the
@@ -322,20 +430,19 @@ class MergeLock:
             raise RuntimeError(
                 "_write_pid called without an acquired lock fd"
             )
-        # Fixed-width PID record so every write overwrites the entire
-        # previous content.  A 16-digit field plus newline covers all
-        # realistic PIDs (max 2^22 on Linux ≈ 4 million, well under
-        # 16 digits).
-        pid_str = f"{os.getpid():016d}\n"
-        data = pid_str.encode("utf-8")
+        # Fixed-width holder record so every write overwrites the entire
+        # previous content.  A 16-digit PID field covers all realistic PIDs
+        # (max 2^22 on Linux ≈ 4 million, well under 16 digits); the machine
+        # id is truncated by the encoder if unexpectedly long.
+        data = _encode_holder_record(os.getpid(), stable_machine_id())
         # Explicit raise rather than ``assert`` so the invariant survives
         # ``python -O`` (which strips assert statements) and so the lint
         # rule "no production assert as runtime validation" is satisfied.
-        # The PID format is fixed-width, so a mismatch would indicate a
-        # programmer error in the encoding above; raise loudly.
-        if len(data) != self._PID_RECORD_LEN:
+        # The record is fixed-width, so a mismatch would indicate a
+        # programmer error in the encoder above; raise loudly.
+        if len(data) != self._HOLDER_RECORD_LEN:
             raise RuntimeError(
-                f"PID record length mismatch: {len(data)} != {self._PID_RECORD_LEN}"
+                f"Holder record length mismatch: {len(data)} != {self._HOLDER_RECORD_LEN}"
             )
         # Atomic prefix overwrite via os.pwrite (does not move the fd's
         # file offset, so concurrent readers using a separate fd are not
@@ -358,7 +465,7 @@ class MergeLock:
                 written += n
         # Truncate AFTER the prefix overwrite so any trailing bytes from
         # a previous longer record are removed.  Readers cap their read
-        # at _PID_RECORD_LEN so the trailing bytes are never observable.
+        # at _HOLDER_RECORD_LEN so the trailing bytes are never observable.
         os.ftruncate(self._fd, len(data))
         os.fsync(self._fd)
         # fsync the parent directory to ensure file metadata is durable.
@@ -452,6 +559,7 @@ class MergeLock:
         # *most recent* attempt, not "whichever sentinel happened to
         # be set".
         last_busy_pid: Optional[int] = busy_pid
+        last_busy_machine: Optional[str] = None
         last_oserror: Optional[OSError] = None
         last_outcome: Optional[str] = "busy" if busy_pid is not None else None
         for attempt in range(self._MAX_BREAK_STALE_ATTEMPTS):
@@ -488,9 +596,11 @@ class MergeLock:
             except OSError as exc2:
                 os.close(fd)
                 if exc2.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
-                    # Refresh the holder PID so the surfaced error
-                    # carries the latest known value.
+                    # Refresh the holder PID + machine so the surfaced error
+                    # carries the latest known values (the winner of the
+                    # unlink race may even be a process on another machine).
                     last_busy_pid = self._read_holder_pid()
+                    last_busy_machine = self._last_read_machine_id
                     last_outcome = "busy"
                     continue
                 last_oserror = exc2
@@ -502,7 +612,9 @@ class MergeLock:
         # than which sentinel happened to be non-None.
         if last_outcome == "oserror" and last_oserror is not None:
             raise last_oserror
-        raise MergeLockBusy(self._resolved_path, last_busy_pid)
+        raise MergeLockBusy(
+            self._resolved_path, last_busy_pid, holder_machine=last_busy_machine,
+        )
 
     def acquire(self, break_stale: bool = False, blocking: bool = False) -> None:
         """Acquire the exclusive merge lock.
@@ -575,6 +687,20 @@ class MergeLock:
             os.close(fd)
             if exc.errno in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
                 holder = self._read_holder_pid()
+                holder_machine = self._last_read_machine_id
+                # WHY: A holder on another machine's PID is meaningless in our
+                # process table, so we must NOT probe it with _is_pid_alive nor
+                # break_stale it — doing so is exactly the cross-machine
+                # double-writer bug this guard exists to prevent. Report it as
+                # busy (never stale) carrying the machine id so the caller can
+                # say "held on machine X". Legacy records (machine_id=None) are
+                # local, keeping pre-upgrade behaviour. INVARIANT: a foreign
+                # holder is never judged stale and never force-broken here.
+                if not is_local_machine(holder_machine):
+                    raise MergeLockBusy(
+                        self._resolved_path, holder,
+                        holder_machine=holder_machine,
+                    )
                 if holder is not None and not self._is_pid_alive(holder):
                     if break_stale:
                         fd = self._try_break_stale_and_acquire(
@@ -588,7 +714,10 @@ class MergeLock:
                         self._write_pid()
                         _HELD_LOCK_PATHS.add(str(self._resolved_path))
                         return
-                    raise MergeLockStale(self._resolved_path, holder)
+                    raise MergeLockStale(
+                        self._resolved_path, holder,
+                        holder_machine=holder_machine,
+                    )
                 # K8: If the lock file exists but the PID could not be parsed
                 # (legacy format, partial read, or corruption), treat it as
                 # stale when break_stale is True so operators have a path
@@ -612,20 +741,34 @@ class MergeLock:
                         return
                     raise MergeLockStale(
                         self._resolved_path, None, corrupt=is_corrupt,
+                        holder_machine=holder_machine,
                     )
-                raise MergeLockBusy(self._resolved_path, holder)
+                raise MergeLockBusy(
+                    self._resolved_path, holder, holder_machine=holder_machine,
+                )
             raise
 
         # flock succeeded — no other process holds the lock.  Check the
         # recorded PID to detect a stale lock left by a crashed process.
+        # Only meaningful for a local-machine holder: a foreign machine id
+        # left over here means the remote holder released (flock is free), so
+        # we simply take the lock — its PID is not probeable from this host.
         recorded = self._read_holder_pid()
-        if recorded is not None and recorded != os.getpid():
+        recorded_machine = self._last_read_machine_id
+        if (
+            recorded is not None
+            and recorded != os.getpid()
+            and is_local_machine(recorded_machine)
+        ):
             if not self._is_pid_alive(recorded):
                 if not break_stale:
                     # Stale lock detected and caller does not want to break it.
                     fcntl.flock(fd, fcntl.LOCK_UN)
                     os.close(fd)
-                    raise MergeLockStale(self._resolved_path, recorded)
+                    raise MergeLockStale(
+                        self._resolved_path, recorded,
+                        holder_machine=recorded_machine,
+                    )
                 # Stale lock — overwrite with our PID.
                 logger.warning("Overwriting stale merge lock (pid=%s)", recorded)
 
@@ -681,9 +824,15 @@ class LockStatus:
             ``False`` when ``holder_pid`` is ``None``.
         stale: Whether the lock can be cleaned up without ``--force`` —
             true when the file is absent, the holder PID is dead, no PID
-            is recorded, or the record is corrupt.
+            is recorded, or the record is corrupt. A holder on ANOTHER
+            machine is never stale (``alive=True``): its liveness cannot be
+            probed from here, so it is reported held and only ``--force`` (or
+            ``luo merge-unlock --force``) evicts it.
         corrupt: Whether a PID record was present but could not be parsed
             as an integer.
+        holder_machine: The :func:`stable_machine_id` recorded by the holder,
+            or ``None`` for a legacy record with no machine field (treated as
+            the local machine).
     """
 
     lock_file: Path
@@ -692,6 +841,7 @@ class LockStatus:
     alive: bool
     stale: bool
     corrupt: bool
+    holder_machine: Optional[str] = None
 
 
 @dataclass
@@ -741,6 +891,22 @@ def inspect_lock(
 
     holder = probe._read_holder_pid()
     corrupt = probe._last_read_corrupt
+    holder_machine = probe._last_read_machine_id
+
+    # A holder on another machine cannot be probed from here — report it as
+    # alive / not-stale so the auto-clean path leaves it intact and only an
+    # explicit --force evicts it (mirrors the acquisition-path machine guard).
+    if not is_local_machine(holder_machine):
+        return LockStatus(
+            lock_file=resolved,
+            exists=True,
+            holder_pid=holder,
+            alive=True,
+            stale=False,
+            corrupt=False,
+            holder_machine=holder_machine,
+        )
+
     if holder is None:
         # No PID recorded, or an unparseable (corrupt) record — both are
         # treated as stale (reclaimable without --force).
@@ -751,6 +917,7 @@ def inspect_lock(
             alive=False,
             stale=True,
             corrupt=corrupt,
+            holder_machine=holder_machine,
         )
 
     alive = probe._is_pid_alive(holder)
@@ -761,6 +928,7 @@ def inspect_lock(
         alive=alive,
         stale=not alive,
         corrupt=False,
+        holder_machine=holder_machine,
     )
 
 
