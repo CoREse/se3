@@ -191,7 +191,6 @@ class TestValidatePlanTaskRegression:
             "expectation_source": {"type": "plan_task", "verbatim_quote": quote},
             "evidence_lines": ["src/feature.py:10"],
             "missing_in": [],
-            "out_of_scope": False,
         }
 
     def _regression_issue(self, evidence="src/shared.py:5"):
@@ -208,7 +207,6 @@ class TestValidatePlanTaskRegression:
             },
             "evidence_lines": [evidence],
             "missing_in": [],
-            "out_of_scope": False,
         }
 
     def test_plan_task_issue_kept_when_quote_hits_task(self):
@@ -273,12 +271,15 @@ class TestValidatePlanTaskRegression:
         kept, _ = _validate_and_filter_issues([issue], self._inputs())
         assert len(kept) == 1
 
-    def test_out_of_scope_release_valve_still_applies(self):
+    def test_out_of_scope_no_longer_a_release_valve(self):
+        """The release valve is gone: a regression issue that self-marks
+        out_of_scope still runs the regression evidence path and is kept."""
         issue = self._regression_issue()
         issue["out_of_scope"] = True
         kept, stats = _validate_and_filter_issues([issue], self._inputs())
-        assert kept == []
-        assert stats["out_of_scope_count"] == 1
+        assert len(kept) == 1
+        assert stats["kept_count"] == 1
+        assert "out_of_scope_count" not in stats
 
     def test_wholly_missing_task_survives_via_missing_in(self):
         # A planned task implemented nowhere has NO changed lines to cite, so the

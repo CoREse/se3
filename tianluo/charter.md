@@ -113,6 +113,11 @@ treated as local, preserving pre-upgrade behaviour.
   错误；对 `tianluo.server` 包及其重依赖的引用必须延迟到 `tianluo-server` 入口真正运行。
 - **代码即真相源**：未来意图经 issue（`luo issue`）进入，不得改写 charter /
   code-index / why-comments 去描述尚未构建的未来。
+- **check 类步骤的 finding 只有一条去向**：任何 check 类步骤（self_check /
+  invariant_check 及后继同类步骤）报出的 finding，唯一去向是当场进入 fix loop
+  修复。不得引入丢弃、豁免、按 severity 分级放行，或『记为 issue 以后再修』等
+  任何绕过当场修复的通道。抑制无价值报告只能通过提高 prompt 侧的报告门槛与
+  证据落地校验来实现——前者留下痕迹，后者只筛『证据是否成立』而非『值不值得修』。
 
 ### Requirement: Workflow Conventions
 - 用 `luo commit` 而非 `git commit`（强制测试通过、拦截敏感文件）。

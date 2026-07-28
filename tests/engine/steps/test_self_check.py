@@ -28,7 +28,6 @@ def _valid_issue(
     actual: str = "returns None when input is empty",
     expected: str = "returns an empty list",
     divergence: str = "callers iterating the result get TypeError",
-    out_of_scope: bool = False,
 ) -> dict:
     """Build a fully-populated issue dict matching the new self_check
     schema. Used by tests that exercise the post-validation revision
@@ -50,7 +49,6 @@ def _valid_issue(
         },
         "evidence_lines": [f"{path}:{line}"],
         "missing_in": [],
-        "out_of_scope": out_of_scope,
     }
 
 
@@ -912,7 +910,6 @@ class TestValidateAndFilterIssues:
             },
             "evidence_lines": ["src/retry.py:42"],
             "missing_in": [],
-            "out_of_scope": False,
         }
         issue.update(overrides)
         return issue
@@ -926,35 +923,29 @@ class TestValidateAndFilterIssues:
         assert stats["kept_count"] == 1
         assert stats["input_count"] == 1
 
-    def test_out_of_scope_dropped(self):
+    def test_out_of_scope_no_longer_exempts(self):
+        """There is no exemption channel: a self-marked out_of_scope item
+        is validated on evidence like any other and kept when it passes."""
         from tianluo.engine.steps.self_check import _validate_and_filter_issues
         kept, stats = _validate_and_filter_issues(
             [self._good_issue(out_of_scope=True)], self._inputs()
         )
-        assert kept == []
-        assert stats["out_of_scope_count"] == 1
+        assert len(kept) == 1
+        assert stats["kept_count"] == 1
+        assert "out_of_scope_count" not in stats
 
-    def test_out_of_scope_logged_before_drop(self, caplog):
-        """An out_of_scope observation is dropped (not filed) but its
-        substance is logged (留痕) — description + evidence — so a real
-        signal does not disappear silently."""
-        import logging
-
+    def test_out_of_scope_item_still_subject_to_evidence_checks(self):
+        """Removing the release valve does not weaken evidence grounding:
+        an out_of_scope item with an ungrounded quote is still dropped —
+        for failing validation, not for being self-marked non-actionable."""
         from tianluo.engine.steps.self_check import _validate_and_filter_issues
 
         issue = self._good_issue(out_of_scope=True)
-        issue["description"] = "pre-existing flakiness in unrelated module"
-        issue["evidence_lines"] = ["src/legacy.py:7"]
-        issue["missing_in"] = []
-        with caplog.at_level(logging.INFO, logger="tianluo.engine.steps.self_check"):
-            kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        issue["expectation_source"]["verbatim_quote"] = "this phrase is not in the task"
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
         assert kept == []
-        assert stats["out_of_scope_count"] == 1
-        # The dropped item's description and evidence must appear in the log.
-        joined = "\n".join(r.getMessage() for r in caplog.records)
-        assert "out_of_scope" in joined
-        assert "pre-existing flakiness in unrelated module" in joined
-        assert "src/legacy.py:7" in joined
+        assert stats["quote_not_in_source_count"] == 1
+        assert "out_of_scope_count" not in stats
 
     def test_empty_quote_dropped(self):
         from tianluo.engine.steps.self_check import _validate_and_filter_issues
@@ -1132,12 +1123,13 @@ class TestPreviousIssueResolutions:
             },
             "evidence_lines": ["a.py:1"],
             "missing_in": [],
-            "out_of_scope": False,
         }
         empty_quote = dict(valid)
         empty_quote["expectation_source"] = {
             "type": "task_description", "verbatim_quote": "",
         }
+        # Self-marked out_of_scope carries no exemption: this one is kept
+        # because its evidence stands up, exactly like ``valid``.
         out_of_scope = dict(valid)
         out_of_scope["out_of_scope"] = True
 
@@ -1153,8 +1145,93 @@ class TestPreviousIssueResolutions:
 
         stats = step.outputs["validation_stats"]
         assert stats["input_count"] == 3
-        assert stats["kept_count"] == 1
+        assert stats["kept_count"] == 2
         assert stats["empty_quote_count"] == 1
-        assert stats["out_of_scope_count"] == 1
+        assert "out_of_scope_count" not in stats
         assert len(step.outputs["raw_issues"]) == 3
-        assert len(step.outputs["issues"]) == 1
+        assert len(step.outputs["issues"]) == 2
+
+
+class TestNoOutOfScopeExemption:
+    """Regression: a check-class step's findings have exactly one destination —
+    the fix loop, now. There is no exemption channel.
+
+    Origin (2026-07-28): a self_check pass whose findings were ALL self-marked
+    ``out_of_scope`` on the FIRST pass — no deferred stash, no carried issues
+    from an earlier pass to mask the discard — returned COMPLETED while the raw
+    LLM report rendered red. The WebUI showed a red "✗ 2 issues" next to a green
+    "✓ passed" at the same time. Before that, every discard happened to be
+    accompanied by other actionable issues, so it never released a flow visibly.
+    Keep this test: it is the only coverage of the unmasked case.
+    """
+
+    @pytest.fixture
+    def flow(self, tmp_path):
+        return FlowInstance(
+            flow_id="no-oos-exemption-flow",
+            task_description="Implement feature X",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "c",
+        )
+
+    def _step(self):
+        return Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Implement feature X",
+                "changes_made": {
+                    "files_changed": [
+                        {"path": "src/feature.py", "action": "modify"},
+                    ]
+                },
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                # First round, first pass: nothing carried, nothing deferred.
+                "fix_iteration": 0,
+                "max_fix_iterations": 10,
+            },
+        )
+
+    def test_all_findings_out_of_scope_first_pass_still_routes_to_fix(self, flow):
+        step = self._step()
+        oos_a = _valid_issue(severity="low", line=42)
+        oos_a["out_of_scope"] = True
+        oos_b = _valid_issue(severity="medium", line=77,
+                             actual="skips the trailing entry",
+                             expected="processes every entry",
+                             divergence="the last record is silently dropped")
+        oos_b["out_of_scope"] = True
+        response = json.dumps({
+            "issues": [oos_a, oos_b],
+            "summary": "observations only",
+        })
+
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert len(step.outputs["issues"]) == 2
+        assert step.outputs["actionable_count"] == len(step.outputs["issues"])
+        assert step.outputs["fix_needed"] is True
+        assert "out_of_scope_count" not in step.outputs["validation_stats"]
+
+    def test_prompt_and_schema_hint_no_longer_offer_the_field(self, flow):
+        """The LLM contract must not keep advertising a field that no longer
+        has any effect — a prompt promising a discard the handler does not
+        perform is worse than no field at all."""
+        step = self._step()
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = json.dumps({"issues": [], "summary": "ok"})
+            mock_cls.return_value = mock_caller
+            self_check_handler(step, flow)
+
+        prompt = mock_caller.call.call_args.kwargs["prompt"]
+        hint = mock_caller.call.call_args.kwargs["json_schema_hint"]
+        assert "out_of_scope" not in prompt
+        assert "out_of_scope" not in hint

@@ -424,7 +424,6 @@ def _build_why_comment_guard_issues(
                 },
                 "evidence_lines": [],
                 "missing_in": [rel],
-                "out_of_scope": False,
             })
     return issues
 
@@ -533,7 +532,8 @@ Each issue MUST be a JSON object with:
   The handler normalizes both the quote and the anchor pool and DROPS any issue whose quote is not a literal substring of the anchored material. Quote the substantive rule, not a generic word.
 - `evidence_lines`: array of `"path:N"` strings whose `path` appears in the Changes Made files. At least one entry required UNLESS `missing_in` is non-empty.
 - `missing_in`: array of file paths that the invariant required to be edited but were not.
-- `out_of_scope`: boolean. Set `true` for any concern that is not a recorded-invariant violation — the handler discards these.
+
+Report ONLY recorded-invariant violations. Everything you list that passes validation goes straight into a fix loop and WILL be changed in the code on the spot — there is no discard channel for concerns that are merely observations, preferences, or unrelated to a recorded invariant. Leave those out entirely.
 
 Respond in JSON format:
 ```json
@@ -549,8 +549,7 @@ Respond in JSON format:
                 "verbatim_quote": "..."
             }},
             "evidence_lines": ["src/foo.py:42"],
-            "missing_in": [],
-            "out_of_scope": false
+            "missing_in": []
         }}
     ],
     "summary": "Brief statement of whether any recorded invariant is violated"
@@ -769,7 +768,7 @@ def invariant_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 '"actual_behavior": "...", "expected_behavior": "...", '
                 '"divergence": "...", '
                 '"expectation_source": {"type": "charter|task_description|why_comment", "verbatim_quote": "..."}, '
-                '"evidence_lines": ["path:N"], "missing_in": [], "out_of_scope": false}], '
+                '"evidence_lines": ["path:N"], "missing_in": []}], '
                 '"summary": "..."}'
             ),
             required_keys=["issues"],

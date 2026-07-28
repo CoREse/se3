@@ -1,5 +1,13 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.0.3 - 2026-07-28
+
+- Fix self_check silently passing a step whose findings were all self-marked `out_of_scope` — every validated finding now routes to REVISION_NEEDED and the fix loop
+- Remove the `out_of_scope` field from the self_check and invariant_check output schemas, JSON examples, and compact retry prompts, so the model can no longer mark its own findings as non-actionable
+- Replace the prompt guidance that steered uncertain findings to `out_of_scope` with an explicit reporting bar: report only evidence-backed real defects, because everything reported gets fixed on the spot
+- Drop the `out_of_scope_count` key from `validation_stats`; the remaining evidence checks (verbatim quote, source-pool match, evidence_lines/missing_in, three-part behavior fields) and the `regression` quote exemption are unchanged
+- Record a charter Key Constraint that check-class findings have exactly one destination — immediate repair — with no discard, exemption, severity-graded pass, or defer-as-issue channel
+- Add regression coverage for a first-pass self_check whose findings are entirely `out_of_scope` with no carried-over items, plus the equivalent invariant_check path
 ## 12.0.2 - 2026-07-28
 
 - Fix concurrent execution of the same flow by two engine processes on different machines sharing one filesystem, which could duplicate a step's work and split fix-iteration counters

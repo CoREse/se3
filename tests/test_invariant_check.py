@@ -76,7 +76,6 @@ def _grounded_issue(quote: str, path: str) -> dict:
         "expectation_source": {"type": "charter", "verbatim_quote": quote},
         "evidence_lines": [f"{path}:10"],
         "missing_in": [],
-        "out_of_scope": False,
     }
 
 
@@ -136,7 +135,6 @@ def test_ungrounded_nit_is_filtered(tmp_path, monkeypatch):
         },
         "evidence_lines": ["src/foo.py:3"],
         "missing_in": [],
-        "out_of_scope": False,
     }
     state = _install_fake_caller(
         monkeypatch, [json.dumps({"issues": [ungrounded], "summary": "x"})]
@@ -311,3 +309,58 @@ def test_unparsable_llm_response_fails(tmp_path, monkeypatch):
 
     assert result is StepStatus.FAILED
     assert step.error_message
+
+
+# ---------------------------------------------------------------------------
+# no exemption channel
+# ---------------------------------------------------------------------------
+
+def test_all_findings_out_of_scope_still_route_to_fix(tmp_path, monkeypatch):
+    """Regression (2026-07-28): a check-class step's findings have exactly one
+    destination — the fix loop, now.
+
+    A self_check pass whose findings were ALL self-marked ``out_of_scope``, on
+    the first pass with nothing carried to mask the discard, returned COMPLETED
+    while the raw report rendered red (a red "✗ 2 issues" beside a green
+    "✓ passed"). invariant_check shares self_check's filter, so it must show the
+    same behaviour: a self-marked item is validated on its evidence like any
+    other and, when the evidence stands up, enters the fix loop.
+    """
+    quote = "The engine MUST never write project source files from a read-only step."
+    issue = _grounded_issue(quote, "src/foo.py")
+    issue["out_of_scope"] = True
+    state = _install_fake_caller(
+        monkeypatch, [json.dumps({"issues": [issue], "summary": "violation"})]
+    )
+    flow = _make_flow(tmp_path)
+    step = _make_step({
+        "charter": CHARTER_TEXT,
+        "changes_made": {"files_changed": ["src/foo.py"]},
+    })
+
+    result = invariant_check.invariant_check_handler(step, flow)
+
+    assert state["calls"] == 1
+    assert result is StepStatus.REVISION_NEEDED
+    assert len(step.outputs["issues"]) == 1
+    assert step.outputs["actionable_count"] == 1
+    assert "out_of_scope_count" not in step.outputs["validation_stats"]
+
+
+def test_prompt_no_longer_offers_out_of_scope(tmp_path, monkeypatch):
+    """The LLM contract must not advertise a field that no longer has any
+    effect: a prompt promising a discard the handler does not perform is worse
+    than no field at all."""
+    state = _install_fake_caller(
+        monkeypatch, [json.dumps({"issues": [], "summary": "clean"})]
+    )
+    flow = _make_flow(tmp_path)
+    step = _make_step({
+        "charter": CHARTER_TEXT,
+        "changes_made": {"files_changed": ["src/foo.py"]},
+    })
+
+    invariant_check.invariant_check_handler(step, flow)
+
+    assert state["calls"] == 1
+    assert "out_of_scope" not in state["prompts"][0]

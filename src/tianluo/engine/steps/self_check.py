@@ -53,8 +53,24 @@ logger = logging.getLogger(__name__)
 #     quote check and must instead ground on evidence_lines.
 #   - evidence_lines pointing at changes_made.files_changed paths, or
 #     missing_in for "should-have-been-edited but wasn't" cases.
-#   - out_of_scope=True as an explicit release valve for non-actionable
-#     observations; handler discards out_of_scope items with telemetry.
+#
+# INVARIANT: a finding reported by a check-class step has exactly one
+# destination — the fix loop, right now. There is no exemption channel: no
+# handler-side discard of "non-actionable" items, no severity-graded pass,
+# no "file it as an issue and fix it later". Every item that survives
+# validation drives REVISION_NEEDED.
+#
+# WHY: the validators below answer only ONE question — does the evidence
+# stand up? — never "is this worth fixing?". Letting the handler drop items
+# on the LLM's own worth-fixing self-assessment silently released real
+# defects (a pass whose findings were ALL self-marked non-actionable came
+# back green while the raw report showed red). Scope creep from
+# observation-only reports is instead suppressed one layer earlier, at the
+# LLM's reporting decision: the prompt sets an explicit reporting bar
+# (report only evidence-backed real defects, because everything reported
+# WILL be fixed on the spot), backed by the evidence-grounding pipeline
+# here. Suppression by reporting bar leaves a trace in the report;
+# suppression by handler discard does not.
 #
 # Items failing any check are dropped from the issue list and tallied in
 # ``validation_stats`` (also surfaced via outputs and a single log line)
@@ -293,24 +309,25 @@ def _validate_and_filter_issues(
     Returns a tuple ``(kept_issues, stats)`` where ``stats`` is a dict
     of per-rejection-reason counts. The pipeline is:
 
-    1. ``out_of_scope == True`` → drop (counted in ``out_of_scope_count``)
-    2. ``verbatim_quote`` empty after normalize → drop
-    3. ``verbatim_quote`` not a substring of any source-pool entry → drop
-    4. ``evidence_lines`` / ``missing_in`` provides no real grounding → drop
-    5. ``actual_behavior`` / ``expected_behavior`` / ``divergence`` empty → drop
+    1. ``verbatim_quote`` empty after normalize → drop
+    2. ``verbatim_quote`` not a substring of any source-pool entry → drop
+    3. ``evidence_lines`` / ``missing_in`` provides no real grounding → drop
+    4. ``actual_behavior`` / ``expected_behavior`` / ``divergence`` empty → drop
+
+    Every check asks only whether the evidence stands up — never whether the
+    finding is worth fixing. Anything that survives is actionable by definition.
 
     Exception: ``expectation_source.type == "regression"`` issues are exempt
-    from the verbatim-quote checks (2 & 3). A regression protects PRE-EXISTING
+    from the verbatim-quote checks (1 & 2). A regression protects PRE-EXISTING
     behavior outside the task's textual scope, which by definition has no entry
     in the source pool; grounding it on a quote would be impossible. Instead the
-    evidence grounding (4) is mandatory — the issue must point at the changed
+    evidence grounding (3) is mandatory — the issue must point at the changed
     line(s) responsible. ``plan_task`` issues use the ordinary quote path: the
     source pool now includes task_groups text, so their quote matches there.
     """
     stats = {
         "input_count": 0,
         "kept_count": 0,
-        "out_of_scope_count": 0,
         "empty_quote_count": 0,
         "quote_not_in_source_count": 0,
         "bad_evidence_count": 0,
@@ -331,27 +348,6 @@ def _validate_and_filter_issues(
         if not isinstance(issue, dict):
             stats["non_dict_count"] += 1
             continue
-        if issue.get("out_of_scope") is True:
-            stats["out_of_scope_count"] += 1
-            # 留痕: an out_of_scope observation is dropped (not filed as an
-            # issue, to avoid issue explosion), but its substance must not
-            # disappear silently. Log the description plus whatever evidence
-            # the LLM supplied so a real signal stays recoverable from logs.
-            description = (
-                issue.get("description")
-                or issue.get("title")
-                or issue.get("actual_behavior")
-                or "(no description)"
-            )
-            logger.info(
-                "self_check dropped out_of_scope issue (logged, not filed): "
-                "%s | evidence_lines=%s | missing_in=%s",
-                description,
-                issue.get("evidence_lines") or [],
-                issue.get("missing_in") or [],
-            )
-            continue
-
         source = issue.get("expectation_source") or {}
         src_type = source.get("type", "") if isinstance(source, dict) else ""
         quote = (
@@ -450,7 +446,6 @@ Each issue MUST be a JSON object with these fields:
     - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in `evidence_lines` pointing at the changed line(s) that broke the behavior.
 - `evidence_lines`: array of `"path:N"` strings, where `path` MUST appear in `changes_made.files_changed` (the handler verifies). At least one entry required UNLESS `missing_in` is non-empty.
 - `missing_in`: array of file paths that should have been edited/created but were not. Use this for any issue that cannot point at a changed line — "missed integration point" issues AND a planned `plan_task` that is ENTIRELY unimplemented (list the file(s) that should have carried it).
-- `out_of_scope`: boolean. Set to `true` if the concern is a suggestion / observation rather than an actionable bug — the handler will discard out_of_scope items, so this is the correct release valve. Do NOT downgrade observations to `low` severity; use this field instead.
 
 ## Previous Issue Resolutions (HARD requirement when prev_issues are listed)
 
@@ -460,9 +455,12 @@ If the Fix Context above includes "Previously Reported Issues", you MUST emit a 
 - "fixed" — the change in `changes_made` resolves it; do NOT also list it again under `issues`.
 - "still_present" — the change did not resolve it; ALSO list it again under `issues` with full schema.
 
+## Reporting Bar (there is no discard channel — everything you report gets fixed)
+
+Report ONLY real defects you can back with evidence. There is no "observation only" escape hatch and no severity low enough to be ignored: every issue you list that passes validation goes straight into a fix loop and WILL be changed in the code on the spot. So do NOT report pure preferences, style opinions, speculative "might be nice" hardening, or observations you would not want someone to act on. If you cannot state a concrete wrong result under a concrete input, it is not an issue — leave it out.
+
 ## Soft guidance (handler does not enforce, but this is the team's preference)
 
-- If you're unsure whether something is a real bug or just a preference, prefer `out_of_scope=true` over a low-severity issue.
 - Avoid tentative phrasing in `actual_behavior` / `expected_behavior` / `divergence` ("could fail", "may not handle", "consider", "observation only"). State the failure as a concrete fact ("returns 0 instead of None when X", "raises KeyError when Y", "silently overwrites Z").
 - A `verbatim_quote` of one or two generic words is unlikely to ground a real issue. Quote a substantive phrase that pins down what the user actually asked for.
 
@@ -480,8 +478,7 @@ Respond in JSON format:
                 "verbatim_quote": "..."
             }},
             "evidence_lines": ["src/foo.py:42"],
-            "missing_in": [],
-            "out_of_scope": false
+            "missing_in": []
         }}
     ],
     "previous_issue_resolutions": [
@@ -772,7 +769,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 '"actual_behavior": "...", "expected_behavior": "...", '
                 '"divergence": "...", '
                 '"expectation_source": {"type": "task_description|spec|user_interjection|plan_task|regression", "verbatim_quote": "..."}, '
-                '"evidence_lines": ["path:N"], "missing_in": [], "out_of_scope": false}], '
+                '"evidence_lines": ["path:N"], "missing_in": []}], '
                 '"previous_issue_resolutions": [{"prev_issue_summary": "...", "status": "fixed|still_present"}], '
                 '"summary": "..."}'
             ),
