@@ -1596,7 +1596,7 @@ def test_resume_flow_completed_returns_409(client_and_app):
 
 def test_resume_flow_running_returns_409_with_still_running_detail(client_and_app):
     """A RUNNING flow (live process holds it) is rejected with an explicit
-    409 'still running' detail, NOT a misleading resume_dispatched.
+    409 'running on machine X' detail, NOT a misleading resume_dispatched.
 
     Acceptance point (3): calling resume on a running flow yields a clear
     rejection rather than an optimistic dispatched receipt.
@@ -1631,7 +1631,10 @@ def test_resume_flow_running_returns_409_with_still_running_detail(client_and_ap
         body = resp.json()
         # The receipt must be an explicit rejection, never resume_dispatched.
         assert body.get("status") != "resume_dispatched"
-        assert "该 flow 仍在运行，无法 resume" == body.get("detail")
+        # The rejection names the owning machine: on a shared filesystem the
+        # holder may be a run on another host, and the operator needs to know
+        # WHERE to go (luo end-session) rather than just that it is busy.
+        assert "该 flow 正在机器 m1 上运行，无法 resume" == body.get("detail")
 
 
 def test_resume_flow_running_but_dead_is_resumable(client_and_app):

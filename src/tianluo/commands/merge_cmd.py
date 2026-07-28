@@ -979,6 +979,29 @@ def _run_deferred_branch_cleanup(project_root: Path, report, branches: list[str]
             )
 
 
+def _lock_busy_message(exc) -> str:
+    """Render the "merge lock is busy" message for a :class:`MergeLockBusy`.
+
+    A holder on ANOTHER machine gets its own message: the generic one points at
+    a PID that does not exist in this machine's process table and offers no way
+    to find the real holder, so the operator needs the holding machine named
+    before they can check it (or decide on ``luo merge-unlock --force``).
+    """
+    from tianluo.core.machine_id import is_local_machine
+
+    if not is_local_machine(getattr(exc, "holder_machine", None)):
+        return t(
+            "cli.merge.lock_busy_remote_machine",
+            machine=exc.holder_machine,
+            holder_pid=exc.holder_pid,
+        )
+    return t(
+        "cli.merge.lock_busy",
+        holder_pid=exc.holder_pid,
+        lock_file=exc.lock_file,
+    )
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "fast",
@@ -1364,14 +1387,7 @@ def run_merge(
             # lock on every exit path, including an orchestrator exception.
             lock.release()
     except MergeLockBusy as exc:
-        render_text(
-            t(
-                "cli.merge.lock_busy",
-                holder_pid=exc.holder_pid,
-                lock_file=exc.lock_file,
-            ),
-            title=t("cli.merge.lock_busy_title"),
-        )
+        render_text(_lock_busy_message(exc), title=t("cli.merge.lock_busy_title"))
         return 1
     except MergeLockStale as exc:
         if exc.holder_pid is None:

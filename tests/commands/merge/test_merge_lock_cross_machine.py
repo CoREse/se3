@@ -200,6 +200,182 @@ time.sleep(5)
         assert status.stale is False
 
 
+class TestBreakStaleRetryAbortsOnForeignWinner:
+    """A foreign holder that wins the unlink race must stop the break loop.
+
+    ``_try_break_stale_and_acquire`` is entered on a *local* dead-PID verdict,
+    but between our unlink and our flock a process on another machine can
+    create + lock the new file. Retrying the unlink would then evict a live
+    remote writer — the cross-machine double-writer this guard exists to
+    prevent — so the refreshed foreign holder must abort the loop immediately.
+    """
+
+    def test_retry_stops_unlinking_once_holder_is_foreign(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import errno
+        import fcntl
+
+        path = _lock_path(tmp_project)
+        # Local holder with a dead PID: the classic stale lock that legitimately
+        # enters the break path.
+        path.write_bytes(ml._encode_holder_record(_DEAD_PID, stable_machine_id()))
+
+        unlinks = {"count": 0}
+        real_unlink = Path.unlink
+
+        def _counting_unlink(self, *args, **kwargs):
+            if str(self) == str(path):
+                unlinks["count"] += 1
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _counting_unlink)
+
+        calls = {"flock": 0}
+        foreign_record = ml._encode_holder_record(_DEAD_PID, _FOREIGN_MACHINE)
+
+        def _racing_flock(fd, operation):
+            calls["flock"] += 1
+            # Call 1 is ``acquire``'s own probe (the stale local record is still
+            # on disk). From call 2 on we are inside the break loop: simulate a
+            # machine-B process having created + locked the fresh lock file.
+            if calls["flock"] >= 2:
+                path.write_bytes(foreign_record)
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(fcntl, "flock", _racing_flock)
+
+        lock = MergeLock(tmp_project)
+        with pytest.raises(MergeLockBusy) as exc_info:
+            lock.acquire(break_stale=True)
+
+        assert exc_info.value.holder_machine == _FOREIGN_MACHINE
+        # Exactly one unlink: the break attempt made on the (valid) local stale
+        # verdict. Every later attempt would have destroyed machine B's lock.
+        assert unlinks["count"] == 1
+        # Machine B's record survives untouched.
+        assert path.read_bytes()[: ml._HOLDER_RECORD_LEN] == foreign_record
+
+    def test_retry_stops_when_race_winner_has_not_written_its_record_yet(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An EAGAIN on a still-EMPTY record must not trigger another unlink.
+
+        The race winner creates + flocks the fresh lock file BEFORE it finishes
+        ``_write_pid``, so for a moment the record is blank. Blank decodes to
+        ``machine_id=None``, and the "legacy record == local machine" rule is
+        only safe for a record that was actually written — applying it here
+        would unlink a live holder's lock file on the next attempt.
+        """
+        import errno
+        import fcntl
+
+        path = _lock_path(tmp_project)
+        path.write_bytes(ml._encode_holder_record(_DEAD_PID, stable_machine_id()))
+
+        unlinks = {"count": 0}
+        real_unlink = Path.unlink
+
+        def _counting_unlink(self, *args, **kwargs):
+            if str(self) == str(path):
+                unlinks["count"] += 1
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _counting_unlink)
+
+        calls = {"flock": 0}
+
+        def _racing_flock(fd, operation):
+            calls["flock"] += 1
+            # Call 1 is acquire()'s own probe (the local stale record is still on
+            # disk). From call 2 on we are inside the break loop: the winner has
+            # created + flocked the file but not yet written its holder record.
+            if calls["flock"] >= 2:
+                path.write_bytes(b"")
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(fcntl, "flock", _racing_flock)
+
+        lock = MergeLock(tmp_project)
+        with pytest.raises(MergeLockBusy):
+            lock.acquire(break_stale=True)
+        assert unlinks["count"] == 1
+
+    def test_retry_stops_when_race_winner_is_a_live_local_pid(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A live LOCAL winner of the unlink race is busy, not re-breakable."""
+        import errno
+        import fcntl
+
+        path = _lock_path(tmp_project)
+        path.write_bytes(ml._encode_holder_record(_DEAD_PID, stable_machine_id()))
+
+        unlinks = {"count": 0}
+        real_unlink = Path.unlink
+
+        def _counting_unlink(self, *args, **kwargs):
+            if str(self) == str(path):
+                unlinks["count"] += 1
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _counting_unlink)
+
+        calls = {"flock": 0}
+        # Our own pid is unambiguously alive in the local process table.
+        live_record = ml._encode_holder_record(os.getpid(), stable_machine_id())
+
+        def _racing_flock(fd, operation):
+            calls["flock"] += 1
+            if calls["flock"] >= 2:
+                path.write_bytes(live_record)
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(fcntl, "flock", _racing_flock)
+
+        lock = MergeLock(tmp_project)
+        with pytest.raises(MergeLockBusy) as exc_info:
+            lock.acquire(break_stale=True)
+        assert exc_info.value.holder_pid == os.getpid()
+        assert unlinks["count"] == 1
+        assert path.read_bytes()[: ml._HOLDER_RECORD_LEN] == live_record
+
+    def test_retry_continues_while_holder_stays_local(
+        self, tmp_project: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The bounded local retry loop is unchanged (requirement 5d)."""
+        import errno
+        import fcntl
+
+        path = _lock_path(tmp_project)
+        path.write_bytes(ml._encode_holder_record(_DEAD_PID, stable_machine_id()))
+
+        unlinks = {"count": 0}
+        real_unlink = Path.unlink
+
+        def _counting_unlink(self, *args, **kwargs):
+            if str(self) == str(path):
+                unlinks["count"] += 1
+            return real_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", _counting_unlink)
+
+        local_record = ml._encode_holder_record(_DEAD_PID, stable_machine_id())
+
+        def _local_busy_flock(fd, operation):
+            path.write_bytes(local_record)
+            raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+        monkeypatch.setattr(fcntl, "flock", _local_busy_flock)
+        # No sleeping between attempts — the backoff is not under test.
+        monkeypatch.setattr(ml.MergeLock, "_BREAK_STALE_BASE_BACKOFF_S", 0.0)
+
+        lock = MergeLock(tmp_project)
+        with pytest.raises(MergeLockBusy):
+            lock.acquire(break_stale=True)
+        assert unlinks["count"] == MergeLock._MAX_BREAK_STALE_ATTEMPTS
+
+
 # --------------------------------------------------------------------------
 # (c-lock) Legacy no-machine record is treated as local
 # --------------------------------------------------------------------------

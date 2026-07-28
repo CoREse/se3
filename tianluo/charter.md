@@ -63,6 +63,16 @@ flow（相同步骤/状态持久化/`--resume`/`--type`），成功后经重量�
 queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式的 flow body
 不持该锁，故多个 `--worktree` run 可并发执行，仅在各自最终 merge 处竞争。
 
+**Cross-machine single writer.** Project state may live on a filesystem shared by
+several machines, so process liveness is not decidable from the local process table
+alone. Every on-disk execution-ownership marker (the merge lock holder record and the
+run pid file) carries a stable machine identity: a marker may be probed against the
+local process table — and hence declared stale and reclaimed — only when it belongs to
+the current machine. A marker owned by another machine is always treated as held; it is
+never auto-broken, and clearing a duplicate process on the far side goes through an
+explicit operator entry point. Markers written before machine identity existed are
+treated as local, preserving pre-upgrade behaviour.
+
 **注意:** 每个目录/模块/符号『在哪、干嘛、有哪些关键符号』这类机械定位信息
 **不写在这里**，由 code-index 自动维护、按需查阅（`luo code-index` 显示顶层
 地图，`luo code-index show <path>` 钻取到函数级）。charter 只承载机械结构

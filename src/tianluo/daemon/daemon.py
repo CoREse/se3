@@ -214,6 +214,32 @@ class ProjectCommandError(Exception):
         self.code = code
 
 
+def _worktree_state_dir_for_flow(root: Path, flow_id: str) -> Optional[Path]:
+    """Return the state dir of *root*'s isolation worktree running *flow_id*.
+
+    WHY it exists here rather than reusing ``commands.run``: the daemon's resume
+    guard only needs the worktree's state directory, and importing the CLI's
+    heavy run module into the daemon event-loop process for that would drag in
+    the whole engine. Scans both runtime layouts (``tianluo/`` and legacy
+    ``se3/``) and reads only the size-guarded engine header. Returns ``None``
+    when *root* has no worktree carrying that flow (the common main-root case).
+    """
+    from ..runtime_paths import dual_runtime_glob
+
+    worktrees_dir = runtime_dir(root) / "worktrees"
+    if not worktrees_dir.is_dir():
+        return None
+    for engine_file in sorted(
+        dual_runtime_glob(worktrees_dir, "*/", "state/engine.json")
+    ):
+        data = read_engine_header(engine_file, active=True)
+        if data is None:
+            continue
+        if str(data.get("flow_id") or "") == str(flow_id):
+            return engine_file.parent
+    return None
+
+
 class Daemon:
     """The resident control-plane process."""
 
@@ -401,11 +427,45 @@ class Daemon:
         # means an active cross-machine run.
         from ..core.run_pidfile import foreign_run_holder
 
-        foreign_machine = foreign_run_holder(state_dir)
-        if foreign_machine is not None:
+        # INVARIANT: ownership is read from exactly ONE state dir — the one the
+        # target flow actually writes. A ``--worktree`` flow stamps its marker
+        # inside its own worktree, never in the main root (``run_worktree_mode``
+        # passes ``manage_pidfile=False`` down to ``run_flow``), so its worktree
+        # marker is the sole authority: the main root's marker may belong to an
+        # unrelated run there, and a worktree flow body shares no state file with
+        # the main root, so letting that record refuse would wedge the worktree
+        # flow behind a run it can never collide with.
+        wt_state_dir = _worktree_state_dir_for_flow(root, flow_id)
+        # WHY the attribution matters: a project root's marker is per state dir,
+        # not per flow, so it may name a live run of a DIFFERENT flow. The
+        # refusal is the same either way (both engines would write the root's
+        # single-slot engine.json), but claiming the *requested* flow runs there
+        # — and pointing at ``luo end-session`` for it — would send the operator
+        # to kill an unrelated live session on that host. A worktree state dir is
+        # resolved *by* flow_id, so it can host no other flow: an unstamped
+        # marker there is still this flow's.
+        if wt_state_dir is not None:
+            holder = foreign_run_holder(wt_state_dir)
+            holder_owns_flow = holder is not None and holder.owns_flow(
+                flow_id, flow_scoped=True
+            )
+        else:
+            holder = foreign_run_holder(state_dir)
+            holder_owns_flow = holder is not None and holder.owns_flow(flow_id)
+        if holder is not None:
+            machine = holder.machine_id
+            if holder_owns_flow:
+                raise ValueError(
+                    f"Flow {flow_id} is running on machine {machine}; "
+                    f"cannot resume it from here. If that run is gone, clear its "
+                    f"marker by running 'luo end-session' on {machine}"
+                )
+            other = holder.flow_id or "unknown"
             raise ValueError(
-                f"Flow {flow_id} is running on machine {foreign_machine}; "
-                f"cannot resume it from here"
+                f"Project {root} has a live run on machine {machine} "
+                f"(flow {other}); cannot resume flow {flow_id} from here — a "
+                f"second engine would race the same engine.json. Wait for that "
+                f"run to finish, or clear its marker on {machine} once it is gone"
             )
 
         # Guard against double-spawn: refuse to resume into a project root that

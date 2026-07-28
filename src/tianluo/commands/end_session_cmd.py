@@ -155,6 +155,26 @@ def end_session(
         results.append((t("end_session.step.terminate_process"), "FAIL", str(e)[:80]))
         logger.warning("Step 3 (terminate process) failed: %s", e)
 
+    # -- Step 3b: clear an abandoned LOCAL run.pid marker -------------------
+    # Only meaningful once the process is confirmed gone. This is the operator
+    # recovery path the cross-machine resume refusal points at: the marker can
+    # only be judged dead on the host that wrote it, so end-session here is
+    # what unblocks resuming the flow from any other machine.
+    if terminate_ok:
+        cleared_roots = [
+            root
+            for root in _run_marker_roots(project_root, wt_record)
+            if _clear_stale_local_run_pidfile(root)
+        ]
+        for root in cleared_roots:
+            results.append(
+                (
+                    t("end_session.step.clear_run_marker"),
+                    "OK",
+                    t("end_session.detail.run_marker_cleared", path=str(root)),
+                )
+            )
+
     # -- Step 4: archive ---------------------------------------------------
     # Refuse to archive/clean while the session process is still alive: the
     # on-disk worktree + engine snapshot are still being written to, so a
@@ -431,11 +451,77 @@ def _read_run_pidfile(state_root: Path) -> Optional[int]:
     Parses both the machine-aware two-line record and the legacy single-line
     (bare pid) record via the shared codec; only the pid is returned so the
     existing call sites are unchanged.
+
+    WHY the machine gate: on a shared filesystem the marker may name a pid on
+    ANOTHER host, where that number means nothing in our process table — an
+    unrelated local ``luo run`` that happens to hold the same pid would match
+    the liveness probe and be signalled by end-session while the real remote
+    run keeps going. A foreign record therefore yields ``None``; only the
+    owning machine (and legacy unstamped records, treated as local) may act on
+    it. Clearing an abandoned foreign marker is the owning host's job — see
+    :func:`_clear_stale_local_run_pidfile`.
     """
+    from ..core.machine_id import is_local_machine
     from ..core.run_pidfile import read_run_pidfile
 
-    pid, _machine_id = read_run_pidfile(runtime_dir(state_root) / "state")
+    pid, machine_id = read_run_pidfile(runtime_dir(state_root) / "state")
+    if pid is not None and not is_local_machine(machine_id):
+        logger.debug(
+            "Ignoring run.pid at %s: recorded on machine %s", state_root, machine_id
+        )
+        return None
     return pid
+
+
+def _run_marker_roots(
+    project_root: Path, wt_record: Optional[Dict[str, Any]]
+) -> List[Path]:
+    """Roots whose ``run.pid`` marker belongs to the session being ended.
+
+    A ``--worktree`` run writes its marker into the worktree's own state dir,
+    so both it and the main root are candidates (mirrors the discovery order in
+    :func:`_discover_pids_for_flow`).
+    """
+    roots: List[Path] = []
+    if wt_record and wt_record.get("worktree_path"):
+        roots.append(Path(wt_record["worktree_path"]))
+    roots.append(Path(project_root))
+    return roots
+
+
+def _clear_stale_local_run_pidfile(state_root: Path) -> bool:
+    """Remove ``<state_root>/tianluo/state/run.pid`` if it is a dead LOCAL marker.
+
+    WHY this exists: a run killed without running its ``finally`` (SIGKILL, OOM,
+    host reboot) leaves the marker behind. Cross-machine resume guards refuse a
+    resume while a marker names another host, so an abandoned marker would make
+    the project permanently un-resumable from every other machine. Running
+    ``luo end-session`` on the owning host — the recovery the refusal message
+    points at — clears it here, which is the only place that can: liveness of
+    the recorded pid is only decidable on the machine that wrote it.
+
+    Only ever unlinks a marker whose machine id is this machine (or absent, i.e.
+    a legacy record) AND whose pid is no longer a live ``luo run``; a foreign or
+    still-live marker is left untouched. Never raises.
+    """
+    try:
+        from ..core.machine_id import is_local_machine
+        from ..core.run_pidfile import RUN_PID_FILENAME, read_run_pidfile
+
+        state_dir = runtime_dir(state_root) / "state"
+        pid_file = state_dir / RUN_PID_FILENAME
+        if not pid_file.exists():
+            return False
+        pid, machine_id = read_run_pidfile(state_dir)
+        if not is_local_machine(machine_id):
+            return False
+        if pid is not None and pid != os.getpid() and _pid_is_live_se3_run(pid):
+            return False
+        pid_file.unlink()
+        return True
+    except Exception:  # noqa: BLE001 - the marker is purely advisory
+        logger.debug("Failed to clear stale run.pid at %s", state_root, exc_info=True)
+        return False
 
 
 def _pid_is_live_se3_run(pid: int) -> bool:

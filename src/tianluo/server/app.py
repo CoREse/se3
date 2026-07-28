@@ -1131,7 +1131,7 @@ def create_app(
             # The flow exists and belongs to the caller but is not resumable.
             # Distinguish the two reasons so the user gets an honest receipt
             # instead of an optimistic dispatched.
-            holder_machine, existing_flow = existing
+            _resolved_machine, existing_flow = existing
             status = str(existing_flow.get("status") or "").lower()
             if status == "completed":
                 raise HTTPException(
@@ -1145,9 +1145,44 @@ def create_app(
             # can tell the operator *where* it is running — on a shared
             # filesystem the flow may be held by a run on another host that this
             # server (and that host's process table) cannot terminate remotely.
-            raise HTTPException(
+            #
+            # WHY the holder is resolved separately instead of reusing the
+            # machine ``get_flow`` returned: that resolution is reachable-first
+            # (it answers "which daemon can serve this request"), so on a shared
+            # filesystem — where every daemon aggregating the same engine.json
+            # reports the same flow — it can name a mere observer. Naming the
+            # wrong host is worse than naming none: the operator would go run
+            # ``luo end-session`` on a machine that holds nothing.
+            # ``find_live_holder_machine`` returns ``None`` unless exactly one
+            # reporter shows the flow live on itself, and the refusal then stays
+            # machine-agnostic.
+            #
+            # WHY a JSONResponse instead of HTTPException: the machine id has to
+            # reach the browser as a MACHINE-READABLE field so the WebUI renders
+            # the refusal from its own language pack (an en-US console must not
+            # be shown this Chinese sentence). ``detail`` stays as the
+            # non-browser (curl / API) fallback wording, and ``reason`` lets the
+            # browser localize the machine-agnostic variant too.
+            holder_machine = await state.find_live_holder_machine(
+                flow_id, owner=scope
+            )
+            if holder_machine:
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "detail": (
+                            f"该 flow 正在机器 {holder_machine} 上运行，无法 resume"
+                        ),
+                        "holder_machine": holder_machine,
+                        "reason": "still_running",
+                    },
+                )
+            return JSONResponse(
                 status_code=409,
-                detail=f"该 flow 正在机器 {holder_machine} 上运行，无法 resume",
+                content={
+                    "detail": "该 flow 仍在运行，无法 resume",
+                    "reason": "still_running",
+                },
             )
         machine_id, flow = result
         if not manager.is_connected(machine_id):

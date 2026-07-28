@@ -1032,6 +1032,7 @@ def merge_unlock_cmd(
     """
     from .commands.merge.merge_lock import release_merge_lock
     from .commands.run import get_project_root
+    from .core.machine_id import is_local_machine
 
     project_root = get_project_root()
     outcome = release_merge_lock(project_root, force=force)
@@ -1049,7 +1050,17 @@ def merge_unlock_cmd(
             else t("cli.merge_unlock.pid_none_recorded")
         )
         lines.append(t("cli.merge_unlock.holder_pid", pid=pid_str))
-        if status.corrupt:
+        if not is_local_machine(status.holder_machine):
+            # A foreign holder is reported alive (its PID is unprobeable from
+            # here), but the generic "alive" line hides the one fact the
+            # operator needs before deciding on --force: which host to check.
+            lines.append(
+                t(
+                    "cli.merge_unlock.state_held_remote",
+                    machine=status.holder_machine,
+                )
+            )
+        elif status.corrupt:
             lines.append(t("cli.merge_unlock.state_stale_corrupt"))
         elif status.stale:
             if status.holder_pid is None:

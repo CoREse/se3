@@ -3391,10 +3391,36 @@ function isResumeInProgress(flowId) {
 // lost. A backend detail change should therefore be mirrored here, but never
 // leaves the UI without a message.
 //
-// Non-404 statuses are intentionally passed straight through (detail verbatim,
-// "" when absent) so the 409/other branches keep their own fallback wording.
-function resumeErrorText(status, detail) {
+// The 409 "held by another machine" case is the one place the backend hands us
+// a MACHINE-READABLE field (`holder_machine`) instead of relying on its own
+// prose: the refusal names a host the operator must go to, and that sentence
+// has to render in the console's own language. When the field is present the
+// localized key wins over the backend detail (which stays the fallback for a
+// backend that has not yet been upgraded to send it).
+//
+// Other non-404 statuses are intentionally passed straight through (detail
+// verbatim, "" when absent) so those branches keep their own fallback wording.
+function resumeErrorText(status, detail, holderMachine, reason) {
   const text = typeof detail === "string" ? detail.trim() : "";
+  const machine = typeof holderMachine === "string" ? holderMachine.trim() : "";
+  if (status === 409 && machine) {
+    return tf(
+      "toast.resumeHeldByMachine",
+      text || `This flow is running on machine ${machine} and cannot be resumed from here.`,
+      { machine },
+    );
+  }
+  // The backend refuses without naming a host when several daemons report the
+  // same shared-filesystem flow and none can be singled out as its holder — it
+  // deliberately says nothing machine-specific rather than blame an observer.
+  // The `reason` code carries that case so the console still renders in its own
+  // language instead of echoing the backend's Chinese detail.
+  if (status === 409 && reason === "still_running") {
+    return tf(
+      "toast.resumeStillRunning",
+      text || "This flow is still running and cannot be resumed",
+    );
+  }
   if (status !== 404) return text;
   if (/is not connected/.test(text)) {
     return tf("toast.resumeMachineOffline", text);
@@ -3428,11 +3454,24 @@ async function resumeFlow(flowId) {
       showToast("error", resumeErrorText(404, detail));
     } else if (resp.status === 409) {
       // The flow exists but is not resumable right now — typically it is still
-      // running (a live process holds it). Surface the backend's explicit
-      // rejection detail rather than a misleading "dispatched" success.
+      // running (a live process holds it). When the backend names the holding
+      // machine, resumeErrorText renders it from the local language pack;
+      // otherwise the backend's own rejection detail is surfaced rather than a
+      // misleading "dispatched" success.
       let detail = "";
-      try { detail = (await resp.json()).detail || ""; } catch (_) {}
-      showToast("error", detail || tf("toast.resumeStillRunning", "This flow is still running and cannot be resumed"));
+      let holderMachine = "";
+      let reason = "";
+      try {
+        const body = await resp.json();
+        detail = body.detail || "";
+        holderMachine = body.holder_machine || "";
+        reason = body.reason || "";
+      } catch (_) {}
+      showToast(
+        "error",
+        resumeErrorText(409, detail, holderMachine, reason)
+          || tf("toast.resumeStillRunning", "This flow is still running and cannot be resumed"),
+      );
     } else {
       let detail = "";
       try { detail = (await resp.json()).detail || ""; } catch (_) {}

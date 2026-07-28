@@ -236,6 +236,80 @@ check("non-404 statuses pass the detail through unchanged", () => {
 });
 
 // ---------------------------------------------------------------------------
+// resumeErrorText — 409 held-by-another-machine (cross-machine single writer)
+// ---------------------------------------------------------------------------
+// The backend answers 409 with a machine-readable `holder_machine` alongside a
+// Chinese `detail`; the console must render the refusal from its OWN language
+// pack, so these load the shipped dictionaries and assert both locales render.
+const enDict = require(path.join(
+  here, "..", "..", "src", "tianluo", "server", "static", "i18n", "en-US.json"));
+const zhDict = require(path.join(
+  here, "..", "..", "src", "tianluo", "server", "static", "i18n", "zh-CN.json"));
+
+check("toast.resumeHeldByMachine exists in both language packs", () => {
+  assert.ok(enDict["toast.resumeHeldByMachine"], "missing in en-US");
+  assert.ok(zhDict["toast.resumeHeldByMachine"], "missing in zh-CN");
+});
+
+function withDicts(lang, fn) {
+  const savedLang = app.I18N.lang;
+  const savedDicts = app.I18N.dicts;
+  try {
+    app.I18N.dicts = { "en-US": enDict, "zh-CN": zhDict };
+    app.I18N.lang = lang;
+    fn();
+  } finally {
+    app.I18N.lang = savedLang;
+    app.I18N.dicts = savedDicts;
+  }
+}
+
+check("409 with a holder machine renders the localized key, not the raw detail", () => {
+  const detail = "该 flow 正在机器 node-b-1a2b 上运行，无法 resume";
+  withDicts("en-US", () => {
+    const out = app.resumeErrorText(409, detail, "node-b-1a2b");
+    assert.notEqual(out, detail, "en-US console must not show the backend Chinese text");
+    assert.match(out, /node-b-1a2b/);
+    assert.match(out, /machine/);
+  });
+  withDicts("zh-CN", () => {
+    const out = app.resumeErrorText(409, detail, "node-b-1a2b");
+    assert.match(out, /node-b-1a2b/);
+    assert.match(out, /机器/);
+  });
+});
+
+check("409 without a holder machine keeps the backend detail", () => {
+  withDicts("en-US", () => {
+    assert.equal(
+      app.resumeErrorText(409, "该 flow 仍在运行，无法 resume", ""),
+      "该 flow 仍在运行，无法 resume",
+    );
+    // A legacy backend that sends no holder field at all: unchanged behaviour.
+    assert.equal(app.resumeErrorText(409, "busy"), "busy");
+  });
+});
+
+// When several daemons report the same shared-filesystem flow the backend
+// refuses without naming a host (blaming a mere reporter would send the
+// operator to the wrong machine) and sends `reason` instead, so the console
+// still renders the refusal from its own language pack.
+check("409 with reason=still_running and no holder renders the localized key", () => {
+  const detail = "该 flow 仍在运行，无法 resume";
+  withDicts("en-US", () => {
+    const out = app.resumeErrorText(409, detail, "", "still_running");
+    assert.equal(out, enDict["toast.resumeStillRunning"]);
+    assert.notEqual(out, detail, "en-US console must not show the backend Chinese text");
+  });
+  withDicts("zh-CN", () => {
+    assert.equal(
+      app.resumeErrorText(409, detail, "", "still_running"),
+      zhDict["toast.resumeStillRunning"],
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Done
 // ---------------------------------------------------------------------------
 console.log(`\n  ${passed} checks passed.`);

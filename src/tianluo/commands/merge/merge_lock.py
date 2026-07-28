@@ -602,6 +602,31 @@ class MergeLock:
                     last_busy_pid = self._read_holder_pid()
                     last_busy_machine = self._last_read_machine_id
                     last_outcome = "busy"
+                    # INVARIANT: only a holder we can positively re-prove stale
+                    # is force-broken again. The staleness verdict that got us
+                    # here was made about the *previous* (local, dead) holder;
+                    # the flock we just lost belongs to whoever won the race
+                    # after our unlink, and unlinking their file on the next
+                    # attempt would evict a live writer — the double-writer this
+                    # guard exists to prevent. Another attempt is therefore only
+                    # allowed when the refreshed record proves a dead LOCAL pid:
+                    #
+                    #   * foreign machine → unprobeable from here → busy;
+                    #   * pid alive → live local holder → busy;
+                    #   * no/blank pid → the winner created + flocked the file
+                    #     but has not finished _write_pid yet, so an empty
+                    #     record means "live holder mid-write", NOT "legacy
+                    #     local record" (the legacy==local rule is only safe for
+                    #     a record that was actually written) → busy.
+                    if (
+                        last_busy_pid is None
+                        or not is_local_machine(last_busy_machine)
+                        or self._is_pid_alive(last_busy_pid)
+                    ):
+                        raise MergeLockBusy(
+                            self._resolved_path, last_busy_pid,
+                            holder_machine=last_busy_machine,
+                        )
                     continue
                 last_oserror = exc2
                 last_outcome = "oserror"

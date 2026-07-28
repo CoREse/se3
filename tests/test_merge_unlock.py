@@ -304,3 +304,63 @@ def test_cli_failed_remove_reports_error_and_nonzero(cli_project) -> None:
         assert "Releasedstale" not in _flat(result.stdout)
     finally:
         _restore(path)
+
+
+# ---------------------------------------------------------------------------
+# Cross-machine holder: the operator must be told WHICH machine holds the lock
+# ---------------------------------------------------------------------------
+
+FOREIGN_MACHINE = "node-elsewhere-deadbeef"
+
+
+def _write_foreign_lock(project_root: Path) -> Path:
+    from tianluo.commands.merge import merge_lock as ml
+
+    path = _lock_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(ml._encode_holder_record(_dead_pid(), FOREIGN_MACHINE))
+    return path
+
+
+def test_cli_foreign_holder_names_the_machine_and_refuses(cli_project) -> None:
+    path = _write_foreign_lock(cli_project)
+    result = _run(["merge-unlock"])
+    assert result.exit_code != 0
+    flat = _flat(result.stdout)
+    # Not the generic "holder alive" line: the holding machine is named so the
+    # operator knows where to look before reaching for --force.
+    assert FOREIGN_MACHINE in flat
+    assert path.exists()
+
+
+def test_cli_force_still_releases_a_foreign_holder(cli_project) -> None:
+    """``--force`` stays the explicit operator escape hatch."""
+    path = _write_foreign_lock(cli_project)
+    result = _run(["merge-unlock", "--force"])
+    assert result.exit_code == 0
+    assert not path.exists()
+
+
+def test_lock_busy_message_names_foreign_machine() -> None:
+    from tianluo.commands.merge.merge_lock import MergeLockBusy
+    from tianluo.commands.merge_cmd import _lock_busy_message
+
+    exc = MergeLockBusy(
+        Path("/tmp/merge.lock"), 4242, holder_machine=FOREIGN_MACHINE
+    )
+    message = _lock_busy_message(exc)
+    assert FOREIGN_MACHINE in message
+    assert "4242" in message
+
+
+def test_lock_busy_message_local_holder_uses_generic_text() -> None:
+    from tianluo.commands.merge.merge_lock import MergeLockBusy
+    from tianluo.commands.merge_cmd import _lock_busy_message
+    from tianluo.core.machine_id import stable_machine_id
+    from tianluo.i18n import t
+
+    for machine in (None, stable_machine_id()):
+        exc = MergeLockBusy(Path("/tmp/merge.lock"), 4242, holder_machine=machine)
+        assert _lock_busy_message(exc) == t(
+            "cli.merge.lock_busy", holder_pid=4242, lock_file=Path("/tmp/merge.lock")
+        )

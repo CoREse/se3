@@ -870,6 +870,42 @@ class ServerState:
         result = await self.get_flow(flow_id, owner=owner)
         return result[0] if result is not None else None
 
+    async def find_live_holder_machine(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[str]:
+        """Return the machine that demonstrably HOLDS *flow_id* live, or ``None``.
+
+        Distinct from :meth:`get_flow`/:meth:`find_machine_for_flow`, whose
+        reachable-first resolution answers "which daemon should serve this
+        request" — it deliberately prefers a *connected* reporter and therefore
+        cannot be read as ownership. On a shared filesystem every machine
+        aggregating the same ``engine.json`` reports the same flow, so the
+        reachable-first winner may be a mere observer while another host's
+        ``run.pid`` actually holds the run.
+
+        A reporter counts as a holder only when its own snapshot says the flow
+        is live there: not completed, and ``resumable`` false — the aggregator
+        clears that flag exactly when the reporting daemon sees a live local
+        ``luo run`` process for the flow's root (its live-roots gate). Ambiguity
+        is resolved by refusing to guess: zero or several such reporters yield
+        ``None``, and the caller must then say nothing machine-specific rather
+        than send an operator to the wrong host.
+        """
+        holders: List[str] = []
+        async with self._lock:
+            for machine_id, record in self._iter_owned_machines_online_first(
+                owner
+            ):
+                flow = record.flows.get(flow_id)
+                if flow is None:
+                    continue
+                if str(flow.status or "").lower() == "completed":
+                    continue
+                if flow.resumable:
+                    continue
+                holders.append(machine_id)
+        return holders[0] if len(holders) == 1 else None
+
     async def find_call_owner(
         self,
         call_id: str,

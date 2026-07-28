@@ -9,10 +9,13 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import tianluo.commands.run as run
+from tianluo.core.machine_id import stable_machine_id
+from tianluo.core.run_pidfile import read_run_pidfile
 from tianluo.engine.issue_manager import IssueManager, IssueStatus
 
 
@@ -205,7 +208,7 @@ class TestRunWorktreeMode:
         def fake_run_flow(*_a, **kwargs):
             # ``run_flow`` is told NOT to manage the marker for a worktree body.
             assert kwargs["manage_pidfile"] is False
-            seen["during_flow"] = pid_file.read_text().strip()
+            seen["during_flow"] = read_run_pidfile(pid_file.parent)
             return 0
 
         def fake_cleanup(*_a, **_kw):
@@ -213,7 +216,7 @@ class TestRunWorktreeMode:
             # marker must still be present so end-session can find the live
             # process. (The merge itself now happens in-flow; only housekeeping
             # remains in the wrapper.)
-            seen["during_merge"] = pid_file.read_text().strip()
+            seen["during_merge"] = read_run_pidfile(pid_file.parent)
             return 0
 
         with patch("tianluo.commands.run.run_flow", side_effect=fake_run_flow), \
@@ -225,9 +228,12 @@ class TestRunWorktreeMode:
             rc = run.run_worktree_mode(project_root=tmp_path, task="Add feature")
 
         assert rc == 0
-        # Present during both the flow body and the trailing merge, naming us.
-        assert seen["during_flow"] == str(__import__("os").getpid())
-        assert seen["during_merge"] == str(__import__("os").getpid())
+        # Present during both the flow body and the trailing merge, naming this
+        # process AND this machine (the marker is the cross-host ownership
+        # record the resume guards read, not just an end-session pid hint).
+        owner = (os.getpid(), stable_machine_id())
+        assert seen["during_flow"] == owner
+        assert seen["during_merge"] == owner
         # Cleared once the run fully returns (worktree not deleted by the mock).
         assert not pid_file.exists()
 

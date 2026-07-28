@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.0.2 - 2026-07-28
+
+- Fix concurrent execution of the same flow by two engine processes on different machines sharing one filesystem, which could duplicate a step's work and split fix-iteration counters
+- Record a stable machine identifier in `merge.lock` holder entries and `tianluo/state/run.pid`, keeping the fixed-length atomic write so concurrent readers stay safe
+- Stop treating a merge lock held by another machine as stale: such locks are never force-broken, callers block or fail with a message naming the holding machine, and `luo merge-unlock --force` remains the explicit operator override
+- Reject `luo run --resume`, daemon resume, and the WebUI 'continue' action when the target flow is already held by an active run on another machine, reporting which machine is running it
+- Determine flow ownership from the state directory the flow actually writes, so a `--worktree` flow resumes correctly even when the project root is occupied by an unrelated run on another machine, with wording that distinguishes the two cases
+- Treat legacy lock and pid records that carry no machine identifier as local, so existing locks and pid files keep working unchanged after upgrade
+- Extract the stable machine id into a shared `tianluo.core.machine_id` module reused by the daemon aggregator, merge locking, and run pidfile handling
 ## 12.0.1 - 2026-07-27
 
 - Replace leftover 'SE3' product references with 'tianluo' across CLI --help and runtime i18n catalogs (en-US and zh-CN), keeping 'SE 3.0' only where it denotes the methodology

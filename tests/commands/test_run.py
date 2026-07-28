@@ -1078,3 +1078,55 @@ class TestDiscoverFromIssueCombination:
         assert result.exit_code == 0
         normalized = " ".join(result.output.split())
         assert "discovery step" in normalized
+
+
+class TestRunPidfileFlowStamp:
+    """The ``run.pid`` marker learns its flow id once the engine mints one.
+
+    A new run writes the marker before the flow exists, so the record starts
+    flow-less. Another machine's resume guard reads that record to decide
+    whether the flow being resumed is the one running here — an unstamped
+    record can only be reported as "this root is busy", never as "your flow
+    runs there", so the stamp is what keeps the refusal specific.
+    """
+
+    def _persistence(self, tmp_path: Path):
+        from tianluo.engine.persistence import PersistenceManager
+
+        return PersistenceManager(tmp_path)
+
+    def test_stamp_fills_in_the_flow_id(self, tmp_path):
+        import os
+
+        from tianluo.commands import run as run_cmd
+        from tianluo.core.run_pidfile import read_run_holder
+
+        persistence = self._persistence(tmp_path)
+        run_cmd._write_run_pidfile(persistence)
+        assert read_run_holder(persistence.state_dir).flow_id is None
+
+        run_cmd._stamp_run_pidfile_flow(persistence, "flow-abc")
+        holder = read_run_holder(persistence.state_dir)
+        assert holder.pid == os.getpid()
+        assert holder.flow_id == "flow-abc"
+
+    def test_stamp_never_rewrites_someone_elses_marker(self, tmp_path):
+        from tianluo.commands import run as run_cmd
+        from tianluo.core.machine_id import stable_machine_id
+        from tianluo.core.run_pidfile import encode_run_pidfile, read_run_holder
+
+        persistence = self._persistence(tmp_path)
+        persistence.ensure_directories()
+        marker = persistence.state_dir / "run.pid"
+
+        # Another machine's live run owns it.
+        foreign = encode_run_pidfile(999999, "node-elsewhere", "flow-other")
+        marker.write_text(foreign, encoding="utf-8")
+        run_cmd._stamp_run_pidfile_flow(persistence, "flow-abc")
+        assert marker.read_text(encoding="utf-8") == foreign
+
+        # A concurrently-relaunched LOCAL run overwrote it with its own pid.
+        other_local = encode_run_pidfile(999998, stable_machine_id(), "flow-other")
+        marker.write_text(other_local, encoding="utf-8")
+        run_cmd._stamp_run_pidfile_flow(persistence, "flow-abc")
+        assert read_run_holder(persistence.state_dir).flow_id == "flow-other"
