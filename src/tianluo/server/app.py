@@ -1131,7 +1131,7 @@ def create_app(
             # The flow exists and belongs to the caller but is not resumable.
             # Distinguish the two reasons so the user gets an honest receipt
             # instead of an optimistic dispatched.
-            _, existing_flow = existing
+            holder_machine, existing_flow = existing
             status = str(existing_flow.get("status") or "").lower()
             if status == "completed":
                 raise HTTPException(
@@ -1141,10 +1141,13 @@ def create_app(
             # running / init / recovering (or any other in-progress state):
             # there is a live process for this flow, so resuming would be a
             # no-op double-spawn that the daemon's request_resume() guard
-            # bounces anyway.
+            # bounces anyway. Name the owning machine so the WebUI "继续" path
+            # can tell the operator *where* it is running — on a shared
+            # filesystem the flow may be held by a run on another host that this
+            # server (and that host's process table) cannot terminate remotely.
             raise HTTPException(
                 status_code=409,
-                detail="该 flow 仍在运行，无法 resume",
+                detail=f"该 flow 正在机器 {holder_machine} 上运行，无法 resume",
             )
         machine_id, flow = result
         if not manager.is_connected(machine_id):

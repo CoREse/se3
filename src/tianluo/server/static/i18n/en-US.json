@@ -156,6 +156,7 @@
   "toast.resumeNotFound": "Flow not found or not resumable.",
   "toast.resumeMachineOffline": "The machine that owns this flow is not connected — it may have moved to another node.",
   "toast.resumeStillRunning": "This flow is still running and cannot be resumed",
+  "toast.resumeHeldByMachine": "This flow is currently running on machine {machine} and cannot be resumed from here.",
   "toast.resumeFailed": "Resume failed ({status}).",
   "toast.resumeNetworkError": "Network error — could not dispatch resume.",
   "toast.endDispatched": "End dispatched for {id}…",

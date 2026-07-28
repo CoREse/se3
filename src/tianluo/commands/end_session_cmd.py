@@ -427,17 +427,15 @@ def _read_run_pidfile(state_root: Path) -> Optional[int]:
     un-findable case of a ``--worktree`` parent that keeps ``cwd==main_root`` and
     is momentarily between agent/test subprocesses (no descendant inside the
     worktree). Returns ``None`` when the marker is absent / unreadable / empty.
+
+    Parses both the machine-aware two-line record and the legacy single-line
+    (bare pid) record via the shared codec; only the pid is returned so the
+    existing call sites are unchanged.
     """
-    pid_file = runtime_dir(state_root) / "state" / "run.pid"
-    try:
-        raw = pid_file.read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        return None
-    try:
-        pid = int(raw)
-    except ValueError:
-        return None
-    return pid if pid > 0 else None
+    from ..core.run_pidfile import read_run_pidfile
+
+    pid, _machine_id = read_run_pidfile(runtime_dir(state_root) / "state")
+    return pid
 
 
 def _pid_is_live_se3_run(pid: int) -> bool:

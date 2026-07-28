@@ -45,6 +45,7 @@
   "cli.run.resume.tag_worktree": " [worktree]",
   "cli.run.resume.flow_option": "{description}（步骤：{current_step}）{wt_tag}{status_tag}",
   "cli.run.resume.which_flow": "要恢复哪个流程？",
+  "cli.run.resume.held_by_machine": "该 flow 正在机器 {machine} 上运行，无法在此 resume。若确认对端已卡死，请先在该机器上执行 'luo end-session'。",
   "cli.run.interrupt.title": "追加指令",
   "cli.run.interrupt.message": "请输入追加指令（Ctrl+D 或 Esc+Enter 结束，Ctrl+C 取消，留空则原样重试）：",
   "cli.run.interrupt.exit_title": "退出",

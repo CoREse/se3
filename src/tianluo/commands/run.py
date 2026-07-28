@@ -2268,17 +2268,26 @@ def run_flow(
 
 
 def _write_run_pidfile(persistence: PersistenceManager) -> None:
-    """Best-effort: record the current pid into ``tianluo/state/run.pid``.
+    """Best-effort: record the current pid + machine id into ``run.pid``.
 
-    Read by ``luo end-session`` to reliably locate the live flow process. Never
-    raises — a failure to write the marker only degrades end-session back to its
-    process-scan heuristics.
+    Read by ``luo end-session`` to reliably locate the live flow process, and by
+    the resume double-spawn guards to reject a second engine when the marker is
+    held by a live run on ANOTHER machine (a shared-filesystem hazard the local
+    process table can never observe). The machine id is stamped so those guards
+    can tell "held on this host" from "held on host X". Never raises — a failure
+    to write the marker only degrades end-session back to its process-scan
+    heuristics.
     """
     try:
+        from ..core.machine_id import stable_machine_id
+        from ..core.run_pidfile import encode_run_pidfile
+
         persistence.ensure_directories()
         pid_file = persistence.state_dir / "run.pid"
         tmp = pid_file.with_suffix(".pid.tmp")
-        tmp.write_text(str(os.getpid()), encoding="utf-8")
+        tmp.write_text(
+            encode_run_pidfile(os.getpid(), stable_machine_id()), encoding="utf-8"
+        )
         tmp.replace(pid_file)
     except Exception:  # noqa: BLE001 - the marker is purely advisory
         logger.debug("Failed to write run.pid marker", exc_info=True)
@@ -2287,19 +2296,22 @@ def _write_run_pidfile(persistence: PersistenceManager) -> None:
 def _clear_run_pidfile(persistence: PersistenceManager) -> None:
     """Best-effort: remove ``tianluo/state/run.pid`` when it still names this process.
 
-    Only unlinks when the recorded pid is our own, so a concurrently-relaunched
-    flow that overwrote the marker (e.g. a fast ``--resume`` in the same state
-    dir) is never clobbered. Never raises.
+    Only unlinks when the recorded pid is our own pid on THIS machine (or the
+    record is unreadable), so a concurrently-relaunched flow that overwrote the
+    marker — or, critically, a live run that owns it from another host — is
+    never clobbered. Never raises.
     """
     try:
+        from ..core.machine_id import is_local_machine
+        from ..core.run_pidfile import read_run_pidfile
+
         pid_file = persistence.state_dir / "run.pid"
         if not pid_file.exists():
             return
-        try:
-            recorded = int(pid_file.read_text(encoding="utf-8").strip())
-        except (OSError, ValueError):
-            recorded = None
-        if recorded is None or recorded == os.getpid():
+        recorded_pid, recorded_machine = read_run_pidfile(persistence.state_dir)
+        if recorded_pid is None or (
+            recorded_pid == os.getpid() and is_local_machine(recorded_machine)
+        ):
             pid_file.unlink()
     except Exception:  # noqa: BLE001 - the marker is purely advisory
         logger.debug("Failed to clear run.pid marker", exc_info=True)
@@ -3996,6 +4008,41 @@ def _resume_worktree_run(
         _clear_run_pidfile(wt_persistence)
 
 
+def _read_engine_status(project_root: Path, flow_id: str) -> Optional[str]:
+    """Return the upper-cased status of *flow_id* from the active engine.json.
+
+    Used by the resume cross-machine preflight to skip the guard for a COMPLETED
+    flow (a foreign ``run.pid`` marker left by a since-finished run must not
+    block; COMPLETED is unresumable anyway). Reads only the size-guarded header
+    so a tens-of-MB legacy engine.json is not fully parsed. Returns ``None`` when
+    the active engine.json does not describe *flow_id*.
+    """
+    from ..daemon.disk_json_cache import read_engine_header
+
+    engine_json = runtime_dir(project_root) / "state" / "engine.json"
+    data = read_engine_header(engine_json, active=True)
+    if data is None or str(data.get("flow_id") or "") != flow_id:
+        return None
+    return str(data.get("status") or "").upper()
+
+
+def _cross_machine_resume_block(project_root: Path, flow_id: str) -> Optional[str]:
+    """Return the remote machine id blocking a resume, or ``None`` to allow it.
+
+    A non-``None`` result names the machine whose live run holds *flow_id*'s
+    ``run.pid`` marker; the caller refuses the resume and surfaces the id. The
+    guard is skipped when the flow is COMPLETED (unresumable, and its foreign
+    marker is at most stale) and for local / legacy (unstamped) markers, which
+    :func:`~tianluo.core.run_pidfile.foreign_run_holder` already treats as local
+    so pre-upgrade markers keep the same-machine path.
+    """
+    from ..core.run_pidfile import foreign_run_holder
+
+    if _read_engine_status(project_root, flow_id) == "COMPLETED":
+        return None
+    return foreign_run_holder(runtime_dir(project_root) / "state")
+
+
 def resume_run(
     project_root: Path,
     flow_id: str,
@@ -4013,6 +4060,17 @@ def resume_run(
     flow is resumed in place (a synchronous run that acquires the main-worktree
     mutex for its whole duration).
     """
+    # Cross-machine single-writer preflight — mirror of the daemon's
+    # ``request_resume`` guard for the direct ``luo run --resume`` path: if the
+    # target flow's ``run.pid`` marker is held by a live run on another machine,
+    # refuse rather than spawn a second engine that would race the shared
+    # engine.json. The local process table can never observe the remote process,
+    # so the on-disk machine-stamped marker is the only cross-host signal.
+    held_by = _cross_machine_resume_block(project_root, flow_id)
+    if held_by is not None:
+        display_error(t("cli.run.resume.held_by_machine", machine=held_by))
+        return 1
+
     worktree_run = _find_worktree_run_by_flow_id(project_root, flow_id)
     if worktree_run is not None:
         return _resume_worktree_run(

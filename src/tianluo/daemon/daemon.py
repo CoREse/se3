@@ -389,6 +389,25 @@ class Daemon:
                 f"Flow {flow_id} is COMPLETED and cannot be resumed"
             )
 
+        # Cross-machine single-writer guard: the local supervisor's psutil scan
+        # can only see processes on THIS host, so on a shared filesystem it would
+        # happily authorize a second engine for a flow that is still running on
+        # another machine. The on-disk ``run.pid`` marker carries a machine id;
+        # when it names another host we refuse — the local process table can
+        # never prove that remote process is dead, so rejecting a double-writer
+        # is the safe default (auto-terminating the peer is deliberately out of
+        # scope; ``luo end-session`` remains the human path). The COMPLETED early
+        # return above already handled a finished flow, so a foreign holder here
+        # means an active cross-machine run.
+        from ..core.run_pidfile import foreign_run_holder
+
+        foreign_machine = foreign_run_holder(state_dir)
+        if foreign_machine is not None:
+            raise ValueError(
+                f"Flow {flow_id} is running on machine {foreign_machine}; "
+                f"cannot resume it from here"
+            )
+
         # Guard against double-spawn: refuse to resume into a project root that
         # already has ANY live ``luo run`` process. The flow engine persists to
         # a single-slot ``tianluo/state/engine.json`` per project, so resuming flow

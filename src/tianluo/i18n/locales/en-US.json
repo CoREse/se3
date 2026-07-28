@@ -46,6 +46,7 @@
   "cli.run.resume.tag_worktree": " [worktree]",
   "cli.run.resume.flow_option": "{description} (step: {current_step}){wt_tag}{status_tag}",
   "cli.run.resume.which_flow": "Which flow to resume?",
+  "cli.run.resume.held_by_machine": "This flow is currently running on machine {machine}; it cannot be resumed from here. Use 'luo end-session' on that machine first if it is stuck.",
   "cli.run.interrupt.title": "Additional Instruction",
   "cli.run.interrupt.message": "Enter additional instruction (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel, empty to retry as-is):",
   "cli.run.interrupt.exit_title": "Exit",

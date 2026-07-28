@@ -156,6 +156,7 @@
   "toast.resumeNotFound": "flow 不存在或无法 resume。",
   "toast.resumeMachineOffline": "持有该 flow 的机器未连接——它可能已切换到其他节点。",
   "toast.resumeStillRunning": "该 flow 仍在运行，无法 resume",
+  "toast.resumeHeldByMachine": "该 flow 正在机器 {machine} 上运行，无法在此 resume。",
   "toast.resumeFailed": "resume 失败（{status}）。",
   "toast.resumeNetworkError": "网络错误 — 无法下发 resume。",
   "toast.endDispatched": "已下发结束：{id}…",
