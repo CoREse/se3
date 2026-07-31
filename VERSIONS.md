@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.1.0 - 2026-07-31
+
+- Add file attachment support to the WebUI prompt boxes — paste, drag-and-drop, or pick files in the New Task, respond, and interject inputs
+- Relay uploaded files through the central server to the owning project's daemon, storing them under the project's `tianluo/uploads/` directory as `<content-hash>_<filename>` with deduplication of identical content
+- Insert a placeholder at the cursor while a file uploads and replace it in place with the project-relative path on success, so the reference stays visible, editable, and movable in the prompt text
+- Show an attachment strip under the input with image thumbnails, file icons, names, and sizes; removing an entry deletes only the path text from the prompt, never the stored file
+- Enforce a 20 MB per-file limit independently in the browser, the server, and the daemon, with immediate error feedback when exceeded
+- Bump the daemon protocol to version 5 with an upload channel and a `supports_uploads` negotiation check, so an out-of-date daemon reports "unsupported" instantly instead of timing out
+- Exclude the upload directory from version control in `luo init`-generated project `.gitignore` files
+- Localize all new upload-related buttons, statuses, and error messages in en-US and zh-CN, and document the upload channel in the daemon/server docs
 ## 12.0.3 - 2026-07-28
 
 - Fix self_check silently passing a step whose findings were all self-marked `out_of_scope` — every validated finding now routes to REVISION_NEEDED and the fix loop

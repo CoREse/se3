@@ -50,6 +50,11 @@ const state = {
   // never collide on a token even across scopes.
   uploadAttachments: {},
   uploadSeq: 0,
+  // The machine+project each strip's rows were uploaded into, same keys as
+  // uploadAttachments. Kept because the paths in the text are relative to THAT
+  // project root only: if the New Task form is re-pointed at another one, the
+  // rows and their text must go with it (see discardAttachments).
+  uploadTargets: {},
 
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
@@ -917,8 +922,10 @@ function isImageFile(file) {
 // The strip is a mirror of what the text already says, so `canRemove` is gated
 // on a landed path: an in-flight or failed entry has no path in the text to
 // remove, and removal is defined purely as "delete that path from the text" —
-// it never touches the file the daemon already wrote to disk. Pure apart from
-// the size/status lookups.
+// it never touches the file the daemon already wrote to disk. `canCancel` is
+// the in-flight counterpart: a row that carries a placeholder instead of a path
+// is dismissed by giving up on the request, not by editing a path out. Pure
+// apart from the size/status lookups.
 function attachmentRowModel(entry) {
   entry = entry && typeof entry === "object" ? entry : {};
   const raw = String(entry.status || "");
@@ -940,6 +947,7 @@ function attachmentRowModel(entry) {
     previewUrl: typeof entry.previewUrl === "string" ? entry.previewUrl : "",
     path,
     canRemove: status === "done" && Boolean(path),
+    canCancel: status === "uploading",
     errorKey: status === "error" ? uploadErrorKey(entry.code) : "",
   };
 }
@@ -968,12 +976,32 @@ const UPLOAD_ERROR_KEYS = {
   not_connected: "upload.errNotConnected",
   timeout: "upload.errTimeout",
   no_target: "upload.errNoTarget",
+  // Distinct from no_target: the flow view has no machine/project pickers, so
+  // "choose a machine and a project" would name a remedy that does not exist
+  // on that screen.
+  no_flow: "upload.errNoFlow",
   network: "upload.errNetwork",
 };
 
 function uploadErrorKey(code) {
   const c = typeof code === "string" ? code.trim() : "";
   return UPLOAD_ERROR_KEYS[c] || "upload.errFailed";
+}
+
+// Names of the rows still in flight, in paste order.
+//
+// WHY submitting must wait on this: the placeholder token is not prompt prose.
+// Sending while it is still in the text ships "[uploading shot.png #3]" to the
+// agent, and — because every submit path blanks its input — the 201 that lands
+// a moment later finds no token to replace, so the project-relative path is
+// dropped on the floor and the file that DID reach the disk is named by no
+// prompt at all. Returning the names rather than a bare count lets the refusal
+// say which file it is waiting on. Pure.
+function pendingUploadNames(entries) {
+  const rows = Array.isArray(entries) ? entries : [];
+  return rows
+    .filter((e) => e && String(e.status || "") === "uploading")
+    .map((e) => (typeof e.name === "string" && e.name.trim()) || "file");
 }
 
 // -- file attachments: upload orchestration and the attachment strip ---------
@@ -1028,6 +1056,21 @@ function attachmentEntries(stripId) {
   return state.uploadAttachments[id];
 }
 
+// Submit gate for one strip: "" when the text is settled and safe to send,
+// otherwise the localized refusal to paint. Every prompt-submitting path asks
+// this before it reads the textarea — see pendingUploadNames for why an
+// in-flight row makes the text unsendable.
+function pendingUploadRefusal(stripId) {
+  const names = pendingUploadNames(attachmentEntries(stripId));
+  if (!names.length) return "";
+  const list = names.join(", ");
+  return tf(
+    "upload.errPending",
+    `Still uploading ${list} — wait for it to finish before sending.`,
+    { names: list, count: names.length },
+  );
+}
+
 // Re-measure the docked textarea after a programmatic edit. The auto-grow
 // height is normally driven by the `input` event, which a value assignment does
 // NOT fire — without this, replacing a placeholder with a long path would leave
@@ -1048,7 +1091,7 @@ function resolveUploadTarget(scope) {
   const fail = (code) => ({ ok: false, code, errorKey: uploadErrorKey(code) });
   if (scope === "flow") {
     const flowId = typeof state.selectedFlowId === "string" ? state.selectedFlowId.trim() : "";
-    if (!flowId) return fail("no_target");
+    if (!flowId) return fail("no_flow");
     return { ok: true, kind: "flow", flowId };
   }
   const machineSel = $("nt-machine");
@@ -1086,6 +1129,7 @@ function uploadRequestUrl(target, filename) {
 // fetch failed, or the Node test harness) would paint the raw dotted key.
 const UPLOAD_ERROR_FALLBACKS = {
   "upload.errNoTarget": "Choose a machine and a project before attaching files.",
+  "upload.errNoFlow": "Open a flow before attaching files to a reply.",
   "upload.errUnregisteredProject": "That project is not available on the target machine"
     + " — re-add it under Projects and try again.",
   "upload.errUnsupportedDaemon": "That machine runs an older daemon that cannot receive"
@@ -1171,10 +1215,25 @@ function replaceInInputOnce(inputEl, token, replacement) {
   return true;
 }
 
+// Hard ceiling on one upload request, from the click to the daemon's answer.
+//
+// WHY a bound is mandatory rather than a nicety: an in-flight row is what the
+// submit gate (pendingUploadRefusal) refuses to send past, so a request that
+// neither resolves nor rejects — a connection that dies mid-POST, which the
+// browser may sit on for minutes before it gives up — would hold the operator's
+// whole drafted prompt hostage, including an answer a flow is blocked waiting
+// for. The timeout guarantees the row always settles to `error` on its own; the
+// strip's cancel button is the fast escape for anyone unwilling to wait it out.
+// Generous because the ceiling has to clear a 20 MiB body on a slow uplink plus
+// the server's own 10s wait for the daemon ack — it exists to stop a hang, not
+// to police a slow link.
+const UPLOAD_REQUEST_TIMEOUT_MS = 180000;
+
 // Upload one file: park a placeholder at the caret, POST the bytes, then swap
 // the placeholder for the project-relative path the daemon reports. Everything
 // the prompt will carry is written into the text HERE; submit-time code never
-// touches attachments, so a failure can always be undone by simply taking the
+// rewrites that text (it only refuses to send while a placeholder is still
+// outstanding), so a failure can always be undone by simply taking the
 // placeholder back out.
 async function performUpload(inputEl, file, target, stripId) {
   if (!inputEl || !file || !target || !target.ok) return null;
@@ -1184,6 +1243,7 @@ async function performUpload(inputEl, file, target, stripId) {
   const name = (typeof file.name === "string" && file.name.trim()) || "file";
   const token = uploadPlaceholderToken(name, seq);
 
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
   const entry = {
     id: "upload-" + seq,
     name,
@@ -1194,20 +1254,46 @@ async function performUpload(inputEl, file, target, stripId) {
     code: "",
     previewUrl: isImageFile(file) ? createPreviewUrl(file) : "",
     token,
+    // The handle abortUploadEntry pulls to hang up a request whose row is being
+    // abandoned, and the flag that keeps the answer of an already-abandoned
+    // request from repainting a row that is no longer on screen. The flag is
+    // the load-bearing half: a fetch that has already resolved cannot be
+    // aborted, so `canceled` is what makes the race safe either way.
+    controller,
+    canceled: false,
   };
   insertAtCaret(inputEl, token);
   attachmentEntries(stripId).push(entry);
+  // Recorded at insert time, not on completion: an in-flight row is just as
+  // bound to this target as a settled one, and a target change while it is in
+  // flight must retire it too.
+  rememberUploadTarget(stripId, target);
   renderAttachmentStrip(stripId);
   syncUploadInput(cfg);
+
+  // Whoever gets here first owns the row's outcome. Three parties race for it —
+  // the response, the timeout, and a cancel click — and the two that lose must
+  // do nothing at all, or a late arrival would re-toast an outcome the user has
+  // already seen (or repaint a row they dismissed).
+  let settled = false;
+  const claim = () => {
+    if (settled || entry.canceled) return false;
+    settled = true;
+    clearTimeout(timer);
+    return true;
+  };
 
   // Both failure exits do the same two things: take the placeholder back out of
   // the text (a stranded token would otherwise ship to the agent as prompt
   // prose) and leave the row behind in its error state so the user can see
-  // WHICH file failed after the toast is gone.
+  // WHICH file failed after the toast is gone. An error row is also, unlike an
+  // in-flight one, dismissable and no longer blocks the submit gate.
   const fail = (code, prose) => {
+    if (!claim()) return null;
     replaceInInputOnce(inputEl, token, "");
     entry.status = "error";
     entry.code = code || "";
+    entry.controller = null;
     revokePreviewUrl(entry);
     renderAttachmentStrip(stripId);
     syncUploadInput(cfg);
@@ -1215,14 +1301,30 @@ async function performUpload(inputEl, file, target, stripId) {
     return null;
   };
 
+  // Settling the row here rather than merely aborting matters when the runtime
+  // has no AbortController: the request may keep running, but the row — and
+  // with it the submit gate — no longer waits on it.
+  const timer = setTimeout(() => {
+    if (controller && typeof controller.abort === "function") {
+      try {
+        controller.abort();
+      } catch (_) { /* nothing left to hang up — fail() still settles the row */ }
+    }
+    fail("timeout", "");
+  }, UPLOAD_REQUEST_TIMEOUT_MS);
+
   let resp;
   try {
     resp = await authedFetch(uploadRequestUrl(target, name), {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: file,
+      signal: controller ? controller.signal : undefined,
     });
   } catch (_) {
+    // An abort lands here too, and both aborters have already settled the row:
+    // the timeout painted its error, and a cancel took the whole row away. Only
+    // a genuinely dropped connection still has an outcome to report.
     return fail("network", "");
   }
 
@@ -1237,6 +1339,12 @@ async function performUpload(inputEl, file, target, stripId) {
   const path = (typeof body.path === "string" && body.path.trim()) || "";
   if (!path) return fail("", "");
 
+  // Too late to matter: the row was given up on (timed out, or cancelled) and
+  // its placeholder is already out of the text. The bytes did land on the
+  // project machine — content-addressed, so a re-paste finds them again — but
+  // planting a path now would resurrect an attachment the user watched leave.
+  if (!claim()) return null;
+
   // A miss here is the "user deleted the placeholder mid-flight" case: the file
   // IS stored (the daemon already wrote it), so the row still settles to done —
   // it just has no path in the text to point at, which attachmentRowModel reads
@@ -1245,6 +1353,7 @@ async function performUpload(inputEl, file, target, stripId) {
   entry.status = "done";
   entry.code = "";
   entry.path = landed ? path : "";
+  entry.controller = null;
   renderAttachmentStrip(stripId);
   syncUploadInput(cfg);
   return entry;
@@ -1283,17 +1392,74 @@ function renderAttachmentStrip(stripId, entries) {
     // scrolling line and a full sentence would push the rest of it off-screen.
     // The toast already said it out loud once.
     if (model.errorKey) item.title = uploadFailureText(model.name, entry && entry.code, "");
-    // A settled row is dismissable whatever its outcome — for a failed row that
-    // is the only way to clear it, since its placeholder is already gone.
-    if (model.status !== "uploading") {
-      const btn = el("button", "attachment-remove", "×");
-      btn.type = "button";
+    // EVERY row is dismissable, whatever its state. For a failed row the × is
+    // the only way to clear it, since its placeholder is already gone. For a row
+    // still in flight it is the escape hatch from the submit gate: that gate
+    // refuses to send while anything is uploading, so without a control here a
+    // request whose answer never comes would hold the drafted prompt hostage
+    // until the request timeout — including a reply a flow is blocked on. The
+    // two do different things, which is why the labels differ: one edits a path
+    // out of the text, the other gives up on a request still running.
+    const btn = el("button", "attachment-remove", "×");
+    btn.type = "button";
+    if (model.canCancel) {
+      btn.title = tf("upload.cancelTitle", "Cancel this upload and drop it from the text");
+      btn.addEventListener("click", () => cancelAttachment(stripId, model.id));
+    } else {
       btn.title = tf("upload.removeTitle", "Remove this attachment from the text");
       btn.addEventListener("click", () => removeAttachment(stripId, model.id));
-      item.appendChild(btn);
     }
+    item.appendChild(btn);
     strip.appendChild(item);
   }
+}
+
+// Hang up an in-flight row's request and mark it abandoned.
+//
+// The flag, not the abort, is what makes this safe: a response already on its
+// way (or one from a runtime with no AbortController) cannot be recalled, and
+// `canceled` is what tells performUpload that the outcome it is holding belongs
+// to a row nobody is looking at any more.
+function abortUploadEntry(entry) {
+  if (!entry || typeof entry !== "object") return;
+  entry.canceled = true;
+  const controller = entry.controller;
+  entry.controller = null;
+  if (controller && typeof controller.abort === "function") {
+    try {
+      controller.abort();
+    } catch (_) { /* already finished — nothing left to hang up */ }
+  }
+}
+
+// Give up on a row that is still uploading: stop the request, take its
+// placeholder back out of the text, drop the row.
+//
+// WHY this exists as a distinct gesture: an uploading row blocks every send
+// from its prompt box (pendingUploadRefusal), and the request that would clear
+// it can stall for as long as the browser is willing to wait on a dead socket.
+// Without a way out, the only escape would be closing the view — which blanks
+// the drafted prompt along with the strip. Cancelling costs the attachment and
+// keeps the words.
+function cancelAttachment(stripId, id) {
+  const rows = attachmentEntries(stripId);
+  const key = String(id == null ? "" : id);
+  const idx = rows.findIndex((e) => e && String(e.id) === key);
+  if (idx < 0) return;
+  const entry = rows[idx];
+  const cfg = uploadScopeForStrip(stripId);
+  const inputEl = cfg ? $(cfg.inputId) : null;
+  abortUploadEntry(entry);
+  // Pulling the token is both the cleanup and the second safety net: a late
+  // answer plants its path only where the token still is, so removing it turns
+  // any reply that still arrives into a no-op on the text.
+  if (inputEl && entry && entry.token) {
+    replaceInInputOnce(inputEl, entry.token, "");
+    syncUploadInput(cfg);
+  }
+  revokePreviewUrl(entry);
+  rows.splice(idx, 1);
+  renderAttachmentStrip(stripId);
 }
 
 function removeAttachment(stripId, id) {
@@ -1327,9 +1493,63 @@ function removeAttachment(stripId, id) {
 // removeAttachment: UI only, the stored files stay where the daemon put them.
 function clearAttachments(stripId) {
   const rows = attachmentEntries(stripId);
-  for (const entry of rows) revokePreviewUrl(entry);
+  for (const entry of rows) {
+    // An in-flight row goes too, so its request is hung up and its answer
+    // disarmed — otherwise it would keep the connection busy on behalf of a
+    // strip that no longer exists, and repaint rows nobody can see.
+    abortUploadEntry(entry);
+    revokePreviewUrl(entry);
+  }
   rows.length = 0;
+  if (state.uploadTargets && typeof state.uploadTargets === "object") {
+    delete state.uploadTargets[String(stripId || "")];
+  }
   renderAttachmentStrip(stripId);
+}
+
+// Drop every row AND take back the text those rows planted. This is the harsher
+// sibling of clearAttachments, for the case where the text is NOT already gone:
+// the destination the paths were resolved against has stopped being the one the
+// prompt will run in, so every path in the box is now unresolvable. Leaving them
+// would ship a prompt naming files that do not exist under the new project root
+// — a silent failure the agent discovers and the user never sees. Returns how
+// many rows were discarded so the caller can decide whether to say so out loud.
+function discardAttachments(stripId) {
+  const rows = attachmentEntries(stripId);
+  if (!rows.length) return 0;
+  const count = rows.length;
+  const cfg = uploadScopeForStrip(stripId);
+  const inputEl = cfg ? $(cfg.inputId) : null;
+  if (inputEl) {
+    for (const entry of rows) {
+      const model = attachmentRowModel(entry);
+      if (model.canRemove && model.path) {
+        inputEl.value = removePathOnce(String(inputEl.value == null ? "" : inputEl.value), model.path);
+      } else if (model.status === "uploading" && entry && entry.token) {
+        // Still in flight: the placeholder is what the text carries, and pulling
+        // it out now is also what disarms the late answer — performUpload plants
+        // its path only where the token still is, so a missing token turns the
+        // arriving reply into a no-op instead of a path for the wrong project.
+        replaceInInputOnce(inputEl, entry.token, "");
+      }
+    }
+    syncUploadInput(cfg);
+  }
+  clearAttachments(stripId);
+  return count;
+}
+
+// Remember which machine+project a strip's rows were uploaded into, so a later
+// target change can be recognised as one. Keyed by strip rather than per row
+// because a change discards the whole strip: every row in it shares the target.
+function rememberUploadTarget(stripId, target) {
+  if (!state.uploadTargets || typeof state.uploadTargets !== "object") state.uploadTargets = {};
+  if (!target || target.kind !== "project") return;
+  state.uploadTargets[String(stripId || "")] = uploadTargetKey(target.machineId, target.projectRoot);
+}
+
+function uploadTargetKey(machineId, projectRoot) {
+  return String(machineId == null ? "" : machineId) + " " + String(projectRoot == null ? "" : projectRoot);
 }
 
 // Normalize a FileList (or the array a test hands in) to a plain array.
@@ -5207,6 +5427,11 @@ function updateReplyBox(flow) {
 function resetReplyBox() {
   const input = $("flow-reply-input");
   input.value = "";
+  // The strip only ever mirrors paths present in this text, so blanking the
+  // text must retire the rows with it — otherwise opening another flow shows
+  // rows for paths that live in the previous flow's project, whose × button
+  // then has nothing to remove, and leaks their preview object URLs.
+  clearAttachments("flow-attachments");
   // Reset the auto-grow height back to a single line on a fresh flow / chip
   // switch (mobile portrait only; a no-op on desktop).
   autoGrowReplyTextarea();
@@ -5307,6 +5532,15 @@ function submitReply(event) {
   const text = input.value.trim();
   if (!text) {
     showToast("error", tf("toast.responseEmpty", "Response must not be empty."));
+    return;
+  }
+  // An upload still in flight makes this text unsendable: it carries a
+  // placeholder token instead of a path, and sending clears the box the answer
+  // needs to write into. Refusing costs the operator the second or two the
+  // upload still needs; sending costs them the file.
+  const pendingUploads = pendingUploadRefusal("flow-attachments");
+  if (pendingUploads) {
+    showToast("error", pendingUploads);
     return;
   }
   // CONFIRM gates route the free-text box through the structured decision
@@ -14575,6 +14809,42 @@ function refreshProjectOptions() {
   updateManualPathVisibility();
 }
 
+// Re-point of the New Task target. The paths already sitting in #nt-task are
+// relative to the project they were uploaded into, and nothing rewrites the
+// task text at submit time — so once the form names a different machine or
+// project, those paths would travel into a flow that runs somewhere the files
+// were never written, and the agent's only symptom is a missing file. Both
+// halves therefore go: the text is un-planted and the strip retired, and the
+// user is told once so the disappearance is not a mystery.
+//
+// Called after the two selects have settled (a machine change repopulates the
+// project list first), and driven off the recorded target rather than the raw
+// change event: repopulating can leave the same machine+project selected, and
+// discarding a still-valid attachment would be its own small betrayal.
+function syncNewTaskUploadTarget() {
+  const stripId = "nt-attachments";
+  const machineSel = $("nt-machine");
+  const projectSel = $("nt-project");
+  const key = uploadTargetKey(
+    machineSel ? String(machineSel.value || "").trim() : "",
+    projectSel ? String(projectSel.value || "").trim() : "",
+  );
+  const targets = state.uploadTargets && typeof state.uploadTargets === "object" ? state.uploadTargets : {};
+  const previous = targets[stripId];
+  if (typeof previous !== "string" || previous === key) return 0;
+  const discarded = discardAttachments(stripId);
+  if (discarded) {
+    showToast(
+      "info",
+      tf(
+        "upload.targetChanged",
+        "Attachments were removed because the task now targets a different project.",
+      ),
+    );
+  }
+  return discarded;
+}
+
 // Pure DOM helper: rebuild `select` from a project_roots list. Empties the
 // select, hides/shows the optional empty-hint, and toggles `submit.disabled`
 // when there is nothing to publish against.
@@ -14669,6 +14939,14 @@ async function submitNewTask(event) {
 
   if (!machineId) return showFormError(errBox, tf("newTask.errSelectMachine", "Select a target machine."));
   if (!task) return showFormError(errBox, tf("newTask.errTaskEmpty", "Task description must not be empty."));
+  // Same rule as the reply box: a task text still holding a placeholder token
+  // would reach the agent as prose, and closing the modal on submit destroys
+  // the input the arriving path must be written into.
+  const pendingUploads = pendingUploadRefusal("nt-attachments");
+  if (pendingUploads) {
+    showToast("error", pendingUploads);
+    return showFormError(errBox, pendingUploads);
+  }
   if (!projectSelectValue) {
     return showFormError(errBox, tf("newTask.errSelectProject", "Select a project root for this task."));
   }
@@ -15663,8 +15941,17 @@ function init() {
   $("new-task-btn").addEventListener("click", openNewTask);
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
-  $("nt-machine").addEventListener("change", refreshProjectOptions);
-  $("nt-project").addEventListener("change", updateManualPathVisibility);
+  // Both target selects run the attachment re-check after their own handler,
+  // because either one moves where the task will run — and the paths already in
+  // the box only resolve under the project they were uploaded into.
+  $("nt-machine").addEventListener("change", () => {
+    refreshProjectOptions();
+    syncNewTaskUploadTarget();
+  });
+  $("nt-project").addEventListener("change", () => {
+    updateManualPathVisibility();
+    syncNewTaskUploadTarget();
+  });
 
   $("flow-view-close").addEventListener("click", closeFlowView);
 
@@ -16008,6 +16295,9 @@ if (typeof module !== "undefined" && module.exports) {
     // adjudicated_description diff, exposed for tests/frontend/adjudicate_review.test.mjs.
     renderAdjudicateReview,
     submitReply,
+    // Exposed alongside submitReply so the upload suite can drive BOTH prompt
+    // submitters against the in-flight-attachment gate.
+    submitNewTask,
     updateReplyBox,
     interpretConfirmAnswer,
     CONFIRM_APPROVE_TOKENS,
@@ -16120,6 +16410,8 @@ if (typeof module !== "undefined" && module.exports) {
     attachmentRowModel,
     uploadErrorKey,
     UPLOAD_ERROR_KEYS,
+    pendingUploadNames,
+    pendingUploadRefusal,
     // Upload orchestration + attachment strip (G5) — the DOM-stub tests in
     // tests/frontend/file_upload.test.mjs drive these directly.
     UPLOAD_SCOPES,
@@ -16129,9 +16421,15 @@ if (typeof module !== "undefined" && module.exports) {
     replaceInInputOnce,
     attachmentEntries,
     performUpload,
+    UPLOAD_REQUEST_TIMEOUT_MS,
     renderAttachmentStrip,
     removeAttachment,
+    cancelAttachment,
+    abortUploadEntry,
     clearAttachments,
+    discardAttachments,
+    uploadTargetKey,
+    syncNewTaskUploadTarget,
     startUploads,
     handleInputPaste,
     handleInputDragOver,

@@ -24,8 +24,11 @@
  *   (d) startUploads — the browser-side size bound and the unresolved-target
  *       refusal, both asserted as "no request was made".
  *   (e) renderAttachmentStrip — thumbnail vs icon rows, hidden-when-empty.
- *   (f) removeAttachment / clearAttachments — text-only removal, and the
- *       hard boundary that nothing is ever deleted on the project machine.
+ *   (f) removeAttachment / cancelAttachment / clearAttachments — text-only
+ *       removal, the two escapes from a stalled upload (the user's cancel and
+ *       the request's own ceiling, both of which must keep the drafted text),
+ *       and the hard boundary that nothing is ever deleted on the project
+ *       machine.
  *   (g) paste / drop / picker handlers — plain text left untouched, drop
  *       claimed only for files, picker value reset.
  *
@@ -76,6 +79,7 @@ export async function registerFileUploadTests(ctx) {
 
   function resetScopes() {
     state.uploadAttachments = {};
+    state.uploadTargets = {};
     state.uploadSeq = 0;
     state.selectedFlowId = null;
     for (const id of ["nt-task", "flow-reply-input"]) {
@@ -301,12 +305,14 @@ export async function registerFileUploadTests(ctx) {
       assert.equal(t.machineId, undefined);
     });
 
-    check("G5 resolveUploadTarget: no open flow is a no_target refusal", () => {
+    check("G5 resolveUploadTarget: no open flow is a no_flow refusal", () => {
       resetScopes();
       const t = app.resolveUploadTarget("flow");
       assert.equal(t.ok, false);
-      assert.equal(t.code, "no_target");
-      assert.equal(t.errorKey, "upload.errNoTarget");
+      // Its own code, not no_target: the flow view has no machine/project
+      // pickers, so the New Task remedy would be unactionable here.
+      assert.equal(t.code, "no_flow");
+      assert.equal(t.errorKey, "upload.errNoFlow");
     });
 
     check("G5 resolveUploadTarget: New Task returns machine + registered root", () => {
@@ -577,7 +583,7 @@ export async function registerFileUploadTests(ctx) {
         const started = app.startUploads("flow", [fakeFile("a.txt")]);
         assert.equal(started.length, 0);
         assert.equal(f.calls.length, 0);
-        assert.equal(toasts().join("|").includes("Choose a machine and a project"), true);
+        assert.equal(toasts().join("|").includes("Open a flow before attaching files"), true);
       } finally {
         f.restore();
       }
@@ -640,16 +646,21 @@ export async function registerFileUploadTests(ctx) {
       assert.equal(findAll(strip, "attachment-remove").length, 1);
     });
 
-    check("G5 renderAttachmentStrip: an in-flight row shows status and cannot be removed", () => {
+    check("G5 renderAttachmentStrip: an in-flight row shows status and offers cancel", () => {
       resetScopes();
       app.renderAttachmentStrip("nt-attachments", [{
         id: "u1", name: "big.bin", size: 4096, status: "uploading",
       }]);
       const strip = $("nt-attachments");
       assert.equal(findOne(strip, "attachment-size").textContent, "Uploading…");
-      // Removing it would strand the in-flight response with no token to swap.
-      assert.equal(findAll(strip, "attachment-remove").length, 0);
       assert.equal(strip.children[0].classList.contains("uploading"), true);
+      // The × on an in-flight row cancels the request instead of editing a path
+      // out of the text (there is no path yet, only a placeholder). It has to be
+      // there: this row holds the submit gate shut, so without it a request that
+      // never answers would strand the whole drafted prompt.
+      const btn = findOne(strip, "attachment-remove");
+      assert.notEqual(btn, null, "an in-flight row must be escapable");
+      assert.equal(btn.title.includes("Cancel"), true, btn.title);
     });
 
     check("G5 renderAttachmentStrip: a failed row stays, dismissable, with its reason", () => {
@@ -723,6 +734,122 @@ export async function registerFileUploadTests(ctx) {
       assert.equal(input.value, "a  b P c");
     });
 
+    // ---- escaping a stalled upload ------------------------------------------
+    // An uploading row shuts the submit gate for its whole prompt box, so the
+    // two ways out of that state are the load-bearing part of the feature: the
+    // user cancels, or the request's own ceiling settles it. Neither may cost
+    // the operator the words they had already typed.
+    await checkAsync("G5 cancelAttachment: a stalled upload releases the send gate and keeps the draft", async () => {
+      resetScopes();
+      state.selectedFlowId = "f1";
+      const input = $("flow-reply-input");
+      input.value = "yes, go ahead";
+      input.selectionStart = 13;
+      input.selectionEnd = 13;
+      const saved = globalThis.fetch;
+      const signals = [];
+      // A POST that never answers — a connection that died mid-body, which the
+      // browser itself may sit on for minutes before it gives up.
+      globalThis.fetch = (url, init) => {
+        signals.push(init && init.signal);
+        return new Promise(() => {});
+      };
+      try {
+        const pending = app.startUploads("flow", [fakeFile("clip.mp4", 15 * 1024 * 1024, "video/mp4")]);
+        assert.equal(pending.length, 1);
+        assert.equal(input.value.includes("clip.mp4"), true, "the placeholder is parked");
+        assert.notEqual(app.pendingUploadRefusal("flow-attachments"), "", "the send is refused");
+
+        findOne($("flow-attachments"), "attachment-remove").dispatch("click");
+
+        // The whole point: the answer to a pending CONFIRM is still typed and
+        // now sendable — only the attachment was given up on.
+        assert.equal(input.value, "yes, go ahead", "the drafted words survive");
+        assert.equal(app.attachmentEntries("flow-attachments").length, 0);
+        assert.equal(app.pendingUploadRefusal("flow-attachments"), "", "the gate reopens");
+        assert.equal($("flow-attachments").classList.contains("hidden"), true);
+        // Hung up for real, not merely forgotten about.
+        assert.equal(Boolean(signals[0] && signals[0].aborted), true, "the request was aborted");
+      } finally {
+        globalThis.fetch = saved;
+      }
+    });
+
+    await checkAsync("G5 cancelAttachment: an answer arriving after the cancel changes nothing", async () => {
+      resetScopes();
+      const input = $("nt-task");
+      const resolvers = [];
+      const saved = globalThis.fetch;
+      globalThis.fetch = () => new Promise((resolve) => { resolvers.push(resolve); });
+      try {
+        const pending = app.performUpload(
+          input,
+          fakeFile("late.bin"),
+          { ok: true, kind: "flow", flowId: "f1" },
+          "nt-attachments",
+        );
+        app.cancelAttachment("nt-attachments", app.attachmentEntries("nt-attachments")[0].id);
+        assert.equal(input.value, "");
+        // The bytes did land on the project machine, but the row is gone from
+        // the screen — resurrecting a path here would re-arm a gate the user
+        // just escaped, and plant text they did not ask for.
+        resolvers[0]({
+          ok: true,
+          status: 201,
+          json: async () => ({ path: "tianluo/uploads/aaaaaaaaaaaa_late.bin" }),
+        });
+        assert.equal(await pending, null, "the cancelled upload yields no attachment");
+        assert.equal(input.value, "");
+        assert.equal(app.attachmentEntries("nt-attachments").length, 0);
+        assert.equal(toasts().length, 0, "and a cancel the user asked for is not an error");
+      } finally {
+        globalThis.fetch = saved;
+      }
+    });
+
+    await checkAsync("G5 performUpload: a request that never answers times out instead of pinning the row", async () => {
+      resetScopes();
+      const input = $("nt-task");
+      input.value = "please review ";
+      input.selectionStart = 14;
+      input.selectionEnd = 14;
+      const timers = [];
+      const savedTimeout = globalThis.setTimeout;
+      const savedFetch = globalThis.fetch;
+      let signal = null;
+      globalThis.setTimeout = (fn, ms) => { timers.push({ fn, ms }); return 0; };
+      globalThis.fetch = (url, init) => {
+        signal = init && init.signal;
+        return new Promise(() => {});
+      };
+      try {
+        app.performUpload(
+          input,
+          fakeFile("stall.bin"),
+          { ok: true, kind: "flow", flowId: "f1" },
+          "nt-attachments",
+        );
+        const armed = timers.find((t) => t.ms === app.UPLOAD_REQUEST_TIMEOUT_MS);
+        assert.notEqual(armed, undefined, "the request must be bounded, not open-ended");
+        armed.fn();   // the ceiling is reached with the socket still dead
+        assert.equal(input.value, "please review ", "the placeholder is taken back out");
+        const rows = app.attachmentEntries("nt-attachments");
+        assert.equal(rows.length, 1);
+        assert.equal(rows[0].status, "error");
+        assert.equal(rows[0].code, "timeout");
+        assert.equal(app.pendingUploadRefusal("nt-attachments"), "", "the send gate reopens on its own");
+        assert.equal(Boolean(signal && signal.aborted), true, "the dead request is hung up");
+        assert.equal(toasts().join("|").includes("did not answer in time"), true);
+        // A settled row is dismissable — the only way to clear it, since its
+        // placeholder is already gone.
+        app.renderAttachmentStrip("nt-attachments");
+        assert.equal(findAll($("nt-attachments"), "attachment-remove").length, 1);
+      } finally {
+        globalThis.setTimeout = savedTimeout;
+        globalThis.fetch = savedFetch;
+      }
+    });
+
     check("G5 clearAttachments: empties the strip and recycles preview URLs", () => {
       resetScopes();
       resetObjectUrls();
@@ -758,6 +885,125 @@ export async function registerFileUploadTests(ctx) {
         assert.deepEqual(objectUrls.revoked, objectUrls.created);
       } finally {
         f.restore();
+      }
+    });
+
+    // ========================================================================
+    // (f2) New Task target change
+    // ========================================================================
+    //
+    // A project-relative path only means anything under the project it was
+    // uploaded into, and submitNewTask never rewrites the task text. So when the
+    // form is re-pointed, the text has to lose those paths — otherwise the flow
+    // spawns in the new project and the agent silently finds nothing there.
+    await checkAsync("G5 target change: switching project un-plants the pasted path", async () => {
+      resetScopes();
+      $("nt-machine").value = "m1";
+      $("nt-project").value = "/proj/a";
+      const f = installFetch(() => okUpload("tianluo/uploads/aaaaaaaaaaaa_shot.png"));
+      try {
+        const input = $("nt-task");
+        input.value = "look at ";
+        input.selectionStart = 8;
+        input.selectionEnd = 8;
+        await Promise.all(app.startUploads("newTask", [fakeFile("shot.png", 12, "image/png")]));
+        assert.equal(input.value, "look at tianluo/uploads/aaaaaaaaaaaa_shot.png");
+        const before = f.calls.length;
+
+        $("nt-project").value = "/proj/b";
+        const discarded = app.syncNewTaskUploadTarget();
+
+        assert.equal(discarded, 1);
+        assert.equal(input.value, "look at ", "no path resolvable only in /proj/a survives");
+        assert.equal(app.attachmentEntries("nt-attachments").length, 0);
+        assert.equal($("nt-attachments").classList.contains("hidden"), true);
+        assert.equal(toasts().join("|").includes("different project"), true, toasts().join("|"));
+        // Same boundary as removeAttachment: the stored bytes stay on the
+        // machine that already wrote them.
+        assert.equal(f.calls.length, before, "nothing is deleted on the project machine");
+      } finally {
+        f.restore();
+      }
+    });
+
+    await checkAsync("G5 target change: switching machine discards even a same-named root", async () => {
+      resetScopes();
+      $("nt-machine").value = "m1";
+      $("nt-project").value = "/srv/shared";
+      const f = installFetch(() => okUpload("tianluo/uploads/bbbbbbbbbbbb_n.txt"));
+      try {
+        const input = $("nt-task");
+        await Promise.all(app.startUploads("newTask", [fakeFile("n.txt")]));
+        assert.equal(input.value, "tianluo/uploads/bbbbbbbbbbbb_n.txt");
+        // The path string would still be spellable on m2, but the bytes only
+        // exist on m1 — an identical root name is not the same uploads dir.
+        $("nt-machine").value = "m2";
+        assert.equal(app.syncNewTaskUploadTarget(), 1);
+        assert.equal(input.value, "");
+      } finally {
+        f.restore();
+      }
+    });
+
+    await checkAsync("G5 target change: re-selecting the same target keeps the attachment", async () => {
+      resetScopes();
+      $("nt-machine").value = "m1";
+      $("nt-project").value = "/proj/a";
+      const f = installFetch(() => okUpload("tianluo/uploads/cccccccccccc_c.txt"));
+      try {
+        const input = $("nt-task");
+        await Promise.all(app.startUploads("newTask", [fakeFile("c.txt")]));
+        // A machine change repopulates the project list, which can land on the
+        // very same pair; discarding then would destroy still-valid work.
+        assert.equal(app.syncNewTaskUploadTarget(), 0);
+        assert.equal(input.value, "tianluo/uploads/cccccccccccc_c.txt");
+        assert.equal(app.attachmentEntries("nt-attachments").length, 1);
+        assert.deepEqual(toasts(), []);
+      } finally {
+        f.restore();
+      }
+    });
+
+    check("G5 target change: an empty strip changes nothing and says nothing", () => {
+      resetScopes();
+      $("nt-machine").value = "m1";
+      $("nt-project").value = "/proj/a";
+      const input = $("nt-task");
+      input.value = "just a task";
+      assert.equal(app.syncNewTaskUploadTarget(), 0);
+      assert.equal(input.value, "just a task");
+      assert.deepEqual(toasts(), []);
+    });
+
+    await checkAsync("G5 target change: an in-flight paste is disarmed, not left to land", async () => {
+      resetScopes();
+      $("nt-machine").value = "m1";
+      $("nt-project").value = "/proj/a";
+      const input = $("nt-task");
+      const resolvers = [];
+      const saved = globalThis.fetch;
+      globalThis.fetch = () => new Promise((resolve) => { resolvers.push(resolve); });
+      try {
+        const pending = app.startUploads("newTask", [fakeFile("late.txt")]);
+        assert.equal(input.value.includes("late.txt"), true, "the placeholder is parked");
+
+        $("nt-project").value = "/proj/b";
+        assert.equal(app.syncNewTaskUploadTarget(), 1);
+        assert.equal(input.value, "", "the placeholder goes with the row");
+
+        // The answer for /proj/a arrives after the form already points at
+        // /proj/b: with its token gone there is nowhere for the path to land,
+        // which is exactly what keeps it out of the new project's prompt.
+        resolvers[0]({
+          ok: true,
+          status: 201,
+          json: async () => ({ path: "tianluo/uploads/dddddddddddd_late.txt" }),
+        });
+        await Promise.all(pending);
+        assert.equal(input.value, "");
+        assert.equal(app.attachmentEntries("nt-attachments").length, 0);
+      } finally {
+        globalThis.fetch = saved;
       }
     });
 
@@ -936,6 +1182,115 @@ export async function registerFileUploadTests(ctx) {
       const gone = { value: "nothing here", selectionStart: 3, selectionEnd: 3 };
       assert.equal(app.replaceInInputOnce(gone, "[tok]", "path"), false);
       assert.equal(gone.value, "nothing here");
+    });
+
+    // ========================================================================
+    // (h) the submit gate — a placeholder is never allowed to ship as prose
+    // ========================================================================
+
+    check("G6 pendingUploadNames: only the rows still in flight count", () => {
+      assert.deepEqual(app.pendingUploadNames([]), []);
+      assert.deepEqual(app.pendingUploadNames(null), []);
+      assert.deepEqual(
+        app.pendingUploadNames([
+          { name: "done.png", status: "done" },
+          { name: "boom.bin", status: "error" },
+          { name: "slow.zip", status: "uploading" },
+          { name: "  ", status: "uploading" },
+        ]),
+        ["slow.zip", "file"],
+      );
+    });
+
+    check("G5 pendingUploadRefusal: localized while in flight, empty once settled", () => {
+      resetScopes();
+      const rows = app.attachmentEntries("flow-attachments");
+      rows.push({ id: "upload-1", name: "big.zip", status: "uploading", path: "" });
+      const refusal = app.pendingUploadRefusal("flow-attachments");
+      assert.equal(refusal.includes("big.zip"), true);
+      // Copy comes from the language pack, never a raw key.
+      assert.equal(refusal.includes("upload.errPending"), false);
+      rows[0].status = "done";
+      rows[0].path = "tianluo/uploads/aaaaaaaaaaaa_big.zip";
+      assert.equal(app.pendingUploadRefusal("flow-attachments"), "");
+    });
+
+    check("G5 submitReply: an in-flight paste blocks the send instead of shipping the token", () => {
+      resetScopes();
+      state.selectedFlowId = "f1";
+      state.flowInterventions = [{ id: "t1", kind: "call", callId: "c1" }];
+      state.flowReplyTargetId = "t1";
+      const f = installFetch(() => ({ status: 200, body: {} }));
+      try {
+        const input = $("flow-reply-input");
+        input.value = "have a look at [uploading big.zip #1]";
+        app.attachmentEntries("flow-attachments").push({
+          id: "upload-1", name: "big.zip", status: "uploading", path: "",
+        });
+
+        app.submitReply({ preventDefault: () => {} });
+
+        assert.equal(f.calls.length, 0, "nothing was sent");
+        // The text is left exactly as typed: the answer still has a token to
+        // land on, so the path is not lost.
+        assert.equal(input.value, "have a look at [uploading big.zip #1]");
+        assert.equal(toasts().some((t) => t.includes("big.zip")), true, "and the user is told why");
+      } finally {
+        f.restore();
+        state.flowInterventions = [];
+        state.flowReplyTargetId = null;
+      }
+    });
+
+    await checkAsync("G5 submitNewTask: an in-flight paste blocks Publish", async () => {
+      resetScopes();
+      const f = installFetch(() => ({ status: 202, body: {} }));
+      try {
+        $("nt-machine").value = "m1";
+        $("nt-project").value = "/srv/proj";
+        $("nt-type").value = "feature";
+        const input = $("nt-task");
+        input.value = "review [uploading big.zip #1]";
+        app.attachmentEntries("nt-attachments").push({
+          id: "upload-1", name: "big.zip", status: "uploading", path: "",
+        });
+
+        await app.submitNewTask({ preventDefault: () => {} });
+
+        assert.equal(f.calls.length, 0, "no flow was spawned");
+        assert.equal(input.value, "review [uploading big.zip #1]");
+        assert.equal($("nt-error").classList.contains("hidden"), false, "the modal says why");
+        assert.equal(toasts().some((t) => t.includes("big.zip")), true);
+      } finally {
+        f.restore();
+      }
+    });
+
+    await checkAsync("G5 submitNewTask: publishes once the path has landed", async () => {
+      // The other half of the gate: a settled row must not keep the operator
+      // from sending, or the refusal would be a permanent lock.
+      resetScopes();
+      const f = installFetch(() => ({ status: 202, body: {} }));
+      try {
+        $("nt-machine").value = "m1";
+        $("nt-project").value = "/srv/proj";
+        $("nt-type").value = "feature";
+        const path = "tianluo/uploads/aaaaaaaaaaaa_big.zip";
+        $("nt-task").value = "review " + path;
+        app.attachmentEntries("nt-attachments").push({
+          id: "upload-1", name: "big.zip", status: "done", path,
+        });
+
+        await app.submitNewTask({ preventDefault: () => {} });
+
+        assert.equal(f.calls.length, 1, "the flow was spawned");
+        const body = JSON.parse(f.calls[0].init.body);
+        assert.equal(body.task, "review " + path, "the prompt carries the path, not a token");
+        // The rows mirrored text that has now left with the request.
+        assert.equal(app.attachmentEntries("nt-attachments").length, 0);
+      } finally {
+        f.restore();
+      }
     });
 
     resetScopes();

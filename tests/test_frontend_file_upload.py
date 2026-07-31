@@ -69,11 +69,13 @@ REQUIRED_I18N_KEYS = (
     "upload.attachTitle",
     "upload.attachmentsLabel",
     "upload.removeTitle",
+    "upload.cancelTitle",
     "upload.placeholder",
     "upload.uploading",
     "upload.errTooLarge",
     "upload.errFailed",
     "upload.errNoTarget",
+    "upload.errNoFlow",
     "upload.errUnregisteredProject",
     "upload.errUnsupportedDaemon",
     "upload.errNotConnected",
@@ -81,6 +83,8 @@ REQUIRED_I18N_KEYS = (
     "upload.errWriteFailed",
     "upload.errInvalidFilename",
     "upload.errNetwork",
+    "upload.errPending",
+    "upload.targetChanged",
     "common.size.bytes",
     "common.size.kb",
     "common.size.mb",
@@ -166,6 +170,49 @@ def test_index_html_carries_both_upload_scopes():
     assert 'id="flow-file-input" class="hidden"' in html
 
 
+def test_reset_reply_box_clears_the_docked_strip():
+    """Blanking the docked textarea must retire the strip that mirrors it.
+
+    ``resetReplyBox`` runs on every flow open/switch. Left unwired, flow A's
+    rows would sit under flow B's input advertising paths that are not in its
+    text (and live in another project), and their preview object URLs would
+    never be revoked. Guarded statically because the function drives half the
+    reply dock, which the DOM stub does not model.
+    """
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js.split("function resetReplyBox()", 1)
+    assert len(body) == 2, "app.js no longer declares `function resetReplyBox()`"
+    body = body[1].split("\nfunction ", 1)[0]
+    assert 'clearAttachments("flow-attachments")' in body, (
+        "resetReplyBox() blanks #flow-reply-input without clearing the "
+        "attachment strip that mirrors it"
+    )
+
+
+def test_new_task_target_selects_recheck_the_attachments():
+    """Both New Task target selects must re-run the attachment check.
+
+    An uploaded path resolves only under the project it was written into, and
+    ``submitNewTask`` ships the task text verbatim — so a machine/project change
+    that leaves the old paths in ``#nt-task`` publishes a prompt naming files
+    that do not exist where the flow runs, with no error anywhere. The discard
+    itself is covered by the Node suite; only the two ``init()`` bindings that
+    trigger it live outside the DOM stub's reach.
+    """
+    js = APP_JS.read_text(encoding="utf-8")
+    body = js.split("\nfunction init()", 1)
+    assert len(body) == 2, "app.js no longer declares `function init()`"
+    body = body[1].split("\nfunction ", 1)[0]
+    for element_id in ("nt-machine", "nt-project"):
+        anchor = f'$("{element_id}").addEventListener("change"'
+        assert anchor in body, f"init() no longer binds the {element_id} change handler"
+        handler = body.split(anchor, 1)[1].split("addEventListener", 1)[0]
+        assert "syncNewTaskUploadTarget()" in handler, (
+            f"a {element_id} change re-points the task without re-checking the "
+            "attachments its paths belong to"
+        )
+
+
 def test_style_css_styles_the_strip_and_the_drop_target():
     css = STYLE_CSS.read_text(encoding="utf-8")
     for selector in (
@@ -231,7 +278,17 @@ def test_frontend_file_upload_node_suite_passes():
         "G5 renderAttachmentStrip: a plain file renders icon + name + size",
         "G5 removeAttachment: deletes the path from the text and nothing else",
         "G5 clearAttachments: empties the strip and recycles preview URLs",
+        # escaping a stalled upload — an in-flight row shuts the submit gate
+        "G5 renderAttachmentStrip: an in-flight row shows status and offers cancel",
+        "G5 cancelAttachment: a stalled upload releases the send gate and keeps the draft",
+        "G5 cancelAttachment: an answer arriving after the cancel changes nothing",
+        "G5 performUpload: a request that never answers times out instead of pinning the row",
         "G5 bindUploadScope: both scopes bind all four gestures",
+        # the submit gate: a placeholder must never ship as prompt prose
+        "G6 pendingUploadNames: only the rows still in flight count",
+        "G5 submitReply: an in-flight paste blocks the send instead of shipping the token",
+        "G5 submitNewTask: an in-flight paste blocks Publish",
+        "G5 submitNewTask: publishes once the path has landed",
     ):
         assert needle in combined, (
             f"expected upload check {needle!r} in node output:\n{combined}"

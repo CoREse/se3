@@ -25,6 +25,7 @@ from tianluo.engine.worktree import (
     merge_in_progress,
     recover_stale_unmerged_paths,
     remove_worktree,
+    seed_uploads,
 )
 
 
@@ -166,6 +167,138 @@ class TestCreateWorktree:
             capture_output=True, text=True, check=True,
         )
         assert "wt-test" in result.stdout
+
+
+class TestSeedUploads:
+    """Attachments pasted before a ``--worktree`` fork must survive it.
+
+    The web UI stores a New Task attachment under the main root and leaves the
+    project-relative path in the prompt; if the sandbox the flow runs in lacks
+    the (gitignored, hence never checked out) uploads directory, that path
+    resolves to nothing.
+    """
+
+    def _seed_attachment(self, root: Path, name: str, body: bytes) -> Path:
+        target = root / "tianluo" / "uploads" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(body)
+        return target
+
+    def test_worktree_carries_pre_fork_attachments(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        self._seed_attachment(tmp_path, "abc123def456_shot.png", b"PNG-BYTES")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
+
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        landed = wt_path / "tianluo" / "uploads" / "abc123def456_shot.png"
+        assert landed.is_file()
+        assert landed.read_bytes() == b"PNG-BYTES"
+
+    def test_seeded_path_matches_the_prompt_relative_path(self, tmp_path: Path) -> None:
+        # The prompt carries exactly this string; the agent opens it with the
+        # sandbox as its working directory.
+        _init_repo(tmp_path)
+        self._seed_attachment(tmp_path, "0011223344ff_notes.txt", b"hi")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
+
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        relative = "tianluo/uploads/0011223344ff_notes.txt"
+        assert (wt_path / relative).read_bytes() == b"hi"
+
+    def test_uploads_directory_is_a_real_directory(self, tmp_path: Path) -> None:
+        # A symlink would be seen by git as a file, so the trailing-slash
+        # gitignore rule would not cover it and the sandbox would be dirty.
+        _init_repo(tmp_path)
+        self._seed_attachment(tmp_path, "aaaaaaaaaaaa_a.bin", b"x")
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
+
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        seeded_dir = wt_path / "tianluo" / "uploads"
+        assert seeded_dir.is_dir()
+        assert not seeded_dir.is_symlink()
+
+    def test_no_uploads_directory_is_not_an_error(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
+
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        assert wt_path.is_dir()
+        assert not (wt_path / "tianluo" / "uploads").exists()
+
+    def test_seeds_share_storage_with_the_source(self, tmp_path: Path) -> None:
+        # Hard-linked, so forking stays cheap regardless of how many 20 MB
+        # attachments a project has accumulated.
+        _init_repo(tmp_path)
+        source = self._seed_attachment(tmp_path, "bbbbbbbbbbbb_b.bin", b"y" * 32)
+        branch_name, _ = _make_test_branch(tmp_path, timestamp="test")
+
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        landed = wt_path / "tianluo" / "uploads" / "bbbbbbbbbbbb_b.bin"
+        assert landed.stat().st_ino == source.stat().st_ino
+
+    def test_falls_back_to_copying_when_linking_is_refused(self, tmp_path: Path) -> None:
+        main = tmp_path / "main"
+        main.mkdir()
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        self._seed_attachment(main, "cccccccccccc_c.bin", b"payload")
+
+        with patch("tianluo.engine.worktree.os.link", side_effect=OSError("EXDEV")):
+            assert seed_uploads(main, wt) == 1
+
+        assert (wt / "tianluo" / "uploads" / "cccccccccccc_c.bin").read_bytes() == b"payload"
+
+    def test_legacy_layout_seeds_the_legacy_path(self, tmp_path: Path) -> None:
+        # A 12.x-legacy project stores uploads in se3/uploads/ and its prompt
+        # path says so; seeding must not silently re-spell it as tianluo/.
+        main = tmp_path / "main"
+        (main / "se3" / "uploads").mkdir(parents=True)
+        (main / "se3" / "uploads" / "dddddddddddd_d.bin").write_bytes(b"legacy")
+        wt = tmp_path / "wt"
+        wt.mkdir()
+
+        assert seed_uploads(main, wt) == 1
+
+        assert (wt / "se3" / "uploads" / "dddddddddddd_d.bin").read_bytes() == b"legacy"
+        assert not (wt / "tianluo").exists()
+
+    def test_existing_sandbox_attachment_is_left_alone(self, tmp_path: Path) -> None:
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        self._seed_attachment(main, "eeeeeeeeeeee_e.bin", b"from-main")
+        self._seed_attachment(wt, "eeeeeeeeeeee_e.bin", b"already-here")
+
+        assert seed_uploads(main, wt) == 1
+
+        assert (wt / "tianluo" / "uploads" / "eeeeeeeeeeee_e.bin").read_bytes() == b"already-here"
+
+    def test_write_failure_never_breaks_the_fork(self, tmp_path: Path) -> None:
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        self._seed_attachment(main, "ffffffffffff_f.bin", b"z")
+
+        with patch("tianluo.engine.worktree.os.link", side_effect=OSError("boom")), \
+                patch("tianluo.engine.worktree.shutil.copy2", side_effect=OSError("boom")):
+            assert seed_uploads(main, wt) == 0
+
+    def test_subdirectories_are_not_seeded(self, tmp_path: Path) -> None:
+        # The uploads area is flat by design; anything else is not an
+        # attachment and must not be dragged into the sandbox.
+        main = tmp_path / "main"
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (main / "tianluo" / "uploads" / "nested").mkdir(parents=True)
+        (main / "tianluo" / "uploads" / "nested" / "x.bin").write_bytes(b"n")
+
+        assert seed_uploads(main, wt) == 0
+
+        assert not (wt / "tianluo" / "uploads" / "nested").exists()
 
 
 class TestRemoveWorktree:

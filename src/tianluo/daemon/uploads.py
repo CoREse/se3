@@ -21,18 +21,28 @@ import hashlib
 import logging
 import os
 import unicodedata
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Union
 
-from tianluo.runtime_paths import runtime_dir, runtime_dir_name
+from tianluo.runtime_paths import UPLOADS_DIR_NAME, runtime_dir_name, uploads_dir
 
 from . import protocol
 
 logger = logging.getLogger(__name__)
 
-#: Directory (under the project's runtime dir) holding operator attachments.
-UPLOADS_DIR_NAME = "uploads"
+# Re-exported so this module stays the one place the upload layer is read from,
+# while the definitions live in ``runtime_paths`` — the module ``luo init`` and
+# worktree creation can import without pulling in the daemon package.
+__all__ = [
+    "UPLOADS_DIR_NAME",
+    "UploadError",
+    "UploadStored",
+    "sanitize_upload_filename",
+    "store_upload",
+    "uploads_dir",
+]
 
 #: Hex characters of the content sha256 used as the stored file's prefix. 12
 #: hex chars (48 bits) makes an accidental collision between two distinct
@@ -40,10 +50,15 @@ UPLOADS_DIR_NAME = "uploads"
 #: short enough to stay readable inside a prompt.
 HASH_PREFIX_LEN = 12
 
-#: Cap on the sanitized name (the part after the hash prefix). Chosen so the
-#: whole ``<12 hex>_<name>`` stays comfortably inside the 255-byte filename
-#: limit even when every character is a 2-byte UTF-8 codepoint.
-MAX_NAME_LEN = 100
+#: Cap on the sanitized name (the part after the hash prefix), counted in
+#: **encoded UTF-8 bytes**. The filesystem's NAME_MAX is a byte budget (255 on
+#: ext4/xfs/apfs), so a character count cannot express it: one CJK codepoint
+#: costs 3 bytes and an emoji 4, which is how a name that looks short to a
+#: zh-CN operator produced an ENAMETOOLONG on ``os.replace`` and surfaced as an
+#: unexplainable "the machine could not save the file to disk". 200 bytes leaves
+#: the whole ``<12 hex>_<name>`` component at 213 bytes — inside the limit with
+#: room for the filesystems that budget below 255.
+MAX_NAME_BYTES = 200
 
 #: Fallback when sanitization consumes the entire name (e.g. the browser sent
 #: ``".."`` or a string of control characters).
@@ -53,6 +68,21 @@ FALLBACK_NAME = "file"
 #: address another directory; the rest are either illegal on common filesystems
 #: or invisible, which makes a path a human cannot verify by reading it.
 _UNSAFE_CHARS = frozenset('/\\:*?"<>|\0')
+
+
+def _truncate_utf8(text: str, limit: int) -> str:
+    """Longest prefix of *text* that encodes to at most *limit* UTF-8 bytes.
+
+    Cuts on a codepoint boundary — slicing the encoded bytes directly would
+    leave a half-written multibyte sequence, i.e. a name the operator cannot
+    type back and some tools refuse to open.
+    """
+    encoded = text.encode("utf-8")
+    if len(encoded) <= limit:
+        return text
+    # "ignore" drops exactly the trailing partial sequence the cut created; the
+    # input is a valid str, so nothing else in it can fail to decode.
+    return encoded[: max(limit, 0)].decode("utf-8", "ignore")
 
 
 class UploadError(Exception):
@@ -84,26 +114,18 @@ class UploadStored:
     deduplicated: bool = False
 
 
-def uploads_dir(project_root: Union[str, Path]) -> Path:
-    """Return the attachments directory for *project_root*.
-
-    Resolved through :func:`~tianluo.runtime_paths.runtime_dir` rather than
-    hard-coding ``tianluo/``: a project still on the legacy ``se3/`` layout
-    would otherwise get a stray top-level directory that no gitignore rule
-    covers, and that stray directory would then be committed by accident.
-    """
-    return runtime_dir(project_root) / UPLOADS_DIR_NAME
-
-
 def sanitize_upload_filename(name: str) -> str:
     """Reduce a browser-supplied filename to a safe single path component.
 
     The input is fully attacker-controlled (it travels from a browser through
     the server to this machine's disk), so nothing about it is trusted: the
     directory part is discarded, anything that could redirect or hide the path
-    is folded to ``_``, and the result is length-capped. The extension is
-    preserved across truncation because it is what tells the agent — and the
-    web UI's thumbnail logic — what kind of file this is.
+    is folded to ``_``, and the result is capped at :data:`MAX_NAME_BYTES`
+    *encoded bytes* — the unit the filesystem itself counts in, so a name of
+    3-byte CJK characters is truncated on the same budget as an ASCII one
+    instead of sailing past it into an ENAMETOOLONG at write time. The
+    extension is preserved across truncation because it is what tells the agent
+    — and the web UI's thumbnail logic — what kind of file this is.
     """
     raw = unicodedata.normalize("NFC", str(name or ""))
     # Both separator styles are stripped regardless of the daemon's OS: the
@@ -112,8 +134,18 @@ def sanitize_upload_filename(name: str) -> str:
     for sep in ("\\", "/"):
         raw = raw.rsplit(sep, 1)[-1]
 
+    # Lone surrogates join the unsafe set: they cannot be UTF-8 encoded, so a
+    # name carrying one would blow up the byte-budget truncation below (and
+    # land on disk as a name no operator can retype).
     cleaned = "".join(
-        "_" if (ch in _UNSAFE_CHARS or ord(ch) < 32 or ch.isspace()) else ch
+        "_"
+        if (
+            ch in _UNSAFE_CHARS
+            or ord(ch) < 32
+            or ch.isspace()
+            or 0xD800 <= ord(ch) <= 0xDFFF
+        )
+        else ch
         for ch in raw
     )
     # Leading dots/dashes are dropped so a stored file can never turn into a
@@ -121,12 +153,16 @@ def sanitize_upload_filename(name: str) -> str:
     # command-line option to a tool the agent later runs on the path.
     cleaned = cleaned.lstrip("._-")
 
-    if len(cleaned) > MAX_NAME_LEN:
+    if len(cleaned.encode("utf-8")) > MAX_NAME_BYTES:
         stem, dot, ext = cleaned.rpartition(".")
-        if dot and stem and len(ext) < MAX_NAME_LEN - 1:
-            cleaned = stem[: MAX_NAME_LEN - len(ext) - 1] + "." + ext
+        ext_bytes = len(ext.encode("utf-8"))
+        # The extension only survives if there is still room for a stem after
+        # it; an absurdly long "extension" is treated as no extension at all
+        # rather than eating the whole budget.
+        if dot and stem and ext_bytes < MAX_NAME_BYTES - 1:
+            cleaned = _truncate_utf8(stem, MAX_NAME_BYTES - ext_bytes - 1) + "." + ext
         else:
-            cleaned = cleaned[:MAX_NAME_LEN]
+            cleaned = _truncate_utf8(cleaned, MAX_NAME_BYTES)
         cleaned = cleaned.lstrip("._-")
 
     if not cleaned or cleaned in {".", ".."}:
@@ -198,9 +234,25 @@ def store_upload(
         # reading this directory at any moment, and os.replace is what
         # guarantees it observes either no file or the whole file — never the
         # prefix of an upload still in flight.
-        tmp = target_dir / f".{target.name}.{os.getpid()}.part"
+        #
+        # The per-call random token is what makes that guarantee hold under
+        # concurrency: two uploads of the same content+name (a double paste) run
+        # on separate to_thread workers and would otherwise share one temp path,
+        # so each would truncate and unlink the other's in-flight file —
+        # publishing a half-written target, the exact state this dance exists to
+        # prevent. O_EXCL turns the (astronomically unlikely) token collision
+        # into a loud failure rather than that same corruption.
+        #
+        # The component is built from the *digest* and a short token, not from
+        # target.name, because it must fit the same 255-byte filename budget
+        # MAX_NAME_BYTES sizes the target for: appending a suffix to a 213-byte
+        # target name would make a name that is perfectly storable as an
+        # attachment unstorable as its own temp file, failing the upload for a
+        # reason the operator can neither see nor act on.
+        tmp = target_dir / f".{digest}.{os.getpid()}.{uuid.uuid4().hex[:8]}.part"
         try:
-            with open(tmp, "wb") as fh:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+            with os.fdopen(fd, "wb") as fh:
                 fh.write(payload)
             os.replace(tmp, target)
         finally:

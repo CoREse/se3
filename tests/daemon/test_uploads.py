@@ -8,6 +8,8 @@ registry gate, ack shape). No real socket and no ``websockets`` import.
 
 import asyncio
 import base64
+import os
+from pathlib import Path
 
 import pytest
 
@@ -162,6 +164,73 @@ def test_store_upload_leaves_no_partial_temp_file_behind(tmp_path):
     assert not any(n.endswith(".part") or n.startswith(".") for n in names)
 
 
+def test_store_upload_temp_path_is_unique_per_call(tmp_path, monkeypatch):
+    """Two in-flight writes of the same content+name must not share a temp file.
+
+    A double paste dispatches two ``store_upload`` calls onto separate threads
+    with identical target names; a shared temp path lets each truncate and
+    unlink the other's in-flight file, publishing a half-written attachment —
+    exactly what the tmp+replace dance exists to prevent.
+    """
+    root = _project(tmp_path)
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(str(src))
+        real_replace(src, dst)
+
+    monkeypatch.setattr(uploads.os, "replace", spy)
+
+    store_upload(root, "shot.png", b"identical bytes")
+    # Drop the stored file so the second call writes for real instead of taking
+    # the dedup short-circuit — the collision only exists between two writers.
+    (root / "tianluo" / "uploads" / _stored_files(root)[0]).unlink()
+    store_upload(root, "shot.png", b"identical bytes")
+
+    assert len(seen) == 2
+    assert len(set(seen)) == 2, f"both writes used the same temp path: {seen}"
+
+
+def test_store_upload_accepts_a_max_length_multibyte_name(tmp_path):
+    """A name that exactly fills MAX_NAME_BYTES must survive the temp write.
+
+    100 Cyrillic characters is a 200-byte name: right at the budget, so the
+    target is stored verbatim. The temp component must fit the same budget —
+    derive it from the target name plus a suffix and the write dies with
+    ENAMETOOLONG, surfacing as an unexplainable "could not save to disk".
+    """
+    root = _project(tmp_path)
+    name = "я" * (uploads.MAX_NAME_BYTES // 2)
+
+    stored = store_upload(root, name, b"payload")
+
+    assert stored.path.endswith(name)
+    assert (root / stored.path).read_bytes() == b"payload"
+    assert _stored_files(root) == [Path(stored.path).name]
+
+
+def test_store_upload_stores_a_long_cjk_name(tmp_path):
+    """A long Chinese filename stores like any other, not as a disk failure.
+
+    Every CJK character is 3 UTF-8 bytes, so a name that reads as "short" to a
+    zh-CN operator can blow past NAME_MAX once the hash prefix is added. Before
+    the budget was counted in bytes this raised ENAMETOOLONG inside os.replace,
+    which the operator was shown as "the machine could not save the file to
+    disk" — a report about a disk that was in fact perfectly fine.
+    """
+    root = _project(tmp_path)
+    name = ("项目截图说明文档" * 12) + ".png"  # 100 chars / 292 bytes
+
+    stored = store_upload(root, name, b"payload")
+
+    component = Path(stored.path).name
+    assert len(component.encode("utf-8")) <= 255
+    assert component.endswith(".png"), "the extension survives truncation"
+    assert (root / stored.path).read_bytes() == b"payload"
+    assert _stored_files(root) == [component]
+
+
 # --------------------------------------------------------------------------
 # sanitize_upload_filename — the security-critical transform
 # --------------------------------------------------------------------------
@@ -208,13 +277,43 @@ def test_sanitize_falls_back_for_names_that_vanish(raw):
 
 def test_sanitize_truncates_long_names_keeping_the_extension():
     safe = sanitize_upload_filename("a" * 300 + ".png")
-    assert len(safe) <= uploads.MAX_NAME_LEN
+    assert len(safe.encode("utf-8")) <= uploads.MAX_NAME_BYTES
     assert safe.endswith(".png")
 
 
 def test_sanitize_truncates_extensionless_names():
     safe = sanitize_upload_filename("b" * 400)
-    assert len(safe) == uploads.MAX_NAME_LEN
+    assert len(safe.encode("utf-8")) == uploads.MAX_NAME_BYTES
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "项目截图说明文档" * 40,  # 3-byte codepoints, no extension
+        ("项目截图说明文档" * 40) + ".png",  # 3-byte codepoints + extension
+        ("🙂" * 200) + ".png",  # 4-byte codepoints
+        ("я" * 300) + ".txt",  # 2-byte codepoints
+    ],
+)
+def test_sanitize_caps_on_encoded_bytes_not_characters(raw):
+    """The cap is the filesystem's unit — bytes — for every alphabet.
+
+    A character-counted cap lets a CJK or emoji name through at 3–4× the byte
+    budget, and the overflow only shows up as an ENAMETOOLONG when the file is
+    finally moved into place, far from the name that caused it.
+    """
+    safe = sanitize_upload_filename(raw)
+    assert len(safe.encode("utf-8")) <= uploads.MAX_NAME_BYTES
+    # Whatever survives must still be a usable name, never a mojibake tail from
+    # a cut through the middle of a multibyte sequence.
+    assert safe
+    assert safe.encode("utf-8").decode("utf-8") == safe
+
+
+def test_sanitize_keeps_the_whole_target_component_within_name_max():
+    """`<12 hex>_<name>` is what the filesystem sees; that is what must fit."""
+    safe = sanitize_upload_filename("项目截图" * 50 + ".png")
+    assert len(f"{'0' * 12}_{safe}".encode("utf-8")) <= 255
 
 
 def test_sanitize_preserves_unicode_names():
@@ -443,6 +542,48 @@ def test_upload_command_rejects_unregistered_project_root(tmp_path):
     assert ack["ok"] is False
     assert ack["error_code"] == protocol.UPLOAD_ERR_NOT_REGISTERED
     assert not (outsider / "tianluo" / "uploads").exists()
+
+
+def test_upload_command_accepts_a_worktree_root_of_a_registered_project(tmp_path):
+    """A ``--worktree`` flow's sandbox is never in the registry, yet must work.
+
+    The aggregator deliberately folds worktree copies back to their main root,
+    so gating strictly on the registry would refuse every attachment to every
+    worktree-mode flow. The bytes still land in the sandbox, which is the cwd
+    the flow's agent resolves the returned relative path against.
+    """
+    main = _project(tmp_path)
+    worktree = main / "tianluo" / "worktrees" / "wt1"
+    (worktree / "tianluo").mkdir(parents=True)
+    client = _make_client(main, upload_handler=store_upload)
+    ws = _FakeWS()
+
+    _run_upload(client, ws, **_upload_kwargs(worktree, b"shot"))
+
+    ack = _acks(ws)[0].payload
+    assert ack["ok"] is True, ack
+    assert ack["path"].startswith("tianluo/uploads/")
+    assert (worktree / ack["path"]).read_bytes() == b"shot"
+    # The main root keeps its own uploads dir untouched — the path is relative
+    # to the worktree the agent actually runs in.
+    assert not (main / "tianluo" / "uploads").exists()
+
+
+def test_upload_command_rejects_a_worktree_of_an_unregistered_project(tmp_path):
+    """Worktree attribution widens the gate by one hop, not into a hole."""
+    registered = _project(tmp_path)
+    outsider = tmp_path / "outsider"
+    worktree = outsider / "tianluo" / "worktrees" / "wt1"
+    (worktree / "tianluo").mkdir(parents=True)
+    client = _make_client(registered, upload_handler=store_upload)
+    ws = _FakeWS()
+
+    _run_upload(client, ws, **_upload_kwargs(worktree, b"evil"))
+
+    ack = _acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.UPLOAD_ERR_NOT_REGISTERED
+    assert not (worktree / "tianluo" / "uploads").exists()
 
 
 def test_upload_command_without_handler_replies_unsupported(tmp_path):

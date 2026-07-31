@@ -7,9 +7,10 @@ the ``luo run --worktree`` isolation mode.
 """
 
 from __future__ import annotations
-from tianluo.runtime_paths import runtime_dir
+from tianluo.runtime_paths import runtime_dir, uploads_dir
 
 import logging
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -101,6 +102,73 @@ def _branch_safe_name(branch: str) -> str:
     return branch.replace("/", "-")
 
 
+def seed_uploads(project_root: Path, worktree_path: Path) -> int:
+    """Materialize *project_root*'s web-UI attachments inside *worktree_path*.
+
+    INVARIANT: an attachment path sitting in a prompt must be openable from the
+    working directory the flow actually runs in. The web UI stores a pasted file
+    under the *main* root and leaves the project-relative path
+    ``<runtime>/uploads/<hash>_<name>`` in the prompt text; a ``--worktree`` run
+    then executes that prompt with the sandbox as its working directory. Since
+    the uploads directory is gitignored, ``git worktree add`` produces a
+    checkout without it, and that path would resolve to nothing. Seeding closes
+    the gap for files attached *before* the fork; files attached to an
+    already-running worktree flow land in the sandbox directly (see
+    ``daemon/client.py``'s UPLOAD_COMMAND handler).
+
+    Entries are hard-linked, not copied: the names are content-addressed, so a
+    stored attachment is immutable and sharing one inode between the main root
+    and every sandbox is safe — and it keeps forking cheap no matter how many
+    (up to 20 MB each) attachments a project has accumulated. Copying is the
+    fallback for filesystems that refuse the link.
+
+    A real directory is created rather than a symlink to the main root's: the
+    gitignore rule ``<runtime>/uploads/`` has a trailing slash and therefore
+    matches directories only, so a symlink (which git sees as a file) would
+    leave the sandbox permanently dirty and break its commit steps.
+
+    Returns the number of attachments made available. Never raises: a sandbox
+    without its attachments is a degraded run, but a worktree that fails to be
+    created at all is a dead one.
+    """
+    source = uploads_dir(project_root)
+    if not source.is_dir():
+        return 0
+
+    # The sandbox path is the main root's, transplanted — NOT re-resolved
+    # against the sandbox. The prompt already carries a relative path spelled
+    # with the main root's runtime directory name, and a freshly checked-out
+    # sandbox whose runtime directory happens to hold nothing tracked would
+    # resolve to the canonical name instead, landing the files beside the path
+    # the agent is about to open rather than at it.
+    target = worktree_path / source.relative_to(Path(project_root))
+    seeded = 0
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for entry in sorted(source.iterdir()):
+            if not entry.is_file():
+                continue
+            destination = target / entry.name
+            if destination.exists():
+                seeded += 1
+                continue
+            try:
+                os.link(entry, destination)
+            except OSError:
+                shutil.copy2(entry, destination)
+            seeded += 1
+    except OSError as exc:
+        logger.warning(
+            "Could not seed uploads from %s into worktree %s: %s",
+            source, worktree_path, exc,
+        )
+        return seeded
+
+    if seeded:
+        logger.info("Seeded %d upload(s) into worktree: %s", seeded, worktree_path)
+    return seeded
+
+
 def create_worktree(project_root: Path, branch: str) -> Path:
     """Create a git worktree for the given branch.
 
@@ -131,6 +199,7 @@ def create_worktree(project_root: Path, branch: str) -> Path:
         try:
             _run_git(project_root, "worktree", "add", str(worktree_path), branch, timeout=timeout)
             logger.info("Created worktree at: %s (branch: %s)", worktree_path, branch)
+            seed_uploads(project_root, worktree_path)
             return worktree_path
         except subprocess.TimeoutExpired as e:
             last_error = e

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from . import history, protocol
+from .supervisor import resolve_worktree_main_root
 from .wire_metrics import WireMetrics
 
 logger = logging.getLogger(__name__)
@@ -1795,18 +1796,28 @@ class DaemonClient:
             self._last_known_project_roots = known_roots
         resolved = str(Path(project_root).resolve())
         if resolved not in known_roots:
-            logger.warning(
-                "UPLOAD_COMMAND: project_root %r is not a registered project; "
-                "known roots: %s",
-                project_root,
-                sorted(known_roots)[:5],
-            )
-            await _reply(
-                ok=False,
-                error="project_root is not a registered project",
-                error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
-            )
-            return
+            # A `luo run --worktree` flow reports its sandbox
+            # (<main>/tianluo/worktrees/<name>) as project_root, and the
+            # aggregator deliberately keeps those out of the registry — they are
+            # transient copies, not projects. The registry gate must therefore
+            # accept a sandbox whose *main* root is registered, otherwise every
+            # attachment to a worktree-mode flow is refused. The file still
+            # lands in the sandbox's own uploads dir, because that is the
+            # working directory the flow's agent reads the relative path from.
+            main_root = resolve_worktree_main_root(resolved)
+            if not main_root or str(Path(main_root).resolve()) not in known_roots:
+                logger.warning(
+                    "UPLOAD_COMMAND: project_root %r is not a registered project; "
+                    "known roots: %s",
+                    project_root,
+                    sorted(known_roots)[:5],
+                )
+                await _reply(
+                    ok=False,
+                    error="project_root is not a registered project",
+                    error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
+                )
+                return
 
         handler = self._upload_handler
         if handler is None:

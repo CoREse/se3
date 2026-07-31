@@ -2,7 +2,7 @@
 
 # tianluo (田螺) — the Software Engineering 3.0 flow engine
 
-![Version](https://img.shields.io/badge/version-12.0.3-blue)
+![Version](https://img.shields.io/badge/version-12.1.0-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 

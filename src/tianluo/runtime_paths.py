@@ -24,6 +24,14 @@ logger = logging.getLogger(__name__)
 RUNTIME_DIR_NAME = "tianluo"
 LEGACY_RUNTIME_DIR_NAME = "se3"
 
+#: Runtime sub-directory the daemon lands web-UI attachments in. It lives here,
+#: in the one module every layer may import cheaply, because three unrelated
+#: layers need it: the daemon writes into it, ``luo init`` writes its gitignore
+#: rule, and worktree creation seeds it into a new sandbox. Importing
+#: ``tianluo.daemon.uploads`` for it would drag the resident control plane into
+#: plain ``luo`` CLI startup, and a per-layer copy of the literal would drift.
+UPLOADS_DIR_NAME = "uploads"
+
 # Roots we already logged the migration hint for (avoid log spam from the
 # daemon's polling loops). Process-local by design.
 _HINTED_ROOTS: Set[str] = set()
@@ -54,6 +62,17 @@ def runtime_dir(project_root: Union[str, Path]) -> Path:
     """Return the runtime directory *path* in effect under *project_root*."""
     root = Path(project_root)
     return root / runtime_dir_name(root)
+
+
+def uploads_dir(project_root: Union[str, Path]) -> Path:
+    """Return the web-UI attachments directory in effect under *project_root*.
+
+    Resolved through :func:`runtime_dir` rather than hard-coding ``tianluo/``:
+    a project still on the legacy ``se3/`` layout would otherwise get a stray
+    top-level directory that no gitignore rule covers, and that stray directory
+    would then be committed by accident.
+    """
+    return runtime_dir(project_root) / UPLOADS_DIR_NAME
 
 
 def runtime_relpath(project_root: Union[str, Path], *parts: str) -> Path:

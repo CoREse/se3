@@ -1,8 +1,8 @@
 id: '264'
 description: webui可以粘贴图片并且上传到服务器的某个位置，然后在prompt里在粘贴图片的位置用图片上传的位置的路径来代替那个图片。
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-07-06T14:41:11.414010'
-updated_at: '2026-07-06T14:41:11.414010'
+updated_at: '2026-07-31T16:53:01.454885'
 type: feature

@@ -1,6 +1,6 @@
 """SE3 Init command - Initialize a new SE3 project."""
 
-from tianluo.runtime_paths import runtime_dir, runtime_dir_name
+from tianluo.runtime_paths import UPLOADS_DIR_NAME, runtime_dir, runtime_dir_name
 import fnmatch
 import subprocess
 from datetime import datetime
@@ -231,13 +231,6 @@ LOCAL_CONFIG_PATTERN = "tianluo.local.yaml"
 # also matching the committed ``tianluo.yaml`` — i.e. the user was targeting
 # the ``.local.yaml`` name specifically, not ``.yaml`` in general.
 _PROJECT_CONFIG_PATTERN = "tianluo.yaml"
-
-# Name of the runtime sub-directory the daemon lands web-UI attachments in.
-# Mirrors ``tianluo.daemon.uploads.UPLOADS_DIR_NAME``; duplicated rather than
-# imported because importing the daemon package would pull the whole resident
-# control plane into every ``luo`` CLI startup. A test pins the two together
-# so the duplication cannot drift.
-UPLOADS_DIR_NAME = "uploads"
 
 
 class _EnsuredPattern(NamedTuple):

@@ -41,7 +41,10 @@ logger = logging.getLogger(__name__)
 # nested ``foo/tianluo/logs/...``) is a runtime leak that should never be
 # committed. This is a pure-path signature — no content-based classification.
 _RUNTIME_SUBTREES = frozenset(
-    {"cache", "history", "logs", "state", "tmp", "worktrees", "calls", "collab"}
+    {
+        "cache", "history", "logs", "state", "tmp", "worktrees", "calls",
+        "collab", "uploads",
+    }
 )
 
 
