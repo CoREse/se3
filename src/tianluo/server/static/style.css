@@ -906,6 +906,146 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   #flow-reply-submit { align-self: flex-end; }
 }
 
+/* -- file attachments (upload strip) --------------------------------- *
+ * The strip sits directly under a prompt input (New Task and the docked
+ * reply/interject box) and mirrors what the text already carries: every entry
+ * corresponds to a project-relative path sitting in the textarea. It is a
+ * VIEW, not the source of truth — removing an entry only deletes that path
+ * from the text — so the strip is deliberately lightweight chrome that never
+ * grows tall enough to push the input off-screen: one scrollable row.
+ */
+.attachment-strip {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: stretch;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.attachment-item {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 240px;
+  padding: 5px 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+}
+/* In-flight and failed entries are dimmed / reddened rather than removed, so
+ * the row keeps its position while its placeholder token is still in the text. */
+.attachment-item.uploading {
+  opacity: 0.7;
+  border-style: dashed;
+}
+.attachment-item.error {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.attachment-thumb {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+}
+.attachment-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 4px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.attachment-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+/* A pasted screenshot can carry a very long generated name; it must ellipsize
+ * instead of widening the row (which would push the delete button off the
+ * horizontally-scrolling strip). */
+.attachment-name {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+}
+.attachment-size {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.attachment-remove {
+  flex: none;
+  padding: 0 4px;
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attachment-remove:hover {
+  color: var(--red);
+}
+
+/* New Task's attach button: the reply row's icon button is sized for a flex
+ * row of controls, so the modal gets its own left-aligned variant. */
+.attachment-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+}
+.attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  min-height: 30px;
+  padding: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+.attach-btn:hover {
+  border-color: var(--accent);
+  color: var(--fg);
+  background: var(--bg-card);
+}
+
+/* Drag-hover feedback on the drop target itself (both prompt inputs), so the
+ * user can tell which box a dropped file will land in before releasing. */
+#nt-task.drop-active,
+#flow-reply-input.drop-active {
+  border-color: var(--accent);
+  background: rgba(76, 141, 255, 0.08);
+}
+
 /* -- collapsed prompt chips ----------------------------------------- */
 /*
  * user / system template-style messages render as a one-line clickable chip
@@ -3420,6 +3560,35 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     flex: 1 1 auto;
     align-self: stretch;
     min-height: 44px;
+  }
+
+  /* -- file attachments ------------------------------------------------- *
+   * Vertical space is the scarce resource on a phone, so the strip shrinks:
+   * smaller thumbnails, a narrower name column, and a delete button widened
+   * into a real touch target (there is no hover to reveal it). */
+  .attachment-strip {
+    gap: 6px;
+    padding: 5px;
+  }
+  .attachment-item {
+    max-width: 180px;
+    padding: 4px 5px;
+  }
+  .attachment-thumb,
+  .attachment-icon {
+    width: 28px;
+    height: 28px;
+  }
+  .attachment-name { max-width: 104px; }
+  .attachment-remove {
+    min-width: 32px;
+    min-height: 32px;
+    font-size: 17px;
+  }
+  .attach-btn {
+    min-width: 44px;
+    min-height: 40px;
+    font-size: 18px;
   }
 
   /* -- chat conversation: reclaim horizontal whitespace (G1) -------------- *

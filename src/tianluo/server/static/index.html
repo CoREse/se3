@@ -408,11 +408,23 @@
                     class="reply-icon-btn interject hidden"
                     data-i18n-title="flow.interjectTitle"
                     title="Interject into this running flow">&#9998;</button>
+            <!-- Attach control for BOTH docked input modes: respond and
+                 interject share this one textarea, so one button / one file
+                 input / one strip serves both — a second copy would only be
+                 dead DOM competing for the same #flow-reply-input. -->
+            <button type="button" id="flow-attach-btn"
+                    class="reply-icon-btn attach"
+                    data-i18n-title="upload.attachTitle"
+                    title="Attach files — you can also paste or drop them into the box">&#128206;</button>
+            <input type="file" id="flow-file-input" class="hidden" multiple />
             <textarea id="flow-reply-input" rows="6"
                       data-i18n-placeholder="flow.replyPlaceholder"
                       placeholder="No pending items&hellip;"></textarea>
             <button type="submit" id="flow-reply-submit" disabled data-i18n="flow.replySubmit">Send</button>
           </div>
+          <div id="flow-attachments" class="attachment-strip hidden"
+               data-i18n-aria-label="upload.attachmentsLabel"
+               aria-label="Attachments"></div>
         </form>
       </section>
     </div>
@@ -460,6 +472,20 @@
         <textarea id="nt-task" rows="5" required
                   data-i18n-placeholder="newTask.taskPlaceholder"
                   placeholder="Describe the task to run&hellip;"></textarea>
+
+        <!-- Attachments: the button is a fallback affordance — paste and drop
+             on the textarea above are the primary paths — and the file input
+             stays hidden because a native file control cannot be styled to
+             match the console chrome. -->
+        <div class="attachment-controls">
+          <button type="button" id="nt-attach-btn" class="attach-btn"
+                  data-i18n-title="upload.attachTitle"
+                  title="Attach files — you can also paste or drop them into the box">&#128206;</button>
+          <input type="file" id="nt-file-input" class="hidden" multiple />
+        </div>
+        <div id="nt-attachments" class="attachment-strip hidden"
+             data-i18n-aria-label="upload.attachmentsLabel"
+             aria-label="Attachments"></div>
 
         <label class="checkbox-label" for="nt-discover">
           <input type="checkbox" id="nt-discover">

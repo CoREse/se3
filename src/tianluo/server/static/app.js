@@ -770,6 +770,202 @@ function applyProjectRemoved(entries, projectRoot) {
   return rows.filter((e) => !e || e.path !== path);
 }
 
+// -- file attachments: DOM-free upload helpers -------------------------------
+//
+// The whole feature rests on one rule: the textarea's text IS the prompt. A
+// pasted file inserts a placeholder token at the caret, and the upload's answer
+// replaces that token in place with the project-relative path — which then
+// stays put as ordinary, editable, deletable text. Nothing is substituted at
+// submit time, so there is no text→attachment mapping that a user edit can
+// corrupt. Every helper below is therefore a plain string/object transform,
+// callable straight from Node in tests/frontend/file_upload.test.mjs.
+
+// WHY this literal is duplicated from Python: the browser cannot import
+// protocol.py, and this pre-flight check exists precisely so an over-sized file
+// never leaves the machine. It MUST equal protocol.MAX_UPLOAD_BYTES — the
+// server and the daemon each re-check the same bound independently — and the
+// static guard test tests/test_frontend_file_upload.py pins the two literals
+// together so they cannot drift apart silently.
+const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
+// Pre-flight gate run before a single byte is uploaded. Returns a discriminated
+// {ok, code} rather than throwing, and the `code` is deliberately drawn from
+// the SAME vocabulary the daemon uses (protocol.UPLOAD_ERROR_CODES) so the
+// browser-side rejection and the wire-side rejection localize through one path
+// (uploadErrorKey). Pure.
+function validateUploadFile(file) {
+  if (!file || typeof file !== "object") return { ok: false, code: "invalid_payload" };
+  const name = typeof file.name === "string" ? file.name.trim() : "";
+  if (!name) return { ok: false, code: "invalid_filename" };
+  const size = Number(file.size);
+  if (!Number.isFinite(size) || size < 0) return { ok: false, code: "invalid_payload" };
+  if (size > MAX_UPLOAD_BYTES) return { ok: false, code: "too_large" };
+  return { ok: true, code: "" };
+}
+
+// The visible "this is uploading" marker parked at the caret until the path
+// arrives. `seq` is a per-input monotonic counter, not a display detail: two
+// pastes of the SAME file name must yield two distinct tokens, or the first
+// answer would replace the second paste's marker. Pure apart from the language
+// lookup (re-resolved per call, so a language switch mid-upload is harmless).
+function uploadPlaceholderToken(name, seq) {
+  const label = String(name == null ? "" : name).trim() || "file";
+  const n = Number(seq);
+  const ordinal = Number.isFinite(n) ? n : 0;
+  return tf("upload.placeholder", `[uploading ${label} #${ordinal}]`, {
+    name: label,
+    seq: ordinal,
+  });
+}
+
+// Literal (never regex) first-occurrence replace / remove.
+//
+// WHY literal: both the token and the path embed a user-supplied file name,
+// which may legally contain regex metacharacters (`a+b(1).png`); compiling
+// either into a pattern would match the wrong span or throw. First occurrence
+// only, because the user may well have copy-pasted the same path elsewhere on
+// purpose — this operation owns exactly the one it put there. A miss (the user
+// deleted the token, or edited the path) returns the text untouched: the text
+// is the source of truth and is never "repaired" behind the user's back. Pure.
+function replaceTokenOnce(text, token, replacement) {
+  const src = String(text == null ? "" : text);
+  const needle = String(token == null ? "" : token);
+  if (!needle) return src;
+  const at = src.indexOf(needle);
+  if (at < 0) return src;
+  return src.slice(0, at) + String(replacement == null ? "" : replacement)
+    + src.slice(at + needle.length);
+}
+
+function removePathOnce(text, path) {
+  return replaceTokenOnce(text, path, "");
+}
+
+// Insert `text` at the caret of a textarea/input, replacing any selection, and
+// leave the caret just past what was inserted so the user can keep typing.
+// Touches only value/selectionStart/selectionEnd — no document, no events — so
+// a plain object literal stands in for the element under Node. An element with
+// no usable selection (a never-focused field reports null) appends at the end
+// rather than silently prepending at 0. Returns the new value.
+function insertAtCaret(el, text) {
+  if (!el || typeof el !== "object") return "";
+  const insert = String(text == null ? "" : text);
+  const value = String(el.value == null ? "" : el.value);
+  const rawStart = Number(el.selectionStart);
+  const start = Number.isFinite(rawStart)
+    ? Math.max(0, Math.min(rawStart, value.length))
+    : value.length;
+  const rawEnd = Number(el.selectionEnd);
+  const end = Number.isFinite(rawEnd)
+    ? Math.max(start, Math.min(rawEnd, value.length))
+    : start;
+  const next = value.slice(0, start) + insert + value.slice(end);
+  el.value = next;
+  const caret = start + insert.length;
+  el.selectionStart = caret;
+  el.selectionEnd = caret;
+  return next;
+}
+
+// Human file size. Binary units with one decimal (dropped when it is a bare
+// .0), capped at MB because the channel's ceiling is 20 MiB — a GB branch would
+// be unreachable. The unit words come from the language pack. Pure apart from
+// the lookup.
+function formatFileSize(bytes) {
+  const raw = Number(bytes);
+  const size = Number.isFinite(raw) && raw > 0 ? raw : 0;
+  const trim = (n) => String(Math.round(n * 10) / 10);
+  if (size < 1024) {
+    const n = Math.round(size);
+    return tf("common.size.bytes", `${n} B`, { n });
+  }
+  if (size < 1024 * 1024) {
+    const n = trim(size / 1024);
+    return tf("common.size.kb", `${n} KB`, { n });
+  }
+  const n = trim(size / (1024 * 1024));
+  return tf("common.size.mb", `${n} MB`, { n });
+}
+
+// Image extensions used ONLY when the MIME type is absent — some file managers
+// and drag sources hand over a blank `type`. The answer decides whether the
+// strip shows a thumbnail or a generic icon, nothing else: a wrong guess costs
+// a broken preview, never a failed upload, so guessing is worth it.
+const IMAGE_EXT_RE = /\.(png|jpe?g|gif|webp|bmp|svg|avif|heic|heif|ico|tiff?)$/i;
+
+function isImageFile(file) {
+  if (!file || typeof file !== "object") return false;
+  const type = typeof file.type === "string" ? file.type.trim().toLowerCase() : "";
+  if (type) return type.startsWith("image/");
+  const name = typeof file.name === "string" ? file.name : "";
+  return IMAGE_EXT_RE.test(name);
+}
+
+// View model for one attachment-strip row. `entry` is the in-memory upload
+// record {id, name, size, type, status, path, previewUrl, code}.
+//
+// The strip is a mirror of what the text already says, so `canRemove` is gated
+// on a landed path: an in-flight or failed entry has no path in the text to
+// remove, and removal is defined purely as "delete that path from the text" —
+// it never touches the file the daemon already wrote to disk. Pure apart from
+// the size/status lookups.
+function attachmentRowModel(entry) {
+  entry = entry && typeof entry === "object" ? entry : {};
+  const raw = String(entry.status || "");
+  const status = ["uploading", "done", "error"].includes(raw) ? raw : "uploading";
+  const size = Number(entry.size);
+  const path = typeof entry.path === "string" ? entry.path : "";
+  return {
+    id: String(entry.id == null ? "" : entry.id),
+    name: typeof entry.name === "string" ? entry.name : "",
+    size: Number.isFinite(size) && size > 0 ? size : 0,
+    sizeText: formatFileSize(entry.size),
+    status,
+    // Secondary line while the outcome is still unknown; "" once the size
+    // itself is the whole story.
+    statusText: status === "uploading" ? tf("upload.uploading", "Uploading…") : "",
+    isImage: isImageFile(entry),
+    // A revoked/absent object URL must not render an empty <img>; the caller
+    // drops the preview when it recycles the URL.
+    previewUrl: typeof entry.previewUrl === "string" ? entry.previewUrl : "",
+    path,
+    canRemove: status === "done" && Boolean(path),
+    errorKey: status === "error" ? uploadErrorKey(entry.code) : "",
+  };
+}
+
+// Stable upload error_code → i18n key map, covering all three sources of a
+// failure code: the daemon's own protocol.UPLOAD_ERROR_CODES, the codes the
+// server mints before dispatch (unsupported_daemon / not_connected / timeout /
+// no_target), and the browser-local "network" for a fetch that never landed.
+// Same contract as PROJECT_ERROR_KEYS: prose lives in the language packs, the
+// wire carries only codes, and an unrecognised code (a newer daemon) falls back
+// to the generic message rather than painting a raw token.
+//
+// `invalid_path` folds into the unregistered-project message on purpose: both
+// mean the daemon refused the project root this browser named, and the
+// operator's remedy is identical — re-add the project — so a second string
+// would only be a distinction without a difference.
+const UPLOAD_ERROR_KEYS = {
+  too_large: "upload.errTooLarge",
+  not_registered: "upload.errUnregisteredProject",
+  invalid_path: "upload.errUnregisteredProject",
+  invalid_filename: "upload.errInvalidFilename",
+  invalid_payload: "upload.errFailed",
+  write_failed: "upload.errWriteFailed",
+  unsupported: "upload.errUnsupportedDaemon",
+  unsupported_daemon: "upload.errUnsupportedDaemon",
+  not_connected: "upload.errNotConnected",
+  timeout: "upload.errTimeout",
+  no_target: "upload.errNoTarget",
+  network: "upload.errNetwork",
+};
+
+function uploadErrorKey(code) {
+  const c = typeof code === "string" ? code.trim() : "";
+  return UPLOAD_ERROR_KEYS[c] || "upload.errFailed";
+}
+
 // View model for one user-management row. Normalizes the label / provider /
 // admin presentation and — mirroring the server-side guards — decides which
 // per-row actions are offered. This is purely a UX projection; every action is
@@ -15394,6 +15590,19 @@ if (typeof module !== "undefined" && module.exports) {
     closeRemoveProject,
     removeProject,
     syncProjectsFromSnapshot,
+    // File-attachment upload helpers (G4) — DOM-free, exposed for the tests in
+    // tests/frontend/file_upload.test.mjs.
+    MAX_UPLOAD_BYTES,
+    validateUploadFile,
+    uploadPlaceholderToken,
+    replaceTokenOnce,
+    removePathOnce,
+    insertAtCaret,
+    formatFileSize,
+    isImageFile,
+    attachmentRowModel,
+    uploadErrorKey,
+    UPLOAD_ERROR_KEYS,
     // User-management row model (G3) — exposed for the DOM-free tests in
     // tests/frontend/user_mgmt.test.mjs.
     userRowModel,
