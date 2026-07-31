@@ -7413,4 +7413,16 @@ check("renderInterventions: phase / target / pendingSend changes each rebuild", 
 const projectRegistryMod = await import("./project_registry.test.mjs");
 await projectRegistryMod.registerProjectRegistryTests({ app, check, checkAsync, findOne, findAll });
 
+// ---------------------------------------------------------------------------
+// File attachments on the prompt inputs (G5)
+// ---------------------------------------------------------------------------
+//
+// Paste / drop / pick a file into any of the three prompt boxes and it is
+// relayed to the flow's own machine, then referenced by its project-relative
+// path. The path lands in the text at the paste position and STAYS there as
+// ordinary editable text — the textarea is the prompt, so these tests mostly
+// assert on the exact string left behind.
+const fileUploadMod = await import("./file_upload.test.mjs");
+await fileUploadMod.registerFileUploadTests({ app, check, checkAsync, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

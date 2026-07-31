@@ -41,6 +41,16 @@ const state = {
   projectEntries: [],
   projectRemoveTarget: null,
 
+  // Attachment rows currently shown under each prompt input, keyed by the strip
+  // element's id ("nt-attachments" / "flow-attachments"), plus the monotonic
+  // counter behind the placeholder tokens. The rows are a VIEW of what the
+  // textarea text already carries — the text is the source of truth (see the
+  // upload helper block) — so nothing here is ever consulted at submit time.
+  // The counter is global rather than per-strip so two concurrent uploads can
+  // never collide on a token even across scopes.
+  uploadAttachments: {},
+  uploadSeq: 0,
+
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
   selectedFlowId: null,   // flow open in the full-screen flow view
@@ -964,6 +974,496 @@ const UPLOAD_ERROR_KEYS = {
 function uploadErrorKey(code) {
   const c = typeof code === "string" ? code.trim() : "";
   return UPLOAD_ERROR_KEYS[c] || "upload.errFailed";
+}
+
+// -- file attachments: upload orchestration and the attachment strip ---------
+//
+// The interaction layer over the pure helpers above. There are three prompt
+// inputs but only TWO DOM scopes: respond and interject share the one docked
+// textarea, so a single set of bindings serves both — a second copy would only
+// be dead DOM competing for the same element.
+//
+// Each scope owns four ids: the textarea that receives the paste/drop, the
+// strip that mirrors it, and the (hidden) file input plus the button that
+// opens it. `autoGrow` marks the docked box, whose height tracks its content —
+// every programmatic edit of that text has to re-run the same measurement a
+// keystroke would.
+const UPLOAD_SCOPES = {
+  newTask: {
+    inputId: "nt-task",
+    stripId: "nt-attachments",
+    fileInputId: "nt-file-input",
+    attachBtnId: "nt-attach-btn",
+    autoGrow: false,
+  },
+  flow: {
+    inputId: "flow-reply-input",
+    stripId: "flow-attachments",
+    fileInputId: "flow-file-input",
+    attachBtnId: "flow-attach-btn",
+    autoGrow: true,
+  },
+};
+
+function uploadScope(scope) {
+  return UPLOAD_SCOPES[String(scope || "")] || null;
+}
+
+// Reverse lookup so the strip's own handlers (remove / clear) can find the
+// textarea they must edit without the caller threading the scope through.
+function uploadScopeForStrip(stripId) {
+  const id = String(stripId || "");
+  for (const name of Object.keys(UPLOAD_SCOPES)) {
+    if (UPLOAD_SCOPES[name].stripId === id) return UPLOAD_SCOPES[name];
+  }
+  return null;
+}
+
+function attachmentEntries(stripId) {
+  if (!state.uploadAttachments || typeof state.uploadAttachments !== "object") {
+    state.uploadAttachments = {};
+  }
+  const id = String(stripId || "");
+  if (!Array.isArray(state.uploadAttachments[id])) state.uploadAttachments[id] = [];
+  return state.uploadAttachments[id];
+}
+
+// Re-measure the docked textarea after a programmatic edit. The auto-grow
+// height is normally driven by the `input` event, which a value assignment does
+// NOT fire — without this, replacing a placeholder with a long path would leave
+// the box clipped at its pre-paste height.
+function syncUploadInput(cfg) {
+  if (cfg && cfg.autoGrow) autoGrowReplyTextarea();
+}
+
+// Resolve where a file pasted into `scope` should be stored.
+//
+// The two scopes name their target differently because they know different
+// things: a running flow already carries its machine and project root (the
+// server re-derives both from the flow snapshot, so the browser sends only the
+// id), whereas the New Task form has no flow yet and must name the pair
+// outright. Returns {ok:true, ...} or {ok:false, code, errorKey}; failures are
+// data, not exceptions, so the caller can toast and skip the gesture.
+function resolveUploadTarget(scope) {
+  const fail = (code) => ({ ok: false, code, errorKey: uploadErrorKey(code) });
+  if (scope === "flow") {
+    const flowId = typeof state.selectedFlowId === "string" ? state.selectedFlowId.trim() : "";
+    if (!flowId) return fail("no_target");
+    return { ok: true, kind: "flow", flowId };
+  }
+  const machineSel = $("nt-machine");
+  const projectSel = $("nt-project");
+  const machineId = machineSel ? String(machineSel.value || "").trim() : "";
+  const projectRoot = projectSel ? String(projectSel.value || "").trim() : "";
+  if (!machineId || !projectRoot) return fail("no_target");
+  // WHY a hand-typed path cannot receive an upload: the daemon writes only into
+  // roots it has actually registered (that check is what stops a compromised
+  // server from dropping bytes anywhere on the machine), and the "Other path…"
+  // entry exists precisely for directories the daemon has NOT registered yet —
+  // it may not even be a project until the spawn runs `luo init` there. So the
+  // upload is refused up front with the "re-add the project" remedy rather than
+  // sent out to earn a `not_registered` from the far side.
+  if (projectRoot === PROJECT_MANUAL_SENTINEL) return fail("not_registered");
+  return { ok: true, kind: "project", machineId, projectRoot };
+}
+
+// Build the POST url. The metadata rides in the query string because the body
+// is the raw file bytes — the server deliberately does not parse multipart.
+function uploadRequestUrl(target, filename) {
+  const parts = ["filename=" + encodeURIComponent(String(filename || ""))];
+  if (target && target.kind === "flow") {
+    parts.push("flow_id=" + encodeURIComponent(String(target.flowId || "")));
+  } else if (target) {
+    parts.push("machine_id=" + encodeURIComponent(String(target.machineId || "")));
+    parts.push("project_root=" + encodeURIComponent(String(target.projectRoot || "")));
+  }
+  return "/api/uploads?" + parts.join("&");
+}
+
+// Built-in English for the parameterless upload messages, mirroring the en-US
+// pack. tf()'s fallback is a plain literal (it is NOT interpolated), so each
+// key needs one here — and without them a dictionary-less environment (the boot
+// fetch failed, or the Node test harness) would paint the raw dotted key.
+const UPLOAD_ERROR_FALLBACKS = {
+  "upload.errNoTarget": "Choose a machine and a project before attaching files.",
+  "upload.errUnregisteredProject": "That project is not available on the target machine"
+    + " — re-add it under Projects and try again.",
+  "upload.errUnsupportedDaemon": "That machine runs an older daemon that cannot receive"
+    + " files. Upgrade it and try again.",
+  "upload.errNotConnected": "That machine is offline right now — reconnect it and try again.",
+  "upload.errTimeout": "The machine did not answer in time. Try again in a moment.",
+  "upload.errWriteFailed": "The machine could not save the file to disk.",
+  "upload.errInvalidFilename": "That file name cannot be used — rename the file and try again.",
+  "upload.errNetwork": "The connection to the server dropped before the file arrived.",
+};
+
+// Localized copy for one rejected/failed file. `prose` is the server's English
+// detail, used only as a last-resort fallback — the wire carries codes precisely
+// so the user never reads untranslated backend text.
+function uploadFailureText(name, code, prose) {
+  const label = String(name == null ? "" : name);
+  const key = uploadErrorKey(code);
+  const limit = formatFileSize(MAX_UPLOAD_BYTES);
+  if (key === "upload.errTooLarge") {
+    return tf(key, `“${label}” is larger than the ${limit} limit.`, { name: label, limit });
+  }
+  if (key === "upload.errFailed") {
+    const message = prose || code || "";
+    return tf(key, `Could not attach “${label}”: ${message}`, { name: label, message });
+  }
+  return tf(key, UPLOAD_ERROR_FALLBACKS[key] || prose || key, { name: label, limit });
+}
+
+// Object-URL lifecycle for image previews. Both ends are guarded because the
+// DOM-stub test environment has no Blob-backed URL factory — a missing preview
+// costs a thumbnail, never an upload.
+function createPreviewUrl(file) {
+  try {
+    if (typeof URL !== "undefined" && typeof URL.createObjectURL === "function") {
+      return URL.createObjectURL(file);
+    }
+  } catch (_) {
+    /* noop */
+  }
+  return "";
+}
+
+function revokePreviewUrl(entry) {
+  const url = entry && typeof entry.previewUrl === "string" ? entry.previewUrl : "";
+  if (!url) return;
+  entry.previewUrl = "";
+  try {
+    if (typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      URL.revokeObjectURL(url);
+    }
+  } catch (_) {
+    /* noop */
+  }
+}
+
+// Literal first-occurrence replace applied to a live field, keeping the caret
+// anchored to the text the user is actually editing. Returns whether the span
+// was still there: a false answer means the user deleted the placeholder while
+// the request was in flight, and the caller must NOT re-insert anything — the
+// deletion is a deliberate "cancel this one", and appending the path elsewhere
+// would put text somewhere the user never asked for.
+function replaceInInputOnce(inputEl, token, replacement) {
+  if (!inputEl || typeof inputEl !== "object") return false;
+  const before = String(inputEl.value == null ? "" : inputEl.value);
+  const needle = String(token == null ? "" : token);
+  if (!needle) return false;
+  const at = before.indexOf(needle);
+  if (at < 0) return false;
+  const text = String(replacement == null ? "" : replacement);
+  inputEl.value = before.slice(0, at) + text + before.slice(at + needle.length);
+  const delta = text.length - needle.length;
+  const shift = (pos) => {
+    const p = Number(pos);
+    if (!Number.isFinite(p)) return p;
+    if (p >= at + needle.length) return p + delta;
+    // A caret parked inside the span being rewritten has nowhere faithful to
+    // land; the end of the replacement is the least surprising place.
+    if (p > at) return at + text.length;
+    return p;
+  };
+  inputEl.selectionStart = shift(inputEl.selectionStart);
+  inputEl.selectionEnd = shift(inputEl.selectionEnd);
+  return true;
+}
+
+// Upload one file: park a placeholder at the caret, POST the bytes, then swap
+// the placeholder for the project-relative path the daemon reports. Everything
+// the prompt will carry is written into the text HERE; submit-time code never
+// touches attachments, so a failure can always be undone by simply taking the
+// placeholder back out.
+async function performUpload(inputEl, file, target, stripId) {
+  if (!inputEl || !file || !target || !target.ok) return null;
+  const cfg = uploadScopeForStrip(stripId);
+  state.uploadSeq = (Number(state.uploadSeq) || 0) + 1;
+  const seq = state.uploadSeq;
+  const name = (typeof file.name === "string" && file.name.trim()) || "file";
+  const token = uploadPlaceholderToken(name, seq);
+
+  const entry = {
+    id: "upload-" + seq,
+    name,
+    size: Number(file.size) || 0,
+    type: typeof file.type === "string" ? file.type : "",
+    status: "uploading",
+    path: "",
+    code: "",
+    previewUrl: isImageFile(file) ? createPreviewUrl(file) : "",
+    token,
+  };
+  insertAtCaret(inputEl, token);
+  attachmentEntries(stripId).push(entry);
+  renderAttachmentStrip(stripId);
+  syncUploadInput(cfg);
+
+  // Both failure exits do the same two things: take the placeholder back out of
+  // the text (a stranded token would otherwise ship to the agent as prompt
+  // prose) and leave the row behind in its error state so the user can see
+  // WHICH file failed after the toast is gone.
+  const fail = (code, prose) => {
+    replaceInInputOnce(inputEl, token, "");
+    entry.status = "error";
+    entry.code = code || "";
+    revokePreviewUrl(entry);
+    renderAttachmentStrip(stripId);
+    syncUploadInput(cfg);
+    showToast("error", uploadFailureText(name, code, prose));
+    return null;
+  };
+
+  let resp;
+  try {
+    resp = await authedFetch(uploadRequestUrl(target, name), {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+  } catch (_) {
+    return fail("network", "");
+  }
+
+  if (!resp || resp.status !== 201) {
+    const detail = (resp && (await resp.json().catch(() => ({})))) || {};
+    const code = (detail && typeof detail.error_code === "string" && detail.error_code) || "";
+    const prose = (detail && typeof detail.detail === "string" && detail.detail) || "";
+    return fail(code, prose);
+  }
+
+  const body = (await resp.json().catch(() => ({}))) || {};
+  const path = (typeof body.path === "string" && body.path.trim()) || "";
+  if (!path) return fail("", "");
+
+  // A miss here is the "user deleted the placeholder mid-flight" case: the file
+  // IS stored (the daemon already wrote it), so the row still settles to done —
+  // it just has no path in the text to point at, which attachmentRowModel reads
+  // as "nothing to remove".
+  const landed = replaceInInputOnce(inputEl, token, path);
+  entry.status = "done";
+  entry.code = "";
+  entry.path = landed ? path : "";
+  renderAttachmentStrip(stripId);
+  syncUploadInput(cfg);
+  return entry;
+}
+
+// Render one strip from its entries. Called after every lifecycle transition;
+// cheap enough to rebuild wholesale because a strip holds a handful of rows.
+function renderAttachmentStrip(stripId, entries) {
+  const strip = $(stripId);
+  if (!strip) return;
+  const rows = Array.isArray(entries) ? entries : attachmentEntries(stripId);
+  strip.innerHTML = "";
+  if (!rows.length) {
+    strip.classList.add("hidden");
+    return;
+  }
+  strip.classList.remove("hidden");
+  for (const entry of rows) {
+    const model = attachmentRowModel(entry);
+    const item = el("div", "attachment-item " + model.status);
+    if (model.isImage && model.previewUrl) {
+      const img = el("img", "attachment-thumb");
+      img.src = model.previewUrl;
+      img.alt = model.name;
+      item.appendChild(img);
+    } else {
+      item.appendChild(el("span", "attachment-icon", "📄"));
+    }
+    const meta = el("div", "attachment-meta");
+    meta.append(
+      el("span", "attachment-name", model.name),
+      el("span", "attachment-size", model.statusText || model.sizeText),
+    );
+    item.appendChild(meta);
+    // The failure prose lives in the tooltip, not in the row: the strip is one
+    // scrolling line and a full sentence would push the rest of it off-screen.
+    // The toast already said it out loud once.
+    if (model.errorKey) item.title = uploadFailureText(model.name, entry && entry.code, "");
+    // A settled row is dismissable whatever its outcome — for a failed row that
+    // is the only way to clear it, since its placeholder is already gone.
+    if (model.status !== "uploading") {
+      const btn = el("button", "attachment-remove", "×");
+      btn.type = "button";
+      btn.title = tf("upload.removeTitle", "Remove this attachment from the text");
+      btn.addEventListener("click", () => removeAttachment(stripId, model.id));
+      item.appendChild(btn);
+    }
+    strip.appendChild(item);
+  }
+}
+
+function removeAttachment(stripId, id) {
+  const rows = attachmentEntries(stripId);
+  const key = String(id == null ? "" : id);
+  const idx = rows.findIndex((e) => e && String(e.id) === key);
+  if (idx < 0) return;
+  const entry = rows[idx];
+  const model = attachmentRowModel(entry);
+  const cfg = uploadScopeForStrip(stripId);
+  const inputEl = cfg ? $(cfg.inputId) : null;
+  // WHY nothing is deleted on the project machine: the bytes already landed in
+  // the project's (gitignored) uploads directory, content-addressed and shared
+  // by every prompt that named the same file — an earlier, already-submitted
+  // prompt may still be pointing at this exact path, and a running agent may be
+  // about to read it. So removal here is strictly a TEXT edit, "I no longer
+  // want to mention this path", and it drops exactly one occurrence plus the
+  // row mirroring it. Reaping stored bytes is the project's own housekeeping,
+  // never a click in a browser that could silently break another prompt.
+  if (inputEl && model.canRemove) {
+    inputEl.value = removePathOnce(String(inputEl.value == null ? "" : inputEl.value), model.path);
+    syncUploadInput(cfg);
+  }
+  revokePreviewUrl(entry);
+  rows.splice(idx, 1);
+  renderAttachmentStrip(stripId);
+}
+
+// Drop every row of a strip. Called when the text those rows mirror is itself
+// gone (the New Task modal opens/submits, a reply is sent) — same boundary as
+// removeAttachment: UI only, the stored files stay where the daemon put them.
+function clearAttachments(stripId) {
+  const rows = attachmentEntries(stripId);
+  for (const entry of rows) revokePreviewUrl(entry);
+  rows.length = 0;
+  renderAttachmentStrip(stripId);
+}
+
+// Normalize a FileList (or the array a test hands in) to a plain array.
+function filesFromList(list) {
+  if (!list) return [];
+  if (Array.isArray(list)) return list.filter(Boolean);
+  const out = [];
+  const n = Number(list.length) || 0;
+  for (let i = 0; i < n; i += 1) {
+    if (list[i]) out.push(list[i]);
+  }
+  return out;
+}
+
+// Files carried by a paste. `clipboardData.files` is the modern spelling;
+// `items` is the fallback still needed for pasted screenshots in some browsers,
+// where the image arrives as an item of kind "file" with no `files` entry.
+function filesFromClipboard(clipboardData) {
+  if (!clipboardData) return [];
+  const direct = filesFromList(clipboardData.files);
+  if (direct.length) return direct;
+  const items = clipboardData.items;
+  if (!items) return [];
+  const out = [];
+  const n = Number(items.length) || 0;
+  for (let i = 0; i < n; i += 1) {
+    const item = items[i];
+    if (!item || item.kind !== "file" || typeof item.getAsFile !== "function") continue;
+    const file = item.getAsFile();
+    if (file) out.push(file);
+  }
+  return out;
+}
+
+// True when a drag is carrying files rather than text. Dragging a selection
+// around inside the textarea is a normal editing gesture and must keep working,
+// so the drop handling only claims the event when files are actually involved.
+function dragCarriesFiles(event) {
+  const dt = event && event.dataTransfer;
+  if (!dt) return false;
+  if (filesFromList(dt.files).length) return true;
+  const types = dt.types;
+  if (!types) return false;
+  const list = Array.isArray(types) ? types : Array.prototype.slice.call(types);
+  return list.some((t) => String(t) === "Files");
+}
+
+function setDropActive(scope, active) {
+  const cfg = uploadScope(scope);
+  const input = cfg ? $(cfg.inputId) : null;
+  if (input && input.classList) input.classList.toggle("drop-active", Boolean(active));
+}
+
+// Common entry point for all three gestures. Returns the started uploads so a
+// caller (and the tests) can await the batch.
+function startUploads(scope, files) {
+  const cfg = uploadScope(scope);
+  const input = cfg ? $(cfg.inputId) : null;
+  const list = filesFromList(files);
+  const started = [];
+  if (!cfg || !input || !list.length) return started;
+
+  // Resolved ONCE per gesture: every file of one paste goes to the same place,
+  // and a per-file toast for the same missing target would bury the input.
+  const target = resolveUploadTarget(scope);
+  if (!target.ok) {
+    showToast("error", uploadFailureText("", target.code, ""));
+    return started;
+  }
+  for (const file of list) {
+    const verdict = validateUploadFile(file);
+    if (!verdict.ok) {
+      // Rejected before a single byte leaves the machine — this is the whole
+      // point of the browser-side bound; the server and daemon re-check it.
+      showToast("error", uploadFailureText(file && file.name, verdict.code, ""));
+      continue;
+    }
+    started.push(performUpload(input, file, target, cfg.stripId));
+  }
+  return started;
+}
+
+function handleInputPaste(event, scope) {
+  const files = filesFromClipboard(event && event.clipboardData);
+  // No files → an ordinary text paste. Leave the event completely alone so the
+  // browser's own insertion (and its undo entry) behaves exactly as before.
+  if (!files.length) return [];
+  if (event && typeof event.preventDefault === "function") event.preventDefault();
+  return startUploads(scope, files);
+}
+
+function handleInputDragOver(event, scope) {
+  if (!dragCarriesFiles(event)) return false;
+  // Without this the browser navigates away to the dropped file.
+  if (event && typeof event.preventDefault === "function") event.preventDefault();
+  setDropActive(scope, true);
+  return true;
+}
+
+function handleInputDrop(event, scope) {
+  setDropActive(scope, false);
+  const files = filesFromList(event && event.dataTransfer && event.dataTransfer.files);
+  if (!files.length) return [];
+  if (event && typeof event.preventDefault === "function") event.preventDefault();
+  return startUploads(scope, files);
+}
+
+// Bind one scope's four controls. Tolerates missing nodes so the flow-view
+// bindings do not have to know whether that markup is present.
+function bindUploadScope(scope) {
+  const cfg = uploadScope(scope);
+  if (!cfg) return;
+  const input = $(cfg.inputId);
+  if (input && typeof input.addEventListener === "function") {
+    input.addEventListener("paste", (e) => handleInputPaste(e, scope));
+    input.addEventListener("dragover", (e) => handleInputDragOver(e, scope));
+    input.addEventListener("dragleave", () => setDropActive(scope, false));
+    input.addEventListener("drop", (e) => handleInputDrop(e, scope));
+  }
+  const picker = $(cfg.fileInputId);
+  const button = $(cfg.attachBtnId);
+  if (button && picker && typeof button.addEventListener === "function") {
+    button.addEventListener("click", () => picker.click());
+  }
+  if (picker && typeof picker.addEventListener === "function") {
+    picker.addEventListener("change", () => {
+      const files = filesFromList(picker.files);
+      // Cleared BEFORE the uploads start: `change` fires only when the value
+      // actually changes, so leaving the last selection in place would make
+      // picking the same file twice in a row silently do nothing.
+      picker.value = "";
+      startUploads(scope, files);
+    });
+  }
 }
 
 // View model for one user-management row. Normalizes the label / provider /
@@ -4916,6 +5416,7 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
       if (state.selectedFlowId === flowId) {
         $("flow-reply-input").value = "";
         autoGrowReplyTextarea();
+        clearAttachments("flow-attachments");
       }
       showToast("success", approved ? tf("toast.approved", "Approved.") : tf("toast.rejected", "Rejected."));
       // Optimistic echo as a human-readable user bubble so the decision shows
@@ -4989,6 +5490,10 @@ async function sendReply(flowId, target, text) {
         $("flow-reply-input").value = "";
         // Cleared content collapses the auto-grow textarea back to one line.
         autoGrowReplyTextarea();
+        // The paths travelled with the text that was just sent; the rows now
+        // mirror nothing. UI only — the files stay on the project machine,
+        // where the flow is about to read them.
+        clearAttachments("flow-attachments");
       }
       // Keep the synthetic interject chip visible in `pending` visual state
       // until the real interjection chip materializes (via ws push) — that
@@ -14042,6 +14547,9 @@ function openNewTask() {
   $("nt-submit").disabled = false;
   const manualInput = $("nt-project-manual");
   if (manualInput) manualInput.value = "";
+  // The strip mirrors the task text, which was just blanked — leaving last
+  // session's rows would point at paths no longer in the box.
+  clearAttachments("nt-attachments");
   $("new-task-modal").classList.remove("hidden");
   refreshProjectOptions();
 }
@@ -14200,6 +14708,10 @@ async function submitNewTask(event) {
     });
     if (resp.status === 202) {
       closeNewTask();
+      // The paths went out inside `task` itself; the rows have nothing left to
+      // mirror. Only the strip is cleared — the uploaded files stay on the
+      // project machine, which is exactly where the flow is about to read them.
+      clearAttachments("nt-attachments");
       showToast("success", tf("toast.taskPublished", "Task published."));
     } else {
       const detail = await resp.json().catch(() => ({}));
@@ -15312,6 +15824,11 @@ function init() {
   // types (mobile portrait only; a no-op on desktop).
   $("flow-reply-input").addEventListener("input", autoGrowReplyTextarea);
 
+  // File attachments on both prompt inputs (paste / drag-drop / file picker).
+  // Two scopes, three inputs: respond and interject share the docked textarea.
+  bindUploadScope("newTask");
+  bindUploadScope("flow");
+
   // Browser back collapses the flow view back to the flow list, instead of
   // leaving the site. openFlowView pushed an entry on top of the stack; a
   // popstate fired while the flow view is open means the user (or our own
@@ -15603,6 +16120,26 @@ if (typeof module !== "undefined" && module.exports) {
     attachmentRowModel,
     uploadErrorKey,
     UPLOAD_ERROR_KEYS,
+    // Upload orchestration + attachment strip (G5) — the DOM-stub tests in
+    // tests/frontend/file_upload.test.mjs drive these directly.
+    UPLOAD_SCOPES,
+    resolveUploadTarget,
+    uploadRequestUrl,
+    uploadFailureText,
+    replaceInInputOnce,
+    attachmentEntries,
+    performUpload,
+    renderAttachmentStrip,
+    removeAttachment,
+    clearAttachments,
+    startUploads,
+    handleInputPaste,
+    handleInputDragOver,
+    handleInputDrop,
+    bindUploadScope,
+    filesFromClipboard,
+    filesFromList,
+    dragCarriesFiles,
     // User-management row model (G3) — exposed for the DOM-free tests in
     // tests/frontend/user_mgmt.test.mjs.
     userRowModel,
