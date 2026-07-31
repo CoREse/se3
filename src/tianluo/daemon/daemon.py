@@ -42,6 +42,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only; runtime import is lazy in _
 from .disk_json_cache import read_engine_header
 from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
+from .uploads import UploadStored, store_upload
 from .supervisor import (
     DaemonSupervisor,
     is_worktree_copy_root,
@@ -761,6 +762,7 @@ class Daemon:
             end_session_handler=self._handle_end_session_request,
             respond_handler=self._handle_respond_request,
             project_handler=self._handle_project_request,
+            upload_handler=self._handle_upload_request,
             history_provider=self.history_reader,
             calls_signature_provider=self.aggregator.pending_calls_signature,
             history_poll_interval=self.config.history_poll_interval,
@@ -827,6 +829,17 @@ class Daemon:
         raise ProjectCommandError(
             "invalid_operation", f"Unknown project operation: {operation!r}"
         )
+
+    def _handle_upload_request(
+        self, project_root: str, filename: str, data: bytes
+    ) -> UploadStored:
+        """Adapt a server UPLOAD_COMMAND into an attachment write.
+
+        A thin seam rather than a direct wiring of ``uploads.store_upload``:
+        the client only needs *a* callable, and routing through the Daemon
+        keeps every server-initiated side effect visible on one object.
+        """
+        return store_upload(project_root, filename, data)
 
     def _handle_ensure_request(self, project_root: str) -> Any:
         """Pre-spawn hook: run ``luo init`` in *project_root* if needed.

@@ -30,6 +30,8 @@ from __future__ import annotations
 from tianluo.runtime_paths import runtime_dir
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import json
 import logging
@@ -95,6 +97,14 @@ RespondHandler = Callable[[str, str, Any], Any]
 #: (``tianluo.daemon.daemon.ProjectCommandError``), which the client relays verbatim
 #: as the reply's ``error_code``.
 ProjectHandler = Callable[[str, str], str]
+#: Type of the upload handler — called with (project_root, filename, data) when
+#: an UPLOAD_COMMAND arrives, returning an object exposing ``path`` / ``size`` /
+#: ``deduplicated`` (a :class:`~tianluo.daemon.uploads.UploadStored`). It writes
+#: to disk, so the client always invokes it off the event loop. It signals a
+#: refusal by raising an exception carrying a stable ``code`` attribute
+#: (:class:`~tianluo.daemon.uploads.UploadError`), relayed verbatim as the
+#: reply's ``error_code``.
+UploadHandler = Callable[[str, str, bytes], Any]
 #: Type of the history provider — a :class:`~tianluo.daemon.history.DaemonHistoryReader`
 #: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
 HistoryProvider = Any
@@ -245,6 +255,7 @@ class DaemonClient:
         end_session_handler: Optional[EndSessionHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
         project_handler: Optional[ProjectHandler] = None,
+        upload_handler: Optional[UploadHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         calls_signature_provider: Optional[CallsSignatureProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
@@ -284,6 +295,13 @@ class DaemonClient:
                 refused with ``error_code="unsupported"`` — a daemon build
                 without registry management must say so rather than let the
                 server's REST caller sit until its timeout.
+            upload_handler: Callable invoked for an incoming UPLOAD_COMMAND
+                with ``(project_root, filename, data)``, returning the stored
+                attachment's project-relative path and size. When ``None`` the
+                command is refused with ``error_code="unsupported"``, for the
+                same reason ``project_handler`` is: an operator pasting a file
+                must get an immediate, explainable refusal rather than watch
+                the browser sit until the server's upload timeout.
             history_provider: A :class:`~tianluo.daemon.history.DaemonHistoryReader`
                 used to report the history index, push active-flow increments
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
@@ -318,6 +336,7 @@ class DaemonClient:
         self._end_session_handler = end_session_handler
         self._respond_handler = respond_handler or _default_respond_handler
         self._project_handler = project_handler
+        self._upload_handler = upload_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
         self._calls_signature_provider = calls_signature_provider
@@ -995,6 +1014,8 @@ class DaemonClient:
             await self._handle_issue_command(ws, message.payload)
         elif message.type == protocol.MSG_PROJECT_COMMAND:
             await self._handle_project_command(ws, message.payload)
+        elif message.type == protocol.MSG_UPLOAD_COMMAND:
+            await self._handle_upload_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -1650,6 +1671,189 @@ class DaemonClient:
         self._trigger_fast_push()
         logger.info(
             "PROJECT_COMMAND %s handled for %s", operation, registered or project_root
+        )
+
+    async def _handle_upload_command(self, ws: Any, payload: Dict[str, Any]) -> None:
+        """Land one operator-attached file in the project's uploads directory.
+
+        Decodes and bounds-checks the frame here, re-validates the target
+        against this daemon's own project registry, then hands the bytes to the
+        injected ``upload_handler`` (``uploads.store_upload``) off the event
+        loop. Every outcome travels back as a stable ``error_code`` rather than
+        prose — the browser renders a localized string from that code, and the
+        untranslated ``error`` is only a diagnostic fallback.
+
+        The size and registry checks are deliberately re-done even though the
+        server already performed them: the server is a separate trust domain
+        reachable from the network, and this daemon's disk is the resource
+        actually being protected.
+        """
+        request_id = str(payload.get("request_id") or "").strip()
+        project_root = str(payload.get("project_root") or "").strip()
+        filename = str(payload.get("filename") or "").strip()
+        content_b64 = payload.get("content_b64") or ""
+
+        async def _reply(
+            *,
+            ok: bool,
+            path: str = "",
+            error: str = "",
+            error_code: str = "",
+            size: int = 0,
+            deduplicated: bool = False,
+        ) -> None:
+            """Send a result back if we have a request_id and a live ws."""
+            if not request_id:
+                return
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_upload_result(
+                        request_id,
+                        ok=ok,
+                        path=path,
+                        error=error,
+                        error_code=error_code,
+                        size=size,
+                        deduplicated=deduplicated,
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to send UPLOAD_RESULT for request %s",
+                    request_id,
+                    exc_info=True,
+                )
+
+        if not filename:
+            logger.warning("Ignoring UPLOAD_COMMAND with empty filename")
+            await _reply(
+                ok=False,
+                error="upload requires a non-empty filename",
+                error_code=protocol.UPLOAD_ERR_INVALID_FILENAME,
+            )
+            return
+
+        try:
+            data = base64.b64decode(str(content_b64), validate=True)
+        except (binascii.Error, ValueError, TypeError) as exc:
+            logger.warning("UPLOAD_COMMAND carried undecodable content: %s", exc)
+            await _reply(
+                ok=False,
+                error="upload content is not valid base64",
+                error_code=protocol.UPLOAD_ERR_INVALID_PAYLOAD,
+            )
+            return
+
+        if len(data) > protocol.MAX_UPLOAD_BYTES:
+            logger.warning(
+                "UPLOAD_COMMAND: %d bytes exceeds the %d-byte limit",
+                len(data),
+                protocol.MAX_UPLOAD_BYTES,
+            )
+            await _reply(
+                ok=False,
+                error=(
+                    f"upload of {len(data)} bytes exceeds the "
+                    f"{protocol.MAX_UPLOAD_BYTES}-byte limit"
+                ),
+                error_code=protocol.UPLOAD_ERR_TOO_LARGE,
+            )
+            return
+
+        if not project_root or not Path(project_root).is_absolute():
+            logger.warning(
+                "UPLOAD_COMMAND: project_root must be an absolute path, got %r",
+                project_root,
+            )
+            await _reply(
+                ok=False,
+                error="project_root must be an absolute path",
+                error_code=protocol.UPLOAD_ERR_INVALID_PATH,
+            )
+            return
+
+        # Same registry gate as ISSUE_COMMAND, and for a stronger reason: this
+        # frame writes a file. Restricting the target to a root the aggregator
+        # already tracks means a compromised or spoofed server still cannot
+        # name an arbitrary directory on this machine. Prefer the cache the
+        # STATUS_UPDATE loop refreshes so a paste — an interactive, latency-
+        # sensitive action — never pays for a full snapshot walk.
+        known_roots = self._last_known_project_roots
+        if known_roots is None:
+            try:
+                snapshot = await asyncio.to_thread(self._snapshot_provider)
+            except Exception:
+                logger.debug("UPLOAD_COMMAND: snapshot lookup failed", exc_info=True)
+                await _reply(
+                    ok=False,
+                    error="snapshot lookup failed",
+                    error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
+                )
+                return
+            known_roots = set(snapshot.get("project_roots") or [])
+            self._last_known_project_roots = known_roots
+        resolved = str(Path(project_root).resolve())
+        if resolved not in known_roots:
+            logger.warning(
+                "UPLOAD_COMMAND: project_root %r is not a registered project; "
+                "known roots: %s",
+                project_root,
+                sorted(known_roots)[:5],
+            )
+            await _reply(
+                ok=False,
+                error="project_root is not a registered project",
+                error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
+            )
+            return
+
+        handler = self._upload_handler
+        if handler is None:
+            logger.warning("UPLOAD_COMMAND received but no upload handler is wired")
+            await _reply(
+                ok=False,
+                error="file uploads are not available",
+                error_code=protocol.UPLOAD_ERR_UNSUPPORTED,
+            )
+            return
+
+        # Writing up to MAX_UPLOAD_BYTES is blocking I/O that must never run on
+        # the event loop, which is concurrently serving the status pushes and
+        # heartbeats the whole web UI depends on.
+        try:
+            stored = await asyncio.to_thread(handler, resolved, filename, data)
+        except Exception as exc:
+            logger.warning(
+                "UPLOAD_COMMAND failed for %s in %s: %s", filename, project_root, exc
+            )
+            # Only an UploadError carries a code we can relay; anything else is
+            # an unexpected fault, reported as a write failure rather than
+            # letting an unknown string reach make_upload_result's validator.
+            code = str(getattr(exc, "code", "") or "")
+            if code not in protocol.UPLOAD_ERROR_CODES:
+                code = protocol.UPLOAD_ERR_WRITE_FAILED
+            await _reply(
+                ok=False,
+                error=str(exc) or type(exc).__name__,
+                error_code=code,
+            )
+            return
+
+        # No fast push here, unlike ISSUE_COMMAND / PROJECT_COMMAND: an upload
+        # adds a file the operator's prompt will reference but changes nothing
+        # in the machine snapshot (no flow, call, issue or registry state), so
+        # a push would ship an identical snapshot for nothing.
+        await _reply(
+            ok=True,
+            path=str(getattr(stored, "path", "") or ""),
+            size=int(getattr(stored, "size", 0) or 0),
+            deduplicated=bool(getattr(stored, "deduplicated", False)),
+        )
+        logger.info(
+            "UPLOAD_COMMAND stored %s in %s",
+            getattr(stored, "path", "") or filename,
+            project_root,
         )
 
     def _drain_active(self, flow_id: str) -> bool:
