@@ -24,12 +24,14 @@ Message directions
   :data:`MSG_KEEPALIVE`, :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
   :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_INDEX_DELTA`,
   :data:`MSG_HISTORY_DATA`, :data:`MSG_DETAIL_DATA`, :data:`MSG_ISSUE_RESULT`,
-  :data:`MSG_PROJECT_RESULT`, :data:`MSG_SPAWN_FAILED`.
+  :data:`MSG_PROJECT_RESULT`, :data:`MSG_SPAWN_FAILED`,
+  :data:`MSG_UPLOAD_RESULT`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
   :data:`MSG_ISSUE_COMMAND`, :data:`MSG_PROJECT_COMMAND`,
-  :data:`MSG_DETAIL_REQUEST`, :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`.
+  :data:`MSG_DETAIL_REQUEST`, :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`,
+  :data:`MSG_UPLOAD_COMMAND`.
 
 Backward compatibility
 ----------------------
@@ -73,11 +75,29 @@ today's full-speed behaviour** whenever the server speaks an older revision
 or has not yet reported a count. The gear-shifting logic lives in the daemon
 client and server hub; this module only owns the wire schema, the version
 constant, and this contract.
+
+Protocol version 5 added the *upload* channel (:data:`MSG_UPLOAD_COMMAND` /
+:data:`MSG_UPLOAD_RESULT`), which relays a file the operator pasted into the
+web UI's prompt box to the daemon owning that flow's project, where it is
+written under the project's runtime ``uploads/`` directory. Earlier additive
+server→daemon commands (END_SESSION, PROJECT_COMMAND) deliberately did *not*
+bump the version, because an older daemon that ignores the frame merely costs
+one visible timeout on a low-frequency, human-initiated action. Uploads are
+different in kind: they happen inline in the user's typing, several per
+message, and the placeholder token sitting in the textarea cannot be resolved
+until the ack arrives — silently waiting out a request timeout on every paste
+is not an acceptable outcome. The version was therefore bumped to ``5`` so the
+server can consult the daemon's advertised ``protocol_version`` (see
+:func:`supports_uploads`) *before* dispatching and answer with an immediate,
+explainable "this machine's daemon is too old" instead of a timeout. As with
+every other gate here, this module owns only the wire schema, the version
+constant, and this contract; the dispatch decision lives in the server.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional
@@ -92,7 +112,11 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # ``viewers`` field on MSG_PING); a daemon may only enter its low-power idle
 # gear when the server advertises "4" or newer — otherwise it assumes viewers
 # are present and stays at full speed (see the module docstring).
-PROTOCOL_VERSION = "4"
+# Revision "5" added the upload channel (MSG_UPLOAD_COMMAND / MSG_UPLOAD_RESULT);
+# the server must not dispatch an upload to a daemon advertising "4" or older —
+# it answers "unsupported daemon" up front rather than making the browser wait
+# out a timeout on every pasted file (see the module docstring).
+PROTOCOL_VERSION = "5"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -145,6 +169,33 @@ def supports_presence(peer_version: Any) -> bool:
     except (TypeError, ValueError):
         return False
 
+
+#: Minimum peer ``protocol_version`` that understands the revision-5 upload
+#: channel (:data:`MSG_UPLOAD_COMMAND` / :data:`MSG_UPLOAD_RESULT`). The server
+#: checks this *before* dispatching so an older daemon is reported as
+#: unsupported immediately: an upload sits in the user's typing path with a
+#: placeholder token that cannot be resolved until the ack lands, so falling
+#: back to "wait for the request timeout" would stall every paste. Version
+#: strings are compared as integers with a safe fallback so a non-numeric or
+#: missing value degrades to "legacy" (no upload support).
+MIN_UPLOAD_PROTOCOL_VERSION = 5
+
+
+def supports_uploads(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the revision-5 upload channel.
+
+    Used by the server's upload endpoint to decide whether the target machine's
+    daemon can accept a :data:`MSG_UPLOAD_COMMAND` at all. A missing or
+    non-numeric version degrades safely to ``False`` (report unsupported rather
+    than dispatch a frame the peer would reject), mirroring
+    :func:`supports_traffic_reduction` and :func:`supports_presence`.
+    """
+    try:
+        return int(str(peer_version).strip()) >= MIN_UPLOAD_PROTOCOL_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
 # Default TCP port for the central server. This is the *single source of
 # truth* for the default port: ``tianluo-server`` binds it when ``--port`` is
 # omitted, and the daemon client fills it in when ``--server-url`` carries no
@@ -178,6 +229,22 @@ DEFAULT_SERVER_TLS_PORT = 443
 # pathological frame to protect server memory (we deliberately do not use
 # ``None``/unbounded).
 MAX_WS_MESSAGE_BYTES = 256 * 1024 * 1024
+
+# Maximum size, in bytes, of a single file uploaded through the revision-5
+# upload channel. This is the *single source of truth* for a limit enforced
+# independently at three layers — the browser pre-checks ``file.size`` so an
+# oversized paste never leaves the page, the server re-checks the request body
+# because the browser is not trusted, and the daemon re-checks the decoded
+# payload because the server is not trusted and the daemon's disk is the
+# resource actually being protected. The frontend cannot import this module, so
+# its mirrored literal is pinned by a static guard test instead.
+#
+# 20 MiB is chosen to cover the pasted screenshots / logs / small archives this
+# channel exists for while staying an order of magnitude below
+# MAX_WS_MESSAGE_BYTES: the daemon leg base64-encodes the bytes (a ~33% blow-up)
+# and wraps them in a JSON frame, so the largest legal upload still leaves ample
+# room under the per-frame cap.
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 # -- message types: daemon -> server --------------------------------------
 MSG_HELLO = "hello"
@@ -262,6 +329,22 @@ MSG_ISSUE_COMMAND = "issue_command"
 #: warranted if an existing behaviour silently degraded — nothing here does.
 MSG_PROJECT_COMMAND = "project_command"
 
+#: server → daemon: write one file the operator attached in the web UI's prompt
+#: box into the project's runtime ``uploads/`` directory, so the agent can later
+#: read it by the project-relative path echoed back in
+#: :data:`MSG_UPLOAD_RESULT`. The payload carries ``project_root``, the original
+#: ``filename``, the base64-encoded ``content_b64`` (the wire is JSON lines, so
+#: raw bytes cannot ride directly), the declared ``size`` and a ``request_id``.
+#: Unlike :data:`MSG_END_SESSION` / :data:`MSG_PROJECT_COMMAND` — additive types
+#: an older daemon may silently ignore at the cost of one timeout on a rare
+#: human-initiated action — this one DID force a ``PROTOCOL_VERSION`` bump to
+#: ``5``: an upload happens inline while the user types, once per attached file,
+#: and the placeholder token in the textarea stays unresolved until the ack
+#: lands, so "wait out the timeout" is not a survivable degradation. The bump
+#: lets the server refuse up front (see :func:`supports_uploads`) with an error
+#: the UI can explain. Revision 5.
+MSG_UPLOAD_COMMAND = "upload_command"
+
 #: server → daemon: report the number of browsers currently watching the web
 #: UI. Sent as an *edge* only on the 0↔non-0 transitions (open the first page /
 #: close the last one) — 1→2 or 2→1 changes are not broadcast, because the
@@ -287,6 +370,18 @@ MSG_ISSUE_RESULT = "issue_result"
 #: diagnostic fallback), which is why this reply is not just an ISSUE_RESULT
 #: clone.
 MSG_PROJECT_RESULT = "project_result"
+
+#: daemon → server: acknowledge the result of a :data:`MSG_UPLOAD_COMMAND`.
+#: Carries ``request_id`` (echoed from the command) plus ``ok`` and, on success,
+#: the ``path`` the file landed at **relative to the project root** — never the
+#: daemon machine's absolute path, both because the prompt consumes it with the
+#: project root as the working directory and because the server must not leak a
+#: remote machine's directory layout to the browser — along with ``size`` and
+#: ``deduplicated`` (the content was already on disk, so nothing was written).
+#: On failure it carries a human ``error`` plus a stable ``error_code`` from
+#: :data:`UPLOAD_ERROR_CODES`, which is what the web UI maps to a localized
+#: message. Revision 5.
+MSG_UPLOAD_RESULT = "upload_result"
 
 #: server → daemon: pull the *full text* of a single issue or pending call on
 #: demand. STATUS_UPDATE now carries only truncated summaries (issue
@@ -314,6 +409,31 @@ PROJECT_OP_ADD = "add"
 PROJECT_OP_REMOVE = "remove"
 #: Every recognised project-registry operation.
 PROJECT_OPERATIONS: FrozenSet[str] = frozenset({PROJECT_OP_ADD, PROJECT_OP_REMOVE})
+
+# -- upload failure codes (protocol revision 5) ---------------------------
+# The ``error_code`` field of a failed MSG_UPLOAD_RESULT. These codes — not the
+# accompanying ``error`` prose — are the contract: the server maps each to an
+# HTTP status and the web UI maps each to a localized message, so the prose can
+# change freely while the codes stay stable.
+UPLOAD_ERR_INVALID_PATH = "invalid_path"
+UPLOAD_ERR_NOT_REGISTERED = "not_registered"
+UPLOAD_ERR_TOO_LARGE = "too_large"
+UPLOAD_ERR_INVALID_FILENAME = "invalid_filename"
+UPLOAD_ERR_INVALID_PAYLOAD = "invalid_payload"
+UPLOAD_ERR_WRITE_FAILED = "write_failed"
+UPLOAD_ERR_UNSUPPORTED = "unsupported"
+#: Every recognised upload failure code.
+UPLOAD_ERROR_CODES: FrozenSet[str] = frozenset(
+    {
+        UPLOAD_ERR_INVALID_PATH,
+        UPLOAD_ERR_NOT_REGISTERED,
+        UPLOAD_ERR_TOO_LARGE,
+        UPLOAD_ERR_INVALID_FILENAME,
+        UPLOAD_ERR_INVALID_PAYLOAD,
+        UPLOAD_ERR_WRITE_FAILED,
+        UPLOAD_ERR_UNSUPPORTED,
+    }
+)
 
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
@@ -375,6 +495,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_ISSUE_RESULT,
         MSG_PROJECT_RESULT,
         MSG_SPAWN_FAILED,
+        MSG_UPLOAD_RESULT,
     }
 )
 #: Messages a server is allowed to send to a daemon.
@@ -392,6 +513,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_DETAIL_REQUEST,
         MSG_END_SESSION,
         MSG_VIEWERS,
+        MSG_UPLOAD_COMMAND,
     }
 )
 #: Every known message type.
@@ -840,6 +962,110 @@ def make_project_result(
     if project_root:
         payload["project_root"] = project_root
     return Message(type=MSG_PROJECT_RESULT, payload=payload)
+
+
+# -- upload messages (protocol revision 5) --------------------------------
+
+
+def make_upload_command(
+    project_root: str,
+    filename: str,
+    content_b64: str,
+    *,
+    size: int,
+    request_id: str = "",
+) -> Message:
+    """server → daemon: store one attached file under the project's uploads dir.
+
+    *project_root* is the absolute path on the daemon's machine; the daemon
+    re-validates it against its own registry, so this check is only a cheap
+    early reject. *filename* is the browser-supplied original name — carried
+    verbatim so the stored file keeps a name a human and an agent can read; the
+    daemon sanitizes it before touching the filesystem. *content_b64* is the
+    base64 encoding of the file bytes, required because the wire is JSON lines
+    and cannot carry raw bytes. *size* is the declared *decoded* length, so both
+    ends can reject an oversized upload without materializing it. *request_id*
+    correlates the :data:`MSG_UPLOAD_RESULT` reply back to the waiting REST
+    request.
+
+    Raises :class:`ProtocolError` when *filename* is empty, *project_root* is
+    not absolute, or *size* exceeds :data:`MAX_UPLOAD_BYTES` — the three
+    conditions no downstream layer can recover from, caught here so a malformed
+    frame is never put on the wire in the first place.
+    """
+    if not filename or not str(filename).strip():
+        raise ProtocolError("upload command requires a non-empty filename")
+    if not project_root or not os.path.isabs(str(project_root)):
+        raise ProtocolError(
+            f"upload project_root must be an absolute path, got {project_root!r}"
+        )
+    try:
+        declared_size = int(size)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"upload size must be an integer, got {size!r}") from exc
+    if declared_size < 0:
+        raise ProtocolError(f"upload size must not be negative, got {declared_size}")
+    if declared_size > MAX_UPLOAD_BYTES:
+        raise ProtocolError(
+            f"upload size {declared_size} exceeds the {MAX_UPLOAD_BYTES}-byte limit"
+        )
+    payload: Dict[str, Any] = {
+        "project_root": str(project_root),
+        "filename": str(filename),
+        "content_b64": content_b64,
+        "size": declared_size,
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    return Message(type=MSG_UPLOAD_COMMAND, payload=payload)
+
+
+def make_upload_result(
+    request_id: str,
+    *,
+    ok: bool = True,
+    path: str = "",
+    error: str = "",
+    error_code: str = "",
+    size: int = 0,
+    deduplicated: bool = False,
+) -> Message:
+    """daemon → server: acknowledge the result of an upload command.
+
+    *request_id* echoes the originating :data:`MSG_UPLOAD_COMMAND`. On success
+    *path* is the stored file's path **relative to the project root** (posix
+    separators) — that is exactly the string the operator's prompt will carry,
+    and it keeps the daemon machine's absolute layout off the wire. *size* and
+    *deduplicated* are always emitted on success even at their zero values: a
+    0-byte file and "the content was already on disk" are real answers, not
+    absences, and the server distinguishes them by key presence.
+
+    On failure *error_code* is a stable :data:`UPLOAD_ERROR_CODES` member that
+    the server maps to an HTTP status and the web UI maps to a localized
+    message; *error* is untranslated diagnostic prose kept only as a fallback.
+
+    Raises :class:`ProtocolError` when *error_code* is not a recognised
+    :data:`UPLOAD_ERROR_CODES` value.
+    """
+    if error_code and error_code not in UPLOAD_ERROR_CODES:
+        raise ProtocolError(
+            f"upload error_code must be one of {sorted(UPLOAD_ERROR_CODES)}, "
+            f"got {error_code!r}"
+        )
+    payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "ok": bool(ok),
+    }
+    if ok:
+        payload["path"] = path
+        payload["size"] = int(size)
+        payload["deduplicated"] = bool(deduplicated)
+    else:
+        if error:
+            payload["error"] = error
+        if error_code:
+            payload["error_code"] = error_code
+    return Message(type=MSG_UPLOAD_RESULT, payload=payload)
 
 
 def make_ping(*, seq: int = 0, viewers: Optional[int] = None) -> Message:

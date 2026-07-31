@@ -42,9 +42,10 @@ def test_msg_end_session_is_server_to_daemon():
 def test_protocol_version_current():
     """END_SESSION was additive and did not itself bump PROTOCOL_VERSION; the
     version later advanced to "3" for the (unrelated) traffic-reduction
-    messages and then to "4" for the (also unrelated) presence signalling, so
-    simply pin the current revision here."""
-    assert protocol.PROTOCOL_VERSION == "4"
+    messages, to "4" for the (also unrelated) presence signalling and to "5"
+    for the (likewise unrelated) upload channel, so simply pin the current
+    revision here."""
+    assert protocol.PROTOCOL_VERSION == "5"
 
 
 def test_make_end_session_roundtrip():

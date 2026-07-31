@@ -28,8 +28,9 @@ def test_protocol_version_current():
     # Revision 3 added the traffic-reduction messages (keepalive / index-delta /
     # detail); the bump is what lets each side detect a legacy peer and fall
     # back to full-frame semantics. Revision 4 later added the (unrelated)
-    # presence signalling; pin the current revision here.
-    assert protocol.PROTOCOL_VERSION == "4"
+    # presence signalling and revision 5 the (likewise unrelated) upload
+    # channel; pin the current revision here.
+    assert protocol.PROTOCOL_VERSION == "5"
 
 
 def test_history_message_types_registered():
