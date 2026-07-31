@@ -13,6 +13,8 @@ daemons and exposes it to the web frontend:
 * ``POST /api/flows`` — publish a new task (routed to a daemon as SPAWN_FLOW);
 * ``POST /api/flows/{id}/respond`` — answer a flow's pending interjection/call;
 * ``POST /api/flows/{id}/interject`` — inject a mid-flow instruction into a flow;
+* ``POST /api/uploads`` — relay a pasted/dropped attachment to the owning daemon,
+  which stores it under the project's uploads directory;
 * ``GET /api/history`` — the aggregated history-session index;
 * ``GET /api/history/{id}`` — one flow's history records (pulled on demand);
 * ``/`` and ``/static`` — the bundled web frontend (static files).
@@ -27,6 +29,7 @@ point and checks for the extra before importing this module.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -71,6 +74,7 @@ from .ws import (
     PresenceDebouncer,
     ProjectCommandRegistry,
     UiHub,
+    UploadRequestRegistry,
     _PullAbandoned,
     broadcast_index_refresh,
     handle_daemon_connection,
@@ -166,6 +170,48 @@ PROJECT_ERROR_STATUS: Dict[str, int] = {
 #: not know (a newer daemon, or a bare ``ok=false`` with no code). 400 says
 #: "the request did not succeed" without claiming a specific cause.
 PROJECT_ERROR_STATUS_DEFAULT = 400
+
+#: Seconds ``POST /api/uploads`` waits for the daemon to acknowledge the
+#: ``MSG_UPLOAD_COMMAND``. The daemon-side work is one hash plus a write of at
+#: most :data:`~tianluo.daemon.protocol.MAX_UPLOAD_BYTES`, offloaded to a thread —
+#: but this sits in the operator's typing path behind an unresolved placeholder
+#: token, so the window is kept to the same short 10s as the other command legs:
+#: a visible failure the operator can re-paste beats an input box that hangs.
+UPLOAD_COMMAND_TIMEOUT = 10.0
+
+#: Error codes this server mints itself (the daemon never sends them), for
+#: failures that happen before the frame is dispatched. They ride in the same
+#: top-level ``error_code`` slot as the daemon's own codes so the web UI has a
+#: single localization path for every upload failure.
+UPLOAD_ERR_UNSUPPORTED_DAEMON = "unsupported_daemon"
+UPLOAD_ERR_NOT_CONNECTED = "not_connected"
+UPLOAD_ERR_TIMEOUT = "timeout"
+UPLOAD_ERR_NO_TARGET = "no_target"
+
+#: Maps the daemon's stable upload ``error_code`` (see
+#: :data:`~tianluo.daemon.protocol.UPLOAD_ERROR_CODES`) onto an HTTP status.
+#: Daemon-sent codes only — the server-minted codes above carry their status at
+#: the raise site. ``not_registered`` is 409 rather than 404: the project root
+#: came from this server's own mirror, so the daemon refusing it means the two
+#: sides disagree about what is registered *right now*, which the operator fixes
+#: by re-adding the project — not a "no such thing" the browser should hide.
+UPLOAD_ERROR_STATUS: Dict[str, int] = {
+    protocol.UPLOAD_ERR_TOO_LARGE: 413,
+    protocol.UPLOAD_ERR_NOT_REGISTERED: 409,
+    protocol.UPLOAD_ERR_INVALID_PATH: 422,
+    protocol.UPLOAD_ERR_INVALID_FILENAME: 422,
+    protocol.UPLOAD_ERR_INVALID_PAYLOAD: 422,
+    protocol.UPLOAD_ERR_UNSUPPORTED: 501,
+    # The request was well-formed and accepted — the daemon's disk refused it.
+    # 500 (not 4xx) so a non-browser client reads it as "retry".
+    protocol.UPLOAD_ERR_WRITE_FAILED: 500,
+}
+
+#: Status for an upload failure whose ``error_code`` this server revision does
+#: not know (a newer daemon, or a bare ``ok=false``). 502, not 400: the request
+#: reached a daemon that answered with something this server cannot interpret,
+#: which is an upstream fault rather than the browser's.
+UPLOAD_ERROR_STATUS_DEFAULT = 502
 
 #: Seconds an issue/call detail endpoint waits for the owning daemon to answer
 #: the on-demand ``MSG_DETAIL_REQUEST`` with the full text. A single issue YAML
@@ -385,6 +431,31 @@ class AddProjectRequest(BaseModel):
     project_root: str
 
 
+class _UploadDispatchError(Exception):
+    """An upload failure raised on the dispatch leg, carrying its own status.
+
+    WHY a bespoke exception rather than ``HTTPException``: every upload failure
+    must answer with a *top-level* ``error_code`` (it is the browser's
+    localization key), and ``HTTPException`` can only nest a structured body
+    under ``detail``. Raising this lets the dispatch helper keep the
+    park/discard bookkeeping in one place while the endpoint still renders a
+    flat body.
+    """
+
+    def __init__(self, status: int, code: str, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.code = code
+        self.detail = detail
+
+
+def _upload_error(status: int, code: str, detail: str) -> JSONResponse:
+    """Render one upload failure with its stable code at the body's top level."""
+    return JSONResponse(
+        status_code=status, content={"detail": detail, "error_code": code}
+    )
+
+
 def _scope_for(identity: OwnerIdentity) -> Optional[str]:
     """Map an authenticated identity to the owner-scoping value for queries.
 
@@ -480,6 +551,7 @@ def create_app(
     index_refresh_registry = IndexRefreshRegistry()
     issue_command_registry = IssueCommandRegistry()
     project_command_registry = ProjectCommandRegistry()
+    upload_command_registry = UploadRequestRegistry()
     detail_registry = DetailRequestRegistry()
     interjection_tracker = InterjectionEventTracker()
     # Grace the daemon-offline transition by 60s so a lossy-link reconnect
@@ -516,6 +588,7 @@ def create_app(
     app.state.index_refresh_registry = index_refresh_registry
     app.state.issue_command_registry = issue_command_registry
     app.state.project_command_registry = project_command_registry
+    app.state.upload_command_registry = upload_command_registry
     app.state.detail_registry = detail_registry
     app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
@@ -557,6 +630,7 @@ def create_app(
             issue_registry=issue_command_registry,
             detail_registry=detail_registry,
             project_registry=project_command_registry,
+            upload_registry=upload_command_registry,
             presence_debouncer=presence_debouncer,
         )
 
@@ -865,6 +939,200 @@ def create_app(
                 "status": "removed",
                 "machine_id": machine_id,
                 "project_root": str(result.get("project_root") or project_root),
+            },
+        )
+
+    # -- attachment uploads -------------------------------------------------
+
+    async def _send_upload_command(
+        machine_id: str, message: protocol.Message, request_id: str
+    ) -> dict:
+        """Dispatch an upload command and await the daemon's ack.
+
+        Returns the daemon's :data:`~tianluo.daemon.protocol.MSG_UPLOAD_RESULT`
+        payload. Raises :class:`_UploadDispatchError` (503) when the frame could
+        not be delivered and (504) when the ack does not arrive inside
+        :data:`UPLOAD_COMMAND_TIMEOUT` — both paths discard the parked future so
+        a silent daemon cannot leak one waiter per retry.
+        """
+        fut = upload_command_registry.register(request_id)
+        sent = await manager.send_to(machine_id, message)
+        if not sent:
+            upload_command_registry.discard(request_id, fut)
+            raise _UploadDispatchError(
+                503,
+                UPLOAD_ERR_NOT_CONNECTED,
+                f"failed to deliver UPLOAD_COMMAND to '{machine_id}'",
+            )
+        try:
+            return await asyncio.wait_for(fut, timeout=UPLOAD_COMMAND_TIMEOUT)
+        except asyncio.TimeoutError:
+            upload_command_registry.discard(request_id, fut)
+            raise _UploadDispatchError(
+                504,
+                UPLOAD_ERR_TIMEOUT,
+                f"timed out waiting for upload result from '{machine_id}'",
+            )
+
+    def _upload_failure(result: dict, fallback: str) -> JSONResponse:
+        """Render a daemon ``ok=false`` upload result as a mapped error.
+
+        Mirrors :func:`_project_failure`: the code stays at the top level
+        because it is the frontend's localization key, and burying it in a prose
+        field would force the UI back onto the daemon's untranslated English.
+        """
+        code = str(result.get("error_code") or "")
+        status = UPLOAD_ERROR_STATUS.get(code, UPLOAD_ERROR_STATUS_DEFAULT)
+        return _upload_error(status, code, str(result.get("error") or fallback))
+
+    @app.post("/api/uploads")
+    async def upload_attachment(
+        request: Request,
+        filename: str = "",
+        flow_id: str = "",
+        machine_id: str = "",
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> JSONResponse:
+        """Store one pasted / dropped attachment on the target project's machine.
+
+        The body is the raw file bytes (``application/octet-stream``); the
+        metadata rides in the query string. Deliberately NOT multipart: parsing
+        it would pull ``python-multipart`` into the server extra, and the raw
+        body also lets the size gate fire on ``Content-Length`` alone.
+
+        Two ways to name the target, matching the two places the web UI accepts
+        an attachment: ``flow_id`` for the docked reply/interject box (the flow
+        already knows its machine and project root), or an explicit
+        ``machine_id`` + ``project_root`` pair for the New Task form, where no
+        flow exists yet. Both go through the same ownership gate, so another
+        owner's flow or machine reads exactly like an unknown one.
+        """
+        scope = _scope_for(identity_)
+        name = (filename or "").strip()
+        flow_ref = (flow_id or "").strip()
+        machine_ref = (machine_id or "").strip()
+        root_ref = (project_root or "").strip()
+
+        if flow_ref:
+            resolved = await state.get_flow(flow_ref, owner=scope)
+            if resolved is None:
+                raise HTTPException(
+                    status_code=404, detail=f"flow '{flow_ref}' not found"
+                )
+            target_machine, flow = resolved
+            target_root = str(flow.get("project_root") or "").strip()
+            if not target_root:
+                return _upload_error(
+                    422,
+                    protocol.UPLOAD_ERR_INVALID_PATH,
+                    f"flow '{flow_ref}' reports no project root to store under",
+                )
+            owned = await state.get_machine(target_machine, owner=scope)
+            if owned is None:  # pragma: no cover - get_flow already owner-scoped
+                raise HTTPException(
+                    status_code=404, detail=f"machine '{target_machine}' not found"
+                )
+        elif machine_ref and root_ref:
+            target_root = _validated_project_root(root_ref)
+            target_machine = machine_ref
+            owned = await _owned_machine_or_404(target_machine, identity_)
+        else:
+            return _upload_error(
+                422,
+                UPLOAD_ERR_NO_TARGET,
+                "supply either 'flow_id' or both 'machine_id' and 'project_root'",
+            )
+
+        if not name:
+            raise HTTPException(
+                status_code=422, detail="'filename' must not be empty"
+            )
+
+        # WHY the Content-Length gate runs before ``await request.body()``: the
+        # body is the only large thing this endpoint touches, so refusing on the
+        # declared length is what keeps an oversized upload from being pulled
+        # into server memory at all. The header is client-supplied and therefore
+        # advisory — the real length is re-checked below once the bytes are in
+        # hand — but a well-behaved browser gets its 413 for free.
+        declared = request.headers.get("content-length")
+        if declared is not None:
+            try:
+                declared_size = int(declared)
+            except (TypeError, ValueError):
+                declared_size = 0
+            if declared_size > protocol.MAX_UPLOAD_BYTES:
+                return _upload_error(
+                    413,
+                    protocol.UPLOAD_ERR_TOO_LARGE,
+                    f"upload exceeds the {protocol.MAX_UPLOAD_BYTES}-byte limit",
+                )
+
+        data = await request.body()
+        if len(data) > protocol.MAX_UPLOAD_BYTES:
+            return _upload_error(
+                413,
+                protocol.UPLOAD_ERR_TOO_LARGE,
+                f"upload exceeds the {protocol.MAX_UPLOAD_BYTES}-byte limit",
+            )
+
+        if not manager.is_connected(target_machine):
+            return _upload_error(
+                503,
+                UPLOAD_ERR_NOT_CONNECTED,
+                f"machine '{target_machine}' is not connected",
+            )
+        # Capability gate, not a timeout: a pre-revision-5 daemon drops the
+        # unknown frame silently, and the operator would sit behind an
+        # unresolvable placeholder token for the full ack window before learning
+        # anything. Answer immediately with a code the UI can explain instead.
+        if not protocol.supports_uploads(owned.get("protocol_version")):
+            return _upload_error(
+                501,
+                UPLOAD_ERR_UNSUPPORTED_DAEMON,
+                (
+                    f"daemon on '{target_machine}' does not support file uploads; "
+                    "upgrade it to a build speaking protocol revision "
+                    f"{protocol.MIN_UPLOAD_PROTOCOL_VERSION} or newer"
+                ),
+            )
+
+        request_id = uuid.uuid4().hex
+        try:
+            message = protocol.make_upload_command(
+                target_root,
+                name,
+                base64.b64encode(data).decode("ascii"),
+                size=len(data),
+                request_id=request_id,
+            )
+        except protocol.ProtocolError as exc:
+            # The remaining constructor rejections are shapes the resolution
+            # above cannot rule out on its own (a mirrored flow whose
+            # project_root is relative, say) — surface them rather than putting
+            # a frame the daemon would refuse on the wire.
+            return _upload_error(422, protocol.UPLOAD_ERR_INVALID_PATH, str(exc))
+
+        try:
+            result = await _send_upload_command(target_machine, message, request_id)
+        except _UploadDispatchError as exc:
+            return _upload_error(exc.status, exc.code, exc.detail)
+
+        if not result.get("ok"):
+            return _upload_failure(result, "upload failed on daemon")
+        return JSONResponse(
+            status_code=201,
+            content={
+                "status": "stored",
+                # The daemon returns the path RELATIVE to the project root — the
+                # exact string the operator's prompt will carry, and the reason
+                # the daemon machine's absolute layout never reaches the browser.
+                "path": str(result.get("path") or ""),
+                "filename": name,
+                "size": int(result.get("size") or 0),
+                "machine_id": target_machine,
+                "project_root": target_root,
+                "deduplicated": bool(result.get("deduplicated")),
             },
         )
 
