@@ -23,6 +23,7 @@ from tianluo.commands.init_cmd import (
     init_repository,
     create_gitignore,
     DEFAULT_GITIGNORE_TEMPLATE,
+    UPLOADS_DIR_NAME,
 )
 
 
@@ -145,6 +146,35 @@ class TestRunInit:
         assert "!/tianluo/specs/" not in content
         assert "!/tianluo/issues/" in content
         assert "__pycache__/" in content
+        # Web-UI attachments are runtime output, never committed.
+        assert "/tianluo/uploads/" in content.splitlines()
+
+    def test_gitignore_ignores_uploads_dir(self, tmp_path):
+        """git itself must ignore the uploads dir after a fresh init.
+
+        Verified with the real ignore engine rather than string matching:
+        uploaded attachments are unbounded-size runtime artifacts that may
+        carry anything the operator dropped into a prompt, and the committer
+        is an agent running `git add -A`.
+        """
+        import shutil
+        import subprocess
+
+        if shutil.which("git") is None:
+            pytest.skip("git not available")
+
+        run_init(tmp_path, "TestProject")
+
+        uploads = tmp_path / "tianluo" / "uploads"
+        uploads.mkdir(parents=True)
+        (uploads / "abc123def456_screenshot.png").write_bytes(b"x")
+
+        proc = subprocess.run(
+            ["git", "check-ignore", "-q", "tianluo/uploads/abc123def456_screenshot.png"],
+            cwd=str(tmp_path),
+            capture_output=True,
+        )
+        assert proc.returncode == 0, "uploaded attachment is not gitignored"
 
     def test_gitignore_has_root_default_deny(self, tmp_path):
         """Generated .gitignore opens with root default-deny `/*`.
@@ -246,6 +276,8 @@ class TestRunInit:
         content = gitignore.read_text()
         assert "*.pyc" in content  # original content preserved
         assert "tianluo.local.yaml" in content  # pattern added
+        assert "tianluo/uploads/" in content  # attachments stay untracked too
+        assert result["gitignore_patterns"] == ["tianluo.local.yaml", "tianluo/uploads/"]
 
     def test_init_local_overrides_yaml_signal(self, tmp_path):
         """When tianluo.local.yaml already exists, run_init must surface the
@@ -411,7 +443,7 @@ class TestGitHelpers:
 
     def test_create_gitignore_creates_file(self, tmp_path):
         """create_gitignore creates .gitignore with template."""
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "created"
         gitignore = tmp_path / ".gitignore"
@@ -423,7 +455,7 @@ class TestGitHelpers:
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("# existing content")
 
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "appended"
         content = gitignore.read_text()
@@ -431,27 +463,29 @@ class TestGitHelpers:
         assert "tianluo.local.yaml" in content
 
     def test_create_gitignore_idempotent_when_pattern_present(self, tmp_path):
-        """When tianluo.local.yaml is already ignored, create_gitignore is a no-op."""
+        """When every ensured rule is already ignored, create_gitignore is a no-op."""
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("# existing\ntianluo.local.yaml\n")
+        original = "# existing\ntianluo.local.yaml\ntianluo/uploads/\n"
+        gitignore.write_text(original)
 
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "unchanged"
         assert "already exists" in message
-        assert gitignore.read_text() == "# existing\ntianluo.local.yaml\n"
+        assert gitignore.read_text() == original
 
     def test_create_gitignore_idempotent_with_trailing_slash_pattern(self, tmp_path):
         """``tianluo.local.yaml/`` (directory-only marker) still counts as intent
         to ignore — avoid appending a duplicate ``tianluo.local.yaml`` line.
         """
         gitignore = tmp_path / ".gitignore"
-        gitignore.write_text("# existing\ntianluo.local.yaml/\n")
+        original = "# existing\ntianluo.local.yaml/\ntianluo/uploads/\n"
+        gitignore.write_text(original)
 
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "unchanged"
-        assert gitignore.read_text() == "# existing\ntianluo.local.yaml/\n"
+        assert gitignore.read_text() == original
 
     def test_create_gitignore_detects_negation_and_refuses_to_append(self, tmp_path):
         """When .gitignore contains ``!tianluo.local.yaml`` (explicit
@@ -466,7 +500,7 @@ class TestGitHelpers:
         original = "*.yaml\n!tianluo.local.yaml\n"
         gitignore.write_text(original)
 
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "negated"
         # Original content preserved exactly — no silent mutation.
@@ -484,7 +518,7 @@ class TestGitHelpers:
             gitignore = tmp_path / ".gitignore"
             gitignore.write_text(f"# existing\n{broad}")
 
-            status, message = create_gitignore(tmp_path)
+            status, message, _patterns = create_gitignore(tmp_path)
 
             assert status == "appended", (
                 f"broad negation {broad!r} must NOT trigger 'negated' status; "
@@ -503,20 +537,144 @@ class TestGitHelpers:
         plain rule. Verify the prefix is handled.
         """
         gitignore = tmp_path / ".gitignore"
-        original = "# existing\n**/tianluo.local.yaml\n"
+        original = "# existing\n**/tianluo.local.yaml\ntianluo/uploads/\n"
         gitignore.write_text(original)
 
-        status, message = create_gitignore(tmp_path)
+        status, message, _patterns = create_gitignore(tmp_path)
 
         assert status == "unchanged"
         assert gitignore.read_text() == original
+
+    def test_create_gitignore_appends_uploads_pattern(self, tmp_path):
+        """An existing .gitignore gains the uploads rule.
+
+        Uploaded attachments are runtime output on the project's machine —
+        unbounded in size and carrying whatever the operator dropped into a
+        prompt — so a project whose .gitignore predates the upload channel
+        must not start committing them on the next `git add -A`.
+        """
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# legacy gitignore\n*.pyc\n")
+
+        status, message, patterns = create_gitignore(tmp_path)
+
+        assert status == "appended"
+        content = gitignore.read_text()
+        assert "*.pyc" in content
+        assert "tianluo/uploads/" in content.splitlines()
+        assert "tianluo/uploads/" in patterns
+        assert "tianluo.local.yaml" in patterns
+
+    def test_create_gitignore_appends_only_the_missing_pattern(self, tmp_path):
+        """Rules already present are not re-appended alongside a missing one."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# existing\ntianluo.local.yaml\n")
+
+        status, message, patterns = create_gitignore(tmp_path)
+
+        assert status == "appended"
+        assert patterns == ["tianluo/uploads/"]
+        lines = gitignore.read_text().splitlines()
+        # The pre-existing rule must appear exactly once — no duplicate line.
+        assert lines.count("tianluo.local.yaml") == 1
+        assert lines.count("tianluo/uploads/") == 1
+
+    def test_create_gitignore_uploads_idempotent_under_runtime_deny(self, tmp_path):
+        """`/tianluo/*` already ignores the uploads dir — do not append.
+
+        This is the shape the generated template (and this repo's own root
+        .gitignore) uses: a default-deny over the runtime dir with explicit
+        whitelists. Appending a redundant rule beside it would be noise.
+        """
+        gitignore = tmp_path / ".gitignore"
+        original = "tianluo.local.yaml\n/tianluo/*\n!/tianluo/charter.md\n"
+        gitignore.write_text(original)
+
+        status, message, _patterns = create_gitignore(tmp_path)
+
+        assert status == "unchanged"
+        assert gitignore.read_text() == original
+
+    def test_create_gitignore_uploads_idempotent_with_bare_pattern(self, tmp_path):
+        """A slash-free `uploads/` ignores the dir at any depth in git's model.
+
+        fnmatch does not model that, so without the component-wise fallback
+        init would append a redundant rule next to one already doing the job.
+        """
+        gitignore = tmp_path / ".gitignore"
+        original = "tianluo.local.yaml\nuploads/\n"
+        gitignore.write_text(original)
+
+        status, message, _patterns = create_gitignore(tmp_path)
+
+        assert status == "unchanged"
+        assert gitignore.read_text() == original
+
+    def test_create_gitignore_uploads_uses_legacy_runtime_dir_name(self, tmp_path):
+        """On a legacy `se3/` layout the rule must name `se3/uploads/`.
+
+        The daemon lands uploads under the project's *actual* runtime dir; a
+        rule hard-coded to `tianluo/uploads/` would leave the real directory
+        tracked on every not-yet-migrated project.
+        """
+        (tmp_path / "se3").mkdir()
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# legacy gitignore\n")
+
+        status, message, patterns = create_gitignore(tmp_path)
+
+        assert status == "appended"
+        assert "se3/uploads/" in patterns
+        lines = gitignore.read_text().splitlines()
+        assert "se3/uploads/" in lines
+        assert "tianluo/uploads/" not in lines
+
+    def test_create_gitignore_negation_of_uploads_is_refused(self, tmp_path):
+        """An explicit `!tianluo/uploads/` blocks the write, like the local one."""
+        gitignore = tmp_path / ".gitignore"
+        original = "tianluo.local.yaml\n/tianluo/*\n!tianluo/uploads/\n"
+        gitignore.write_text(original)
+
+        status, message, patterns = create_gitignore(tmp_path)
+
+        assert status == "negated"
+        assert patterns == ["tianluo/uploads/"]
+        assert gitignore.read_text() == original
+
+    def test_create_gitignore_runtime_dir_whitelist_is_not_a_negation(self, tmp_path):
+        """`!/tianluo/` must not read as un-ignoring `tianluo/uploads`.
+
+        The generated template carries that line so git descends into the
+        runtime dir before `/tianluo/*` re-ignores its contents. Misreading
+        it as a narrow negation would make init refuse to ever touch the
+        file — including the local-config rule.
+        """
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# existing\n!/tianluo/\n")
+
+        status, message, patterns = create_gitignore(tmp_path)
+
+        assert status == "appended"
+        assert "tianluo/uploads/" in patterns
+        assert "tianluo.local.yaml" in patterns
+
+    def test_uploads_dir_name_matches_daemon(self):
+        """The gitignore rule must name the directory the daemon actually writes.
+
+        init_cmd re-declares the constant instead of importing the daemon
+        package (which would load the resident control plane into every CLI
+        startup), so pin the two together here.
+        """
+        from tianluo.daemon.uploads import UPLOADS_DIR_NAME as daemon_name
+
+        assert UPLOADS_DIR_NAME == daemon_name
 
     def test_create_gitignore_overwrites_with_force(self, tmp_path):
         """create_gitignore overwrites existing .gitignore with force=True."""
         gitignore = tmp_path / ".gitignore"
         gitignore.write_text("# existing content")
 
-        status, message = create_gitignore(tmp_path, force=True)
+        status, message, _patterns = create_gitignore(tmp_path, force=True)
 
         assert status == "created"
         assert gitignore.read_text() == DEFAULT_GITIGNORE_TEMPLATE

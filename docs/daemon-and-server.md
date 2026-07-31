@@ -32,6 +32,7 @@ neither.
    - [Inside the daemon](#inside-the-daemon)
    - [Inside the central server](#inside-the-central-server)
    - [End-to-end: publishing a task from a remote machine](#end-to-end-publishing-a-task-from-a-remote-machine)
+   - [The file-upload channel](#the-file-upload-channel)
 4. [Authentication & Multi-Tenant Access](#authentication--multi-tenant-access)
    - [Why authentication is mandatory](#why-authentication-is-mandatory)
    - [The persistence layer (`~/.se3/server.db`)](#the-persistence-layer-se3serverdb)
@@ -362,6 +363,66 @@ Answering a flow's pending interjection/call follows the mirror-image path:
 `POST /api/flows/{id}/respond` → server → `RESPOND_CALL` down the socket →
 the daemon writes a response file into that project's `tianluo/calls/` queue,
 which unblocks the paused flow.
+
+### The file-upload channel
+
+The web frontend lets you attach any file — a pasted screenshot, a log, a
+small archive — to a prompt: in the New Task box, in a running flow's reply
+box, or in the interjection box. The file does **not** travel to the agent as
+an attachment; it is landed on disk on the machine that owns the flow, and the
+prompt carries its **project-relative path**. The agent then opens that path
+with the project root as its working directory, exactly as it would any other
+file in the repository.
+
+The path follows the same outbound-only topology as every other command:
+
+1. The browser `POST`s the raw bytes to `POST /api/uploads` over the **existing
+   authenticated session** (an unauthenticated request is rejected — there is no
+   anonymous upload), naming either the target `flow_id` or an explicit
+   `machine_id` + `project_root`.
+2. The server resolves the target to a machine it can prove the caller owns,
+   then sends an `UPLOAD_COMMAND` frame *down* that machine's existing outbound
+   WebSocket and waits for the matching `UPLOAD_RESULT`.
+3. The **daemon** decodes the payload and writes it under the project's runtime
+   directory, `<project_root>/tianluo/uploads/`.
+4. The daemon replies with the project-relative path, which the server returns
+   to the browser and the web UI substitutes into the prompt text in place of
+   the "uploading…" placeholder that was inserted at the caret.
+
+Properties worth knowing before you rely on it:
+
+- **Size limit: 20 MiB per file**, enforced independently at three layers — the
+  browser pre-checks so an oversized paste never leaves the page, the server
+  re-checks the request body because the browser is not trusted, and the daemon
+  re-checks the decoded payload because the server is not trusted and the
+  daemon's disk is the resource actually being protected. `tianluo.daemon.protocol`
+  holds the single constant all three follow.
+- **Naming and dedup.** A stored file is named `<sha256[:12]>_<original name>`,
+  with the original name sanitized (path separators and control characters are
+  replaced, so a name can never address a directory outside `uploads/`). The
+  hash prefix means two different files called `screenshot.png` coexist instead
+  of overwriting each other; re-uploading *identical* content reuses the file
+  already on disk and writes nothing. Writes go through a temporary file and an
+  atomic rename, so an agent never reads a half-written attachment.
+- **The target project must be registered** with that machine's daemon. The
+  daemon refuses to write into a directory it does not already track, so a
+  compromised or buggy server cannot use this channel to drop files anywhere on
+  a worker machine.
+- **The daemon must speak protocol revision 5 or newer.** The server checks the
+  connected daemon's advertised version *before* dispatching and rejects the
+  upload with an explicit "daemon too old" error, rather than letting the
+  request sit until it times out — an upload happens in the middle of typing, so
+  a silent stall would be indistinguishable from a hang. Upgrade the worker's
+  `tianluo` install to enable uploads there.
+- **Uploads are not version-controlled.** `luo init` ensures the project's
+  `.gitignore` carries the upload directory (`se3/uploads/` on a project still
+  on the legacy runtime layout), because these are runtime artifacts of
+  unbounded size that may carry whatever was dropped into a prompt.
+- **Nothing is cleaned up automatically.** There is no retention policy, no TTL
+  and no size cap on the directory as a whole: `tianluo/uploads/` grows for as
+  long as people attach files, and pruning it is an operator task. Deleting an
+  attachment from the web UI's attachment strip only removes the path text from
+  the prompt — the file on the project's machine stays.
 
 ---
 

@@ -1,11 +1,11 @@
 """SE3 Init command - Initialize a new SE3 project."""
 
-from tianluo.runtime_paths import runtime_dir
+from tianluo.runtime_paths import runtime_dir, runtime_dir_name
 import fnmatch
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import List, NamedTuple, Optional, Tuple
 
 import typer
 
@@ -168,6 +168,12 @@ env/
 # read every merged-in branch's intent from master. Must be tracked, unlike
 # the rest of tianluo/ runtime content that /tianluo/* ignores.
 !/tianluo/version-intents/
+# Web-UI attachments: files the operator pastes/drops into a prompt land here
+# on the project's machine. Redundant under `/tianluo/*`, but kept explicit
+# because these are runtime artifacts of unbounded size that carry whatever
+# was dropped into a prompt (screenshots, logs, customer data) — the intent
+# must survive someone later widening the whitelist above.
+/tianluo/uploads/
 
 # tianluo: local-only config overrides (never committed). Redundant under the
 # root default-deny, but kept explicit so the intent survives manual edits
@@ -225,15 +231,74 @@ LOCAL_CONFIG_PATTERN = "tianluo.local.yaml"
 # also matching the committed ``tianluo.yaml`` — i.e. the user was targeting
 # the ``.local.yaml`` name specifically, not ``.yaml`` in general.
 _PROJECT_CONFIG_PATTERN = "tianluo.yaml"
-# No leading newline here — callers add exactly one blank-line separator
-# before this block, independent of whether the existing file ends with
-# a newline. Keeping the separator logic out of the constant avoids the
-# asymmetric "zero vs one trailing newline → one vs two blank lines"
-# artefact the old layout produced.
-LOCAL_CONFIG_APPEND_BLOCK = (
-    "# tianluo: local-only config overrides (never committed)\n"
-    f"{LOCAL_CONFIG_PATTERN}\n"
-)
+
+# Name of the runtime sub-directory the daemon lands web-UI attachments in.
+# Mirrors ``tianluo.daemon.uploads.UPLOADS_DIR_NAME``; duplicated rather than
+# imported because importing the daemon package would pull the whole resident
+# control plane into every ``luo`` CLI startup. A test pins the two together
+# so the duplication cannot drift.
+UPLOADS_DIR_NAME = "uploads"
+
+
+class _EnsuredPattern(NamedTuple):
+    """One gitignore rule ``luo init`` guarantees an existing file carries.
+
+    *target* is the project-relative posix path probed against the existing
+    rules to decide whether the file is already covered; *broad_probe* is a
+    sibling path used to tell a narrow ``!<this exact thing>`` negation apart
+    from a wide rule (``!*``) that merely happens to cover *target* too.
+    """
+
+    pattern: str
+    target: str
+    broad_probe: str
+    comment: str
+
+
+def _ensured_patterns(project_root: Path) -> Tuple[_EnsuredPattern, ...]:
+    """Return the rules an existing ``.gitignore`` must end up carrying.
+
+    The uploads rule is spelled with the project's *actual* runtime directory
+    name rather than a hard-coded ``tianluo/``: during the 12.x transition a
+    legacy project still lands uploads in ``se3/uploads/``, and an ignore rule
+    naming the wrong directory would leave the real one tracked.
+    """
+    runtime_name = runtime_dir_name(project_root)
+    uploads_rel = f"{runtime_name}/{UPLOADS_DIR_NAME}"
+    return (
+        _EnsuredPattern(
+            pattern=LOCAL_CONFIG_PATTERN,
+            target=LOCAL_CONFIG_PATTERN,
+            broad_probe=_PROJECT_CONFIG_PATTERN,
+            comment="# tianluo: local-only config overrides (never committed)",
+        ),
+        _EnsuredPattern(
+            pattern=f"{uploads_rel}/",
+            target=uploads_rel,
+            # A negation covering a committed runtime artifact as well (e.g.
+            # ``!/tianluo/*``) is a wide whitelist, not a deliberate decision
+            # to track uploaded attachments.
+            broad_probe=f"{runtime_name}/charter.md",
+            comment=(
+                "# tianluo: web-UI attachments land here (runtime output of\n"
+                "# unbounded size that may carry anything dropped into a\n"
+                "# prompt) — never committed."
+            ),
+        ),
+    )
+
+
+class GitignoreResult(NamedTuple):
+    """Outcome of :func:`create_gitignore`.
+
+    *patterns* names the rules the status is *about* — the ones appended, or
+    the ones whose negation blocked the write — so the CLI can report exactly
+    what happened instead of naming every rule init knows about.
+    """
+
+    status: str
+    message: str
+    patterns: List[str]
 
 
 def _normalize_gitignore_pattern(pattern: str) -> str:
@@ -258,16 +323,15 @@ def _normalize_gitignore_pattern(pattern: str) -> str:
     return pattern
 
 
-def _gitignore_has_local_pattern(content: str) -> bool:
-    """Return True when .gitignore already ignores ``tianluo.local.yaml``.
+def _gitignore_covers(content: str, target: str) -> bool:
+    """Return True when .gitignore already ignores *target*.
 
     Matches literal lines (``tianluo.local.yaml`` / ``/tianluo.local.yaml`` /
     ``**/tianluo.local.yaml``) as well as glob patterns that already cover
-    the filename (e.g. ``*.local.yaml``, ``*.local.*``, ``tianluo.local.*``).
-    Without this the user would get a redundant append block on every
-    ``luo init`` even though the file is already ignored by an existing
-    broader pattern. Negation patterns (``!...``) are skipped — they
-    weaken ignore rules rather than add them.
+    the path (e.g. ``*.local.yaml``, ``tianluo/*``). Without this the user
+    would get a redundant append block on every ``luo init`` even though the
+    path is already ignored by an existing broader pattern. Negation patterns
+    (``!...``) are skipped — they weaken ignore rules rather than add them.
     """
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -276,13 +340,21 @@ def _gitignore_has_local_pattern(content: str) -> bool:
         pattern = _normalize_gitignore_pattern(line)
         if not pattern:
             continue
-        if fnmatch.fnmatchcase(LOCAL_CONFIG_PATTERN, pattern):
+        if fnmatch.fnmatchcase(target, pattern):
+            return True
+        # Git treats a slash-free pattern as matching at *any* depth, so a
+        # bare ``uploads/`` really does ignore ``tianluo/uploads``. Comparing
+        # only against the full path would miss that and append a redundant
+        # rule beside one that already does the job.
+        if "/" not in pattern and any(
+            fnmatch.fnmatchcase(part, pattern) for part in target.split("/")
+        ):
             return True
     return False
 
 
-def _gitignore_has_local_negation(content: str) -> bool:
-    """Return True when .gitignore *narrowly* un-ignores ``tianluo.local.yaml``.
+def _gitignore_narrowly_negates(content: str, target: str, broad_probe: str) -> bool:
+    """Return True when .gitignore *narrowly* un-ignores *target*.
 
     Git's ``!pattern`` syntax re-includes a previously-ignored path. If
     the user has explicitly written ``!tianluo.local.yaml`` (perhaps because
@@ -292,12 +364,18 @@ def _gitignore_has_local_negation(content: str) -> bool:
     the user could end up with the file tracked or ignored depending on
     unrelated edits, without any warning.
 
-    "Narrow" here means the negation pattern matches ``tianluo.local.yaml``
-    but does NOT also match ``tianluo.yaml``. Broad patterns such as
-    ``!*.yaml``, ``!se3.*``, or ``!*`` happen to cover our file too, but
-    the user was not explicitly un-ignoring it — they just have a general
-    rule that tracks all YAML (or all) files. In that case appending our
-    ignore rule is the right thing to do, and the warning would mislead.
+    "Narrow" means the negation matches *target* but NOT *broad_probe* — a
+    sibling path a wide rule would sweep up too. ``!*.yaml``, ``!se3.*`` or
+    ``!*`` happen to cover our path, but the user was not explicitly
+    un-ignoring it — they just have a general rule. In that case appending
+    our ignore rule is the right thing to do, and the warning would mislead.
+
+    Unlike :func:`_gitignore_covers` this deliberately does *not* fall back
+    to matching a slash-free pattern against individual path components: the
+    generated template itself carries ``!/tianluo/`` (git must be allowed to
+    descend into the runtime dir before ``/tianluo/*`` re-ignores its
+    contents), and reading that component-wise would misjudge it as
+    un-ignoring ``tianluo/uploads`` and refuse to ever touch the file.
     """
     for raw_line in content.splitlines():
         line = raw_line.strip()
@@ -309,31 +387,36 @@ def _gitignore_has_local_negation(content: str) -> bool:
         pattern = _normalize_gitignore_pattern(body)
         if not pattern:
             continue
-        matches_local = fnmatch.fnmatchcase(LOCAL_CONFIG_PATTERN, pattern)
-        matches_project = fnmatch.fnmatchcase(_PROJECT_CONFIG_PATTERN, pattern)
-        if matches_local and not matches_project:
+        matches_target = fnmatch.fnmatchcase(target, pattern)
+        matches_probe = fnmatch.fnmatchcase(broad_probe, pattern)
+        if matches_target and not matches_probe:
             return True
     return False
 
 
-def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
-    """Ensure ``.gitignore`` ignores ``tianluo.local.yaml``.
+def create_gitignore(path: Path, force: bool = False) -> GitignoreResult:
+    """Ensure ``.gitignore`` carries every rule in :func:`_ensured_patterns`.
+
+    Today that is ``tianluo.local.yaml`` (user-owned config that must never be
+    committed) and ``<runtime dir>/uploads/`` (web-UI attachments: runtime
+    output whose size is unbounded and whose content is whatever the operator
+    dropped into a prompt, so it is default-untracked).
 
     Five outcomes are returned via ``status``:
 
     - ``"created"`` — file did not exist (or ``force=True``); template was
-      written from scratch.
-    - ``"appended"`` — file existed without ``tianluo.local.yaml`` in it; we
-      appended the local-config-ignore block (idempotent: re-running is a
-      no-op). Even without ``--force`` this happens, because the task
-      explicitly requires the pattern to be present.
+      written from scratch (it already carries every ensured rule).
+    - ``"appended"`` — file existed missing one or more ensured rules; the
+      missing blocks were appended (idempotent: re-running is a no-op). Even
+      without ``--force`` this happens, because the rules must be present.
     - ``"negated"`` — file existed and contained an explicit negation
-      (``!tianluo.local.yaml``) that would fight a plain ``tianluo.local.yaml``
-      append. We leave the file untouched and surface a warning rather
-      than create two conflicting rules that silently resolve by
-      last-line-wins.
-    - ``"unchanged"`` — file existed and already ignored
-      ``tianluo.local.yaml``.
+      (e.g. ``!tianluo.local.yaml``) that would fight the matching append.
+      We leave the file untouched — *including* the rules that could have
+      been appended cleanly, since a half-applied write would leave the
+      operator reasoning about a file we mutated while warning them we did
+      not — and surface a warning rather than create two conflicting rules
+      that silently resolve by last-line-wins.
+    - ``"unchanged"`` — file existed and already covered every ensured rule.
     - ``"error"`` — an I/O error prevented reading or writing the file.
       Distinct from ``"unchanged"`` so callers can surface the real
       failure instead of showing a misleading "already exists" message.
@@ -343,51 +426,64 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
         force: When True, overwrite any existing file with the full template.
 
     Returns:
-        Tuple of ``(status, message)``.
+        A :class:`GitignoreResult` of ``(status, message, patterns)``.
     """
     gitignore_path = path / ".gitignore"
 
     if not gitignore_path.exists() or force:
         try:
             gitignore_path.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
-            return "created", ".gitignore created"
+            return GitignoreResult("created", ".gitignore created", [])
         except Exception as e:
             # The message is echoed to the user (init.warning_line), so it is
             # UI copy and renders through i18n; only the OS error text is raw.
-            return "error", t("init.gitignore_error_create", error=str(e))
+            return GitignoreResult(
+                "error", t("init.gitignore_error_create", error=str(e)), []
+            )
 
     try:
         existing = gitignore_path.read_text(encoding="utf-8")
     except Exception as e:
-        return "error", t("init.gitignore_error_read", error=str(e))
+        return GitignoreResult("error", t("init.gitignore_error_read", error=str(e)), [])
 
-    # Negation check runs BEFORE the ignore-pattern check on purpose: a
-    # file can contain both a broad ignore (e.g. ``*.yaml``) AND an
-    # explicit ``!tianluo.local.yaml`` negation. Semantically the negation
-    # wins — git keeps the file tracked — so returning ``"unchanged"``
-    # because the broad pattern also matches would make us silently
-    # accept a state where tianluo.local.yaml is NOT ignored and the
-    # operator never gets warned. Surface the negation warning first.
-    if _gitignore_has_local_negation(existing):
-        # User explicitly un-ignored tianluo.local.yaml. Appending a plain
-        # ``tianluo.local.yaml`` line now would create two conflicting rules
-        # where later-line-wins determines the outcome — exactly the
-        # kind of silent foot-gun we want to avoid. Do not modify the
-        # file; the caller will surface the warning to the operator.
-        return (
+    ensured = _ensured_patterns(path)
+
+    # Negation check runs BEFORE the coverage check on purpose: a file can
+    # contain both a broad ignore (e.g. ``*.yaml``) AND an explicit
+    # ``!tianluo.local.yaml`` negation. Semantically the negation wins — git
+    # keeps the file tracked — so returning ``"unchanged"`` because the broad
+    # pattern also matches would make us silently accept a state where the
+    # file is NOT ignored and the operator never gets warned. Surface the
+    # negation warning first.
+    negated = [
+        p
+        for p in ensured
+        if _gitignore_narrowly_negates(existing, p.target, p.broad_probe)
+    ]
+    if negated:
+        # User explicitly un-ignored one of our paths. Appending a plain
+        # ignore line now would create two conflicting rules where
+        # later-line-wins determines the outcome — exactly the kind of
+        # silent foot-gun we want to avoid. Do not modify the file; the
+        # caller will surface the warning to the operator.
+        names = ", ".join(p.pattern for p in negated)
+        return GitignoreResult(
             "negated",
-            f".gitignore contains an explicit negation of {LOCAL_CONFIG_PATTERN} "
-            f"(``!{LOCAL_CONFIG_PATTERN}``); refusing to append a conflicting rule",
+            f".gitignore contains an explicit negation of {names} "
+            f"(``!…``); refusing to append a conflicting rule",
+            [p.pattern for p in negated],
         )
 
-    if _gitignore_has_local_pattern(existing):
-        return "unchanged", ".gitignore already exists (use --force to overwrite)"
+    missing = [p for p in ensured if not _gitignore_covers(existing, p.target)]
+    if not missing:
+        return GitignoreResult(
+            "unchanged", ".gitignore already exists (use --force to overwrite)", []
+        )
 
-    # Append the local-config block with exactly one blank line of
-    # separation, regardless of whether the existing file ends with a
-    # trailing newline:
-    #   "xyz\n"  + separator + block → "xyz\n\n# SE3…"
-    #   "xyz"    + separator + block → "xyz\n\n# SE3…"
+    # Append the missing blocks with exactly one blank line of separation,
+    # regardless of whether the existing file ends with a trailing newline:
+    #   "xyz\n"  + separator + block → "xyz\n\n# tianluo…"
+    #   "xyz"    + separator + block → "xyz\n\n# tianluo…"
     # Both end up with one blank line between the previous content and
     # the comment header.
     if not existing:
@@ -396,18 +492,27 @@ def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
         separator = "\n"
     else:
         separator = "\n\n"
+    block = "\n".join(f"{p.comment}\n{p.pattern}\n" for p in missing)
     # Single write_text call replaces the read+append pair, so the
     # on-disk transition from "existing" to "existing + block" is one
-    # syscall rather than two. A concurrent writer slipping in between
-    # the earlier read and an append can no longer produce a duplicated
-    # pattern line — the worst case now is a last-writer-wins clobber,
-    # which is the normal semantics of any non-locking file writer.
-    new_content = existing + separator + LOCAL_CONFIG_APPEND_BLOCK
+    # syscall rather than two — and all missing rules land together, so a
+    # crash cannot leave one of them behind. A concurrent writer slipping in
+    # between the earlier read and an append can no longer produce a
+    # duplicated pattern line — the worst case now is a last-writer-wins
+    # clobber, which is the normal semantics of any non-locking file writer.
+    new_content = existing + separator + block
     try:
         gitignore_path.write_text(new_content, encoding="utf-8")
     except Exception as e:
-        return "error", t("init.gitignore_error_append", error=str(e))
-    return "appended", f"appended {LOCAL_CONFIG_PATTERN} to existing .gitignore"
+        return GitignoreResult(
+            "error", t("init.gitignore_error_append", error=str(e)), []
+        )
+    appended = [p.pattern for p in missing]
+    return GitignoreResult(
+        "appended",
+        f"appended {', '.join(appended)} to existing .gitignore",
+        appended,
+    )
 
 
 def _get_charter_template(project_name: str) -> str:
@@ -543,13 +648,15 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
             git_initialized = True
 
     # Create or update .gitignore. Five outcomes are surfaced: created
-    # (brand-new file), appended (existing file gained the tianluo.local.yaml
-    # pattern), negated (file explicitly un-ignores tianluo.local.yaml so we
+    # (brand-new file), appended (existing file gained a missing ensured
+    # pattern), negated (file explicitly un-ignores one of them so we
     # refused to append a conflicting rule), unchanged (existing file
-    # already had the pattern), and error (an I/O error prevented the
+    # already covered them all), and error (an I/O error prevented the
     # read or write). The error status is kept distinct from unchanged so
     # the UI does not mislabel a real I/O failure as "already exists".
-    gitignore_status, gitignore_message = create_gitignore(root, force=force)
+    gitignore_status, gitignore_message, gitignore_patterns = create_gitignore(
+        root, force=force
+    )
     gitignore_created = gitignore_status == "created"
     gitignore_appended = gitignore_status == "appended"
     gitignore_negated = gitignore_status == "negated"
@@ -570,6 +677,9 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         "gitignore_already_existed": gitignore_already_existed,
         "gitignore_error": gitignore_error,
         "gitignore_message": gitignore_message,
+        # The rules the status is about — the CLI names exactly those rather
+        # than every pattern init knows how to ensure.
+        "gitignore_patterns": list(gitignore_patterns),
         "local_overrides_yaml": local_overrides_yaml,
     }
 
@@ -612,12 +722,13 @@ def init_cmd(
         typer.echo(t("init.git_exists"))
 
     # Display .gitignore creation status
+    patterns = ", ".join(result.get("gitignore_patterns") or [LOCAL_CONFIG_PATTERN])
     if result.get("gitignore_created"):
         typer.echo(t("init.gitignore_created"))
     elif result.get("gitignore_appended"):
-        typer.echo(t("init.gitignore_appended", pattern=LOCAL_CONFIG_PATTERN))
+        typer.echo(t("init.gitignore_appended", pattern=patterns))
     elif result.get("gitignore_negated"):
-        typer.echo(t("init.gitignore_negated", pattern=LOCAL_CONFIG_PATTERN))
+        typer.echo(t("init.gitignore_negated", pattern=patterns))
     elif result.get("gitignore_error"):
         typer.echo(t("init.warning_line", msg=result.get("gitignore_message")))
     elif result.get("gitignore_already_existed"):

@@ -16,7 +16,8 @@ Sub-modules:
 * :mod:`supervisor` — discovers and tracks local ``luo run`` processes.
 * :mod:`spawner`    — spawns new ``luo run`` child processes on request.
 * :mod:`aggregator` — polls on-disk flow artifacts into a status snapshot.
-* :mod:`daemon`     — the resident process composing the three above.
+* :mod:`uploads`    — lands web-attached files in a project's uploads dir.
+* :mod:`daemon`     — the resident process composing the others.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from .daemon import (
 from .client import DaemonClient
 from .spawner import DaemonSpawner, SpawnedProcess
 from .supervisor import DaemonSupervisor, FlowRecord
+from .uploads import UploadError, UploadStored, store_upload
 from . import protocol
 
 __all__ = [
@@ -56,5 +58,8 @@ __all__ = [
     "SpawnedProcess",
     "DaemonSupervisor",
     "FlowRecord",
+    "UploadError",
+    "UploadStored",
+    "store_upload",
     "protocol",
 ]
