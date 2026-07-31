@@ -849,6 +849,11 @@ class FakeNode {
     this.value = "";
     this.disabled = false;
     this.placeholder = "";
+    // Text-field caret. A real textarea always reports a numeric selection, and
+    // the upload path parks its placeholder at exactly that offset — with no
+    // caret at all every paste would silently land at the end of the box.
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     // Scroll geometry — defaults to 0; tests assign explicit values to drive
     // the sticky-header viewport logic. `__rect` backs getBoundingClientRect.
     this.scrollTop = 0;
@@ -926,10 +931,19 @@ class FakeNode {
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
   }
-  dispatch(type) {
+  setSelectionRange(start, end) {
+    this.selectionStart = Number(start) || 0;
+    this.selectionEnd = Number(end === undefined ? start : end) || 0;
+  }
+  // `event` carries whatever slice of the real event the handler under test
+  // reads (clipboardData / dataTransfer / target). Only this slice is stubbed —
+  // the harness deliberately keeps no general event model.
+  dispatch(type, event) {
+    const ev = Object.assign({ type, target: this, preventDefault() {} }, event || {});
     for (const fn of (this._listeners[type] || []).slice()) {
-      fn({ preventDefault() {} });
+      fn(ev);
     }
+    return ev;
   }
   closest() { return null; }
   focus() {}
@@ -1003,6 +1017,18 @@ globalThis.document = {
   },
   addEventListener: () => {},
 };
+
+// Object-URL recorder. app.js mints one blob URL per image attachment and must
+// hand it back when the row goes away; a leak is invisible headlessly unless
+// both sides are counted, so the two lists are the assertion surface (a suite
+// resets them, acts, then pairs created against revoked).
+const objectUrls = { created: [], revoked: [] };
+globalThis.URL.createObjectURL = (obj) => {
+  const url = `blob:stub/${objectUrls.created.length}/${(obj && obj.name) || "blob"}`;
+  objectUrls.created.push(url);
+  return url;
+};
+globalThis.URL.revokeObjectURL = (url) => { objectUrls.revoked.push(String(url)); };
 
 // DFS the fake tree collecting element nodes carrying CSS class `cls`.
 function findAll(node, cls, acc = []) {
@@ -7423,6 +7449,8 @@ await projectRegistryMod.registerProjectRegistryTests({ app, check, checkAsync, 
 // ordinary editable text — the textarea is the prompt, so these tests mostly
 // assert on the exact string left behind.
 const fileUploadMod = await import("./file_upload.test.mjs");
-await fileUploadMod.registerFileUploadTests({ app, check, checkAsync, findOne, findAll });
+await fileUploadMod.registerFileUploadTests({
+  app, check, checkAsync, findOne, findAll, objectUrls,
+});
 
 console.log(`\n${passed} checks passed.`);
