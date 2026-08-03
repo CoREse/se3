@@ -7453,4 +7453,15 @@ await fileUploadMod.registerFileUploadTests({
   app, check, checkAsync, findOne, findAll, objectUrls,
 });
 
+// ---------------------------------------------------------------------------
+// Inline conversation thumbnails for stored attachments (G5)
+// ---------------------------------------------------------------------------
+//
+// The uploaded file lives on the project's own machine, so the browser reads it
+// back through GET /api/uploads/file. The path text in the message is left
+// exactly as it is — it is the prompt — and the picture is appended beside it;
+// every way the read-back can fail simply leaves that text alone.
+const inlineUploadImagesMod = await import("./inline_upload_images.test.mjs");
+inlineUploadImagesMod.registerInlineUploadImagesTests({ app, check, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

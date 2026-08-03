@@ -926,12 +926,24 @@ function isImageFile(file) {
 // the in-flight counterpart: a row that carries a placeholder instead of a path
 // is dismissed by giving up on the request, not by editing a path out. Pure
 // apart from the size/status lookups.
+//
+// WHY `storedName` / `titleText` exist at all: the row's visible name is the
+// BROWSER-side name, and a clipboard paste is always called "image.png". Paste
+// three screenshots and the strip shows three identical rows, while the prompt
+// text carries three distinct content-hash-prefixed paths — nothing on screen
+// says which row owns which path. The stored basename (hash prefix first) is
+// the only thing that tells them apart, and the full relative path is what the
+// agent will actually read, so it is what the row's tooltip must say.
 function attachmentRowModel(entry) {
   entry = entry && typeof entry === "object" ? entry : {};
   const raw = String(entry.status || "");
   const status = ["uploading", "done", "error"].includes(raw) ? raw : "uploading";
   const size = Number(entry.size);
   const path = typeof entry.path === "string" ? entry.path : "";
+  // Only a landed path names a real file: an in-flight row has none yet, and a
+  // failed one never will, so both stay blank rather than showing a name for a
+  // file that is not on the project machine.
+  const stored = status === "done" && path ? path : "";
   return {
     id: String(entry.id == null ? "" : entry.id),
     name: typeof entry.name === "string" ? entry.name : "",
@@ -946,6 +958,10 @@ function attachmentRowModel(entry) {
     // drops the preview when it recycles the URL.
     previewUrl: typeof entry.previewUrl === "string" ? entry.previewUrl : "",
     path,
+    // Paths on the wire are project-relative and always posix-separated; a
+    // string with no separator degrades to itself.
+    storedName: stored ? stored.slice(stored.lastIndexOf("/") + 1) : "",
+    titleText: stored,
     canRemove: status === "done" && Boolean(path),
     canCancel: status === "uploading",
     errorKey: status === "error" ? uploadErrorKey(entry.code) : "",
@@ -1121,6 +1137,146 @@ function uploadRequestUrl(target, filename) {
     parts.push("project_root=" + encodeURIComponent(String(target.projectRoot || "")));
   }
   return "/api/uploads?" + parts.join("&");
+}
+
+// Project-relative attachment paths as they appear inside message text.
+//
+// Both layout prefixes are recognised: the runtime directory was renamed
+// se3/ → tianluo/ in 12.0.0, but a conversation recorded before that rename is
+// still replayed from history, and its prompts carry the old prefix forever.
+//
+// The character class is what ends a path, and it is deliberately generous
+// about what a filename may contain (spaces are the only hard stop) while
+// refusing the delimiters that realistically WRAP a path in prose — quotes,
+// brackets and CJK punctuation. A tail of sentence punctuation is then peeled
+// off separately, because those characters ('.' above all) are legal inside a
+// name and can only be judged at the very end of the run.
+const UPLOAD_PATH_RE =
+  /(?:^|[^\w./-])((?:tianluo|se3)\/uploads\/[^\s"'`<>()[\]{}，。、；：！？“”‘’《》【】]+)/g;
+const UPLOAD_PATH_TRAILING_RE = /[.,;:!?]+$/;
+
+// Every distinct image attachment path named by `text`, in first-appearance
+// order. Pure. The image test is the shared IMAGE_EXT_RE (via a name-only
+// pseudo-file) so the strip's thumbnail rule and the conversation's inline
+// rule can never disagree about what an image is.
+function extractUploadImagePaths(text) {
+  const src = typeof text === "string" ? text : "";
+  if (!src) return [];
+  const seen = new Set();
+  const out = [];
+  UPLOAD_PATH_RE.lastIndex = 0;
+  let m = UPLOAD_PATH_RE.exec(src);
+  while (m) {
+    const path = m[1].replace(UPLOAD_PATH_TRAILING_RE, "");
+    // A repeated path is one file: the message may well name it twice (the
+    // user's prompt and the agent quoting it back), and two identical
+    // thumbnails would read as two attachments.
+    if (path && !seen.has(path) && isImageFile({ name: path })) {
+      seen.add(path);
+      out.push(path);
+    }
+    m = UPLOAD_PATH_RE.exec(src);
+  }
+  return out;
+}
+
+// Build the read-back GET url for one stored attachment. Same target shapes and
+// the same encoding as uploadRequestUrl — the two legs address a file the same
+// way, and a divergence here would be a 404 nothing reports.
+function uploadFetchUrl(path, target) {
+  const parts = ["path=" + encodeURIComponent(String(path || ""))];
+  if (target && target.kind === "flow") {
+    parts.push("flow_id=" + encodeURIComponent(String(target.flowId || "")));
+  } else if (target) {
+    parts.push("machine_id=" + encodeURIComponent(String(target.machineId || "")));
+    parts.push("project_root=" + encodeURIComponent(String(target.projectRoot || "")));
+  }
+  return "/api/uploads/file?" + parts.join("&");
+}
+
+// Which machine/project the conversation currently on screen belongs to.
+//
+// WHY machine + root is preferred over the flow id whenever it is known: the
+// server resolves a flow id against the LIVE snapshot, and the history view's
+// whole purpose is to reopen flows that ended — often days ago, on a daemon
+// that has long since forgotten them. Naming the machine and the root directly
+// keeps an old conversation's thumbnails working; the flow id is only the
+// fallback for a flow this browser has not yet seen in any listing.
+//
+// Returns null when nothing is open, which is the caller's "render nothing".
+function resolveInlineImageTarget() {
+  const liveId = typeof state.selectedFlowId === "string" ? state.selectedFlowId.trim() : "";
+  const historyId =
+    typeof state.selectedHistoryId === "string" ? state.selectedHistoryId.trim() : "";
+  const flowId = liveId || historyId;
+  if (!flowId) return null;
+
+  const found = findFlow(flowId);
+  if (found) {
+    const machineId = String((found.machine && found.machine.machine_id) || "");
+    const projectRoot = String((found.flow && found.flow.project_root) || "");
+    if (machineId && projectRoot) return { kind: "project", machineId, projectRoot };
+  }
+  const session = (state.historySessions || []).find((s) => s && s.flow_id === flowId);
+  if (session) {
+    const machineId = String(session.machine_id || "");
+    const projectRoot = String(session.project_root || "");
+    if (machineId && projectRoot) return { kind: "project", machineId, projectRoot };
+  }
+  return { kind: "flow", flowId };
+}
+
+// Inline thumbnails for every image attachment a message names, or null when
+// there is nothing to show (no image path, or no open flow to resolve it
+// against).
+//
+// WHY the path text is left in place rather than replaced by the image: that
+// string IS the prompt — it is what the agent read, and what removeAttachment
+// edits. Swapping it for a picture would make the rendered conversation and the
+// conversation the model saw two different things, which is exactly the split
+// the whole attachment feature is built to avoid. The thumbnail is an addition.
+//
+// Every failure mode of the read-back leg (offline daemon, deleted file,
+// pre-revision-6 daemon, another owner's flow) lands on the same `error` event,
+// and all of them mean the same thing here: fall back to the plain path text
+// the message already shows. A broken-image glyph would be strictly worse than
+// the text it decorates.
+function renderInlineUploadImages(content) {
+  const paths = extractUploadImagePaths(content);
+  if (!paths.length) return null;
+  const target = resolveInlineImageTarget();
+  if (!target) return null;
+
+  const wrap = el("div", "inline-uploads");
+  let alive = paths.length;
+  for (const path of paths) {
+    const url = uploadFetchUrl(path, target);
+    const link = el("a", "inline-upload-link");
+    link.href = url;
+    // A new tab, not a navigation: the console is a long-lived view holding
+    // live websocket state, and leaving it to look at a screenshot would drop
+    // the flow the reader is watching.
+    link.target = "_blank";
+    link.rel = "noopener";
+    const img = el("img", "inline-upload-img");
+    img.src = url;
+    img.alt = path.slice(path.lastIndexOf("/") + 1);
+    img.title = path;
+    img.loading = "lazy";
+    let failed = false;
+    img.addEventListener("error", () => {
+      if (failed) return;
+      failed = true;
+      link.classList.add("hidden");
+      alive -= 1;
+      // The container carries margin of its own, so an all-failed message would
+      // otherwise keep a gap where the images are not.
+      if (alive <= 0) wrap.classList.add("hidden");
+    });
+    link.appendChild(img);
+    wrap.appendChild(link);
+  }
+  return wrap;
 }
 
 // Built-in English for the parameterless upload messages, mirroring the en-US
@@ -1383,11 +1539,25 @@ function renderAttachmentStrip(stripId, entries) {
       item.appendChild(el("span", "attachment-icon", "📄"));
     }
     const meta = el("div", "attachment-meta");
-    meta.append(
-      el("span", "attachment-name", model.name),
-      el("span", "attachment-size", model.statusText || model.sizeText),
-    );
+    // The secondary line carries the stored name next to the size once the file
+    // has landed — see attachmentRowModel for why the browser-side name alone
+    // cannot identify a row. Two nested spans because the clipping (ellipsis)
+    // and the hover scroll have to live on different elements: the outer cell
+    // owns the width, the inner text is what slides inside it.
+    const sizeCell = el("span", "attachment-size");
+    sizeCell.appendChild(el(
+      "span",
+      "attachment-size-text",
+      model.storedName
+        ? model.sizeText + " · " + model.storedName
+        : model.statusText || model.sizeText,
+    ));
+    meta.append(el("span", "attachment-name", model.name), sizeCell);
     item.appendChild(meta);
+    // The whole row is the tooltip target for the stored path: it is the exact
+    // string sitting in the prompt, so a user matching a row against the text
+    // can copy/compare it without opening anything.
+    if (model.titleText) item.title = model.titleText;
     // The failure prose lives in the tooltip, not in the row: the strip is one
     // scrolling line and a full sentence would push the rest of it off-screen.
     // The toast already said it out loud once.
@@ -12803,6 +12973,13 @@ function renderConversationRecord(norm) {
       const buildFull = () => el("pre", "conv-plain", content);
       bubble.appendChild(makeFoldable(buildFull, content));
     }
+    // Inline thumbnails for any attachment path the turn names. Built HERE
+    // rather than at row level because buildBubble is the one construction
+    // point both the expanded and the collapsed-chip paths run through, so
+    // every role gets them from a single call — and the path text above stays
+    // exactly as written (see renderInlineUploadImages).
+    const inlineImages = renderInlineUploadImages(content);
+    if (inlineImages) bubble.appendChild(inlineImages);
     return bubble;
   };
 
@@ -13165,6 +13342,14 @@ function renderUserMarkerRecord(norm, split) {
     const bubble = el("div", "conv-bubble user-content-bubble");
     bubble.appendChild(el("pre", "conv-plain", split.content));
     row.appendChild(bubble);
+
+    // The marker split is the OTHER path a user turn can take (this function is
+    // an early return out of renderConversationRecord, so it never reaches
+    // buildBubble) — and it is where uploaded paths overwhelmingly land, since
+    // the user's own typed content is the half the split isolates. Only that
+    // half is scanned: the framework boilerplate around it names no attachments.
+    const inlineImages = renderInlineUploadImages(split.content);
+    if (inlineImages) row.appendChild(inlineImages);
 
     // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections, with
     // Layer 3 ("查看原始") nested at the end of its expand area. Collapsed by
@@ -16417,6 +16602,12 @@ if (typeof module !== "undefined" && module.exports) {
     UPLOAD_SCOPES,
     resolveUploadTarget,
     uploadRequestUrl,
+    // Inline conversation thumbnails for stored attachments (G5) — exposed for
+    // tests/frontend/inline_upload_images.test.mjs.
+    extractUploadImagePaths,
+    uploadFetchUrl,
+    resolveInlineImageTarget,
+    renderInlineUploadImages,
     uploadFailureText,
     replaceInInputOnce,
     attachmentEntries,

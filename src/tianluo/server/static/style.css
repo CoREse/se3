@@ -929,6 +929,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .attachment-item {
+  /* Shared by the two text columns AND by the hover-scroll keyframe, which has
+   * to know the column width to compute the overrun — so it lives in one place
+   * and the mobile block below only has to override it once. */
+  --attachment-text-w: 150px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -984,15 +988,56 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
  * instead of widening the row (which would push the delete button off the
  * horizontally-scrolling strip). */
 .attachment-name {
-  max-width: 150px;
+  max-width: var(--attachment-text-w);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
 }
+/* The secondary line is "size · stored-name", and the stored name is long
+ * (12 hex digits of content hash + the original filename). It clips at the
+ * TAIL — the hash prefix comes first, and that prefix is the only thing that
+ * tells two pasted "image.png" rows apart, so it must survive the truncation
+ * that the tail does not.
+ *
+ * WHY pure CSS rather than measuring scrollWidth in JS: `min()` makes the
+ * hover translation exactly 0 whenever the text already fits, so "only
+ * overflowing rows scroll" falls out of the math with no measurement, no
+ * resize listener, and no layout-dependent branch (the DOM-stub tests have no
+ * layout at all, so a measured branch would be untestable there). */
 .attachment-size {
+  display: block;
+  max-width: var(--attachment-text-w);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   font-size: 11px;
   color: var(--fg-dim);
+}
+.attachment-size-text {
+  display: inline-block;
+}
+/* Hovering the row (not just the text) starts the reveal: the pointer is
+ * already there while comparing a row against the prompt text. The ellipsis is
+ * dropped for the duration so the sliding tail is not painted over by it. */
+.attachment-item:hover .attachment-size {
+  text-overflow: clip;
+}
+.attachment-item:hover .attachment-size-text {
+  animation: attachment-scroll 6s linear infinite alternate;
+}
+@keyframes attachment-scroll {
+  /* Both ends dwell on a full second of stillness so the name is readable at
+   * rest before and after the slide. */
+  0%, 15% { transform: translateX(0); }
+  /* 100% is the sliding text's OWN width, so the offset is exactly how far it
+   * overruns its column — and zero (no motion) as soon as it fits. */
+  85%, 100% { transform: translateX(min(0px, var(--attachment-text-w) - 100%)); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .attachment-item:hover .attachment-size-text { animation: none; }
+  /* Without the slide the ellipsis is the only truncation cue left, so keep it. */
+  .attachment-item:hover .attachment-size { text-overflow: ellipsis; }
 }
 
 .attachment-remove {
@@ -1763,6 +1808,37 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg);
 }
 .conv-empty { color: var(--fg-dim); font-style: italic; }
+
+/* Inline thumbnails for the attachments a message names. They sit UNDER the
+ * message's own text, which still carries the paths verbatim — the picture is
+ * an addition to the prompt text, never a substitution for it.
+ *
+ * Sized to be scannable at a glance rather than to be read: the full-resolution
+ * image is one click away in a new tab, and a screenshot rendered at its native
+ * height would push the rest of the conversation off the screen. */
+.inline-uploads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.inline-upload-link {
+  display: inline-flex;
+  /* The bubble's own width is the ceiling; a wide screenshot shrinks to fit
+   * instead of stretching the bubble past its `max-width`. */
+  max-width: 100%;
+  line-height: 0;
+}
+.inline-upload-img {
+  max-height: 240px;
+  max-width: 100%;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* A transparent PNG would otherwise sit on the bubble's tint and read as
+   * part of it; the card background gives it an edge of its own. */
+  background: var(--bg-card);
+}
 
 /* In-progress (stream_progress / partial) bubbles: shown live, line by line,
    while a step is still thinking. Dimmed + a left accent bar so they read as
@@ -3571,6 +3647,9 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     padding: 5px;
   }
   .attachment-item {
+    /* Narrows the name AND the stored-name line together, and keeps the
+     * hover-scroll offset honest at the smaller width. */
+    --attachment-text-w: 104px;
     max-width: 180px;
     padding: 4px 5px;
   }
@@ -3619,6 +3698,11 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     max-width: 100%;
     align-self: stretch;
   }
+
+  /* A phone screen is a fraction of the height a desktop one is, so the desktop
+   * cap would let a single screenshot own most of the viewport and bury the
+   * turn it belongs to. Tapping still opens the full image. */
+  .inline-upload-img { max-height: 160px; }
 
   /* -- tool-call chip: compress the summary to one line (G2) -------------- *
    * Desktop lets the chip head wrap; on a narrow screen the name + detail then

@@ -1,9 +1,11 @@
 """Pytest bridge for the WebUI file-attachment upload feature (Group G6).
 
-The behavioural assertions live in the Node suite
-``tests/frontend/file_upload.test.mjs``, which is registered into the shared
-harness ``tests/frontend/test_app_pure.mjs`` (it needs that harness's DOM stub,
-so unlike ``i18n_render_switch.test.mjs`` it is not standalone-runnable). This
+The behavioural assertions live in the Node suites
+``tests/frontend/file_upload.test.mjs`` (the strip and the prompt text) and
+``tests/frontend/inline_upload_images.test.mjs`` (reading a stored attachment
+back as a conversation thumbnail), both registered into the shared harness
+``tests/frontend/test_app_pure.mjs`` (they need that harness's DOM stub, so
+unlike ``i18n_render_switch.test.mjs`` they are not standalone-runnable). This
 module:
 
   1. runs the harness and asserts the upload cases actually executed — a suite
@@ -48,6 +50,7 @@ I18N_DIR = STATIC_DIR / "i18n"
 EN_JSON = I18N_DIR / "en-US.json"
 ZH_JSON = I18N_DIR / "zh-CN.json"
 UPLOAD_TEST = REPO_ROOT / "tests" / "frontend" / "file_upload.test.mjs"
+INLINE_IMAGE_TEST = REPO_ROOT / "tests" / "frontend" / "inline_upload_images.test.mjs"
 HARNESS = REPO_ROOT / "tests" / "frontend" / "test_app_pure.mjs"
 
 # The ids the two upload scopes bind to. Respond and interject share the docked
@@ -221,6 +224,17 @@ def test_style_css_styles_the_strip_and_the_drop_target():
         ".attachment-icon",
         ".attachment-remove",
         ".drop-active",
+        # The stored-name line: app.js emits the inner span purely so this rule
+        # can slide it on hover, so a dropped rule leaves dead markup and a
+        # stored name nothing can reveal in full.
+        ".attachment-size-text",
+        "attachment-scroll",
+        # The conversation's inline thumbnails. Without the size cap a single
+        # screenshot renders at its native height and buries the turn it belongs
+        # to, so the rule is load-bearing rather than decorative.
+        ".inline-uploads",
+        ".inline-upload-link",
+        ".inline-upload-img",
     ):
         assert selector in css, f"style.css is missing the {selector} rule"
 
@@ -234,6 +248,16 @@ def test_upload_node_module_present_and_registered():
     assert "registerFileUploadTests" in harness, (
         "file_upload.test.mjs is no longer registered in test_app_pure.mjs; "
         "the whole suite would stop running without failing anything"
+    )
+
+
+def test_inline_image_node_module_present_and_registered():
+    assert INLINE_IMAGE_TEST.is_file(), f"missing {INLINE_IMAGE_TEST}"
+    harness = HARNESS.read_text(encoding="utf-8")
+    assert "registerInlineUploadImagesTests" in harness, (
+        "inline_upload_images.test.mjs is no longer registered in "
+        "test_app_pure.mjs; the whole suite would stop running without "
+        "failing anything"
     )
 
 
@@ -276,6 +300,11 @@ def test_frontend_file_upload_node_suite_passes():
         "G5 startUploads: an unresolved target toasts and sends nothing",
         "G5 renderAttachmentStrip: an image row renders a thumbnail",
         "G5 renderAttachmentStrip: a plain file renders icon + name + size",
+        # the stored path on the row — the only thing separating two pasted
+        # screenshots, both of which the clipboard calls "image.png"
+        "G4 attachmentRowModel: the stored name is exposed only once it exists",
+        "G4 renderAttachmentStrip: a landed row shows and titles its stored path",
+        "G4 renderAttachmentStrip: a failed row keeps its reason as the tooltip",
         "G5 removeAttachment: deletes the path from the text and nothing else",
         "G5 clearAttachments: empties the strip and recycles preview URLs",
         # escaping a stalled upload — an in-flight row shuts the submit gate
@@ -289,6 +318,14 @@ def test_frontend_file_upload_node_suite_passes():
         "G5 submitReply: an in-flight paste blocks the send instead of shipping the token",
         "G5 submitNewTask: an in-flight paste blocks Publish",
         "G5 submitNewTask: publishes once the path has landed",
+        # the conversation's other half: the stored path is read back and shown
+        # as a picture WITHOUT the path text ever leaving the message
+        "G5 extractUploadImagePaths: both layout prefixes are recognised",
+        "G5 renderInlineUploadImages: one anchor-wrapped img per path",
+        "G5 renderInlineUploadImages: a failed load hides itself, never breaks",
+        "G5 assistant turn: the thumbnail joins the path text, never replaces it",
+        "G5 user prompt (marker split): the user's own half is scanned",
+        "G5 no flow open: the conversation degrades to plain path text",
     ):
         assert needle in combined, (
             f"expected upload check {needle!r} in node output:\n{combined}"

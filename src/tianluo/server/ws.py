@@ -547,6 +547,14 @@ class UploadRequestRegistry:
     resolve an upload waiter on an id collision — here that would hand the
     browser a success with no stored path at all. Lives entirely in process
     memory.
+
+    The revision-6 read-back leg (``GET /api/uploads/file`` ↔
+    :data:`protocol.MSG_FETCH_RESULT`) parks its waiters in a *second instance*
+    of this class rather than in this one: the two legs mint their ids
+    independently, so a shared keyspace would let an upload ack resolve a fetch
+    waiter — handing the browser a "file" whose payload is actually an upload
+    receipt. The bookkeeping is identical, so the class is shared even though
+    the instance is not.
     """
 
     def __init__(self) -> None:
@@ -1337,6 +1345,7 @@ async def handle_daemon_connection(
     detail_registry: Optional["DetailRequestRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
+    fetch_registry: Optional["UploadRequestRegistry"] = None,
     presence_debouncer: Optional["PresenceDebouncer"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
@@ -1474,6 +1483,7 @@ async def handle_daemon_connection(
             detail_registry,
             project_registry,
             upload_registry,
+            fetch_registry,
         )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
@@ -1532,6 +1542,7 @@ async def _serve_loop(
     detail_registry: Optional["DetailRequestRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
+    fetch_registry: Optional["UploadRequestRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -1557,6 +1568,7 @@ async def _serve_loop(
                 detail_registry,
                 project_registry,
                 upload_registry,
+                fetch_registry,
                 manager=manager,
                 connection=websocket,
             )
@@ -1621,6 +1633,7 @@ async def _handle_message(
     detail_registry: Optional["DetailRequestRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
+    fetch_registry: Optional["UploadRequestRegistry"] = None,
     *,
     manager: Optional["ConnectionManager"] = None,
     connection: Any = None,
@@ -1969,5 +1982,26 @@ async def _handle_message(
             )
         else:
             upload_registry.resolve(request_id, message.payload)
+    elif message.type == protocol.MSG_FETCH_RESULT:
+        # Daemon answers a file read-back. Same shape as UPLOAD_RESULT above and
+        # for the same reason: reading a file changes no snapshot state, so this
+        # ack is the only signal the fetch produced anything. Deliberately NOT
+        # touched here, unlike the upload leg — a fetch backs a rendering path
+        # that fires many times per conversation, so letting it refresh
+        # last-seen would make a browser scrolling history the thing that keeps
+        # a dead daemon looking alive.
+        request_id = str(message.payload.get("request_id") or "")
+        if not request_id or fetch_registry is None:
+            # An unwired registry (bare test harness) or a reply with no echoed
+            # id: nothing to wake, and dropping it is safe — the waiting REST
+            # call degrades to its own timeout, and from there the browser
+            # degrades to plain path text.
+            logger.debug(
+                "Ignoring FETCH_RESULT from %s with no waiter (request_id=%r)",
+                machine_id,
+                request_id,
+            )
+        else:
+            fetch_registry.resolve(request_id, message.payload)
     else:  # pragma: no cover - decode() restricts to known daemon->server types
         logger.debug("Ignoring unexpected daemon message type %s", message.type)

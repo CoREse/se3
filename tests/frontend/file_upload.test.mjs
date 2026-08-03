@@ -23,7 +23,9 @@
  *       user-deleted-the-placeholder race, and concurrent pastes.
  *   (d) startUploads — the browser-side size bound and the unresolved-target
  *       refusal, both asserted as "no request was made".
- *   (e) renderAttachmentStrip — thumbnail vs icon rows, hidden-when-empty.
+ *   (e) renderAttachmentStrip — thumbnail vs icon rows, hidden-when-empty, and
+ *       the stored-path surface (secondary line + row tooltip) that is the only
+ *       thing telling two pasted "image.png" rows apart.
  *   (f) removeAttachment / cancelAttachment / clearAttachments — text-only
  *       removal, the two escapes from a stalled upload (the user's cancel and
  *       the request's own ceiling, both of which must keep the drafted text),
@@ -287,6 +289,43 @@ export async function registerFileUploadTests(ctx) {
       // since it withholds the destructive action rather than offering it.
       assert.equal(app.attachmentRowModel({ id: "u4", status: "weird" }).status, "uploading");
       assert.equal(app.attachmentRowModel(null).name, "");
+    });
+
+    check("G4 attachmentRowModel: the stored name is exposed only once it exists", () => {
+      // The point of the field: `name` is what the clipboard called it, which
+      // for a pasted screenshot is always the same string. Only the stored
+      // basename — hash prefix first — separates two of them.
+      const done = app.attachmentRowModel({
+        id: 1, name: "image.png", size: 2048, type: "image/png",
+        status: "done", path: "tianluo/uploads/e155b5b05cf8_image.png",
+      });
+      assert.equal(done.storedName, "e155b5b05cf8_image.png");
+      assert.equal(done.titleText, "tianluo/uploads/e155b5b05cf8_image.png",
+        "the tooltip is the exact string the prompt text carries");
+      assert.equal(done.name, "image.png", "the browser-side name is untouched");
+
+      // No path yet / never will be: naming a file that is not on the project
+      // machine would be a lie in both cases.
+      const flying = app.attachmentRowModel({ id: 2, name: "image.png", status: "uploading" });
+      assert.equal(flying.storedName, "");
+      assert.equal(flying.titleText, "");
+      const failed = app.attachmentRowModel({
+        id: 3, name: "image.png", status: "error", code: "write_failed",
+        path: "tianluo/uploads/zzz_image.png",
+      });
+      assert.equal(failed.storedName, "");
+      assert.equal(failed.titleText, "");
+      // A done row whose placeholder the user deleted has no path either.
+      assert.equal(app.attachmentRowModel({ id: 4, status: "done", path: "" }).storedName, "");
+
+      // Separator handling: posix only (the wire is project-relative), and a
+      // bare name degrades to itself rather than to "".
+      assert.equal(app.attachmentRowModel({
+        id: 5, status: "done", path: "se3/uploads/abc_a.png",
+      }).storedName, "abc_a.png", "the legacy se3/ layout works the same way");
+      assert.equal(app.attachmentRowModel({
+        id: 6, status: "done", path: "solo.png",
+      }).storedName, "solo.png");
     });
 
     // ========================================================================
@@ -629,7 +668,7 @@ export async function registerFileUploadTests(ctx) {
       assert.equal(thumb.src, "blob:shot");
       assert.equal(findOne(strip, "attachment-icon"), null);
       assert.equal(findOne(strip, "attachment-name").textContent, "shot.png");
-      assert.equal(findOne(strip, "attachment-size").textContent, "2 KB");
+      assert.equal(findOne(strip, "attachment-size").textContent, "2 KB · aaa_shot.png");
     });
 
     check("G5 renderAttachmentStrip: a plain file renders icon + name + size", () => {
@@ -642,7 +681,7 @@ export async function registerFileUploadTests(ctx) {
       assert.notEqual(findOne(strip, "attachment-icon"), null);
       assert.equal(findOne(strip, "attachment-thumb"), null);
       assert.equal(findOne(strip, "attachment-name").textContent, "notes.txt");
-      assert.equal(findOne(strip, "attachment-size").textContent, "300 B");
+      assert.equal(findOne(strip, "attachment-size").textContent, "300 B · aaa_notes.txt");
       assert.equal(findAll(strip, "attachment-remove").length, 1);
     });
 
@@ -661,6 +700,67 @@ export async function registerFileUploadTests(ctx) {
       const btn = findOne(strip, "attachment-remove");
       assert.notEqual(btn, null, "an in-flight row must be escapable");
       assert.equal(btn.title.includes("Cancel"), true, btn.title);
+      // Nothing has landed yet, so there is no stored path to name or to
+      // point a tooltip at.
+      assert.equal(strip.children[0].title, "", "an in-flight row carries no tooltip");
+    });
+
+    check("G4 renderAttachmentStrip: a landed row shows and titles its stored path", () => {
+      resetScopes();
+      // Two clipboard pastes: identical browser-side names, different stored
+      // ones. This is the case the whole feature exists for.
+      const entries = [
+        { id: "u1", name: "image.png", size: 2048, type: "image/png",
+          status: "done", path: "tianluo/uploads/e155b5b05cf8_image.png" },
+        { id: "u2", name: "image.png", size: 2048, type: "image/png",
+          status: "done", path: "tianluo/uploads/77bb0c1d4a92_image.png" },
+      ];
+      app.renderAttachmentStrip("nt-attachments", entries);
+      const strip = $("nt-attachments");
+      assert.equal(strip.children.length, 2);
+
+      const names = findAll(strip, "attachment-name").map((n) => n.textContent);
+      assert.deepEqual(names, ["image.png", "image.png"],
+        "the visible name stays the one the browser handed us");
+      const subs = findAll(strip, "attachment-size").map((n) => n.textContent);
+      // Size AND stored name, so the row is still self-describing, and the two
+      // rows are now distinguishable from each other.
+      assert.deepEqual(subs, [
+        "2 KB · e155b5b05cf8_image.png",
+        "2 KB · 77bb0c1d4a92_image.png",
+      ]);
+      assert.notEqual(subs[0], subs[1], "two pasted screenshots are told apart");
+
+      // The scrolling inner span is a separate node from the clipping cell —
+      // the hover animation has nothing to move without it.
+      const texts = findAll(strip, "attachment-size-text");
+      assert.equal(texts.length, 2);
+      assert.equal(texts[0].parentNode.classList.contains("attachment-size"), true);
+
+      // Compared against the model, not a literal, so the tooltip cannot drift
+      // from the path that is actually in the prompt text.
+      for (let i = 0; i < entries.length; i += 1) {
+        const model = app.attachmentRowModel(entries[i]);
+        assert.equal(strip.children[i].title, model.path);
+        assert.equal(strip.children[i].title.endsWith("/" + model.storedName), true,
+          "the tooltip is the full relative path, not just the basename");
+      }
+    });
+
+    check("G4 renderAttachmentStrip: a failed row keeps its reason as the tooltip", () => {
+      resetScopes();
+      // Even carrying a path (a write that failed after the name was chosen),
+      // the reason wins the one tooltip a row has: the user needs the failure,
+      // and nothing points at that path from the text anyway.
+      app.renderAttachmentStrip("nt-attachments", [{
+        id: "u1", name: "x.bin", size: 10, status: "error", code: "write_failed",
+        path: "tianluo/uploads/aaa_x.bin",
+      }]);
+      const strip = $("nt-attachments");
+      assert.equal(strip.children[0].title.includes("could not save the file"), true,
+        strip.children[0].title);
+      assert.equal(findOne(strip, "attachment-size").textContent, "10 B",
+        "a row with no stored file names none");
     });
 
     check("G5 renderAttachmentStrip: a failed row stays, dismissable, with its reason", () => {
