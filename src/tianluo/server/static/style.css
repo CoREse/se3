@@ -1809,6 +1809,37 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 .conv-empty { color: var(--fg-dim); font-style: italic; }
 
+/* Inline thumbnails for the attachments a message names. They sit UNDER the
+ * message's own text, which still carries the paths verbatim — the picture is
+ * an addition to the prompt text, never a substitution for it.
+ *
+ * Sized to be scannable at a glance rather than to be read: the full-resolution
+ * image is one click away in a new tab, and a screenshot rendered at its native
+ * height would push the rest of the conversation off the screen. */
+.inline-uploads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.inline-upload-link {
+  display: inline-flex;
+  /* The bubble's own width is the ceiling; a wide screenshot shrinks to fit
+   * instead of stretching the bubble past its `max-width`. */
+  max-width: 100%;
+  line-height: 0;
+}
+.inline-upload-img {
+  max-height: 240px;
+  max-width: 100%;
+  object-fit: contain;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  /* A transparent PNG would otherwise sit on the bubble's tint and read as
+   * part of it; the card background gives it an edge of its own. */
+  background: var(--bg-card);
+}
+
 /* In-progress (stream_progress / partial) bubbles: shown live, line by line,
    while a step is still thinking. Dimmed + a left accent bar so they read as
    transient process output; they are removed once the turn's final result
@@ -3667,6 +3698,11 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     max-width: 100%;
     align-self: stretch;
   }
+
+  /* A phone screen is a fraction of the height a desktop one is, so the desktop
+   * cap would let a single screenshot own most of the viewport and bury the
+   * turn it belongs to. Tapping still opens the full image. */
+  .inline-upload-img { max-height: 160px; }
 
   /* -- tool-call chip: compress the summary to one line (G2) -------------- *
    * Desktop lets the chip head wrap; on a narrow screen the name + detail then
