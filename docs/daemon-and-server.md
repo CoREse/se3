@@ -408,12 +408,13 @@ Properties worth knowing before you rely on it:
   daemon refuses to write into a directory it does not already track, so a
   compromised or buggy server cannot use this channel to drop files anywhere on
   a worker machine.
-- **The daemon must speak protocol revision 5 or newer.** The server checks the
-  connected daemon's advertised version *before* dispatching and rejects the
-  upload with an explicit "daemon too old" error, rather than letting the
-  request sit until it times out — an upload happens in the middle of typing, so
-  a silent stall would be indistinguishable from a hang. Upgrade the worker's
-  `tianluo` install to enable uploads there.
+- **The daemon must speak protocol revision 5 or newer** (revision 6 for the
+  read-back direction described below). The server checks the connected daemon's
+  advertised version *before* dispatching and rejects the upload with an explicit
+  "daemon too old" error, rather than letting the request sit until it times out
+  — an upload happens in the middle of typing, so a silent stall would be
+  indistinguishable from a hang. Upgrade the worker's `tianluo` install to
+  enable uploads there.
 - **Uploads are not version-controlled.** `luo init` ensures the project's
   `.gitignore` carries the upload directory (`se3/uploads/` on a project still
   on the legacy runtime layout), because these are runtime artifacts of
@@ -423,6 +424,59 @@ Properties worth knowing before you rely on it:
   long as people attach files, and pruning it is an operator task. Deleting an
   attachment from the web UI's attachment strip only removes the path text from
   the prompt — the file on the project's machine stays.
+
+#### Reading an attachment back
+
+An uploaded file lives on the *daemon's* disk, so a browser rendering the
+conversation cannot open it: the only channel to that machine is the daemon's
+own outbound socket. **Protocol revision 6** adds the read-back direction, the
+mirror image of the upload leg, so the web UI can show an attached screenshot
+inline in the conversation instead of a bare path string:
+
+1. `GET /api/uploads/file?path=<project-relative path>` over the same
+   authenticated session, naming the target the same two ways as the upload
+   (`flow_id`, or `machine_id` + `project_root`). Authentication and the owner
+   check are identical — you can only read attachments of a machine you own.
+2. The server sends a `FETCH_COMMAND` frame down that machine's socket and waits
+   (10 s) for the matching `FETCH_RESULT`.
+3. The daemon reads the file and returns the bytes base64-encoded; the server
+   decodes them and answers with the raw bytes in the HTTP body.
+
+The rules that make this safe to expose:
+
+- **Containment is decided on the resolved path.** The daemon accepts the read
+  only if the requested path resolves to a *direct child* of that project's
+  uploads directory. One check covers `..` segments, absolute paths, and — a
+  concern unique to the read direction — a symlink planted inside `uploads/` that
+  points at some other file on the worker machine. Anything else fails closed as
+  `invalid_path`; a legitimate attachment never sits outside that directory.
+  The target project must be registered with the daemon, exactly as for uploads.
+- **The same 20 MiB limit applies**, decided from `stat()` before a byte is read,
+  so an oversized file costs the worker machine no memory.
+- **Revision 6 is gated before dispatch.** The server checks the daemon's
+  advertised protocol version and answers `501` immediately rather than sending a
+  frame an older daemon would silently drop. This matters more here than for
+  uploads: a conversation can hold many inline images, and without the gate each
+  one would hold a browser connection open for the full timeout.
+- **Responses are cached hard**: `Cache-Control: public, max-age=31536000,
+  immutable`. This is sound *because* of the content-hash naming above — one
+  project-relative uploads path can only ever denote one byte string, so a stale
+  entry is unreachable by construction. Without it, scrolling back through a
+  conversation would punch a fresh round trip to the daemon per thumbnail per
+  repaint.
+- **`Content-Type` comes from a small whitelist** of raster image types. Anything
+  else is served as `application/octet-stream` with `X-Content-Type-Options:
+  nosniff`, so an uploaded `.html` — or an `.svg`, deliberately excluded as a
+  script-bearing document — can never be rendered as a document on the server's
+  own origin.
+
+**Degradation is silent by design.** Every failure of this leg — a daemon that is
+offline (`503`), too old (`501`), slow (`504`), a file that was pruned (`404`),
+or a path that does not pass containment (`422`) — surfaces in the browser as a
+failed image load, and the web UI simply hides that thumbnail. The message keeps
+the path text it always showed, which is the string the agent actually read; no
+error is raised at the reader. The inline thumbnail is an addition to the
+conversation, never a replacement for its text.
 
 ---
 
