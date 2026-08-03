@@ -25,13 +25,13 @@ Message directions
   :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_INDEX_DELTA`,
   :data:`MSG_HISTORY_DATA`, :data:`MSG_DETAIL_DATA`, :data:`MSG_ISSUE_RESULT`,
   :data:`MSG_PROJECT_RESULT`, :data:`MSG_SPAWN_FAILED`,
-  :data:`MSG_UPLOAD_RESULT`.
+  :data:`MSG_UPLOAD_RESULT`, :data:`MSG_FETCH_RESULT`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
   :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`,
   :data:`MSG_ISSUE_COMMAND`, :data:`MSG_PROJECT_COMMAND`,
   :data:`MSG_DETAIL_REQUEST`, :data:`MSG_END_SESSION`, :data:`MSG_VIEWERS`,
-  :data:`MSG_UPLOAD_COMMAND`.
+  :data:`MSG_UPLOAD_COMMAND`, :data:`MSG_FETCH_COMMAND`.
 
 Backward compatibility
 ----------------------
@@ -92,6 +92,26 @@ server can consult the daemon's advertised ``protocol_version`` (see
 explainable "this machine's daemon is too old" instead of a timeout. As with
 every other gate here, this module owns only the wire schema, the version
 constant, and this contract; the dispatch decision lives in the server.
+
+Protocol version 6 added the *fetch* channel (:data:`MSG_FETCH_COMMAND` /
+:data:`MSG_FETCH_RESULT`) — the read-back counterpart of revision 5's upload
+channel. Revision 5 could only push a file *to* the daemon's machine; the bytes
+then lived under that project's ``uploads/`` directory with no way back, so the
+web UI could render an attached screenshot's *path* but never its content. The
+fetch channel closes that loop: the server asks the owning daemon for one file
+under the project's uploads directory and gets the bytes back, so the browser
+can show the image inline in the conversation. The version was bumped to ``6``
+for the same reason revision 5 was bumped, only more acutely: an inline
+thumbnail is a *rendering* path, not a human-initiated action — a single
+conversation may reference many images and re-render on every scroll, so an
+older daemon that silently drops the unknown frame would leave every one of
+those requests waiting out the full dispatch timeout and exhaust the browser's
+per-origin connection budget. The server therefore consults
+:func:`supports_fetch` before dispatching and answers "this machine's daemon is
+too old" up front, which the UI degrades to plain path text. This module owns
+only the wire schema, the version constant, and this contract; the containment
+check that keeps a fetch inside the uploads directory lives in the daemon, and
+the dispatch decision lives in the server.
 """
 
 from __future__ import annotations
@@ -116,7 +136,13 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # the server must not dispatch an upload to a daemon advertising "4" or older —
 # it answers "unsupported daemon" up front rather than making the browser wait
 # out a timeout on every pasted file (see the module docstring).
-PROTOCOL_VERSION = "5"
+# Revision "6" added the fetch channel (MSG_FETCH_COMMAND / MSG_FETCH_RESULT),
+# the read-back half of the upload channel. The same up-front refusal applies
+# and matters more here: fetches ride a rendering path (many per conversation,
+# repeated on every re-render), so letting them each wait out a timeout against
+# a pre-fetch daemon would saturate the browser's connections rather than cost
+# one visible delay (see the module docstring).
+PROTOCOL_VERSION = "6"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -192,6 +218,34 @@ def supports_uploads(peer_version: Any) -> bool:
     """
     try:
         return int(str(peer_version).strip()) >= MIN_UPLOAD_PROTOCOL_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
+#: Minimum peer ``protocol_version`` that understands the revision-6 fetch
+#: channel (:data:`MSG_FETCH_COMMAND` / :data:`MSG_FETCH_RESULT`). The server
+#: checks this *before* dispatching for a sharper version of the upload
+#: channel's reason: a fetch backs an inline thumbnail, so a single conversation
+#: issues many of them and re-issues them on every re-render. Against a
+#: pre-fetch daemon that silently drops the unknown frame, "wait for the request
+#: timeout" would not cost one visible delay but pin the browser's whole
+#: per-origin connection budget on requests that can never succeed. Version
+#: strings are compared as integers with a safe fallback so a non-numeric or
+#: missing value degrades to "legacy" (no fetch support).
+MIN_FETCH_PROTOCOL_VERSION = 6
+
+
+def supports_fetch(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the revision-6 fetch channel.
+
+    Used by the server's file read-back endpoint to decide whether the target
+    machine's daemon can accept a :data:`MSG_FETCH_COMMAND` at all. A missing or
+    non-numeric version degrades safely to ``False`` (report unsupported, which
+    the web UI degrades to plain path text, rather than dispatch a frame the
+    peer would drop), mirroring :func:`supports_uploads`.
+    """
+    try:
+        return int(str(peer_version).strip()) >= MIN_FETCH_PROTOCOL_VERSION
     except (TypeError, ValueError):
         return False
 
@@ -345,6 +399,19 @@ MSG_PROJECT_COMMAND = "project_command"
 #: the UI can explain. Revision 5.
 MSG_UPLOAD_COMMAND = "upload_command"
 
+#: server → daemon: read one file back out of the project's runtime
+#: ``uploads/`` directory, so the web UI can render an attached image inline in
+#: the conversation instead of showing only the project-relative path the agent
+#: sees. The payload carries ``project_root``, the project-relative ``path``
+#: (never an absolute one — the browser must not learn the daemon machine's
+#: layout, and the daemon re-derives the real location itself) and a
+#: ``request_id``. This is the exact inverse of :data:`MSG_UPLOAD_COMMAND` and
+#: forced a ``PROTOCOL_VERSION`` bump to ``6`` for a sharper version of the same
+#: reason: fetches back a *rendering* path, so they arrive many at a time and
+#: repeat on every re-render, and a pre-fetch daemon that drops the frame would
+#: leave each of them stalled until the dispatch timeout. Revision 6.
+MSG_FETCH_COMMAND = "fetch_command"
+
 #: server → daemon: report the number of browsers currently watching the web
 #: UI. Sent as an *edge* only on the 0↔non-0 transitions (open the first page /
 #: close the last one) — 1→2 or 2→1 changes are not broadcast, because the
@@ -382,6 +449,17 @@ MSG_PROJECT_RESULT = "project_result"
 #: :data:`UPLOAD_ERROR_CODES`, which is what the web UI maps to a localized
 #: message. Revision 5.
 MSG_UPLOAD_RESULT = "upload_result"
+
+#: daemon → server: deliver the bytes requested by a :data:`MSG_FETCH_COMMAND`.
+#: Carries ``request_id`` (echoed from the command) plus ``ok`` and, on success,
+#: the base64-encoded ``content_b64`` (the wire is JSON lines and cannot carry
+#: raw bytes), the decoded ``size`` and the file's ``name``. On failure it
+#: carries a human ``error`` plus a stable :data:`FETCH_ERROR_CODES` member,
+#: which is what the server maps to an HTTP status. Unlike an upload failure the
+#: code never reaches a human as a message: the browser turns *any* fetch
+#: failure into "keep showing the plain path", so the code exists for the
+#: server's status mapping and for diagnosis, not for the UI. Revision 6.
+MSG_FETCH_RESULT = "fetch_result"
 
 #: server → daemon: pull the *full text* of a single issue or pending call on
 #: demand. STATUS_UPDATE now carries only truncated summaries (issue
@@ -432,6 +510,32 @@ UPLOAD_ERROR_CODES: FrozenSet[str] = frozenset(
         UPLOAD_ERR_INVALID_PAYLOAD,
         UPLOAD_ERR_WRITE_FAILED,
         UPLOAD_ERR_UNSUPPORTED,
+    }
+)
+
+# -- fetch failure codes (protocol revision 6) ----------------------------
+# The ``error_code`` field of a failed MSG_FETCH_RESULT. As with the upload
+# codes, these — not the accompanying prose — are the contract the server maps
+# to an HTTP status. The set deliberately differs from UPLOAD_ERROR_CODES: a
+# read has failure modes a write does not (``not_found``, ``read_failed``) and
+# lacks the ones that only apply to a name the browser supplied
+# (``invalid_filename``, ``invalid_payload``). Keeping them separate means
+# neither channel can drift into accepting a code the other side never emits.
+FETCH_ERR_INVALID_PATH = "invalid_path"
+FETCH_ERR_NOT_REGISTERED = "not_registered"
+FETCH_ERR_NOT_FOUND = "not_found"
+FETCH_ERR_TOO_LARGE = "too_large"
+FETCH_ERR_UNSUPPORTED = "unsupported"
+FETCH_ERR_READ_FAILED = "read_failed"
+#: Every recognised fetch failure code.
+FETCH_ERROR_CODES: FrozenSet[str] = frozenset(
+    {
+        FETCH_ERR_INVALID_PATH,
+        FETCH_ERR_NOT_REGISTERED,
+        FETCH_ERR_NOT_FOUND,
+        FETCH_ERR_TOO_LARGE,
+        FETCH_ERR_UNSUPPORTED,
+        FETCH_ERR_READ_FAILED,
     }
 )
 
@@ -496,6 +600,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_PROJECT_RESULT,
         MSG_SPAWN_FAILED,
         MSG_UPLOAD_RESULT,
+        MSG_FETCH_RESULT,
     }
 )
 #: Messages a server is allowed to send to a daemon.
@@ -514,6 +619,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_END_SESSION,
         MSG_VIEWERS,
         MSG_UPLOAD_COMMAND,
+        MSG_FETCH_COMMAND,
     }
 )
 #: Every known message type.
@@ -1066,6 +1172,115 @@ def make_upload_result(
         if error_code:
             payload["error_code"] = error_code
     return Message(type=MSG_UPLOAD_RESULT, payload=payload)
+
+
+# -- fetch messages (protocol revision 6) ---------------------------------
+
+
+def make_fetch_command(
+    project_root: str,
+    path: str,
+    *,
+    request_id: str = "",
+) -> Message:
+    """server → daemon: read one file back out of the project's uploads dir.
+
+    *project_root* is the absolute path on the daemon's machine; as with
+    :func:`make_upload_command` the daemon re-validates it against its own
+    registry, so the check here is only a cheap early reject. *path* is the
+    file's location **relative to that project root** — the same string
+    :func:`make_upload_result` handed back and the same one the operator's
+    prompt carries — never an absolute path, both because the browser must not
+    learn the daemon machine's layout and because a fetch may only ever reach
+    inside the project. *request_id* correlates the :data:`MSG_FETCH_RESULT`
+    reply back to the waiting REST request.
+
+    Raises :class:`ProtocolError` when *project_root* is not absolute, or when
+    *path* is empty, absolute, or contains a ``..`` segment. The traversal check
+    is a *cheap early* one, not the security boundary: the daemon's own
+    containment check — resolving the path and requiring its parent to be the
+    uploads directory — is what actually holds, because only a resolved path
+    catches symlinks and normalization tricks a string scan cannot see. This one
+    exists so an obviously malformed frame never reaches the wire at all.
+    """
+    if not project_root or not os.path.isabs(str(project_root)):
+        raise ProtocolError(
+            f"fetch project_root must be an absolute path, got {project_root!r}"
+        )
+    if not path or not str(path).strip():
+        raise ProtocolError("fetch command requires a non-empty path")
+    rel_path = str(path).strip()
+    if os.path.isabs(rel_path) or rel_path.startswith("/") or rel_path.startswith("\\"):
+        raise ProtocolError(
+            f"fetch path must be relative to the project root, got {path!r}"
+        )
+    if ".." in rel_path.replace("\\", "/").split("/"):
+        raise ProtocolError(f"fetch path must not contain a '..' segment, got {path!r}")
+    payload: Dict[str, Any] = {
+        "project_root": str(project_root),
+        "path": rel_path,
+    }
+    if request_id:
+        payload["request_id"] = request_id
+    return Message(type=MSG_FETCH_COMMAND, payload=payload)
+
+
+def make_fetch_result(
+    request_id: str,
+    *,
+    ok: bool = True,
+    content_b64: str = "",
+    size: int = 0,
+    name: str = "",
+    error: str = "",
+    error_code: str = "",
+) -> Message:
+    """daemon → server: deliver the bytes requested by a fetch command.
+
+    *request_id* echoes the originating :data:`MSG_FETCH_COMMAND`. On success
+    *content_b64* is the base64 encoding of the file bytes (the wire is JSON
+    lines and cannot carry raw bytes), *size* the decoded length and *name* the
+    stored file's basename. *size* is always emitted on success even at ``0``:
+    an empty file is a real answer, not an absence, and the server tells the two
+    apart by key presence — the same contract :func:`make_upload_result` keeps.
+
+    On failure *error_code* is a stable :data:`FETCH_ERROR_CODES` member the
+    server maps to an HTTP status; *error* is untranslated diagnostic prose.
+
+    Raises :class:`ProtocolError` when *size* is negative or exceeds
+    :data:`MAX_UPLOAD_BYTES` (the read-back leg shares the upload channel's
+    ceiling — the same base64 blow-up has to fit the same frame cap), or when
+    *error_code* is not a recognised :data:`FETCH_ERROR_CODES` value.
+    """
+    if error_code and error_code not in FETCH_ERROR_CODES:
+        raise ProtocolError(
+            f"fetch error_code must be one of {sorted(FETCH_ERROR_CODES)}, "
+            f"got {error_code!r}"
+        )
+    try:
+        declared_size = int(size)
+    except (TypeError, ValueError) as exc:
+        raise ProtocolError(f"fetch size must be an integer, got {size!r}") from exc
+    if declared_size < 0:
+        raise ProtocolError(f"fetch size must not be negative, got {declared_size}")
+    if declared_size > MAX_UPLOAD_BYTES:
+        raise ProtocolError(
+            f"fetch size {declared_size} exceeds the {MAX_UPLOAD_BYTES}-byte limit"
+        )
+    payload: Dict[str, Any] = {
+        "request_id": request_id,
+        "ok": bool(ok),
+    }
+    if ok:
+        payload["content_b64"] = content_b64
+        payload["size"] = declared_size
+        payload["name"] = name
+    else:
+        if error:
+            payload["error"] = error
+        if error_code:
+            payload["error_code"] = error_code
+    return Message(type=MSG_FETCH_RESULT, payload=payload)
 
 
 def make_ping(*, seq: int = 0, viewers: Optional[int] = None) -> Message:
