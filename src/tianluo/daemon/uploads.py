@@ -3,9 +3,11 @@
 This module is the *pure* half of the upload channel: no asyncio, no network,
 no protocol frames — just "given a project root, a browser-supplied filename
 and some bytes, put them somewhere an agent can read and tell me the relative
-path". Keeping it free of the transport lets the security-critical parts (name
-sanitization, directory containment, atomic replace) be tested directly against
-the filesystem rather than through a WebSocket fixture.
+path", plus the read-back direction that hands those bytes back out when the
+web UI wants to render an attachment inline. Keeping it free of the transport
+lets the security-critical parts (name sanitization, directory containment,
+atomic replace) be tested directly against the filesystem rather than through a
+WebSocket fixture.
 
 Stored files land in ``<runtime dir>/uploads/`` and are named
 ``<sha256[:12]>_<sanitized original name>``. The hash prefix is what makes the
@@ -20,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import stat
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -37,8 +40,10 @@ logger = logging.getLogger(__name__)
 # worktree creation can import without pulling in the daemon package.
 __all__ = [
     "UPLOADS_DIR_NAME",
+    "UploadContent",
     "UploadError",
     "UploadStored",
+    "read_upload",
     "sanitize_upload_filename",
     "store_upload",
     "uploads_dir",
@@ -112,6 +117,21 @@ class UploadStored:
     path: str
     size: int
     deduplicated: bool = False
+
+
+@dataclass
+class UploadContent:
+    """Result of a successful :func:`read_upload`.
+
+    *name* is the stored file's basename (hash prefix included) rather than the
+    requested path: the server turns it into the download filename and picks a
+    Content-Type from its extension, and the basename is the only part of the
+    request that has been checked against what is actually on disk.
+    """
+
+    data: bytes
+    size: int
+    name: str
 
 
 def sanitize_upload_filename(name: str) -> str:
@@ -274,6 +294,109 @@ def store_upload(
         size=len(payload),
         deduplicated=False,
     )
+
+
+def read_upload(
+    project_root: Union[str, Path],
+    rel_path: str,
+) -> UploadContent:
+    """Read one previously stored attachment back out of *project_root*.
+
+    The mirror image of :func:`store_upload`: *rel_path* is the project-relative
+    posix path that ``store_upload`` handed back (``tianluo/uploads/<hash>_x.png``),
+    and the returned bytes are what the server ships to the browser so an
+    attachment referenced in a prompt can be rendered inline instead of showing
+    as bare path text.
+
+    Raises :class:`UploadError` with a stable :data:`protocol.FETCH_ERROR_CODES`
+    code when the path is empty, absolute or escapes the uploads directory
+    (``invalid_path``), when nothing readable is there (``not_found``), when the
+    file on disk is over :data:`protocol.MAX_UPLOAD_BYTES` (``too_large``), or
+    when the read itself fails (``read_failed``).
+    """
+    requested = str(rel_path or "").strip()
+    if not requested:
+        raise UploadError(
+            protocol.FETCH_ERR_INVALID_PATH, "fetch requires a non-empty path"
+        )
+    # An absolute path is refused outright rather than left to the containment
+    # check below: the caller is supposed to speak in project-relative terms, and
+    # `root / "/etc/passwd"` silently *discards* the root under pathlib's join
+    # semantics — a caller error that would otherwise read as a path question.
+    if os.path.isabs(requested) or requested.startswith(("/", "\\")):
+        raise UploadError(
+            protocol.FETCH_ERR_INVALID_PATH,
+            f"fetch path must be relative to the project root, got {rel_path!r}",
+        )
+
+    root = Path(project_root)
+    target_dir = uploads_dir(root)
+    target = root / requested
+
+    # INVARIANT: the file read must be a direct child of the uploads directory.
+    # Comparing *resolved* paths is what makes this hold against every shape of
+    # escape at once — a `..` segment, a normalization trick, and (uniquely for
+    # the read direction) a symlink planted inside the uploads dir that points at
+    # an arbitrary file elsewhere on this machine. A string scan cannot see that
+    # last one, which is why the check lives here and not in the frame validator.
+    # Failing closed is always correct: a legitimate attachment never sits
+    # outside this directory.
+    try:
+        resolved_dir = target_dir.resolve()
+        resolved_target = target.resolve()
+    except OSError as exc:
+        raise UploadError(
+            protocol.FETCH_ERR_INVALID_PATH, f"could not resolve {rel_path!r}: {exc}"
+        ) from exc
+    if resolved_target.parent != resolved_dir:
+        raise UploadError(
+            protocol.FETCH_ERR_INVALID_PATH,
+            f"refusing to read {rel_path!r} outside {target_dir}",
+        )
+
+    try:
+        stat_result = resolved_target.stat()
+    except OSError:
+        raise UploadError(
+            protocol.FETCH_ERR_NOT_FOUND, f"no attachment at {rel_path!r}"
+        ) from None
+    # Directories and device nodes are "not an attachment", reported as absent
+    # rather than as a read failure: from the browser's point of view there is
+    # simply nothing to render at that path.
+    if not stat.S_ISREG(stat_result.st_mode):
+        raise UploadError(
+            protocol.FETCH_ERR_NOT_FOUND, f"{rel_path!r} is not a regular file"
+        )
+    # Decided from stat, before a single byte is read: an oversized file must
+    # cost this machine no memory at all, the same way store_upload refuses an
+    # oversized write before touching the disk.
+    if stat_result.st_size > protocol.MAX_UPLOAD_BYTES:
+        raise UploadError(
+            protocol.FETCH_ERR_TOO_LARGE,
+            f"attachment of {stat_result.st_size} bytes exceeds the "
+            f"{protocol.MAX_UPLOAD_BYTES}-byte limit",
+        )
+
+    try:
+        data = resolved_target.read_bytes()
+    except OSError as exc:
+        logger.warning("Failed to read upload %s under %s: %s", requested, root, exc)
+        raise UploadError(
+            protocol.FETCH_ERR_READ_FAILED,
+            f"could not read the attachment: {exc}",
+        ) from exc
+
+    # Re-checked against the bytes actually in hand: the stat above races a
+    # concurrent write, and the size the server declares must describe what it
+    # is about to ship, not what the file measured a moment earlier.
+    if len(data) > protocol.MAX_UPLOAD_BYTES:
+        raise UploadError(
+            protocol.FETCH_ERR_TOO_LARGE,
+            f"attachment of {len(data)} bytes exceeds the "
+            f"{protocol.MAX_UPLOAD_BYTES}-byte limit",
+        )
+
+    return UploadContent(data=data, size=len(data), name=resolved_target.name)
 
 
 def _relative_path(project_root: Path, target: Path) -> str:

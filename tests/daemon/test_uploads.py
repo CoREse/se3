@@ -2,8 +2,9 @@
 
 Two layers are covered here and nothing in between: :mod:`tianluo.daemon.uploads`
 against a real filesystem (naming, dedup, containment, atomicity), and
-``DaemonClient._handle_upload_command`` against a fake WebSocket (decode, size,
-registry gate, ack shape). No real socket and no ``websockets`` import.
+``DaemonClient._handle_upload_command`` / ``_handle_fetch_command`` against a
+fake WebSocket (decode, size, registry gate, ack shape). No real socket and no
+``websockets`` import.
 """
 
 import asyncio
@@ -15,7 +16,12 @@ import pytest
 
 from tianluo.daemon import protocol, uploads
 from tianluo.daemon.client import DaemonClient
-from tianluo.daemon.uploads import UploadError, sanitize_upload_filename, store_upload
+from tianluo.daemon.uploads import (
+    UploadError,
+    read_upload,
+    sanitize_upload_filename,
+    store_upload,
+)
 
 
 # --------------------------------------------------------------------------
@@ -760,3 +766,508 @@ def test_upload_command_uses_cached_roots_without_resnapshotting(tmp_path):
 
     assert len(calls) == 1
     assert all(a.payload["ok"] is True for a in _acks(ws))
+
+
+# --------------------------------------------------------------------------
+# read_upload — on-disk semantics of the read-back direction
+# --------------------------------------------------------------------------
+
+
+def test_read_upload_returns_the_stored_bytes(tmp_path):
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"\x89PNG\r\n pixels")
+
+    content = read_upload(root, stored.path)
+
+    assert content.data == b"\x89PNG\r\n pixels"
+    assert content.size == len(b"\x89PNG\r\n pixels")
+    assert content.name == Path(stored.path).name
+    assert content.name.endswith("_shot.png")
+
+
+def test_read_upload_accepts_a_str_project_root(tmp_path):
+    root = _project(tmp_path)
+    stored = store_upload(root, "note.txt", b"bytes")
+
+    assert read_upload(str(root), stored.path).data == b"bytes"
+
+
+def test_read_upload_handles_an_empty_file(tmp_path):
+    """0 bytes is a real answer, not an absence."""
+    root = _project(tmp_path)
+    stored = store_upload(root, "empty.bin", b"")
+
+    content = read_upload(root, stored.path)
+
+    assert content.data == b""
+    assert content.size == 0
+
+
+def test_read_upload_follows_the_legacy_se3_layout(tmp_path):
+    root = _project(tmp_path, runtime_name="se3")
+    stored = store_upload(root, "old.png", b"legacy bytes")
+
+    assert stored.path.startswith("se3/uploads/")
+    assert read_upload(root, stored.path).data == b"legacy bytes"
+
+
+@pytest.mark.parametrize("raw", ["", "   ", None])
+def test_read_upload_rejects_an_empty_path(tmp_path, raw):
+    root = _project(tmp_path)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, raw)
+
+    assert excinfo.value.code == protocol.FETCH_ERR_INVALID_PATH
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "../../../etc/passwd",
+        "tianluo/uploads/../../../etc/passwd",
+        "tianluo/uploads/../secret.txt",
+        "tianluo/logs/daemon.log",
+        "tianluo/uploads/nested/deep.png",
+    ],
+)
+def test_read_upload_refuses_paths_outside_the_uploads_dir(tmp_path, raw):
+    """Containment is the whole security contract of the read direction."""
+    root = _project(tmp_path)
+    (root / "tianluo" / "uploads").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "secret.txt").write_bytes(b"private")
+    (root / "tianluo" / "logs").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "logs" / "daemon.log").write_bytes(b"private")
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, raw)
+
+    assert excinfo.value.code == protocol.FETCH_ERR_INVALID_PATH
+
+
+@pytest.mark.parametrize("raw", ["/etc/passwd", "\\etc\\passwd"])
+def test_read_upload_refuses_an_absolute_path(tmp_path, raw):
+    root = _project(tmp_path)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, raw)
+
+    assert excinfo.value.code == protocol.FETCH_ERR_INVALID_PATH
+
+
+def test_read_upload_refuses_a_symlink_escaping_the_uploads_dir(tmp_path):
+    """The escape a string scan cannot see: a link planted inside uploads."""
+    root = _project(tmp_path)
+    uploads_root = root / "tianluo" / "uploads"
+    uploads_root.mkdir(parents=True)
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_bytes(b"top secret")
+    link = uploads_root / "abcdef012345_innocent.png"
+    link.symlink_to(outside)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, "tianluo/uploads/abcdef012345_innocent.png")
+
+    assert excinfo.value.code == protocol.FETCH_ERR_INVALID_PATH
+    assert link.is_symlink()  # the check refuses to read, it does not clean up
+
+
+def test_read_upload_reports_a_missing_file_as_not_found(tmp_path):
+    root = _project(tmp_path)
+    (root / "tianluo" / "uploads").mkdir(parents=True)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, "tianluo/uploads/deadbeef0000_gone.png")
+
+    assert excinfo.value.code == protocol.FETCH_ERR_NOT_FOUND
+
+
+def test_read_upload_reports_a_directory_as_not_found(tmp_path):
+    root = _project(tmp_path)
+    (root / "tianluo" / "uploads" / "adir").mkdir(parents=True)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, "tianluo/uploads/adir")
+
+    assert excinfo.value.code == protocol.FETCH_ERR_NOT_FOUND
+
+
+def test_read_upload_refuses_an_oversized_file_before_reading_it(tmp_path, monkeypatch):
+    """The size limit must cost no memory: decided from stat, not from bytes."""
+    root = _project(tmp_path)
+    uploads_root = root / "tianluo" / "uploads"
+    uploads_root.mkdir(parents=True)
+    big = uploads_root / "aabbccddeeff_big.bin"
+    # Sparse: st_size reports past the limit without 20 MB ever being written.
+    with open(big, "wb") as fh:
+        fh.truncate(protocol.MAX_UPLOAD_BYTES + 1)
+
+    reads = []
+    original = Path.read_bytes
+
+    def _recording(self):
+        reads.append(self)
+        return original(self)
+
+    monkeypatch.setattr(Path, "read_bytes", _recording)
+
+    with pytest.raises(UploadError) as excinfo:
+        read_upload(root, "tianluo/uploads/aabbccddeeff_big.bin")
+
+    assert excinfo.value.code == protocol.FETCH_ERR_TOO_LARGE
+    assert reads == []
+
+
+def test_read_upload_accepts_a_file_exactly_at_the_limit(tmp_path):
+    root = _project(tmp_path)
+    uploads_root = root / "tianluo" / "uploads"
+    uploads_root.mkdir(parents=True)
+    exact = uploads_root / "aabbccddeeff_exact.bin"
+    with open(exact, "wb") as fh:
+        fh.truncate(protocol.MAX_UPLOAD_BYTES)
+
+    content = read_upload(root, "tianluo/uploads/aabbccddeeff_exact.bin")
+
+    assert content.size == protocol.MAX_UPLOAD_BYTES
+
+
+def test_read_upload_reports_an_unreadable_file_as_read_failed(tmp_path):
+    root = _project(tmp_path)
+    stored = store_upload(root, "locked.bin", b"payload")
+    target = root / stored.path
+    os.chmod(target, 0o000)
+    if os.access(target, os.R_OK):  # running as root: the mode cannot bite
+        os.chmod(target, 0o644)
+        pytest.skip("cannot make a file unreadable as this user")
+
+    try:
+        with pytest.raises(UploadError) as excinfo:
+            read_upload(root, stored.path)
+    finally:
+        os.chmod(target, 0o644)
+
+    assert excinfo.value.code == protocol.FETCH_ERR_READ_FAILED
+
+
+def test_read_upload_error_codes_are_all_protocol_members():
+    """The code — not the prose — is the contract with the server."""
+    for code in (
+        protocol.FETCH_ERR_INVALID_PATH,
+        protocol.FETCH_ERR_NOT_FOUND,
+        protocol.FETCH_ERR_TOO_LARGE,
+        protocol.FETCH_ERR_READ_FAILED,
+    ):
+        assert code in protocol.FETCH_ERROR_CODES
+
+
+# --------------------------------------------------------------------------
+# _handle_fetch_command — frame-level behaviour
+# --------------------------------------------------------------------------
+
+
+def _run_fetch(client, ws, **kw):
+    """Dispatch one FETCH_COMMAND through the client's real dispatch path."""
+
+    async def scenario():
+        await client._dispatch(ws, protocol.make_fetch_command(**kw))
+
+    asyncio.run(scenario())
+
+
+def _fetch_acks(ws):
+    return [m for m in ws.sent if m.type == protocol.MSG_FETCH_RESULT]
+
+
+def test_fetch_command_returns_the_stored_bytes(tmp_path):
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"\x89PNG pixels")
+    client = _make_client(root, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(client, ws, project_root=str(root), path=stored.path, request_id="f-1")
+
+    acks = _fetch_acks(ws)
+    assert len(acks) == 1
+    ack = acks[0].payload
+    assert ack["request_id"] == "f-1"
+    assert ack["ok"] is True
+    assert base64.b64decode(ack["content_b64"]) == b"\x89PNG pixels"
+    assert ack["size"] == len(b"\x89PNG pixels")
+    assert ack["name"] == Path(stored.path).name
+
+
+def test_fetch_command_rejects_a_traversal_path(tmp_path):
+    """The frame validator catches the obvious shape before the wire."""
+    root = _project(tmp_path)
+
+    with pytest.raises(protocol.ProtocolError):
+        protocol.make_fetch_command(str(root), "../../etc/passwd")
+
+
+def test_fetch_command_rejects_a_traversal_surviving_the_frame_validator(tmp_path):
+    """A hostile server skips the constructor; containment must still hold."""
+    root = _project(tmp_path)
+    (root / "tianluo" / "secret.txt").write_bytes(b"private")
+    client = _make_client(root, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    async def scenario():
+        msg = protocol.Message(
+            type=protocol.MSG_FETCH_COMMAND,
+            payload={
+                "project_root": str(root),
+                "path": "tianluo/uploads/../secret.txt",
+                "request_id": "f-esc",
+            },
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_INVALID_PATH
+
+
+def test_fetch_command_rejects_an_empty_path(tmp_path):
+    root = _project(tmp_path)
+    calls = []
+    client = _make_client(root, fetch_handler=lambda *a: calls.append(a))
+    ws = _FakeWS()
+
+    async def scenario():
+        msg = protocol.Message(
+            type=protocol.MSG_FETCH_COMMAND,
+            payload={"project_root": str(root), "path": "  ", "request_id": "f-empty"},
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    assert calls == []
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["error_code"] == protocol.FETCH_ERR_INVALID_PATH
+
+
+def test_fetch_command_rejects_relative_project_root(tmp_path):
+    root = _project(tmp_path)
+    calls = []
+    client = _make_client(root, fetch_handler=lambda *a: calls.append(a))
+    ws = _FakeWS()
+
+    async def scenario():
+        msg = protocol.Message(
+            type=protocol.MSG_FETCH_COMMAND,
+            payload={
+                "project_root": "relative/path",
+                "path": "tianluo/uploads/x.png",
+                "request_id": "f-rel",
+            },
+        )
+        await client._dispatch(ws, msg)
+
+    asyncio.run(scenario())
+
+    assert calls == []
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["error_code"] == protocol.FETCH_ERR_INVALID_PATH
+
+
+def test_fetch_command_rejects_unregistered_project_root(tmp_path):
+    """The security gate: an unknown root must not yield a single byte."""
+    registered = _project(tmp_path)
+    outsider = tmp_path / "outsider"
+    (outsider / "tianluo").mkdir(parents=True)
+    stored = store_upload(outsider, "secret.png", b"not yours")
+    client = _make_client(registered, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(
+        client, ws, project_root=str(outsider), path=stored.path, request_id="f-out"
+    )
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_NOT_REGISTERED
+    assert "content_b64" not in ack
+
+
+def test_fetch_command_accepts_a_worktree_root_of_a_registered_project(tmp_path):
+    """Attachments pasted into a --worktree flow must read back too."""
+    main = _project(tmp_path)
+    worktree = main / "tianluo" / "worktrees" / "wt1"
+    (worktree / "tianluo").mkdir(parents=True)
+    stored = store_upload(worktree, "shot.png", b"sandbox bytes")
+    client = _make_client(main, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(
+        client, ws, project_root=str(worktree), path=stored.path, request_id="f-wt"
+    )
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is True, ack
+    assert base64.b64decode(ack["content_b64"]) == b"sandbox bytes"
+
+
+def test_fetch_command_rejects_a_worktree_of_an_unregistered_project(tmp_path):
+    registered = _project(tmp_path)
+    outsider = tmp_path / "outsider"
+    worktree = outsider / "tianluo" / "worktrees" / "wt1"
+    (worktree / "tianluo").mkdir(parents=True)
+    stored = store_upload(worktree, "shot.png", b"not yours")
+    client = _make_client(registered, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(
+        client, ws, project_root=str(worktree), path=stored.path, request_id="f-wt2"
+    )
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_NOT_REGISTERED
+
+
+def test_fetch_command_without_handler_replies_unsupported(tmp_path):
+    """A page full of images must not each wait out the server's timeout."""
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"bytes")
+    client = _make_client(root)
+    ws = _FakeWS()
+
+    _run_fetch(client, ws, project_root=str(root), path=stored.path, request_id="f-nh")
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_UNSUPPORTED
+
+
+def test_fetch_command_relays_a_missing_file_as_not_found(tmp_path):
+    root = _project(tmp_path)
+    (root / "tianluo" / "uploads").mkdir(parents=True)
+    client = _make_client(root, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(
+        client,
+        ws,
+        project_root=str(root),
+        path="tianluo/uploads/deadbeef0000_gone.png",
+        request_id="f-404",
+    )
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_NOT_FOUND
+
+
+def test_fetch_command_maps_unknown_failure_to_read_failed(tmp_path):
+    """An unexpected fault must not carry a code make_fetch_result rejects."""
+    root = _project(tmp_path)
+
+    def _boom(project_root, rel_path):
+        raise RuntimeError("something odd")
+
+    client = _make_client(root, fetch_handler=_boom)
+    ws = _FakeWS()
+
+    _run_fetch(
+        client,
+        ws,
+        project_root=str(root),
+        path="tianluo/uploads/x.png",
+        request_id="f-boom",
+    )
+
+    ack = _fetch_acks(ws)[0].payload
+    assert ack["ok"] is False
+    assert ack["error_code"] == protocol.FETCH_ERR_READ_FAILED
+
+
+def test_fetch_command_without_request_id_sends_nothing(tmp_path):
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"bytes")
+    client = _make_client(root, fetch_handler=read_upload)
+    ws = _FakeWS()
+
+    _run_fetch(client, ws, project_root=str(root), path=stored.path)
+
+    assert ws.sent == []  # no request_id -> nothing to correlate a reply to
+
+
+def test_fetch_command_does_not_trigger_fast_push(tmp_path):
+    """Reading a file changes no snapshot state."""
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"bytes")
+    client = _make_client(root, fetch_handler=read_upload)
+    ws = _FakeWS()
+    pushes = []
+    client._trigger_fast_push = lambda: pushes.append(1)
+
+    _run_fetch(client, ws, project_root=str(root), path=stored.path, request_id="f-p")
+
+    assert _fetch_acks(ws)[0].payload["ok"] is True
+    assert pushes == []
+
+
+def test_fetch_command_runs_the_handler_off_the_event_loop(tmp_path):
+    """Blocking disk I/O must not run on the loop serving status pushes."""
+    root = _project(tmp_path)
+    stored = store_upload(root, "shot.png", b"bytes")
+    handler_threads = []
+
+    def _recording(project_root, rel_path):
+        import threading
+
+        handler_threads.append(threading.current_thread().name)
+        return read_upload(project_root, rel_path)
+
+    client = _make_client(root, fetch_handler=_recording)
+    ws = _FakeWS()
+
+    async def scenario():
+        import threading
+
+        main_thread = threading.current_thread().name
+        await client._dispatch(
+            ws,
+            protocol.make_fetch_command(
+                str(root), stored.path, request_id="f-thread"
+            ),
+        )
+        return main_thread
+
+    main_thread = asyncio.run(scenario())
+
+    assert handler_threads and handler_threads[0] != main_thread
+
+
+def test_daemon_wires_a_fetch_handler_into_its_client(tmp_path):
+    """The seam must actually be connected, not merely available."""
+    from tianluo.daemon.daemon import Daemon, DaemonConfig
+
+    root = _project(tmp_path)
+    stored = store_upload(root, "wired.txt", b"bytes")
+    daemon = Daemon(
+        DaemonConfig(
+            pid_dir=tmp_path / "rt",
+            server_url="ws://server/ws",
+            project_roots=[str(root)],
+        )
+    )
+
+    async def scenario():
+        daemon._stop_event = asyncio.Event()
+        task = daemon._start_server_client()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(scenario())
+
+    assert daemon._client is not None
+    assert daemon._client._fetch_handler is not None
+    content = daemon._client._fetch_handler(str(root), stored.path)
+    assert content.data == b"bytes"

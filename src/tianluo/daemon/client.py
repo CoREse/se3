@@ -106,6 +106,14 @@ ProjectHandler = Callable[[str, str], str]
 #: (:class:`~tianluo.daemon.uploads.UploadError`), relayed verbatim as the
 #: reply's ``error_code``.
 UploadHandler = Callable[[str, str, bytes], Any]
+#: Type of the fetch handler — called with (project_root, rel_path) when a
+#: FETCH_COMMAND arrives, returning an object exposing ``data`` / ``size`` /
+#: ``name`` (a :class:`~tianluo.daemon.uploads.UploadContent`). It reads from
+#: disk, so the client always invokes it off the event loop. It signals a
+#: refusal by raising an exception carrying a stable ``code`` attribute
+#: (:class:`~tianluo.daemon.uploads.UploadError`), relayed verbatim as the
+#: reply's ``error_code``.
+FetchHandler = Callable[[str, str], Any]
 #: Type of the history provider — a :class:`~tianluo.daemon.history.DaemonHistoryReader`
 #: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
 HistoryProvider = Any
@@ -257,6 +265,7 @@ class DaemonClient:
         respond_handler: Optional[RespondHandler] = None,
         project_handler: Optional[ProjectHandler] = None,
         upload_handler: Optional[UploadHandler] = None,
+        fetch_handler: Optional[FetchHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         calls_signature_provider: Optional[CallsSignatureProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
@@ -303,6 +312,14 @@ class DaemonClient:
                 same reason ``project_handler`` is: an operator pasting a file
                 must get an immediate, explainable refusal rather than watch
                 the browser sit until the server's upload timeout.
+            fetch_handler: Callable invoked for an incoming FETCH_COMMAND with
+                ``(project_root, rel_path)``, returning the attachment's bytes.
+                When ``None`` the command is refused with
+                ``error_code="unsupported"`` immediately: the browser renders a
+                whole conversation's inline images from these replies, so a
+                daemon that cannot serve them must say so in one round trip
+                rather than make every image on the page wait out the server's
+                fetch timeout.
             history_provider: A :class:`~tianluo.daemon.history.DaemonHistoryReader`
                 used to report the history index, push active-flow increments
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
@@ -338,6 +355,7 @@ class DaemonClient:
         self._respond_handler = respond_handler or _default_respond_handler
         self._project_handler = project_handler
         self._upload_handler = upload_handler
+        self._fetch_handler = fetch_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
         self._calls_signature_provider = calls_signature_provider
@@ -1017,6 +1035,8 @@ class DaemonClient:
             await self._handle_project_command(ws, message.payload)
         elif message.type == protocol.MSG_UPLOAD_COMMAND:
             await self._handle_upload_command(ws, message.payload)
+        elif message.type == protocol.MSG_FETCH_COMMAND:
+            await self._handle_fetch_command(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
@@ -1674,6 +1694,54 @@ class DaemonClient:
             "PROJECT_COMMAND %s handled for %s", operation, registered or project_root
         )
 
+    async def _resolve_registered_root(
+        self, project_root: str, *, label: str
+    ) -> Optional[str]:
+        """Resolve *project_root* to a registered root, or ``None`` if refused.
+
+        Same registry gate as ISSUE_COMMAND, and for a stronger reason: the
+        frames that come through here touch the filesystem. Restricting the
+        target to a root the aggregator already tracks means a compromised or
+        spoofed server still cannot name an arbitrary directory on this machine
+        — neither to write into nor to read out of. Prefer the cache the
+        STATUS_UPDATE loop refreshes so a paste or an inline image — both
+        interactive, latency-sensitive — never pays for a full snapshot walk.
+
+        A snapshot lookup failure is reported as a refusal rather than
+        propagated: an unreadable registry means the gate cannot be evaluated,
+        and an unevaluable gate must fail closed.
+        """
+        known_roots = self._last_known_project_roots
+        if known_roots is None:
+            try:
+                snapshot = await asyncio.to_thread(self._snapshot_provider)
+            except Exception:
+                logger.debug("%s: snapshot lookup failed", label, exc_info=True)
+                return None
+            known_roots = set(snapshot.get("project_roots") or [])
+            self._last_known_project_roots = known_roots
+        resolved = str(Path(project_root).resolve())
+        if resolved in known_roots:
+            return resolved
+        # A `luo run --worktree` flow reports its sandbox
+        # (<main>/tianluo/worktrees/<name>) as project_root, and the aggregator
+        # deliberately keeps those out of the registry — they are transient
+        # copies, not projects. The gate must therefore accept a sandbox whose
+        # *main* root is registered, otherwise every attachment to a
+        # worktree-mode flow is refused. The resolved sandbox path is what is
+        # returned, because the sandbox's own uploads dir is the one the flow's
+        # agent reads the relative path from.
+        main_root = resolve_worktree_main_root(resolved)
+        if main_root and str(Path(main_root).resolve()) in known_roots:
+            return resolved
+        logger.warning(
+            "%s: project_root %r is not a registered project; known roots: %s",
+            label,
+            project_root,
+            sorted(known_roots)[:5],
+        )
+        return None
+
     async def _handle_upload_command(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Land one operator-attached file in the project's uploads directory.
 
@@ -1774,50 +1842,16 @@ class DaemonClient:
             )
             return
 
-        # Same registry gate as ISSUE_COMMAND, and for a stronger reason: this
-        # frame writes a file. Restricting the target to a root the aggregator
-        # already tracks means a compromised or spoofed server still cannot
-        # name an arbitrary directory on this machine. Prefer the cache the
-        # STATUS_UPDATE loop refreshes so a paste — an interactive, latency-
-        # sensitive action — never pays for a full snapshot walk.
-        known_roots = self._last_known_project_roots
-        if known_roots is None:
-            try:
-                snapshot = await asyncio.to_thread(self._snapshot_provider)
-            except Exception:
-                logger.debug("UPLOAD_COMMAND: snapshot lookup failed", exc_info=True)
-                await _reply(
-                    ok=False,
-                    error="snapshot lookup failed",
-                    error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
-                )
-                return
-            known_roots = set(snapshot.get("project_roots") or [])
-            self._last_known_project_roots = known_roots
-        resolved = str(Path(project_root).resolve())
-        if resolved not in known_roots:
-            # A `luo run --worktree` flow reports its sandbox
-            # (<main>/tianluo/worktrees/<name>) as project_root, and the
-            # aggregator deliberately keeps those out of the registry — they are
-            # transient copies, not projects. The registry gate must therefore
-            # accept a sandbox whose *main* root is registered, otherwise every
-            # attachment to a worktree-mode flow is refused. The file still
-            # lands in the sandbox's own uploads dir, because that is the
-            # working directory the flow's agent reads the relative path from.
-            main_root = resolve_worktree_main_root(resolved)
-            if not main_root or str(Path(main_root).resolve()) not in known_roots:
-                logger.warning(
-                    "UPLOAD_COMMAND: project_root %r is not a registered project; "
-                    "known roots: %s",
-                    project_root,
-                    sorted(known_roots)[:5],
-                )
-                await _reply(
-                    ok=False,
-                    error="project_root is not a registered project",
-                    error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
-                )
-                return
+        resolved = await self._resolve_registered_root(
+            project_root, label="UPLOAD_COMMAND"
+        )
+        if resolved is None:
+            await _reply(
+                ok=False,
+                error="project_root is not a registered project",
+                error_code=protocol.UPLOAD_ERR_NOT_REGISTERED,
+            )
+            return
 
         handler = self._upload_handler
         if handler is None:
@@ -1866,6 +1900,130 @@ class DaemonClient:
             getattr(stored, "path", "") or filename,
             project_root,
         )
+
+    async def _handle_fetch_command(self, ws: Any, payload: Dict[str, Any]) -> None:
+        """Hand one previously stored attachment back to the server.
+
+        The read-back counterpart of :meth:`_handle_upload_command` and gated
+        exactly like it: the target is re-validated against this daemon's own
+        project registry before the injected ``fetch_handler``
+        (``uploads.read_upload``) is invoked off the event loop, and every
+        outcome travels back as a stable ``error_code`` the browser can act on.
+
+        The gate is not redundant with the server's: the server is a separate
+        trust domain reachable from the network, and this frame names a file on
+        *this* machine's disk to be sent back over the wire. Containment inside
+        the uploads directory is enforced one layer down, where a *resolved*
+        path can be compared (see ``uploads.read_upload``).
+        """
+        request_id = str(payload.get("request_id") or "").strip()
+        project_root = str(payload.get("project_root") or "").strip()
+        rel_path = str(payload.get("path") or "").strip()
+
+        async def _reply(
+            *,
+            ok: bool,
+            content_b64: str = "",
+            size: int = 0,
+            name: str = "",
+            error: str = "",
+            error_code: str = "",
+        ) -> None:
+            """Send a result back if we have a request_id and a live ws."""
+            if not request_id:
+                return
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_fetch_result(
+                        request_id,
+                        ok=ok,
+                        content_b64=content_b64,
+                        size=size,
+                        name=name,
+                        error=error,
+                        error_code=error_code,
+                    ),
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to send FETCH_RESULT for request %s",
+                    request_id,
+                    exc_info=True,
+                )
+
+        if not rel_path:
+            logger.warning("Ignoring FETCH_COMMAND with empty path")
+            await _reply(
+                ok=False,
+                error="fetch requires a non-empty path",
+                error_code=protocol.FETCH_ERR_INVALID_PATH,
+            )
+            return
+
+        if not project_root or not Path(project_root).is_absolute():
+            logger.warning(
+                "FETCH_COMMAND: project_root must be an absolute path, got %r",
+                project_root,
+            )
+            await _reply(
+                ok=False,
+                error="project_root must be an absolute path",
+                error_code=protocol.FETCH_ERR_INVALID_PATH,
+            )
+            return
+
+        resolved = await self._resolve_registered_root(
+            project_root, label="FETCH_COMMAND"
+        )
+        if resolved is None:
+            await _reply(
+                ok=False,
+                error="project_root is not a registered project",
+                error_code=protocol.FETCH_ERR_NOT_REGISTERED,
+            )
+            return
+
+        handler = self._fetch_handler
+        if handler is None:
+            logger.warning("FETCH_COMMAND received but no fetch handler is wired")
+            await _reply(
+                ok=False,
+                error="file fetch is not available",
+                error_code=protocol.FETCH_ERR_UNSUPPORTED,
+            )
+            return
+
+        # Reading up to MAX_UPLOAD_BYTES is blocking I/O that must never run on
+        # the event loop, which is concurrently serving the status pushes and
+        # heartbeats the whole web UI depends on.
+        try:
+            content = await asyncio.to_thread(handler, resolved, rel_path)
+        except Exception as exc:
+            logger.warning(
+                "FETCH_COMMAND failed for %s in %s: %s", rel_path, project_root, exc
+            )
+            # Only an UploadError carries a code we can relay; anything else is
+            # an unexpected fault, reported as a read failure rather than
+            # letting an unknown string reach make_fetch_result's validator.
+            code = str(getattr(exc, "code", "") or "")
+            if code not in protocol.FETCH_ERROR_CODES:
+                code = protocol.FETCH_ERR_READ_FAILED
+            await _reply(
+                ok=False,
+                error=str(exc) or type(exc).__name__,
+                error_code=code,
+            )
+            return
+
+        data = bytes(getattr(content, "data", b"") or b"")
+        await _reply(
+            ok=True,
+            content_b64=base64.b64encode(data).decode("ascii"),
+            size=len(data),
+            name=str(getattr(content, "name", "") or ""),
+        )
+        logger.debug("FETCH_COMMAND served %s (%d bytes)", rel_path, len(data))
 
     def _drain_active(self, flow_id: str) -> bool:
         """Whether *flow_id* has an in-flight multi-frame full-pull drain.
