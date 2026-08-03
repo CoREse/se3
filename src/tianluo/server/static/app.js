@@ -1148,12 +1148,28 @@ function uploadRequestUrl(target, filename) {
 // The character class is what ends a path, and it is deliberately generous
 // about what a filename may contain (spaces are the only hard stop) while
 // refusing the delimiters that realistically WRAP a path in prose — quotes,
-// brackets and CJK punctuation. A tail of sentence punctuation is then peeled
-// off separately, because those characters ('.' above all) are legal inside a
-// name and can only be judged at the very end of the run.
+// brackets and CJK punctuation. The ASCII comma is deliberately NOT in that
+// set: sanitize_upload_filename keeps a comma verbatim, so `v1,2.png` is a
+// real stored name, and ending the run there would truncate it mid-name.
+// Comma-separated paths still split correctly — the tempered lookahead stops
+// the run at the next prefix, and the trailing rule peels the comma off.
+// A tail of sentence punctuation is peeled off separately, because those
+// characters ('.' above all) are legal inside a name and can only be judged
+// at the very end of the run.
+//
+// WHY the run is additionally tempered by a lookahead for the next prefix:
+// uploading two files in one paste inserts their tokens back-to-back with no
+// separator, so the message text really does read `…_a.pngtianluo/uploads/…_b.png`.
+// Without the lookahead the greedy run swallows both into one string that still
+// ends in .png — a single bogus path the daemon then refuses, hiding BOTH
+// thumbnails in exactly the multi-paste case this feature exists for.
 const UPLOAD_PATH_RE =
-  /(?:^|[^\w./-])((?:tianluo|se3)\/uploads\/[^\s"'`<>()[\]{}，。、；：！？“”‘’《》【】]+)/g;
+  /(?:tianluo|se3)\/uploads\/(?:(?!(?:tianluo|se3)\/uploads\/)[^\s"'`<>()[\]{}，。、；：！？“”‘’《》【】])+/g;
 const UPLOAD_PATH_TRAILING_RE = /[.,;:!?]+$/;
+// What may NOT sit immediately before a path for the run to be one: a longer
+// path's tail (`/home/me/tianluo/uploads/a.png`) is not a project-relative
+// attachment, and neither is `xtianluo/uploads/a.png`.
+const UPLOAD_PATH_LEAD_RE = /[\w./-]/;
 
 // Every distinct image attachment path named by `text`, in first-appearance
 // order. Pure. The image test is the shared IMAGE_EXT_RE (via a name-only
@@ -1165,9 +1181,18 @@ function extractUploadImagePaths(text) {
   const seen = new Set();
   const out = [];
   UPLOAD_PATH_RE.lastIndex = 0;
+  // End of the previous run, whether or not it qualified: a run that starts
+  // exactly where another ended is the back-to-back multi-paste shape, and the
+  // preceding character there is a filename character by construction — the
+  // one place the lead-character rule must not apply.
+  let prevEnd = -1;
   let m = UPLOAD_PATH_RE.exec(src);
   while (m) {
-    const path = m[1].replace(UPLOAD_PATH_TRAILING_RE, "");
+    const start = m.index;
+    const okStart =
+      start === 0 || start === prevEnd || !UPLOAD_PATH_LEAD_RE.test(src[start - 1]);
+    prevEnd = start + m[0].length;
+    const path = okStart ? m[0].replace(UPLOAD_PATH_TRAILING_RE, "") : "";
     // A repeated path is one file: the message may well name it twice (the
     // user's prompt and the agent quoting it back), and two identical
     // thumbnails would read as two attachments.

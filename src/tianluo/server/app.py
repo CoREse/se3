@@ -277,8 +277,21 @@ FETCH_CONTENT_TYPE_DEFAULT = "application/octet-stream"
 #: unreachable by construction. WHY it is *necessary*: the URL is rendered by
 #: every inline thumbnail in a conversation and re-rendered on every repaint, so
 #: without it a scroll through history would punch dozens of round trips through
-#: to the daemon.
-FETCH_CACHE_CONTROL = "public, max-age=31536000, immutable"
+#: to the daemon. INVARIANT: the directive is ``private``, never ``public`` —
+#: content-hash naming makes the bytes *stable*, not *public*, and the route is
+#: owner-scoped behind ``Depends(require_owner)``. ``public`` would license the
+#: documented TLS reverse proxy (nginx ``proxy_cache`` on /api/) to store one
+#: tenant's attachment and replay it to an unauthenticated request for the same
+#: URL, bypassing the owner gate entirely. ``private`` keeps the whole benefit
+#: — the cache that matters is the requesting browser's — inside the trust
+#: boundary that the owner check established.
+FETCH_CACHE_CONTROL = "private, max-age=31536000, immutable"
+
+#: ``Vary`` for a successful read-back. Defence in depth behind ``private``:
+#: owner identity is resolved from the session cookie, so a cache entry is only
+#: ever valid for the cookie that produced it. Belt to the ``private`` braces in
+#: case an intermediary honours ``Vary`` but not ``private``.
+FETCH_VARY = "Cookie"
 
 #: Seconds an issue/call detail endpoint waits for the owning daemon to answer
 #: the on-demand ``MSG_DETAIL_REQUEST`` with the full text. A single issue YAML
@@ -1372,6 +1385,7 @@ def create_app(
             media_type=FETCH_CONTENT_TYPES.get(suffix, FETCH_CONTENT_TYPE_DEFAULT),
             headers={
                 "Cache-Control": FETCH_CACHE_CONTROL,
+                "Vary": FETCH_VARY,
                 # Belt to the whitelist's braces: a non-whitelisted extension is
                 # served as octet-stream, and nosniff is what stops the browser
                 # from second-guessing that into a renderable type.

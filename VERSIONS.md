@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.2.0 - 2026-08-03
+
+- Show the on-disk storage filename (content-hash prefixed basename) next to the file size on each completed attachment row, so pasted images named image.png can be told apart
+- Set each completed attachment row's tooltip to the full project-relative upload path, matching exactly what is embedded in the prompt text
+- Truncate long storage names with tail ellipsis and scroll them horizontally on hover, keeping the distinguishing hash prefix always visible
+- Render inline thumbnails under chat messages that reference uploaded image paths, with click-to-open in a new tab and silent fallback to plain text when the image cannot be fetched
+- Add a GET /api/uploads/file endpoint that reads uploaded files back from the daemon, using the same auth, owner checks and target lookup as POST /api/uploads, with long-lived immutable cache headers
+- Extend the daemon protocol to revision 6 with a file-fetch command/result pair, a supports_fetch capability predicate and stable fetch error codes; servers never dispatch fetches to older daemons
+- Enforce strict containment, existence and 20 MiB size checks on daemon-side upload reads, rejecting path traversal and files outside the project uploads directory
+- Document the new read-back direction, protocol revision 6 requirement, caching and graceful-degradation behavior in the English and Chinese daemon-and-server guides
 ## 12.1.0 - 2026-07-31
 
 - Add file attachment support to the WebUI prompt boxes — paste, drag-and-drop, or pick files in the New Task, respond, and interject inputs

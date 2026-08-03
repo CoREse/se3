@@ -439,6 +439,13 @@ def test_fetch_returns_the_exact_bytes_with_cache_and_type_headers(client_and_ap
         assert resp.headers["content-type"] == "image/png"
         assert "immutable" in resp.headers["cache-control"]
         assert "max-age=31536000" in resp.headers["cache-control"]
+        # The bytes are one owner's private attachment behind an owner gate, so
+        # the long life must be scoped to the requesting browser: a shared cache
+        # allowed to store this would replay it to unauthenticated requests for
+        # the same URL and the owner check would never run.
+        assert "private" in resp.headers["cache-control"]
+        assert "public" not in resp.headers["cache-control"]
+        assert "Cookie" in resp.headers["vary"]
         assert resp.headers["x-content-type-options"] == "nosniff"
         assert resp.headers["content-disposition"] == "inline"
     finally:

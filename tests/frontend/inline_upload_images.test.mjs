@@ -15,8 +15,9 @@
  * Coverage:
  *   (a) extractUploadImagePaths — both layout prefixes (the runtime directory
  *       was renamed se3/ → tianluo/, and history replays the old one forever),
- *       the non-image reject, dedup, and the prose delimiters that must not be
- *       swallowed into a filename.
+ *       the non-image reject, dedup, the prose delimiters that must not be
+ *       swallowed into a filename, and the back-to-back multi-paste shape that
+ *       must split into one path per file.
  *   (b) uploadFetchUrl — the two target shapes and their encoding, pinned
  *       against the GET endpoint the server actually serves.
  *   (c) resolveInlineImageTarget — live flow, reopened history session, an
@@ -96,6 +97,59 @@ export function registerInlineUploadImagesTests(ctx) {
       "the agent quoting the path back must not double the picture",
     );
     assert.deepEqual(app.extractUploadImagePaths(`${IMG}\n${IMG2}`), [IMG, IMG2]);
+  });
+
+  check("G5 extractUploadImagePaths: back-to-back paths are two files", () => {
+    // The multi-paste shape, verbatim: startUploads calls performUpload per
+    // file and each insertAtCaret adds no separator of its own, so two
+    // screenshots dropped in one gesture leave their two tokens — and then
+    // their two paths — adjacent with nothing between them. A run that ate
+    // both would still end in .png, so isImageFile could not catch the
+    // mis-parse; only the daemon would, by refusing the concatenation, and
+    // NEITHER screenshot would show.
+    assert.deepEqual(app.extractUploadImagePaths(`${IMG}${IMG2}`), [IMG, IMG2]);
+    assert.deepEqual(
+      app.extractUploadImagePaths(`照着 ${IMG}${IMG2}${LEGACY} 改`),
+      [IMG, IMG2, LEGACY],
+      "three in one paste chain the same way",
+    );
+    assert.deepEqual(
+      app.extractUploadImagePaths(`look ${IMG},${IMG2} ok`),
+      [IMG, IMG2],
+      "an ASCII comma separates paths as its CJK twin already did",
+    );
+    assert.deepEqual(
+      app.extractUploadImagePaths(`${DOC}${IMG}`),
+      [IMG],
+      "a non-image first attachment must not swallow the image after it",
+    );
+  });
+
+  check("G5 extractUploadImagePaths: a comma inside a stored name survives", () => {
+    // sanitize_upload_filename folds only /\:*?"<>|\0, control chars and
+    // whitespace — a comma reaches disk verbatim, so `v1,2.png` is a name the
+    // daemon would serve. Ending the run at the comma would truncate it to a
+    // extension-less string and silently drop the thumbnail.
+    const COMMA = "tianluo/uploads/a1b2c3d4e5f6_v1,2.png";
+    assert.deepEqual(app.extractUploadImagePaths(`see ${COMMA} ok`), [COMMA]);
+    assert.deepEqual(
+      app.extractUploadImagePaths(`${COMMA},${IMG2}`),
+      [COMMA, IMG2],
+      "and it still splits from a following path across the same comma",
+    );
+  });
+
+  check("G5 extractUploadImagePaths: a longer path's tail is not an attachment", () => {
+    // The lead-character rule the adjacency exception must not undo: an
+    // absolute path merely CONTAINS the same suffix, and its project-relative
+    // tail addresses nothing the server would serve.
+    assert.deepEqual(app.extractUploadImagePaths(`/srv/proj/${IMG}`), []);
+    assert.deepEqual(app.extractUploadImagePaths(`myse3/uploads/aa_x.png`), []);
+    assert.deepEqual(
+      app.extractUploadImagePaths(`/srv/proj/${IMG} but ${IMG2}`),
+      [IMG2],
+      "the absolute one is skipped, the relative one still found",
+    );
   });
 
   check("G5 extractUploadImagePaths: wrapping punctuation is not part of the name", () => {

@@ -392,10 +392,13 @@ agent 随后以项目根为工作目录按该路径读取它,与读取仓库里�
   daemon 直接返回 `501`,而不是发出一条老 daemon 只会静默丢弃的帧。这一点在这里比上传
   方向更要紧:一段会话里可能有很多张内联图片,没有这道门禁的话,每一张都会把一条浏览器
   连接占满整个超时窗口。
-- **响应带长效缓存**:`Cache-Control: public, max-age=31536000, immutable`。它之所以成立,
-  正是因为上文的 content-hash 命名 —— 一个项目相对 uploads 路径只可能对应唯一一份字节,
-  陈旧缓存在构造上就不可能出现。若没有它,回看历史会话时每张缩略图、每次重绘都会穿透到
-  daemon 打一个来回。
+- **响应带长效缓存,但只落在发起请求的浏览器里**:`Cache-Control: private,
+  max-age=31536000, immutable`,并带 `Vary: Cookie`。长生存期之所以成立,正是因为上文的
+  content-hash 命名 —— 一个项目相对 uploads 路径只可能对应唯一一份字节,陈旧缓存在构造上
+  就不可能出现。若没有它,回看历史会话时每张缩略图、每次重绘都会穿透到 daemon 打一个
+  来回。这里刻意用 `private` 而非 `public`:该路由是 owner 作用域的,`public` 会允许
+  server 前面的缓存型反向代理存下某个租户的附件,并对同一 URL 的未鉴权请求直接回放,
+  完全绕过 owner 校验。
 - **`Content-Type` 取自一份很小的白名单**(仅光栅图片类型)。白名单之外的一律以
   `application/octet-stream` 加 `X-Content-Type-Options: nosniff` 返回,因此上传的
   `.html` —— 以及被刻意排除在外的 `.svg`(它是可携带脚本的文档,而非光栅图片)—— 都不会

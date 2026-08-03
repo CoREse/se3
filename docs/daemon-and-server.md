@@ -458,12 +458,16 @@ The rules that make this safe to expose:
   frame an older daemon would silently drop. This matters more here than for
   uploads: a conversation can hold many inline images, and without the gate each
   one would hold a browser connection open for the full timeout.
-- **Responses are cached hard**: `Cache-Control: public, max-age=31536000,
-  immutable`. This is sound *because* of the content-hash naming above — one
+- **Responses are cached hard, but only in the requesting browser**:
+  `Cache-Control: private, max-age=31536000, immutable` plus `Vary: Cookie`. The
+  long life is sound *because* of the content-hash naming above — one
   project-relative uploads path can only ever denote one byte string, so a stale
   entry is unreachable by construction. Without it, scrolling back through a
   conversation would punch a fresh round trip to the daemon per thumbnail per
-  repaint.
+  repaint. The directive is deliberately `private`, not `public`: the route is
+  owner-scoped, and `public` would let a caching reverse proxy in front of the
+  server store one tenant's attachment and serve it to an unauthenticated
+  request for the same URL, never consulting the owner check.
 - **`Content-Type` comes from a small whitelist** of raster image types. Anything
   else is served as `application/octet-stream` with `X-Content-Type-Options:
   nosniff`, so an uploaded `.html` — or an `.svg`, deliberately excluded as a
