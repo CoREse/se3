@@ -926,12 +926,24 @@ function isImageFile(file) {
 // the in-flight counterpart: a row that carries a placeholder instead of a path
 // is dismissed by giving up on the request, not by editing a path out. Pure
 // apart from the size/status lookups.
+//
+// WHY `storedName` / `titleText` exist at all: the row's visible name is the
+// BROWSER-side name, and a clipboard paste is always called "image.png". Paste
+// three screenshots and the strip shows three identical rows, while the prompt
+// text carries three distinct content-hash-prefixed paths — nothing on screen
+// says which row owns which path. The stored basename (hash prefix first) is
+// the only thing that tells them apart, and the full relative path is what the
+// agent will actually read, so it is what the row's tooltip must say.
 function attachmentRowModel(entry) {
   entry = entry && typeof entry === "object" ? entry : {};
   const raw = String(entry.status || "");
   const status = ["uploading", "done", "error"].includes(raw) ? raw : "uploading";
   const size = Number(entry.size);
   const path = typeof entry.path === "string" ? entry.path : "";
+  // Only a landed path names a real file: an in-flight row has none yet, and a
+  // failed one never will, so both stay blank rather than showing a name for a
+  // file that is not on the project machine.
+  const stored = status === "done" && path ? path : "";
   return {
     id: String(entry.id == null ? "" : entry.id),
     name: typeof entry.name === "string" ? entry.name : "",
@@ -946,6 +958,10 @@ function attachmentRowModel(entry) {
     // drops the preview when it recycles the URL.
     previewUrl: typeof entry.previewUrl === "string" ? entry.previewUrl : "",
     path,
+    // Paths on the wire are project-relative and always posix-separated; a
+    // string with no separator degrades to itself.
+    storedName: stored ? stored.slice(stored.lastIndexOf("/") + 1) : "",
+    titleText: stored,
     canRemove: status === "done" && Boolean(path),
     canCancel: status === "uploading",
     errorKey: status === "error" ? uploadErrorKey(entry.code) : "",
@@ -1383,11 +1399,25 @@ function renderAttachmentStrip(stripId, entries) {
       item.appendChild(el("span", "attachment-icon", "📄"));
     }
     const meta = el("div", "attachment-meta");
-    meta.append(
-      el("span", "attachment-name", model.name),
-      el("span", "attachment-size", model.statusText || model.sizeText),
-    );
+    // The secondary line carries the stored name next to the size once the file
+    // has landed — see attachmentRowModel for why the browser-side name alone
+    // cannot identify a row. Two nested spans because the clipping (ellipsis)
+    // and the hover scroll have to live on different elements: the outer cell
+    // owns the width, the inner text is what slides inside it.
+    const sizeCell = el("span", "attachment-size");
+    sizeCell.appendChild(el(
+      "span",
+      "attachment-size-text",
+      model.storedName
+        ? model.sizeText + " · " + model.storedName
+        : model.statusText || model.sizeText,
+    ));
+    meta.append(el("span", "attachment-name", model.name), sizeCell);
     item.appendChild(meta);
+    // The whole row is the tooltip target for the stored path: it is the exact
+    // string sitting in the prompt, so a user matching a row against the text
+    // can copy/compare it without opening anything.
+    if (model.titleText) item.title = model.titleText;
     // The failure prose lives in the tooltip, not in the row: the strip is one
     // scrolling line and a full sentence would push the rest of it off-screen.
     // The toast already said it out loud once.

@@ -221,6 +221,11 @@ def test_style_css_styles_the_strip_and_the_drop_target():
         ".attachment-icon",
         ".attachment-remove",
         ".drop-active",
+        # The stored-name line: app.js emits the inner span purely so this rule
+        # can slide it on hover, so a dropped rule leaves dead markup and a
+        # stored name nothing can reveal in full.
+        ".attachment-size-text",
+        "attachment-scroll",
     ):
         assert selector in css, f"style.css is missing the {selector} rule"
 
@@ -276,6 +281,11 @@ def test_frontend_file_upload_node_suite_passes():
         "G5 startUploads: an unresolved target toasts and sends nothing",
         "G5 renderAttachmentStrip: an image row renders a thumbnail",
         "G5 renderAttachmentStrip: a plain file renders icon + name + size",
+        # the stored path on the row — the only thing separating two pasted
+        # screenshots, both of which the clipboard calls "image.png"
+        "G4 attachmentRowModel: the stored name is exposed only once it exists",
+        "G4 renderAttachmentStrip: a landed row shows and titles its stored path",
+        "G4 renderAttachmentStrip: a failed row keeps its reason as the tooltip",
         "G5 removeAttachment: deletes the path from the text and nothing else",
         "G5 clearAttachments: empties the strip and recycles preview URLs",
         # escaping a stalled upload — an in-flight row shuts the submit gate
