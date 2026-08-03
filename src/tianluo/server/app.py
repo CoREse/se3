@@ -15,6 +15,8 @@ daemons and exposes it to the web frontend:
 * ``POST /api/flows/{id}/interject`` — inject a mid-flow instruction into a flow;
 * ``POST /api/uploads`` — relay a pasted/dropped attachment to the owning daemon,
   which stores it under the project's uploads directory;
+* ``GET /api/uploads/file`` — read one stored attachment back out of that
+  directory (the inline-thumbnail path), via the same daemon socket;
 * ``GET /api/history`` — the aggregated history-session index;
 * ``GET /api/history/{id}`` — one flow's history records (pulled on demand);
 * ``/`` and ``/static`` — the bundled web frontend (static files).
@@ -212,6 +214,71 @@ UPLOAD_ERROR_STATUS: Dict[str, int] = {
 #: reached a daemon that answered with something this server cannot interpret,
 #: which is an upstream fault rather than the browser's.
 UPLOAD_ERROR_STATUS_DEFAULT = 502
+
+#: Seconds ``GET /api/uploads/file`` waits for the daemon's ``MSG_FETCH_RESULT``.
+#: Held equal to :data:`UPLOAD_COMMAND_TIMEOUT` on purpose: the daemon-side work
+#: is the mirror image (one bounded read instead of one bounded write, likewise
+#: offloaded to a thread), and the browser's fallback for a slow answer is the
+#: same as for a failed one — the thumbnail simply never appears and the message
+#: stays plain path text.
+FETCH_COMMAND_TIMEOUT = 10.0
+
+#: Maps the daemon's stable fetch ``error_code`` (see
+#: :data:`~tianluo.daemon.protocol.FETCH_ERROR_CODES`) onto an HTTP status. The
+#: server-minted pre-dispatch codes are the ``UPLOAD_ERR_*`` values above rather
+#: than a parallel set: their strings are the frontend's localization keys, and
+#: "not connected" / "timed out" mean exactly the same thing on both legs, so a
+#: second keyspace would only force the UI to translate each phrase twice.
+#: ``not_registered`` is 409 for the upload leg's reason (server and daemon
+#: disagree about what is registered right now); ``not_found`` is a plain 404 —
+#: the referenced attachment is genuinely gone from the daemon's disk.
+FETCH_ERROR_STATUS: Dict[str, int] = {
+    protocol.FETCH_ERR_INVALID_PATH: 422,
+    protocol.FETCH_ERR_NOT_REGISTERED: 409,
+    protocol.FETCH_ERR_NOT_FOUND: 404,
+    protocol.FETCH_ERR_TOO_LARGE: 413,
+    protocol.FETCH_ERR_UNSUPPORTED: 501,
+    # Well-formed request, existing file, daemon's disk refused the read. 500
+    # (not 4xx) so a non-browser client reads it as "retry".
+    protocol.FETCH_ERR_READ_FAILED: 500,
+}
+
+#: Status for a fetch failure whose ``error_code`` this server revision does not
+#: know. 502 for :data:`UPLOAD_ERROR_STATUS_DEFAULT`'s reason.
+FETCH_ERROR_STATUS_DEFAULT = 502
+
+#: Extension → ``Content-Type`` whitelist for the read-back endpoint. WHY a
+#: whitelist rather than :func:`mimetypes.guess_type`: the bytes are
+#: operator-supplied and served same-origin, so guessing would happily label an
+#: uploaded ``.html`` / ``.svg`` as a renderable document and turn the
+#: attachment store into a stored-XSS surface. Only the raster image types the
+#: inline-thumbnail feature actually needs are named; everything else falls
+#: through to :data:`FETCH_CONTENT_TYPE_DEFAULT`, which no browser renders.
+#: SVG is excluded deliberately — it is a script-bearing document, not a raster
+#: image, and an ``<img>`` thumbnail of it is not worth the execution surface.
+FETCH_CONTENT_TYPES: Dict[str, str] = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".avif": "image/avif",
+    ".ico": "image/x-icon",
+}
+
+#: Content type for a fetched file whose extension is not in the whitelist.
+FETCH_CONTENT_TYPE_DEFAULT = "application/octet-stream"
+
+#: ``Cache-Control`` for a successful read-back. WHY it is safe to cache this
+#: aggressively: the stored filename carries a content-hash prefix (see
+#: :func:`tianluo.daemon.uploads.store_upload`), so one project-relative uploads
+#: path can only ever denote one byte string — a stale cache entry is
+#: unreachable by construction. WHY it is *necessary*: the URL is rendered by
+#: every inline thumbnail in a conversation and re-rendered on every repaint, so
+#: without it a scroll through history would punch dozens of round trips through
+#: to the daemon.
+FETCH_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
 #: Seconds an issue/call detail endpoint waits for the owning daemon to answer
 #: the on-demand ``MSG_DETAIL_REQUEST`` with the full text. A single issue YAML
@@ -431,15 +498,15 @@ class AddProjectRequest(BaseModel):
     project_root: str
 
 
-class _UploadDispatchError(Exception):
-    """An upload failure raised on the dispatch leg, carrying its own status.
+class _UploadRelayError(Exception):
+    """An attachment-relay failure raised out of a helper, carrying its status.
 
-    WHY a bespoke exception rather than ``HTTPException``: every upload failure
-    must answer with a *top-level* ``error_code`` (it is the browser's
+    WHY a bespoke exception rather than ``HTTPException``: every upload / fetch
+    failure must answer with a *top-level* ``error_code`` (it is the browser's
     localization key), and ``HTTPException`` can only nest a structured body
-    under ``detail``. Raising this lets the dispatch helper keep the
-    park/discard bookkeeping in one place while the endpoint still renders a
-    flat body.
+    under ``detail``. Raising this lets the shared target-resolution and
+    dispatch helpers keep their bookkeeping in one place while each endpoint
+    still renders a flat body.
     """
 
     def __init__(self, status: int, code: str, detail: str) -> None:
@@ -552,6 +619,11 @@ def create_app(
     issue_command_registry = IssueCommandRegistry()
     project_command_registry = ProjectCommandRegistry()
     upload_command_registry = UploadRequestRegistry()
+    # A second UploadRequestRegistry instance, not a reuse of the one above: the
+    # upload and fetch legs mint their request ids independently, so sharing the
+    # keyspace would let an upload ack resolve a fetch waiter on a collision.
+    # The bookkeeping is identical, hence the shared class.
+    fetch_command_registry = UploadRequestRegistry()
     detail_registry = DetailRequestRegistry()
     interjection_tracker = InterjectionEventTracker()
     # Grace the daemon-offline transition by 60s so a lossy-link reconnect
@@ -589,6 +661,7 @@ def create_app(
     app.state.issue_command_registry = issue_command_registry
     app.state.project_command_registry = project_command_registry
     app.state.upload_command_registry = upload_command_registry
+    app.state.fetch_command_registry = fetch_command_registry
     app.state.detail_registry = detail_registry
     app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
@@ -631,6 +704,7 @@ def create_app(
             detail_registry=detail_registry,
             project_registry=project_command_registry,
             upload_registry=upload_command_registry,
+            fetch_registry=fetch_command_registry,
             presence_debouncer=presence_debouncer,
         )
 
@@ -944,13 +1018,71 @@ def create_app(
 
     # -- attachment uploads -------------------------------------------------
 
+    async def _resolve_attachment_target(
+        identity_: OwnerIdentity,
+        flow_id: str,
+        machine_id: str,
+        project_root: str,
+    ) -> tuple:
+        """Resolve an attachment request's target machine, root and machine record.
+
+        Two ways to name the target, matching the two places the web UI deals in
+        attachments: *flow_id* for a docked reply / a rendered conversation (the
+        flow already knows its machine and project root), or an explicit
+        *machine_id* + *project_root* pair for the New Task form, where no flow
+        exists yet. Both go through the same ownership gate, so another owner's
+        flow or machine reads exactly like an unknown one.
+
+        Shared by the store (``POST /api/uploads``) and read-back
+        (``GET /api/uploads/file``) legs on purpose: the ownership gate is the
+        only thing standing between one owner's attachments and another's, and a
+        second copy of it is a second place for that gate to drift. Raises
+        ``HTTPException`` (404 / 422) for the shapes those endpoints already
+        answer that way, and :class:`_UploadRelayError` where the answer must
+        carry a top-level ``error_code``.
+        """
+        scope = _scope_for(identity_)
+        flow_ref = (flow_id or "").strip()
+        machine_ref = (machine_id or "").strip()
+        root_ref = (project_root or "").strip()
+
+        if flow_ref:
+            resolved = await state.get_flow(flow_ref, owner=scope)
+            if resolved is None:
+                raise HTTPException(
+                    status_code=404, detail=f"flow '{flow_ref}' not found"
+                )
+            target_machine, flow = resolved
+            target_root = str(flow.get("project_root") or "").strip()
+            if not target_root:
+                raise _UploadRelayError(
+                    422,
+                    protocol.UPLOAD_ERR_INVALID_PATH,
+                    f"flow '{flow_ref}' reports no project root to store under",
+                )
+            owned = await state.get_machine(target_machine, owner=scope)
+            if owned is None:  # pragma: no cover - get_flow already owner-scoped
+                raise HTTPException(
+                    status_code=404, detail=f"machine '{target_machine}' not found"
+                )
+            return target_machine, target_root, owned
+        if machine_ref and root_ref:
+            target_root = _validated_project_root(root_ref)
+            owned = await _owned_machine_or_404(machine_ref, identity_)
+            return machine_ref, target_root, owned
+        raise _UploadRelayError(
+            422,
+            UPLOAD_ERR_NO_TARGET,
+            "supply either 'flow_id' or both 'machine_id' and 'project_root'",
+        )
+
     async def _send_upload_command(
         machine_id: str, message: protocol.Message, request_id: str
     ) -> dict:
         """Dispatch an upload command and await the daemon's ack.
 
         Returns the daemon's :data:`~tianluo.daemon.protocol.MSG_UPLOAD_RESULT`
-        payload. Raises :class:`_UploadDispatchError` (503) when the frame could
+        payload. Raises :class:`_UploadRelayError` (503) when the frame could
         not be delivered and (504) when the ack does not arrive inside
         :data:`UPLOAD_COMMAND_TIMEOUT` — both paths discard the parked future so
         a silent daemon cannot leak one waiter per retry.
@@ -959,7 +1091,7 @@ def create_app(
         sent = await manager.send_to(machine_id, message)
         if not sent:
             upload_command_registry.discard(request_id, fut)
-            raise _UploadDispatchError(
+            raise _UploadRelayError(
                 503,
                 UPLOAD_ERR_NOT_CONNECTED,
                 f"failed to deliver UPLOAD_COMMAND to '{machine_id}'",
@@ -968,7 +1100,7 @@ def create_app(
             return await asyncio.wait_for(fut, timeout=UPLOAD_COMMAND_TIMEOUT)
         except asyncio.TimeoutError:
             upload_command_registry.discard(request_id, fut)
-            raise _UploadDispatchError(
+            raise _UploadRelayError(
                 504,
                 UPLOAD_ERR_TIMEOUT,
                 f"timed out waiting for upload result from '{machine_id}'",
@@ -1001,48 +1133,18 @@ def create_app(
         it would pull ``python-multipart`` into the server extra, and the raw
         body also lets the size gate fire on ``Content-Length`` alone.
 
-        Two ways to name the target, matching the two places the web UI accepts
-        an attachment: ``flow_id`` for the docked reply/interject box (the flow
-        already knows its machine and project root), or an explicit
-        ``machine_id`` + ``project_root`` pair for the New Task form, where no
-        flow exists yet. Both go through the same ownership gate, so another
-        owner's flow or machine reads exactly like an unknown one.
+        The target is named either by ``flow_id`` or by an explicit
+        ``machine_id`` + ``project_root`` pair — see
+        :func:`_resolve_attachment_target`, which also owns the ownership gate.
         """
-        scope = _scope_for(identity_)
         name = (filename or "").strip()
-        flow_ref = (flow_id or "").strip()
-        machine_ref = (machine_id or "").strip()
-        root_ref = (project_root or "").strip()
 
-        if flow_ref:
-            resolved = await state.get_flow(flow_ref, owner=scope)
-            if resolved is None:
-                raise HTTPException(
-                    status_code=404, detail=f"flow '{flow_ref}' not found"
-                )
-            target_machine, flow = resolved
-            target_root = str(flow.get("project_root") or "").strip()
-            if not target_root:
-                return _upload_error(
-                    422,
-                    protocol.UPLOAD_ERR_INVALID_PATH,
-                    f"flow '{flow_ref}' reports no project root to store under",
-                )
-            owned = await state.get_machine(target_machine, owner=scope)
-            if owned is None:  # pragma: no cover - get_flow already owner-scoped
-                raise HTTPException(
-                    status_code=404, detail=f"machine '{target_machine}' not found"
-                )
-        elif machine_ref and root_ref:
-            target_root = _validated_project_root(root_ref)
-            target_machine = machine_ref
-            owned = await _owned_machine_or_404(target_machine, identity_)
-        else:
-            return _upload_error(
-                422,
-                UPLOAD_ERR_NO_TARGET,
-                "supply either 'flow_id' or both 'machine_id' and 'project_root'",
+        try:
+            target_machine, target_root, owned = await _resolve_attachment_target(
+                identity_, flow_id, machine_id, project_root
             )
+        except _UploadRelayError as exc:
+            return _upload_error(exc.status, exc.code, exc.detail)
 
         if not name:
             raise HTTPException(
@@ -1115,7 +1217,7 @@ def create_app(
 
         try:
             result = await _send_upload_command(target_machine, message, request_id)
-        except _UploadDispatchError as exc:
+        except _UploadRelayError as exc:
             return _upload_error(exc.status, exc.code, exc.detail)
 
         if not result.get("ok"):
@@ -1133,6 +1235,151 @@ def create_app(
                 "machine_id": target_machine,
                 "project_root": target_root,
                 "deduplicated": bool(result.get("deduplicated")),
+            },
+        )
+
+    # -- attachment read-back (protocol revision 6) -------------------------
+
+    async def _send_fetch_command(
+        machine_id: str, message: protocol.Message, request_id: str
+    ) -> dict:
+        """Dispatch a fetch command and await the daemon's answer.
+
+        The mirror of :func:`_send_upload_command`, down to the discard-on-both-
+        failure-paths rule: a fetch is issued once per inline thumbnail per
+        render, so a silent daemon that leaked one waiter per attempt would grow
+        the registry for as long as the operator keeps a conversation open.
+        """
+        fut = fetch_command_registry.register(request_id)
+        sent = await manager.send_to(machine_id, message)
+        if not sent:
+            fetch_command_registry.discard(request_id, fut)
+            raise _UploadRelayError(
+                503,
+                UPLOAD_ERR_NOT_CONNECTED,
+                f"failed to deliver FETCH_COMMAND to '{machine_id}'",
+            )
+        try:
+            return await asyncio.wait_for(fut, timeout=FETCH_COMMAND_TIMEOUT)
+        except asyncio.TimeoutError:
+            fetch_command_registry.discard(request_id, fut)
+            raise _UploadRelayError(
+                504,
+                UPLOAD_ERR_TIMEOUT,
+                f"timed out waiting for fetch result from '{machine_id}'",
+            )
+
+    def _fetch_failure(result: dict, fallback: str) -> JSONResponse:
+        """Render a daemon ``ok=false`` fetch result as a mapped error."""
+        code = str(result.get("error_code") or "")
+        status = FETCH_ERROR_STATUS.get(code, FETCH_ERROR_STATUS_DEFAULT)
+        return _upload_error(status, code, str(result.get("error") or fallback))
+
+    @app.get("/api/uploads/file")
+    async def fetch_attachment(
+        path: str = "",
+        flow_id: str = "",
+        machine_id: str = "",
+        project_root: str = "",
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> Response:
+        """Read one stored attachment back out of the target project's machine.
+
+        The counterpart of ``POST /api/uploads``: the file lives on the daemon's
+        disk, and the only channel to that machine is the daemon's own outbound
+        socket, so the bytes come back the way they went out — base64 over the
+        wire, raw in the HTTP body. *path* is the project-relative path the
+        upload returned (and the operator's prompt carries); the daemon, not
+        this endpoint, decides whether it points inside the uploads directory.
+
+        Every failure mode is one the browser must be able to shrug off: this
+        backs inline thumbnails, so an offline daemon / deleted file / legacy
+        daemon simply leaves the message as the plain path text it already is.
+        """
+        rel_path = (path or "").strip()
+
+        try:
+            target_machine, target_root, owned = await _resolve_attachment_target(
+                identity_, flow_id, machine_id, project_root
+            )
+        except _UploadRelayError as exc:
+            return _upload_error(exc.status, exc.code, exc.detail)
+
+        if not rel_path:
+            return _upload_error(
+                422,
+                protocol.FETCH_ERR_INVALID_PATH,
+                "'path' must not be empty",
+            )
+
+        if not manager.is_connected(target_machine):
+            return _upload_error(
+                503,
+                UPLOAD_ERR_NOT_CONNECTED,
+                f"machine '{target_machine}' is not connected",
+            )
+        # Capability gate, not a timeout — and it matters more here than on the
+        # upload leg: a conversation can hold many inline images, and a
+        # pre-revision-6 daemon drops every unknown frame silently, so without
+        # this each thumbnail would hold a browser connection open for the full
+        # ack window before failing.
+        if not protocol.supports_fetch(owned.get("protocol_version")):
+            return _upload_error(
+                501,
+                UPLOAD_ERR_UNSUPPORTED_DAEMON,
+                (
+                    f"daemon on '{target_machine}' does not support file "
+                    "read-back; upgrade it to a build speaking protocol revision "
+                    f"{protocol.MIN_FETCH_PROTOCOL_VERSION} or newer"
+                ),
+            )
+
+        request_id = uuid.uuid4().hex
+        try:
+            message = protocol.make_fetch_command(
+                target_root, rel_path, request_id=request_id
+            )
+        except protocol.ProtocolError as exc:
+            # Cheap early reject of an obviously malformed path (absolute, or
+            # carrying a '..' segment). The real containment boundary is the
+            # daemon's resolved-path check — this only keeps a frame the daemon
+            # would refuse anyway off the wire.
+            return _upload_error(422, protocol.FETCH_ERR_INVALID_PATH, str(exc))
+
+        try:
+            result = await _send_fetch_command(target_machine, message, request_id)
+        except _UploadRelayError as exc:
+            return _upload_error(exc.status, exc.code, exc.detail)
+
+        if not result.get("ok"):
+            return _fetch_failure(result, "fetch failed on daemon")
+
+        try:
+            data = base64.b64decode(str(result.get("content_b64") or ""), validate=True)
+        except (ValueError, TypeError):
+            # A daemon that answered ok=true with an undecodable body is an
+            # upstream fault, not the browser's — 502 for the same reason as
+            # FETCH_ERROR_STATUS_DEFAULT.
+            return _upload_error(
+                502,
+                protocol.FETCH_ERR_READ_FAILED,
+                f"daemon on '{target_machine}' returned an undecodable payload",
+            )
+
+        suffix = os.path.splitext(rel_path)[1].lower()
+        return Response(
+            content=data,
+            media_type=FETCH_CONTENT_TYPES.get(suffix, FETCH_CONTENT_TYPE_DEFAULT),
+            headers={
+                "Cache-Control": FETCH_CACHE_CONTROL,
+                # Belt to the whitelist's braces: a non-whitelisted extension is
+                # served as octet-stream, and nosniff is what stops the browser
+                # from second-guessing that into a renderable type.
+                "X-Content-Type-Options": "nosniff",
+                # No filename parameter: the stored name is operator-supplied and
+                # may be non-ASCII, and the browser only ever renders these in an
+                # <img> or a new tab, never as a download.
+                "Content-Disposition": "inline",
             },
         )
 
