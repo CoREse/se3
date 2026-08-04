@@ -1,5 +1,13 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.2.1 - 2026-08-04
+
+- Show only the stored file's content-hash prefix in the WebUI attachment strip subtitle (e.g. '2 KB · d8fdda666ced') instead of the full stored basename, so each attachment block no longer stretches to the column width limit on desktop
+- Stop duplicating the original filename between the attachment row's first line and its subtitle, while keeping the hash prefix that distinguishes identically-named pasted files such as repeated clipboard screenshots
+- Fall back to the full stored basename when it does not follow the '<hash>_<filename>' convention, so legacy or oddly named uploads still show an identifier rather than an empty tag
+- Keep the row tooltip showing the complete project-relative upload path (e.g. tianluo/uploads/d8fdda666ced_image.png) for comparing and copying paths against the prompt text
+- Leave the existing 150px desktop / 104px mobile column widths and hover-scroll overflow fallback in place to cover the rare long-name fallback case
+- Update the frontend upload tests to cover the new subtitle text and the hash-prefix derivation, including the no-separator fallback
 ## 12.2.0 - 2026-08-03
 
 - Show the on-disk storage filename (content-hash prefixed basename) next to the file size on each completed attachment row, so pasted images named image.png can be told apart

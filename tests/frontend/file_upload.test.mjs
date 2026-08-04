@@ -294,12 +294,13 @@ export async function registerFileUploadTests(ctx) {
     check("G4 attachmentRowModel: the stored name is exposed only once it exists", () => {
       // The point of the field: `name` is what the clipboard called it, which
       // for a pasted screenshot is always the same string. Only the stored
-      // basename — hash prefix first — separates two of them.
+      // name's content-hash head separates two of them — the tail is the same
+      // original filename the row's first line already shows.
       const done = app.attachmentRowModel({
         id: 1, name: "image.png", size: 2048, type: "image/png",
         status: "done", path: "tianluo/uploads/e155b5b05cf8_image.png",
       });
-      assert.equal(done.storedName, "e155b5b05cf8_image.png");
+      assert.equal(done.storedName, "e155b5b05cf8");
       assert.equal(done.titleText, "tianluo/uploads/e155b5b05cf8_image.png",
         "the tooltip is the exact string the prompt text carries");
       assert.equal(done.name, "image.png", "the browser-side name is untouched");
@@ -322,10 +323,22 @@ export async function registerFileUploadTests(ctx) {
       // bare name degrades to itself rather than to "".
       assert.equal(app.attachmentRowModel({
         id: 5, status: "done", path: "se3/uploads/abc_a.png",
-      }).storedName, "abc_a.png", "the legacy se3/ layout works the same way");
+      }).storedName, "abc", "the legacy se3/ layout works the same way");
       assert.equal(app.attachmentRowModel({
         id: 6, status: "done", path: "solo.png",
       }).storedName, "solo.png");
+
+      // The FIRST "_" ends the hash: the original filename may carry its own,
+      // and lastIndexOf would hand back half of it as the identifier.
+      assert.equal(app.attachmentRowModel({
+        id: 7, status: "done", path: "tianluo/uploads/abc123_my_photo.png",
+      }).storedName, "abc123");
+      // Fallbacks: a name that does not follow "<hash>_<original>" yields no
+      // trustworthy identifier, so the whole basename is shown rather than an
+      // empty tag (which would render a bare "2 KB · " and identify nothing).
+      assert.equal(app.attachmentRowModel({
+        id: 8, status: "done", path: "tianluo/uploads/_image.png",
+      }).storedName, "_image.png", "a leading separator leaves no prefix to show");
     });
 
     // ========================================================================
@@ -668,7 +681,7 @@ export async function registerFileUploadTests(ctx) {
       assert.equal(thumb.src, "blob:shot");
       assert.equal(findOne(strip, "attachment-icon"), null);
       assert.equal(findOne(strip, "attachment-name").textContent, "shot.png");
-      assert.equal(findOne(strip, "attachment-size").textContent, "2 KB · aaa_shot.png");
+      assert.equal(findOne(strip, "attachment-size").textContent, "2 KB · aaa");
     });
 
     check("G5 renderAttachmentStrip: a plain file renders icon + name + size", () => {
@@ -681,7 +694,7 @@ export async function registerFileUploadTests(ctx) {
       assert.notEqual(findOne(strip, "attachment-icon"), null);
       assert.equal(findOne(strip, "attachment-thumb"), null);
       assert.equal(findOne(strip, "attachment-name").textContent, "notes.txt");
-      assert.equal(findOne(strip, "attachment-size").textContent, "300 B · aaa_notes.txt");
+      assert.equal(findOne(strip, "attachment-size").textContent, "300 B · aaa");
       assert.equal(findAll(strip, "attachment-remove").length, 1);
     });
 
@@ -723,11 +736,12 @@ export async function registerFileUploadTests(ctx) {
       assert.deepEqual(names, ["image.png", "image.png"],
         "the visible name stays the one the browser handed us");
       const subs = findAll(strip, "attachment-size").map((n) => n.textContent);
-      // Size AND stored name, so the row is still self-describing, and the two
-      // rows are now distinguishable from each other.
+      // Size AND the stored file's hash, so the row is still self-describing,
+      // and the two rows are now distinguishable from each other — without
+      // repeating the original filename the line above already carries.
       assert.deepEqual(subs, [
-        "2 KB · e155b5b05cf8_image.png",
-        "2 KB · 77bb0c1d4a92_image.png",
+        "2 KB · e155b5b05cf8",
+        "2 KB · 77bb0c1d4a92",
       ]);
       assert.notEqual(subs[0], subs[1], "two pasted screenshots are told apart");
 
@@ -742,8 +756,10 @@ export async function registerFileUploadTests(ctx) {
       for (let i = 0; i < entries.length; i += 1) {
         const model = app.attachmentRowModel(entries[i]);
         assert.equal(strip.children[i].title, model.path);
-        assert.equal(strip.children[i].title.endsWith("/" + model.storedName), true,
-          "the tooltip is the full relative path, not just the basename");
+        assert.equal(strip.children[i].title.includes(model.storedName), true,
+          "the tooltip is the full relative path, hash and original name and all");
+        assert.notEqual(strip.children[i].title, model.storedName,
+          "the tooltip is the whole path, not the short identifier the row shows");
       }
     });
 

@@ -994,9 +994,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   white-space: nowrap;
   font-size: 12px;
 }
-/* The secondary line is "size · stored-name", and the stored name is long
- * (12 hex digits of content hash + the original filename). It clips at the
- * TAIL — the hash prefix comes first, and that prefix is the only thing that
+/* The secondary line is "size · content-hash prefix", which fits this column on
+ * its own — the clipping below is for the fallback case, where a stored name
+ * that does not follow the "<hash>_<original name>" convention is shown whole
+ * and can be arbitrarily long. It clips at the TAIL: the head is the part that
  * tells two pasted "image.png" rows apart, so it must survive the truncation
  * that the tail does not.
  *

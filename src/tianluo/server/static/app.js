@@ -931,9 +931,12 @@ function isImageFile(file) {
 // BROWSER-side name, and a clipboard paste is always called "image.png". Paste
 // three screenshots and the strip shows three identical rows, while the prompt
 // text carries three distinct content-hash-prefixed paths — nothing on screen
-// says which row owns which path. The stored basename (hash prefix first) is
-// the only thing that tells them apart, and the full relative path is what the
-// agent will actually read, so it is what the row's tooltip must say.
+// says which row owns which path. `storedName` is the identifying head of the
+// stored basename (its content-hash prefix) and nothing else: the hash is what
+// tells the rows apart, while the basename's tail is the original filename the
+// row's first line already shows, so repeating it only widened every row for no
+// added information. The full relative path is what the agent will actually
+// read, so it is what the row's tooltip must say.
 function attachmentRowModel(entry) {
   entry = entry && typeof entry === "object" ? entry : {};
   const raw = String(entry.status || "");
@@ -944,6 +947,18 @@ function attachmentRowModel(entry) {
   // failed one never will, so both stay blank rather than showing a name for a
   // file that is not on the project machine.
   const stored = status === "done" && path ? path : "";
+  // Paths on the wire are project-relative and always posix-separated; a string
+  // with no separator degrades to itself.
+  const basename = stored ? stored.slice(stored.lastIndexOf("/") + 1) : "";
+  // The identifying head is everything before the FIRST "_": the stored name is
+  // "<content hash>_<original filename>" and the original filename may itself
+  // contain "_" (my_photo.png), so taking the last one would swallow part of it.
+  // A basename with no "_", or one starting with it, does not follow that
+  // convention (legacy/odd naming) and yields no trustworthy identifier — show
+  // the whole basename then rather than an empty tag, and let the column's
+  // ellipsis + hover scroll deal with the length.
+  const sep = basename.indexOf("_");
+  const storedName = sep > 0 ? basename.slice(0, sep) : basename;
   return {
     id: String(entry.id == null ? "" : entry.id),
     name: typeof entry.name === "string" ? entry.name : "",
@@ -958,9 +973,7 @@ function attachmentRowModel(entry) {
     // drops the preview when it recycles the URL.
     previewUrl: typeof entry.previewUrl === "string" ? entry.previewUrl : "",
     path,
-    // Paths on the wire are project-relative and always posix-separated; a
-    // string with no separator degrades to itself.
-    storedName: stored ? stored.slice(stored.lastIndexOf("/") + 1) : "",
+    storedName,
     titleText: stored,
     canRemove: status === "done" && Boolean(path),
     canCancel: status === "uploading",
@@ -1564,11 +1577,13 @@ function renderAttachmentStrip(stripId, entries) {
       item.appendChild(el("span", "attachment-icon", "📄"));
     }
     const meta = el("div", "attachment-meta");
-    // The secondary line carries the stored name next to the size once the file
-    // has landed — see attachmentRowModel for why the browser-side name alone
-    // cannot identify a row. Two nested spans because the clipping (ellipsis)
-    // and the hover scroll have to live on different elements: the outer cell
-    // owns the width, the inner text is what slides inside it.
+    // The secondary line carries the stored file's identifying hash next to the
+    // size once the file has landed — see attachmentRowModel for why the
+    // browser-side name alone cannot identify a row, and why only the hash head
+    // of the stored name is worth the width. Two nested spans because the
+    // clipping (ellipsis) and the hover scroll have to live on different
+    // elements: the outer cell owns the width, the inner text is what slides
+    // inside it.
     const sizeCell = el("span", "attachment-size");
     sizeCell.appendChild(el(
       "span",
