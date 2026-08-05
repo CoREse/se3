@@ -170,12 +170,45 @@ def _read_multiline_input(
         return ""
 
 
+# Task types a user may name explicitly via ``--type``. Deliberately excludes
+# "discovery": that is a run *mode* reached only through ``--discover``, never a
+# classification the user asks analyze to honour.
+EXPLICIT_TASK_TYPES = ("feature", "bugfix", "review", "small", "survey")
+
+
+def _param_from_commandline(ctx: typer.Context, name: str) -> bool:
+    """Report whether *name* was actually typed on the command line.
+
+    WHY: a Typer option with a non-None default is indistinguishable from an
+    explicitly-passed value by looking at the value alone, and ``--type``'s
+    downstream meaning depends on that distinction (an explicit type is
+    persisted as ``explicit_type`` and overrides analyze's classification).
+    ParameterSource is the only reliable signal. Typer versions that vendor
+    click expose it via ``typer._click``; older ones delegate to system click.
+    """
+    try:
+        from typer._click import core as _click_core
+
+        cmdline = _click_core.ParameterSource.COMMANDLINE
+    except (ImportError, ModuleNotFoundError):
+        from click.core import ParameterSource as _PS
+
+        cmdline = _PS.COMMANDLINE
+
+    return ctx.get_parameter_source(name) == cmdline
+
+
 @app.command(name="run", help=t("cli.help.run.desc"))
 def run_cmd(
     ctx: typer.Context,
     task: Optional[str] = typer.Argument(None, help=t("cli.help.run.task")),
     resume: bool = typer.Option(False, "--resume", "-r", help=t("cli.help.run.resume")),
-    type: str = typer.Option("feature", "--type", "-t", help=t("cli.help.run.type")),
+    # WHY: the default is the "pending" sentinel, not a real type. A concrete
+    # default made every run look like an explicit --type to run_flow, which
+    # then wrote explicit_type into the flow context and let it override
+    # analyze's classification — so an unflagged run was silently pinned to
+    # "feature" and the classifier's answer was discarded.
+    type: str = typer.Option("pending", "--type", "-t", help=t("cli.help.run.type")),
     change: Optional[str] = typer.Option(None, "--change", "-c", help=t("cli.help.run.change")),
     flow_id: Optional[str] = typer.Option(None, "--flow-id", help=t("cli.help.run.flow_id")),
     discover: bool = typer.Option(False, "--discover", "-d", help=t("cli.help.run.discover")),
@@ -214,6 +247,29 @@ def run_cmd(
         )
         raise typer.Exit(1)
 
+    # Validate an explicitly-typed --type before anything else touches it.
+    # Only a command-line-sourced value is checked: --preset supplies its own
+    # type from the preset file and --discover overwrites it with the
+    # "discovery" run mode, and neither is a user-authored classification.
+    # WHY reject here rather than in get_default_step_sequence: that lookup must
+    # keep silently falling back for retired types still persisted in old flows.
+    # WHY "pending" is not explicit even when typed: it is the auto-detect
+    # sentinel meaning "let analyze classify". The daemon spawner always appends
+    # `--type <task_type>`, and the WebUI's default "auto" option posts exactly
+    # "pending" — so an explicitly-passed sentinel must behave like no --type at
+    # all, both for this validation and for the --preset exclusivity check.
+    type_is_explicit = _param_from_commandline(ctx, "type") and type != "pending"
+    if type_is_explicit and type not in EXPLICIT_TASK_TYPES:
+        render_full(
+            t(
+                "cli.run.invalid_task_type",
+                task_type=type,
+                valid_types=", ".join(EXPLICIT_TASK_TYPES),
+            ),
+            title=t("cli.common.error"),
+        )
+        raise typer.Exit(1)
+
     project_root = get_project_root()
 
     # Create shared prompt history for this run session
@@ -228,21 +284,9 @@ def run_cmd(
     # Handle preset prompts (common-task library). A preset carries its own
     # task type, so it is mutually exclusive with an explicit --type.
     if preset is not None:
-        # Detect whether --type was explicitly passed on the command line.
-        # Typer versions that vendor click expose ParameterSource via
-        # typer._click; older versions delegate to the system click.
-        try:
-            from typer._click import core as _click_core
-
-            _cmdline = _click_core.ParameterSource.COMMANDLINE
-        except (ImportError, ModuleNotFoundError):
-            from click.core import ParameterSource as _PS
-
-            _cmdline = _PS.COMMANDLINE
-
         from .preset_loader import PresetError, list_presets, resolve
 
-        if ctx.get_parameter_source("type") == _cmdline:
+        if type_is_explicit:
             raise typer.BadParameter(
                 t("cli.preset.mutually_exclusive"),
                 param_hint="--preset",

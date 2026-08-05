@@ -156,6 +156,7 @@ RUNTIME_ENV_INJECTION_DEFAULT_STEPS = [
     "plan",
     "plan_tasks",
     "implement",
+    "investigate",
     "verify_spec",
     "update_spec",
     "self_check",

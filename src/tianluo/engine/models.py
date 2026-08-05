@@ -45,6 +45,7 @@ class StepType(Enum):
 
     DISCOVERY = "discovery"  # Discovery mode: explore requirements with user
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
+    INVESTIGATE = "investigate"  # Net-zero-diff root-cause investigation (no fix, no commit)
     PROJECT_SUMMARY = "project_summary"  # Generate project context summary
     PLAN = "plan"  # Unified planning: proposal + design + task breakdown
     PROPOSE = "propose"  # Generate change proposal (deprecated: use PLAN)
@@ -760,7 +761,48 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "uses_llm": True,
         "read_only": True,
         "inputs": ["task_description", "project_context"],
-        "outputs": ["task_type", "scope", "complexity", "reasoning", "project_summary", "relevant_specs", "spec_content"],
+        "outputs": ["task_type", "scope", "complexity", "reasoning", "root_cause_clear", "project_summary", "relevant_specs", "spec_content"],
+    },
+    StepType.INVESTIGATE: {
+        "name": "investigate",
+        # WHY: read_only is False *deliberately*. Investigation means
+        # hypothesis-and-verify on a problem whose cause is unknown — temporary
+        # logging, a throwaway probe patch, a scratch script are legitimate
+        # instruments, and a tool-level write ban (read_only=True feeds
+        # llm_caller's --disallowedTools) would degrade the step to plain
+        # reading. The "changes nothing" contract is therefore enforced
+        # SEMANTICALLY, not by the tool layer: the handler snapshots the
+        # workspace before and after the step and fails it when the two differ
+        # (see steps/investigate.py + workspace_snapshot.py). Net-zero diff, not
+        # strictly read-only.
+        "description": (
+            "Root-cause investigation for a problem whose cause is unknown: "
+            "read code, run commands, form and test hypotheses. Experimental "
+            "edits (temporary logging, probe patches, scratch scripts) are "
+            "allowed DURING the step but must all be reverted before it ends — "
+            "the engine verifies net-zero diff via before/after workspace "
+            "snapshots and never reverts anything itself. No git commit. The "
+            "actual fix is always carried out by a later PLAN -> IMPLEMENT; the "
+            "report lives in step outputs, never in project files."
+        ),
+        "uses_llm": True,
+        "read_only": False,
+        "inputs": [
+            "task_description",
+            "scope",
+            "investigation_iteration",
+            "investigation_max_iterations",
+            "previous_investigation_reports",
+        ],
+        "outputs": [
+            "root_cause",
+            "evidence",
+            "files_involved",
+            "suggested_fix_direction",
+            "confidence",
+            "conclusive",
+            "root_cause_report",
+        ],
     },
     # Deprecated: PROJECT_SUMMARY merged into ANALYZE (kept for backward compat with persisted flows)
     StepType.PROJECT_SUMMARY: {
@@ -1033,6 +1075,15 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
     """Get the default step sequence for a given task type.
 
     This is the initial selection - the analyze step can modify this.
+
+    WHY: an unknown ``task_type`` falls back to the feature sequence instead of
+    raising. Retired task types stay persisted in old ``engine.json`` files, and
+    this lookup is also used as a pure table read on already-stored types
+    (``version_reconcile`` reverse-derives whether a type was ever supposed to
+    produce a version intent). Raising here would break ``--resume`` and merge
+    reconciliation for those historical flows. Rejecting an unsupported type is
+    the job of the CLI ``--type`` entry check, which guards the single point
+    where a *user* can introduce one.
     """
     # The spec governance steps (VERIFY_SPEC / UPDATE_SPEC / SPEC_GATE) were
     # retired by the charter refactor. Their role is replaced by:
@@ -1041,8 +1092,8 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
     #     and drives the shared fix loop, so it sits inside the fix-loop window.
     #   - CHARTER_FRESHNESS — a non-blocking advisory inserted just before
     #     VERSION_ANALYZE; it only surfaces an update prompt and never blocks.
-    # Lightweight commit-only flows (small / directive) get CHARTER_FRESHNESS
-    # but not INVARIANT_CHECK (they have no self_check/spec phase to extend).
+    # The lightweight commit-only flow (small) gets CHARTER_FRESHNESS but not
+    # INVARIANT_CHECK (it has no self_check/spec phase to extend).
     sequences: Dict[str, List[StepType]] = {
         "feature": [
             StepType.ANALYZE,
@@ -1082,13 +1133,16 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
-        "directive": [
+        # WHY survey carries no IMPLEMENT/TEST/COMMIT and no VERSION_ANALYZE:
+        # its deliverable is a conclusion, not a code change — there is nothing
+        # to test, commit or version. Omitting VERSION_ANALYZE needs no new
+        # branch anywhere: version_reconcile decides positively from the task
+        # type's default sequence, so a sequence without VERSION_ANALYZE falls
+        # into its existing noop short-circuit. Ending on SUMMARIZE (a tail with
+        # no commit) is the shape the review sequence already proved viable.
+        "survey": [
             StepType.ANALYZE,
-            StepType.PLAN,
-            StepType.IMPLEMENT,
-            StepType.CHARTER_FRESHNESS,
-            StepType.VERSION_ANALYZE,
-            StepType.COMMIT,
+            StepType.INVESTIGATE,
             StepType.SUMMARIZE,
         ],
         "discovery": [

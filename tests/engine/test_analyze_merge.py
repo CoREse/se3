@@ -65,6 +65,7 @@ class TestBuildStepInputsAnalyzeMapping:
             "scope": "engine module",
             "complexity": "medium",
             "reasoning": "This is a feature task",
+            "root_cause_clear": True,
             "project_summary": "Project: SE3 Framework, branch: main",
             "relevant_specs": ["flow-engine", "base"],
             "spec_content": {
@@ -115,7 +116,9 @@ class TestBuildStepInputsDeprecatedBackwardCompat:
 class TestStepSequenceNoProjectSummaryOrReadSpec:
     """Verify PROJECT_SUMMARY removed from all task type sequences (READ_SPEC fully removed)."""
 
-    ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "directive", "discovery"]
+    # Kept identical to tests/engine/test_step_sequence.py::ALL_TASK_TYPES so a
+    # newly added task type cannot slip past one sweep while the other covers it.
+    ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "survey", "discovery"]
 
     @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
     def test_no_project_summary_in_sequence(self, task_type):
@@ -148,6 +151,17 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
             StepType.SUMMARIZE,
         ]
 
+    def test_survey_sequence(self):
+        """survey is a pure investigation flow: ANALYZE → INVESTIGATE → SUMMARIZE,
+        with no SELF_CHECK (there is no code change for it to check)."""
+        seq = get_default_step_sequence("survey")
+        assert seq == [
+            StepType.ANALYZE,
+            StepType.INVESTIGATE,
+            StepType.SUMMARIZE,
+        ]
+        assert StepType.SELF_CHECK not in seq
+
     def test_discovery_sequence_starts_with_discovery_then_analyze(self):
         seq = get_default_step_sequence("discovery")
         assert seq[0] == StepType.DISCOVERY
@@ -170,6 +184,10 @@ class TestStepPoolUpdates:
         outputs = STEP_POOL[StepType.ANALYZE]["outputs"]
         assert "task_type" in outputs
         assert "scope" in outputs
+
+    def test_analyze_outputs_declare_root_cause_clear(self):
+        """The root-cause judgement that gates the conditional INVESTIGATE."""
+        assert "root_cause_clear" in STEP_POOL[StepType.ANALYZE]["outputs"]
 
     def test_project_summary_marked_deprecated(self):
         info = STEP_POOL[StepType.PROJECT_SUMMARY]

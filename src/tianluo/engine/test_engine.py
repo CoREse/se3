@@ -135,10 +135,8 @@ class TestModels:
                 StepType.CHARTER_FRESHNESS, StepType.VERSION_ANALYZE,
                 StepType.COMMIT, StepType.SUMMARIZE,
             ],
-            "directive": [
-                StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT,
-                StepType.CHARTER_FRESHNESS, StepType.VERSION_ANALYZE,
-                StepType.COMMIT, StepType.SUMMARIZE,
+            "survey": [
+                StepType.ANALYZE, StepType.INVESTIGATE, StepType.SUMMARIZE,
             ],
             "discovery": [
                 StepType.DISCOVERY, StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT,
@@ -147,13 +145,38 @@ class TestModels:
                 StepType.SUMMARIZE,
             ],
         }
+        # The table below is hand-enumerated, so guard that it stays in step with
+        # the canonical type list the other sequence suites share — otherwise a
+        # newly added type would be silently unasserted here.
+        assert set(expected) == {
+            "feature", "bugfix", "review", "small", "survey", "discovery",
+        }
         for task_type, seq in expected.items():
             assert get_default_step_sequence(task_type) == seq, task_type
+
+        # The retired 'directive' type is gone from the table; asking for it now
+        # takes the unknown-type fallback rather than returning its old sequence.
+        assert get_default_step_sequence("directive") == expected["feature"]
+
+    def test_survey_sequence_has_no_self_check(self):
+        """survey never writes code, so it carries neither SELF_CHECK nor the
+        rest of the change-guarding tail."""
+        seq = get_default_step_sequence("survey")
+        assert seq == [StepType.ANALYZE, StepType.INVESTIGATE, StepType.SUMMARIZE]
+        for absent in (
+            StepType.SELF_CHECK,
+            StepType.INVARIANT_CHECK,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.VERSION_ANALYZE,
+            StepType.COMMIT,
+        ):
+            assert absent not in seq, f"survey must not contain {absent.value}"
 
     def test_retired_spec_steps_absent_from_all_sequences(self):
         """The retired spec governance steps appear in no default sequence."""
         retired = {StepType.VERIFY_SPEC, StepType.UPDATE_SPEC, StepType.SPEC_GATE}
-        for task_type in ("feature", "bugfix", "review", "small", "directive", "discovery"):
+        for task_type in ("feature", "bugfix", "review", "small", "survey", "discovery"):
             seq = set(get_default_step_sequence(task_type))
             assert not (seq & retired), f"{task_type} still contains a retired spec step"
 
@@ -166,8 +189,8 @@ class TestModels:
         # review routes ANALYZE -> INVARIANT_CHECK -> SUMMARIZE (no self_check upstream).
         review = get_default_step_sequence("review")
         assert review.index(StepType.INVARIANT_CHECK) == review.index(StepType.ANALYZE) + 1
-        # small / directive get only the non-blocking CHARTER_FRESHNESS, no INVARIANT_CHECK.
-        for task_type in ("small", "directive"):
+        # small gets only the non-blocking CHARTER_FRESHNESS, no INVARIANT_CHECK.
+        for task_type in ("small",):
             seq = get_default_step_sequence(task_type)
             assert StepType.INVARIANT_CHECK not in seq
             assert seq.index(StepType.CHARTER_FRESHNESS) == seq.index(StepType.VERSION_ANALYZE) - 1
@@ -179,7 +202,7 @@ class TestModels:
             "bugfix",
             "review",
             "small",
-            "directive",
+            "survey",
             "discovery",
         ):
             seq = get_default_step_sequence(task_type)
@@ -189,7 +212,7 @@ class TestModels:
             assert seq.count(StepType.SUMMARIZE) == 1
 
         # Non-review sequences place SUMMARIZE immediately after COMMIT.
-        for task_type in ("feature", "bugfix", "small", "directive", "discovery"):
+        for task_type in ("feature", "bugfix", "small", "discovery"):
             seq = get_default_step_sequence(task_type)
             assert seq.index(StepType.SUMMARIZE) == seq.index(StepType.COMMIT) + 1
 
@@ -631,9 +654,9 @@ class TestCharterRefactorRouting:
             taken += 1
         return taken
 
-    def test_all_six_sequences_run_through(self):
+    def test_all_default_sequences_run_through(self):
         """Every task type's default sequence drives to COMPLETED with mock handlers."""
-        for task_type in ("feature", "bugfix", "review", "small", "directive", "discovery"):
+        for task_type in ("feature", "bugfix", "review", "small", "discovery"):
             with tempfile.TemporaryDirectory() as tmpdir:
                 sm = StateMachine(Path(tmpdir))
 

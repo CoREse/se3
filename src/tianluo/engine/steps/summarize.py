@@ -42,7 +42,7 @@ Your only job is to tell the user what happened in this session: the work that w
 ## Commit
 {commit_info}
 {completion_section}
-## Instructions
+{investigation_section}## Instructions
 Write a concise Markdown report covering ONLY this session. Include:
 
 1. **What was done** - What this session actually accomplished
@@ -59,6 +59,36 @@ Report only facts about this session. Do not invent work that did not happen, an
 # appended here. The web console renders the whole post-BEGIN tail inside
 # the collapsed system-prompt chip.
 SUMMARIZE_PROMPT = inject_boundary(SUMMARIZE_PROMPT, "## Task Description\n")
+
+
+# WHY summarize gets its own instruction on top of the shared section renderer:
+# for PLAN/IMPLEMENT the report is context to aim the work with, but here it is
+# the *subject matter*. A survey flow (ANALYZE -> INVESTIGATE -> SUMMARIZE) makes
+# no changes, runs no tests and creates no commit, so every other input to this
+# prompt is empty — left to itself the model would faithfully report a session
+# that did nothing, and the finding the user actually asked for would exist only
+# inside engine.json. The report file is the flow's sole deliverable, so the
+# conclusion has to be reproduced in it rather than referred to.
+INVESTIGATION_REPORT_INSTRUCTION = """
+This investigation is part of what this session produced. Reproduce its conclusion, the evidence behind it, the files involved and its stated confidence in the report you write — the report file is where the user reads them, so do not merely refer to the investigation having happened. When this session made no code changes and created no commit, the investigation IS the deliverable: present the finding as the result, rather than describing the session as having accomplished nothing.
+"""
+
+
+def _build_investigation_section(step: Step) -> str:
+    """Render the investigation report + its summarize-specific instruction.
+
+    Empty string when no investigation ran, which keeps the prompt of every
+    non-investigating flow byte-identical to what it was before.
+    """
+    from .plan import render_root_cause_section
+
+    section = render_root_cause_section(
+        step.inputs.get("root_cause_report"),
+        exhausted=bool(step.inputs.get("investigation_exhausted")),
+    )
+    if not section:
+        return ""
+    return section.lstrip("\n") + INVESTIGATION_REPORT_INSTRUCTION + "\n"
 
 
 def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -115,6 +145,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         verification_result=verification_text,
         commit_info=commit_info,
         completion_section=completion_section,
+        investigation_section=_build_investigation_section(step),
     )
 
     # Surface the knowledge-artifact guard results (charter auto-update /
@@ -160,6 +191,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
             summary_text = _create_basic_summary_text(
                 flow, changes_made, test_results, task_description,
                 incomplete_tasks, completion_status, verified,
+                root_cause_report=step.inputs.get("root_cause_report"),
             )
 
         # Store output
@@ -178,6 +210,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         summary_text = _create_basic_summary_text(
             flow, changes_made, test_results, task_description,
             incomplete_tasks, completion_status, verified,
+            root_cause_report=step.inputs.get("root_cause_report"),
         )
         step.outputs["summary"] = summary_text
         return StepStatus.COMPLETED
@@ -467,6 +500,37 @@ def _build_completion_section(
     return "\n".join(lines)
 
 
+def _format_root_cause_report(report: Any) -> list[str]:
+    """Render an investigation report as Markdown lines for the fallback summary.
+
+    Returns an empty list when no usable report exists, so a flow that never
+    investigated produces the same fallback text as before.
+    """
+    if not isinstance(report, dict):
+        return []
+    root_cause = str(report.get("root_cause") or "").strip()
+    if not root_cause:
+        return []
+
+    lines = ["### Root-Cause Investigation", root_cause, ""]
+    evidence = report.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        lines.append("**Evidence:**")
+        lines.extend(f"- {e}" for e in evidence)
+        lines.append("")
+    files = report.get("files_involved")
+    if isinstance(files, list) and files:
+        lines.append(
+            "**Files involved:** " + ", ".join(str(f) for f in files)
+        )
+    direction = str(report.get("suggested_fix_direction") or "").strip()
+    if direction:
+        lines.append(f"**Suggested fix direction:** {direction}")
+    lines.append(f"**Confidence:** {report.get('confidence') or 'unknown'}")
+    lines.append("")
+    return lines
+
+
 def _create_basic_summary_text(
     flow: FlowInstance,
     changes_made: dict[str, Any],
@@ -475,6 +539,7 @@ def _create_basic_summary_text(
     incomplete_tasks: list | None = None,
     completion_status: str = "complete",
     verified: bool | None = None,
+    root_cause_report: Any = None,
 ) -> str:
     """Create a basic summary if LLM generation fails.
 
@@ -488,6 +553,11 @@ def _create_basic_summary_text(
         verified: Authoritative verification verdict. When ``False`` the
             fallback summary must not claim the work is completed/verified
             (the completion gate, fallback half).
+        root_cause_report: The INVESTIGATE step's report, when one ran. Carried
+            into the fallback for the same reason the LLM prompt carries it: for
+            a survey flow it is the entire deliverable, and an LLM failure must
+            not be the difference between the user getting their answer and the
+            report file saying the session changed nothing.
 
     Returns:
         Basic summary text in Markdown format
@@ -519,6 +589,10 @@ def _create_basic_summary_text(
             "This session did NOT pass verification — the work is unverified and "
             "not complete.\n",
         ])
+    investigation_lines = _format_root_cause_report(root_cause_report)
+    if investigation_lines:
+        lines.extend(investigation_lines)
+
     lines.extend([
         f"### Key Changes",
         f"- Modified {len(file_list)} files\n",

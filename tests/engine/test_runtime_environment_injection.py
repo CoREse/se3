@@ -201,6 +201,9 @@ def test_defaults_cover_expected_steps():
         "plan",
         "plan_tasks",
         "implement",
+        # investigate hunts an unknown root cause, so prior-session history and
+        # issue context are exactly what it needs to consult.
+        "investigate",
         "verify_spec",
         "update_spec",
         "self_check",

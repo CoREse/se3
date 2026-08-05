@@ -2,7 +2,7 @@
 
 Unified planning step that replaces the separate propose, design, and plan_tasks steps.
 Produces a complete plan document with proposal, design, and task groups in a single LLM call.
-Adapts prompt depth based on task_type (feature/bugfix/directive).
+Adapts prompt depth based on task_type (feature/bugfix/small).
 """
 
 from __future__ import annotations
@@ -215,7 +215,7 @@ Respond in JSON format:
 ```
 """
 
-# Shallow depth output schema for directive/small
+# Shallow depth output schema for small (and any other shallow-depth type)
 SHALLOW_JSON_SCHEMA = """\
 Respond in JSON format:
 ```json
@@ -293,6 +293,87 @@ the plan and explain in the proposal summary that the version bump will be
 handled automatically by the engine.
 """
 
+# --- Root-cause investigation report (independent context source) ---
+#
+# INVARIANT: the report is rendered as its OWN prompt section and is never
+# folded into the task description. It is investigated context, not user
+# intent — merging it into the intent chain would put speculative text into
+# self_check's verbatim-quote source pool. The wording below tells the model
+# the same thing, so it cannot cite the report as a user requirement either.
+ROOT_CAUSE_SECTION = """## Root-Cause Investigation Report
+{exhausted_note}A dedicated investigation step ran before this one and reported the following. \
+This is investigated context, NOT part of the user's request: do not treat it as a requirement \
+and do not quote it as evidence of what the user asked for. Use it to aim the work.
+
+**Root cause:** {root_cause}
+
+**Evidence:**
+{evidence}
+
+**Files involved:** {files_involved}
+
+**Suggested fix direction:** {suggested_fix_direction}
+
+**Confidence:** {confidence}
+"""
+
+ROOT_CAUSE_EXHAUSTED_NOTE = (
+    "> The investigation loop used up its round budget WITHOUT reaching a "
+    "conclusive cause. What follows is the best current hypothesis at LOW "
+    "confidence — verify it before you build on it, and be prepared for it to "
+    "be wrong.\n\n"
+)
+
+
+def render_root_cause_section(report: Any, exhausted: bool = False) -> str:
+    """Render an investigation report as a standalone prompt section.
+
+    Args:
+        report: The ``root_cause_report`` dict from the INVESTIGATE step, or
+            anything falsy / non-dict when no investigation ran.
+        exhausted: True when the round budget ran out without a conclusive
+            verdict, which prefixes an explicit low-confidence warning.
+
+    Returns:
+        ``""`` when there is no usable report — so a flow that never
+        investigated produces a prompt byte-identical to one built before this
+        section existed — otherwise the section padded with a leading and
+        trailing newline, ready to drop into a ``{root_cause_section}`` slot.
+    """
+    if not isinstance(report, dict):
+        return ""
+    root_cause = str(report.get("root_cause") or "").strip()
+    if not root_cause:
+        # No stated cause means nothing worth a section; an empty shell would
+        # only invite the model to invent content for it.
+        return ""
+
+    evidence = report.get("evidence")
+    if isinstance(evidence, list) and evidence:
+        evidence_text = "\n".join(f"- {e}" for e in evidence)
+    else:
+        evidence_text = "- (none recorded)"
+
+    files = report.get("files_involved")
+    if isinstance(files, list) and files:
+        files_text = ", ".join(str(f) for f in files)
+    else:
+        files_text = "(not specified)"
+
+    body = ROOT_CAUSE_SECTION.format(
+        exhausted_note=ROOT_CAUSE_EXHAUSTED_NOTE if exhausted else "",
+        root_cause=root_cause,
+        evidence=evidence_text,
+        files_involved=files_text,
+        suggested_fix_direction=(
+            str(report.get("suggested_fix_direction") or "").strip()
+            or "(not specified)"
+        ),
+        confidence=str(report.get("confidence") or "unknown"),
+    )
+    return "\n" + body
+
+
 def _get_prompt_depth(task_type: str) -> str:
     """Determine prompt depth based on task_type.
 
@@ -302,7 +383,7 @@ def _get_prompt_depth(task_type: str) -> str:
         return "full"
     elif task_type in ("bugfix", "fix"):
         return "medium"
-    else:  # directive, small, etc.
+    else:  # small, review, etc.
         return "shallow"
 
 
@@ -313,6 +394,7 @@ def _build_prompt(
     project_summary: str,
     revision_section: str,
     depth: str,
+    root_cause_section: str = "",
 ) -> str:
     """Build the plan prompt adapted by depth."""
     parts = []
@@ -325,6 +407,12 @@ def _build_prompt(
         project_summary=project_summary,
         revision_section=revision_section,
     ))
+
+    # Between the header and the output schema, and only when an investigation
+    # actually produced a report — appending an empty part would shift the
+    # joined prompt by one newline for every non-investigated flow.
+    if root_cause_section:
+        parts.append(root_cause_section.strip("\n"))
 
     if depth == "full":
         parts.append(PROPOSAL_SECTION)
@@ -392,6 +480,10 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         project_summary=project_summary,
         revision_section=revision_section,
         depth=depth,
+        root_cause_section=render_root_cause_section(
+            step.inputs.get("root_cause_report"),
+            exhausted=bool(step.inputs.get("investigation_exhausted")),
+        ),
     )
 
     # Append language instruction if configured

@@ -459,13 +459,17 @@
         </p>
 
         <label for="nt-type" data-i18n="newTask.type">Task type</label>
+        <!-- WHY the taskType.* keys are safe to add/remove: they label only the
+             options a user can pick for a NEW run. No history/flow view renders
+             a persisted task_type through these keys, so retiring a type here
+             cannot blank out an old flow that still carries it on disk. -->
         <select id="nt-type">
           <option value="pending" data-i18n="newTask.typeAuto">auto</option>
           <option value="feature" data-i18n="taskType.feature">feature</option>
           <option value="bugfix" data-i18n="taskType.bugfix">bugfix</option>
           <option value="review" data-i18n="taskType.review">review</option>
           <option value="small" data-i18n="taskType.small">small</option>
-          <option value="directive" data-i18n="taskType.directive">directive</option>
+          <option value="survey" data-i18n="taskType.survey">survey</option>
         </select>
 
         <label for="nt-task" data-i18n="newTask.task">Task description</label>

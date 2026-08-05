@@ -153,6 +153,29 @@ def _latest_adjudicated_output(
     return None
 
 
+def _latest_investigation_report(flow: "FlowInstance") -> Optional[Dict[str, Any]]:
+    """Newest COMPLETED INVESTIGATE step's ``root_cause_report``, or ``None``.
+
+    Reverse walk so the last round's verdict wins over earlier, superseded
+    hypotheses. Used by the fix-loop path, which reuses the existing IMPLEMENT
+    step object rather than building fresh inputs — without this the fix
+    iterations would be the only implement calls that never see the root cause.
+    """
+    if not (flow.state and flow.state.step_history):
+        return None
+    for sid in reversed(flow.state.step_history):
+        s = flow.state.steps.get(sid)
+        if (
+            s
+            and s.step_type == StepType.INVESTIGATE
+            and s.status == StepStatus.COMPLETED
+        ):
+            report = s.outputs.get("root_cause_report")
+            if isinstance(report, dict) and report:
+                return report
+    return None
+
+
 def _effective_task_description_base(
     flow: "FlowInstance", exclude_step_id: Optional[str] = None
 ) -> str:
@@ -855,6 +878,13 @@ class StateMachine:
         if step.step_type == StepType.IMPLEMENT:
             self._ensure_baseline_ready(flow)
 
+        # INVESTIGATE writes probes into the very tree the background baseline
+        # suite is running against, so the two must never overlap. Settled here
+        # — before the workspace snapshot below — so any files the suite leaves
+        # behind are already part of the investigation's "before" picture.
+        if step.step_type == StepType.INVESTIGATE:
+            self._settle_baseline_before_investigation(flow)
+
         handler = self._handlers.get(step.step_type)
 
         if not handler:
@@ -878,6 +908,19 @@ class StateMachine:
         # have its re-produced outputs silently lost — the header would re-emit
         # the stale cold_ref on every save (issue #244 B3-i).
         step.cold_loaded = True
+
+        # Freeze the investigation's net-zero-diff baseline here rather than
+        # inside the handler, because the save_flow below is the last persistence
+        # point before the (long) investigation call: a baseline first written by
+        # the handler would live only in memory for that whole call, so a hard
+        # kill mid-call (SIGKILL/OOM) would lose it and the `--resume`d round
+        # would re-baseline onto its own unreverted experimental changes,
+        # silently passing the guard. Placed after ``cold_loaded`` is flipped so
+        # a later hydration cannot overwrite the freshly written inputs.
+        # Idempotent, so a retry/resume keeps the original baseline.
+        if step.step_type == StepType.INVESTIGATE:
+            self._ensure_investigation_baseline(flow, step)
+
         flow.status = FlowStatus.RUNNING
         self.persistence.save_flow(flow)
 
@@ -1113,6 +1156,9 @@ class StateMachine:
         # Same per-transition memoization for the self_check chain resolution
         # (needed to derive the effective pass count from a nested chain).
         self._self_check_resolution_cache = None
+        # ...and for the investigation round cap, which the INVESTIGATE loop
+        # branch below reads (possibly twice, via _build_step_inputs).
+        self._investigation_config_cache = None
 
         # Resume-with-invalid-yaml safety net: when this StateMachine instance
         # has no ``_workflow_config_last_good`` (e.g. first transition after
@@ -1312,6 +1358,62 @@ class StateMachine:
                 repeat_step = self._create_self_check_repeat_step(flow)
                 return repeat_step
             # else: all N passes completed — fall through to normal progression
+
+        # Handle the bounded investigation loop: an INVESTIGATE round that did
+        # not reach a conclusive root cause schedules another round, up to
+        # ``investigation.max_iterations`` (0 = unlimited).
+        #
+        # INVARIANT: this loop NEVER uses REVISION_NEEDED. The REVISION_NEEDED
+        # branch above is hardcoded to (TEST, SELF_CHECK, INVARIANT_CHECK,
+        # VERIFY_SPEC); an INVESTIGATE returning REVISION_NEEDED would skip it,
+        # fall through to the plain "advance to the next selected step" logic
+        # below, and the loop would silently never happen — no error, no round 2.
+        # The handler therefore always returns COMPLETED and the router decides
+        # here, exactly as the self_check N-pass does one branch up.
+        #
+        # The ``conclusive`` KEY (not its value) is what gates the branch: only
+        # ``investigate_handler`` writes it, and only on a round that actually
+        # produced a report. run.py's failure gate implements "Skip" by
+        # force-setting the FAILED step to COMPLETED and calling this method, so
+        # a skipped round arrives here indistinguishable from a real one except
+        # for the missing key. Keying off ``outputs.get("conclusive")`` alone
+        # would read the absent verdict as "not conclusive" and schedule another
+        # round — Skip would loop instead of skipping, and each new round is a
+        # fresh Step whose baseline is re-taken on the still-unreverted tree,
+        # reopening exactly the re-baseline hole the persisted baseline closes.
+        if (
+            current_step.step_type == StepType.INVESTIGATE
+            and current_step.status == StepStatus.COMPLETED
+            and "conclusive" in current_step.outputs
+        ):
+            conclusive = bool(current_step.outputs.get("conclusive"))
+            max_rounds = self._get_investigation_max_iterations()
+            rounds_done = self._count_consecutive_investigate_completed(flow)
+            is_unlimited = max_rounds <= 0
+
+            if not conclusive and (is_unlimited or rounds_done < max_rounds):
+                logger.info(
+                    "Investigation round %d/%s was not conclusive; scheduling "
+                    "round %d",
+                    rounds_done,
+                    "unlimited" if is_unlimited else str(max_rounds),
+                    rounds_done + 1,
+                )
+                return self._create_investigate_repeat_step(flow)
+
+            if not conclusive:
+                # Budget exhausted without a conclusive cause. This is NOT a
+                # flow failure: the best current hypothesis is still worth
+                # planning against — it just has to be labelled low-confidence
+                # so PLAN/IMPLEMENT treat it as a lead, not a finding.
+                flow.state.context["investigation_exhausted"] = True
+                logger.warning(
+                    "Investigation exhausted %d round(s) without a conclusive "
+                    "root cause; continuing with the best current hypothesis "
+                    "(marked low-confidence downstream)",
+                    rounds_done,
+                )
+            # Conclusive, or exhausted — fall through to normal progression.
 
         # Find next step in selected sequence
         selected = flow.state.selected_steps
@@ -1536,6 +1638,20 @@ class StateMachine:
         adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
         if isinstance(adjudicated_plan, list) and adjudicated_plan:
             implement_step.inputs["task_groups"] = adjudicated_plan
+        # Same reasoning for the root-cause report: this path REUSES the
+        # implement step instead of rebuilding its inputs, so without an
+        # explicit copy here the fix iterations would be the only implement
+        # calls blind to the investigation that motivated the whole fix.
+        # It stays a dedicated key — the intent-chain fields above
+        # (``task_description``, ``task_groups``) are untouched by it, keeping
+        # self_check's verbatim-quote source pool free of report text.
+        investigation_report = _latest_investigation_report(flow)
+        if investigation_report:
+            implement_step.inputs["root_cause_report"] = copy.deepcopy(
+                investigation_report
+            )
+            if flow.state.context.get("investigation_exhausted"):
+                implement_step.inputs["investigation_exhausted"] = True
         implement_step.inputs["fix_instructions"] = fix_instructions
         implement_step.inputs["fix_context"] = fix_context
         implement_step.inputs["is_fix_iteration"] = True
@@ -2222,6 +2338,104 @@ class StateMachine:
         self._workflow_config_last_good = cfg
         return cfg
 
+    def _get_investigation_max_iterations(self) -> int:
+        """Return the configured investigation round cap (0 = unlimited).
+
+        Memoized per transition exactly like ``_get_workflow_config`` (the cache
+        is cleared at the top of ``transition_to_next``) so a single transition
+        parses tianluo.yaml at most once for this value.
+
+        WHY a separate counter from ``max_fix_iterations``: an investigation
+        round is an *exploration* budget, not a repair attempt. Sharing the fix
+        counter would let a long repair history starve investigation — and
+        would drag the investigation loop into the fix loop's REVISION_NEEDED
+        routing, which it deliberately does not use (see
+        ``_create_investigate_repeat_step``).
+
+        Loader errors degrade to the default rather than crashing a transition;
+        unlike the fix loop there is no fail-fast requirement here, because an
+        unusable investigation cap cannot corrupt state — it only changes how
+        many exploratory rounds run.
+        """
+        cached = getattr(self, "_investigation_config_cache", None)
+        if cached is None:
+            from ..config import InvestigationConfig
+
+            try:
+                cached = InvestigationConfig.load(self.project_root)
+            except (ConfigError, IOError, OSError, ImportError) as e:
+                logger.warning(
+                    "Failed to load investigation config (%s); falling back to "
+                    "defaults", e,
+                )
+                cached = InvestigationConfig()
+            self._investigation_config_cache = cached
+        return cached.max_iterations
+
+    def _count_consecutive_investigate_completed(self, flow: FlowInstance) -> int:
+        """Count consecutive COMPLETED investigate steps at the tail of step_history.
+
+        Mirrors ``_count_consecutive_self_check_completed``: stops at the first
+        step that is neither INVESTIGATE nor a COMPLETED CONFIRM, and at any
+        INVESTIGATE whose status is not COMPLETED. CONFIRM is skipped because a
+        project may gate ``investigate`` through ``confirmation.steps`` — the
+        inserted CONFIRM must not break the round streak.
+
+        Args:
+            flow: Current flow instance.
+
+        Returns:
+            Number of consecutive COMPLETED INVESTIGATE steps at the tail
+            (0 if none).
+        """
+        count = 0
+        for step_id in reversed(flow.state.step_history):
+            step = flow.state.steps.get(step_id)
+            if not step:
+                break
+            if step.step_type == StepType.CONFIRM:
+                if step.status == StepStatus.COMPLETED:
+                    continue
+                break
+            if step.step_type != StepType.INVESTIGATE:
+                break
+            if step.status != StepStatus.COMPLETED:
+                break
+            count += 1
+        return count
+
+    def _create_investigate_repeat_step(self, flow: FlowInstance) -> Step:
+        """Create the next round of the bounded investigation loop.
+
+        INVARIANT: this loop must NEVER be expressed through REVISION_NEEDED.
+        ``transition_to_next`` only honours REVISION_NEEDED for TEST /
+        SELF_CHECK / INVARIANT_CHECK / VERIFY_SPEC; any other step type
+        returning it falls straight through to the ordinary "advance to the
+        next selected step" logic, so the loop would silently never run and
+        nothing would report the failure. The repeat-step form (COMPLETED +
+        a new Step at the same sequence slot) is the same one self_check's
+        N-pass uses and is the only form the router actually implements.
+
+        Args:
+            flow: Current flow instance.
+
+        Returns:
+            A new PENDING INVESTIGATE Step, already added to flow.state.
+        """
+        inputs = self._build_step_inputs(flow, StepType.INVESTIGATE)
+
+        step = Step(
+            step_type=StepType.INVESTIGATE,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        # current_step_index does NOT advance — the flow is still sitting on the
+        # INVESTIGATE slot of selected_steps; only the round number moves.
+        self.persistence.save_flow(flow)
+        return step
+
     def _get_self_check_resolution(self):
         """Load and cache the resolved ``llm_caller.steps.self_check`` config.
 
@@ -2373,6 +2587,12 @@ class StateMachine:
             "flow_id": flow.flow_id,
         }
 
+        # Root-cause reports of the completed investigation rounds, oldest first.
+        # Held in a local (not written into ``inputs`` inside the loop) so the
+        # report reaches ONLY the step types that are supposed to see it — see
+        # the injection block near the end of this method.
+        investigation_reports: List[Dict[str, Any]] = []
+
         # Gather outputs from previous steps
         for step_id in flow.state.step_history:
             step = flow.state.steps.get(step_id)
@@ -2392,6 +2612,14 @@ class StateMachine:
                 # Deprecated: PROJECT_SUMMARY merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
                     inputs["project_summary"] = step.outputs.get("project_summary")
+                elif step.step_type == StepType.INVESTIGATE:
+                    # COMPLETED only: a PARTIAL round carries no verdict, and a
+                    # half-formed hypothesis must not be handed downstream as
+                    # "the" root cause.
+                    if step.status == StepStatus.COMPLETED:
+                        report = step.outputs.get("root_cause_report")
+                        if isinstance(report, dict) and report:
+                            investigation_reports.append(report)
                 elif step.step_type == StepType.PLAN:
                     plan = step.outputs.get("plan", {})
                     inputs["proposal"] = plan.get("proposal", {})
@@ -2778,6 +3006,45 @@ class StateMachine:
                         )
                         break
 
+        # --- Root-cause investigation context -------------------------------
+        # INVARIANT: the investigation report travels ONLY through these
+        # dedicated inputs keys. It must never be merged into
+        # ``task_description`` / ``task_description_base`` / any adjudicated
+        # description — self_check builds its verbatim-quote source pool from
+        # that intent chain (``self_check._build_source_pool``), so report text
+        # in the chain would let an LLM cite its own speculative hypothesis as
+        # "the user asked for this" and slip an ungrounded issue past evidence
+        # validation. The report is a lead for the planner, not a statement of
+        # intent.
+        # SUMMARIZE is in this set for a different reason than PLAN/IMPLEMENT:
+        # it does not aim work with the report, it *is* where the report reaches
+        # the user. The survey sequence is ANALYZE -> INVESTIGATE -> SUMMARIZE,
+        # so without this the only artifact a survey flow writes to disk would
+        # describe a session that changed nothing and ran no tests, while the
+        # answer the user asked for stayed buried in engine.json's step outputs.
+        if step_type in (
+            StepType.PLAN, StepType.IMPLEMENT, StepType.SUMMARIZE,
+        ) and investigation_reports:
+            inputs["root_cause_report"] = copy.deepcopy(investigation_reports[-1])
+            inputs["investigation_history"] = copy.deepcopy(investigation_reports)
+            # Rounds ran out before a conclusive cause: the report is the best
+            # available hypothesis and downstream prompts must say so.
+            if flow.state.context.get("investigation_exhausted"):
+                inputs["investigation_exhausted"] = True
+
+        if step_type == StepType.INVESTIGATE:
+            # Round N sees rounds 1..N-1 so it can push further instead of
+            # repeating experiments that already came back inconclusive.
+            inputs["investigation_iteration"] = (
+                self._count_consecutive_investigate_completed(flow) + 1
+            )
+            inputs["investigation_max_iterations"] = (
+                self._get_investigation_max_iterations()
+            )
+            inputs["previous_investigation_reports"] = copy.deepcopy(
+                investigation_reports
+            )
+
         return inputs
 
     def _write_flow_meta(self, flow: FlowInstance) -> None:
@@ -2858,6 +3125,13 @@ class StateMachine:
         """
         # Fail-fast: validate workflow configuration on every start/resume
         WorkflowConfig.load(self.project_root)
+        # Same for the investigation cap. The state machine is its only reader,
+        # and it deliberately degrades to defaults mid-transition (an unusable
+        # cap must not abort a running flow), so without this check a typo like
+        # `max_iterations: -1` would never be reported to anyone.
+        from ..config import InvestigationConfig
+
+        InvestigationConfig.load(self.project_root)
 
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
@@ -2968,6 +3242,87 @@ class StateMachine:
             logger.info("Baseline capture launched in background (key=%s)", key)
         except Exception as e:  # noqa: BLE001 — never crash the flow on capture setup
             logger.warning("Failed to start baseline capture: %s", e)
+
+    def _settle_baseline_before_investigation(self, flow: FlowInstance) -> None:
+        """Resolve an in-flight baseline suite BEFORE an INVESTIGATE step runs.
+
+        INVARIANT: no step that may write the working tree runs while the
+        background baseline suite launched by :meth:`_start_baseline_capture`
+        is still in flight.
+
+        WHY: that capture overlaps the ``analyze → plan → confirm`` window, and
+        its correctness rests on every step in that window being read-only.
+        INVESTIGATE breaks that premise — it is explicitly allowed to add
+        temporary logging, probe patches and scratch scripts to the live tree
+        (net-zero diff is enforced only at the step's *end*), while the
+        background pytest runs with ``cwd=project_root`` against that same
+        tree. Left unserialized, the suite would import the probes and record
+        their fallout as "pre-existing" failures — poisoning both
+        ``state.baseline_failures`` and the on-disk cache entry keyed on the
+        *pre*-investigation clean tree. Downstream, TEST subtracts that set as
+        inherited, so a real regression in exactly those tests is waved through
+        (and symmetrically, a probe that masks a pre-existing failure gets it
+        blamed on IMPLEMENT).
+
+        Which way to serialize depends on whether this flow ever consumes a
+        baseline, i.e. whether a TEST step remains in its sequence:
+
+        - **TEST ahead** (a bugfix with an inserted investigation): await the
+          run through the ordinary :meth:`_ensure_baseline_ready` path. It was
+          launched against the clean flow-start tree and finishes before any
+          probe lands, so the measurement stays valid and cacheable — and the
+          pre-IMPLEMENT wait later becomes free.
+        - **No TEST** (survey: ANALYZE → INVESTIGATE → SUMMARIZE): the flow
+          never reads a baseline, so blocking on a multi-minute suite would be
+          pure latency. Kill and discard it — nothing is measured, so nothing
+          poisoned can reach the cache either.
+
+        No-op when nothing is in flight (cache hit, resumed flow with a
+        measured baseline, or an already-reaped handle), so a repeat
+        investigation round costs nothing.
+        """
+        if self._baseline_capture is None:
+            return
+
+        needs_baseline = StepType.TEST in (flow.state.selected_steps or [])
+        if needs_baseline:
+            logger.info(
+                "Awaiting the background baseline suite before investigate: the "
+                "investigation may write probes into the tree it is running against"
+            )
+            self._ensure_baseline_ready(flow)
+            return
+
+        logger.info(
+            "Discarding the background baseline suite before investigate: this "
+            "flow has no TEST step, so no baseline is ever consumed"
+        )
+        self.cleanup_baseline_capture()
+
+    def _ensure_investigation_baseline(
+        self, flow: FlowInstance, step: Step
+    ) -> None:
+        """Freeze an INVESTIGATE step's net-zero-diff baseline into its inputs.
+
+        Runs just before the step is marked RUNNING and persisted, so the
+        baseline reaches disk before the investigation call — the only window
+        in the step long enough for a hard kill to matter. Idempotent, so a
+        Retry or a ``--resume`` re-entry keeps the first attempt's baseline and
+        the leftovers it was taken to expose stay visible.
+
+        Never fatal: an unavailable snapshot degrades the guard to *undecidable*
+        downstream, which must not stop the investigation from running.
+        """
+        try:
+            from .steps._project_root import resolve_flow_project_root
+            from .steps.investigate import ensure_workspace_baseline
+
+            ensure_workspace_baseline(step, resolve_flow_project_root(flow))
+        except Exception:
+            logger.debug(
+                "Failed to capture the investigation workspace baseline",
+                exc_info=True,
+            )
 
     def _ensure_baseline_ready(self, flow: FlowInstance) -> None:
         """Block until the pre-implement baseline is measured, before IMPLEMENT.

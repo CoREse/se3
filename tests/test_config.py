@@ -17,12 +17,15 @@ from tianluo.config import (
     ConfigError,
     DEFAULT_ADJUDICATE_PERIOD,
     DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
+    DEFAULT_INVESTIGATION_MAX_ITERATIONS,
     DEFAULT_MAX_FIX_ITERATIONS,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
     DEFAULT_SELF_CHECK_PASSES_REQUIRED,
+    InvestigationConfig,
     TestConfig,
     WorkflowConfig,
     get_max_fix_iterations,
+    load_investigation_config,
     load_workflow_config,
 )
 
@@ -474,3 +477,91 @@ workflow:
         se3_yaml.write_text(yaml_content, encoding="utf-8")
 
         assert get_max_fix_iterations(tmp_path) == 12
+
+
+# ---------------------------------------------------------------------------
+# InvestigationConfig — the investigate step's own bounded loop
+# ---------------------------------------------------------------------------
+
+class TestInvestigationConfig:
+    def test_default_is_three_rounds(self):
+        assert InvestigationConfig().max_iterations == 3
+        assert DEFAULT_INVESTIGATION_MAX_ITERATIONS == 3
+
+    def test_missing_section_returns_default(self):
+        cfg = InvestigationConfig.from_dict({"workflow": {"max_fix_iterations": 5}})
+        assert cfg.max_iterations == DEFAULT_INVESTIGATION_MAX_ITERATIONS
+
+    def test_empty_dict_returns_default(self):
+        assert InvestigationConfig.from_dict({}).max_iterations == 3
+        assert InvestigationConfig.from_dict(None).max_iterations == 3
+
+    def test_custom_value(self):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": 7}})
+        assert cfg.max_iterations == 7
+
+    def test_zero_is_the_unlimited_sentinel(self):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": 0}})
+        assert cfg.max_iterations == 0
+
+    def test_null_normalizes_to_the_unlimited_sentinel(self):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": None}})
+        assert cfg.max_iterations == 0
+
+    def test_negative_raises(self):
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            InvestigationConfig.from_dict({"investigation": {"max_iterations": -1}})
+
+    def test_float_warns_and_falls_back(self, caplog):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": 3.0}})
+        assert cfg.max_iterations == DEFAULT_INVESTIGATION_MAX_ITERATIONS
+        assert "not an integer" in caplog.text or "not a valid integer" in caplog.text
+
+    def test_bool_warns_and_falls_back(self, caplog):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": True}})
+        assert cfg.max_iterations == DEFAULT_INVESTIGATION_MAX_ITERATIONS
+        assert "not a valid integer" in caplog.text
+
+    def test_non_numeric_string_falls_back(self):
+        cfg = InvestigationConfig.from_dict(
+            {"investigation": {"max_iterations": "not_a_number"}}
+        )
+        assert cfg.max_iterations == DEFAULT_INVESTIGATION_MAX_ITERATIONS
+
+    def test_string_integer_is_coerced(self):
+        cfg = InvestigationConfig.from_dict({"investigation": {"max_iterations": "5"}})
+        assert cfg.max_iterations == 5
+
+    def test_non_dict_section_returns_default(self):
+        cfg = InvestigationConfig.from_dict({"investigation": "nope"})
+        assert cfg.max_iterations == DEFAULT_INVESTIGATION_MAX_ITERATIONS
+
+
+class TestLoadInvestigationConfig:
+    def test_no_yaml_returns_defaults(self, tmp_path: Path):
+        assert load_investigation_config(tmp_path).max_iterations == 3
+
+    def test_loads_from_project_yaml(self, tmp_path: Path):
+        (tmp_path / "tianluo.yaml").write_text(
+            "investigation:\n  max_iterations: 5\n", encoding="utf-8"
+        )
+        assert load_investigation_config(tmp_path).max_iterations == 5
+
+    def test_zero_sentinel_from_yaml(self, tmp_path: Path):
+        (tmp_path / "tianluo.yaml").write_text(
+            "investigation:\n  max_iterations: 0\n", encoding="utf-8"
+        )
+        assert load_investigation_config(tmp_path).max_iterations == 0
+
+    def test_none_project_root_uses_cwd(self, tmp_path: Path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert load_investigation_config().max_iterations == 3
+
+    def test_example_yaml_documents_the_section(self):
+        text = (
+            Path(__file__).parent.parent / "tianluo.example.yaml"
+        ).read_text(encoding="utf-8")
+        assert "investigation:" in text
+        assert "max_iterations" in text
+        # The 0 sentinel must be documented, not just the default value.
+        assert "无上限" in text

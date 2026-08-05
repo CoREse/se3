@@ -9660,6 +9660,7 @@ function tagStepType(bubble, stepType) {
 const STEP_HEADER_TITLES = {
   discovery: "DISCOVERY",
   analyze: "ANALYZE",
+  investigate: "INVESTIGATE",
   project_summary: "PROJECT SUMMARY",
   propose: "PROPOSE",
   design: "DESIGN",
@@ -11974,6 +11975,8 @@ const STEP_RESULT_FIELDS = {
   version_analyze: ["current_version", "suggested_version", "bump_type",
     "confidence", "reasoning"],
   summarize: ["summary"],
+  investigate: ["root_cause", "evidence", "files_involved",
+    "suggested_fix_direction", "confidence", "conclusive"],
   discovery: ["content", "refined_description", "questions"],
   charter_freshness: ["charter_update_needed", "charter_auto_updated",
     "charter_diff", "suggested_update", "touched_classes"],
@@ -13452,6 +13455,7 @@ function renderUserMarkerRecord(norm, split) {
 const STEP_REPORT_TITLES = {
   discovery: "Discovery",
   analyze: "Analysis",
+  investigate: "Root-Cause Investigation",
   project_summary: "Project Summary",
   propose: "Proposal",
   design: "Design",

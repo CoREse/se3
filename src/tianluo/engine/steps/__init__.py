@@ -15,6 +15,7 @@ from .confirm import confirm_handler
 from .discovery import discovery_handler
 from .implement import implement_handler
 from .invariant_check import invariant_check_handler
+from .investigate import investigate_handler
 from .merge_integrate import merge_integrate_handler
 from .plan import plan_handler
 from .plan_tasks import plan_tasks_handler
@@ -70,6 +71,7 @@ def project_summary_stub_handler(step, flow):
 STEP_HANDLERS = {
     StepType.DISCOVERY: discovery_handler,
     StepType.ANALYZE: analyze_handler,
+    StepType.INVESTIGATE: investigate_handler,
     StepType.PROJECT_SUMMARY: project_summary_stub_handler,  # Deprecated: merged into ANALYZE
     StepType.PLAN: plan_handler,
     StepType.PROPOSE: propose_stub_handler,  # Backward compat for persisted flows
@@ -93,6 +95,7 @@ __all__ = [
     "discovery_handler",
     "adjudicate_handler",
     "analyze_handler",
+    "investigate_handler",
     "project_summary_handler",
     "project_summary_stub_handler",
     "plan_handler",

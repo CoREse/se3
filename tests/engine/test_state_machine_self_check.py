@@ -23,6 +23,12 @@ from tianluo.engine.models import (
 from tianluo.engine.state_machine import StateMachine
 
 
+# Kept identical to tests/engine/test_step_sequence.py::ALL_TASK_TYPES — the
+# consistency guard at the bottom of TestStepSequences fails if a type is added
+# to the sequence table without being classified here as SELF_CHECK-carrying.
+ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "survey", "discovery"]
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -572,13 +578,28 @@ class TestStepSequences:
         seq = get_default_step_sequence("small")
         assert StepType.SELF_CHECK not in seq
 
-    def test_directive_does_not_include_self_check(self):
-        seq = get_default_step_sequence("directive")
-        assert StepType.SELF_CHECK not in seq
-
     def test_review_does_not_include_self_check(self):
         seq = get_default_step_sequence("review")
         assert StepType.SELF_CHECK not in seq
+
+    def test_survey_does_not_include_self_check(self):
+        """survey never writes code, so there is nothing for SELF_CHECK to
+        verify against the intent chain."""
+        seq = get_default_step_sequence("survey")
+        assert seq == [StepType.ANALYZE, StepType.INVESTIGATE, StepType.SUMMARIZE]
+        assert StepType.SELF_CHECK not in seq
+
+    def test_every_task_type_sequence_is_covered(self):
+        """Guard against a new task type slipping past this class: every type in
+        the sequence table must be asserted on above, either as a SELF_CHECK
+        carrier or as an explicit exclusion."""
+        with_self_check = {"feature", "bugfix", "discovery"}
+        without_self_check = {"small", "review", "survey"}
+        for task_type in with_self_check:
+            assert StepType.SELF_CHECK in get_default_step_sequence(task_type)
+        for task_type in without_self_check:
+            assert StepType.SELF_CHECK not in get_default_step_sequence(task_type)
+        assert with_self_check | without_self_check == set(ALL_TASK_TYPES)
 
 
 # ---------------------------------------------------------------------------

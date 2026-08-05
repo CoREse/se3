@@ -529,7 +529,7 @@ check("index.html enum options are data-i18n tagged with untranslated values", (
   const cases = [
     ["issueType", ["bug", "feature", "enhancement", "idea", "task"]],
     ["issuePriority", ["critical", "high", "medium", "low"]],
-    ["taskType", ["feature", "bugfix", "review", "small", "directive"]],
+    ["taskType", ["feature", "bugfix", "review", "small", "survey"]],
   ];
   for (const [ns, values] of cases) {
     for (const v of values) {

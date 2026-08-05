@@ -1,7 +1,7 @@
 """Analyze step handler.
 
 Analyzes the task description to determine:
-- Task type (feature, bugfix, review, small, directive)
+- Task type (feature, bugfix, review, small, survey)
 - Scope of changes
 - Required steps for the workflow
 
@@ -20,9 +20,15 @@ import logging
 from pathlib import Path
 from typing import List
 
-from ..context import RUN_MODE_TYPES
+from ..context import RUN_MODE_TYPES, effective_task_type
 from ..llm_caller import LLMCaller
-from ..models import FlowInstance, Step, StepStatus, get_default_step_sequence
+from ..models import (
+    FlowInstance,
+    Step,
+    StepStatus,
+    StepType,
+    get_default_step_sequence,
+)
 from ._project_root import resolve_flow_project_root
 from ..project_context import ProjectContextCollector
 from ..prompt_markers import inject_boundary
@@ -43,7 +49,12 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
    - "bugfix": Fixing a bug or issue (corrects incorrect behavior)
    - "review": Code review, audit, or analysis without code changes
    - "small": Minor fix, typo, or simple change (trivial scope, e.g., README update, comment fix)
-   - "directive": Following specific instructions or requirements
+   - "survey": Pure investigation task whose deliverable is a conclusion or a
+     report, NOT a code change (e.g. "why is X slow?", "how does Y work?",
+     "compare the two approaches and recommend one"). Pick this when the user
+     asks to find out / explain / assess something and would be satisfied by an
+     answer alone. If they want the problem actually fixed afterwards, it is a
+     "bugfix" or "feature", not a survey.
 
    IMPORTANT: Do NOT use "discovery" - discovery mode is triggered separately via --discover flag.
 
@@ -52,6 +63,24 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 3. **complexity**: "simple", "medium", or "complex"
 
 4. **reasoning**: Brief explanation of your classification
+
+5. **root_cause_clear**: Boolean. Judge this on the described problem ITSELF,
+   INDEPENDENTLY of the task_type you picked above — your classification may be
+   overridden by an explicit user-supplied type, but this judgement is used as-is
+   either way, so it must never be a rubber stamp.
+   Whenever the description reports something misbehaving — a wrong or empty
+   result, a failure, a crash, a hang, an intermittent or "sometimes" symptom, a
+   regression — ask: is that behaviour's root cause ALREADY established? I.e. do
+   the task description and the known information together pin down both the
+   trigger path (what sequence of events produces the wrong behaviour) and the
+   responsible code location (which function/module is at fault)? Answer false
+   when the symptom is described but the mechanism behind it still has to be
+   found; a plausible guess is not an established root cause. Phrasing the task
+   as a desired change ("make it stop returning empty") does not make the
+   mechanism known.
+   Return true only when the mechanism really is pinned down, or when the
+   description reports no malfunction at all (purely new functionality, a
+   refactor, a rename, a docs change — nothing to root-cause).
 
 Before reading source, consult the code-index map (injected below) to locate the
 relevant modules / symbols; pull deeper detail on demand via
@@ -63,10 +92,11 @@ show); its syntax matches grep (regex ``pattern`` by default, ``-i``/``-F``/``-m
 
 Respond in JSON format:
 {{
-    "task_type": "feature|bugfix|review|small|directive",
+    "task_type": "feature|bugfix|review|small|survey",
     "scope": "description of affected areas",
     "complexity": "simple|medium|complex",
-    "reasoning": "explanation"
+    "reasoning": "explanation",
+    "root_cause_clear": true
 }}
 
 Task description:
@@ -163,10 +193,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Schema hint for TWO_PHASE mode: if Phase 1 produces markdown prose
         # (not JSON), Phase 2 extraction needs the expected structure.
         ANALYZE_SCHEMA_HINT = (
-            '{"task_type": "feature|bugfix|review|small|directive", '
+            '{"task_type": "feature|bugfix|review|small|survey", '
             '"scope": "description of affected areas", '
             '"complexity": "simple|medium|complex", '
-            '"reasoning": "explanation"}'
+            '"reasoning": "explanation", '
+            '"root_cause_clear": true}'
         )
 
         # --- LLM call: task classification ---
@@ -198,6 +229,12 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         analyzed_type = _sanitize_analyzed_type(result)
         flow.state.context["analyzed_type"] = analyzed_type
 
+        # Read straight off the raw LLM result, deliberately BEFORE/independent of
+        # the explicit --type override above: an explicit `--type bugfix` skips
+        # classification but must NOT skip the root-cause judgement, since that is
+        # what decides whether an INVESTIGATE round is needed.
+        root_cause_clear = _extract_root_cause_clear(result)
+
         # Update state with resolved task type
         flow.state.update_task_type(resolved_task_type)
         flow.task_type = resolved_task_type
@@ -214,18 +251,28 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
+        step.outputs["root_cause_clear"] = root_cause_clear
         step.outputs["project_summary"] = project_summary
         step.outputs["relevant_specs"] = []
         step.outputs["spec_content"] = ""
         step.outputs["selected_items"] = []
 
+        # A bugfix whose mechanism is still unknown gets an INVESTIGATE round
+        # before PLAN. The decision is keyed on the *effective* type rather than
+        # the sequence type, so a --discover run (flow.task_type stays
+        # 'discovery' to preserve its sequence) whose real inferred type is
+        # bugfix goes down the same path.
+        effective_type = effective_task_type(flow.state.context, resolved_task_type)
+        needs_investigation = effective_type == "bugfix" and not root_cause_clear
+
         # Update flow's selected steps based on task_type (fixed sequences)
         # Note: discover mode is handled separately via --discover flag, not by analyze
-        _update_flow_steps(flow, resolved_task_type)
+        _update_flow_steps(flow, resolved_task_type, needs_investigation=needs_investigation)
 
         logger.info(
             f"Analysis complete: type={resolved_task_type}, "
-            f"complexity={result.get('complexity')}"
+            f"complexity={result.get('complexity')}, "
+            f"root_cause_clear={root_cause_clear}"
         )
 
         return StepStatus.COMPLETED
@@ -246,9 +293,9 @@ def _extract_task_type(analyze_output: dict, flow: FlowInstance) -> str:
     Returns:
         The extracted task type string
     """
-    valid_types = ["feature", "bugfix", "review", "small", "directive"]
+    valid_types = ["feature", "bugfix", "review", "small", "survey"]
     task_type = analyze_output.get("task_type", "feature")
-    
+
     # Discovery mode can ONLY be triggered by the --discover flag, never by
     # analyze on its own. If analyze returns "discovery", preserve it ONLY when
     # --discover was actually set (explicit_type == "discovery"); otherwise
@@ -280,11 +327,52 @@ def _sanitize_analyzed_type(analyze_output: dict) -> str:
     returns anything invalid) degrades to 'feature' here, keeping the downstream
     helper's fallback logic trivial.
     """
-    valid_types = ("feature", "bugfix", "review", "small", "directive")
+    valid_types = ("feature", "bugfix", "review", "small", "survey")
     task_type = analyze_output.get("task_type", "feature")
     if task_type in RUN_MODE_TYPES or task_type not in valid_types:
         return "feature"
     return task_type
+
+
+def _extract_root_cause_clear(analyze_output: dict) -> bool:
+    """Extract the 'is the root cause already established' judgement.
+
+    WHY the default is False: a missing/garbled field means the judgement was
+    never actually made, and the two failure modes are not symmetric — an
+    unnecessary INVESTIGATE round costs one bounded, net-zero-diff step, while a
+    wrongly skipped one sends PLAN off to design a fix for a mechanism nobody has
+    identified. So absence degrades toward investigating.
+
+    Args:
+        analyze_output: The parsed JSON output from the analyze LLM call
+
+    Returns:
+        True only when the LLM affirmatively said the root cause is clear
+    """
+    if "root_cause_clear" not in analyze_output:
+        logger.warning(
+            "Analyze output missing 'root_cause_clear'; assuming the root cause "
+            "is NOT established (a bugfix will get an investigation round)"
+        )
+        return False
+
+    value = analyze_output.get("root_cause_clear")
+    if isinstance(value, bool):
+        return value
+    # Some agents emit the JSON booleans as strings; accept the unambiguous
+    # spellings rather than sending an otherwise-fine analysis to investigate.
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "yes"):
+            return True
+        if normalized in ("false", "no"):
+            return False
+
+    logger.warning(
+        f"Analyze returned a non-boolean 'root_cause_clear' ({value!r}); "
+        f"assuming the root cause is NOT established"
+    )
+    return False
 
 
 def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> str:
@@ -377,19 +465,31 @@ def _collect_project_summary(project_root: Path) -> str:
 def _update_flow_steps(
     flow: FlowInstance,
     task_type: str,
+    needs_investigation: bool = False,
 ) -> None:
     """Update the flow's selected steps based on task type.
-    
+
     Uses predefined step sequences for each task type.
     Discover mode is handled separately via --discover flag.
     Also inserts CONFIRM steps based on configuration.
 
     Args:
         flow: The flow instance to update
-        task_type: The determined task type (feature, bugfix, small, review, directive)
+        task_type: The determined task type (feature, bugfix, small, review, survey)
+        needs_investigation: Insert an INVESTIGATE step before PLAN (a bugfix
+            whose root cause analyze could not establish)
     """
     # Get default sequence for task type (fixed sequences per spec)
     selected_steps = get_default_step_sequence(task_type)
+
+    # The conditional INVESTIGATE goes in at the FRONT of the rebuild chain,
+    # against the raw default sequence — every later stage keys off positions in
+    # the sequence it is handed (apply_step_config appends, the merge pair
+    # anchors on COMMIT, CONFIRM gates anchor on the step they guard). Inserting
+    # after any of them would put the investigation on the wrong side of a
+    # confirmation gate or of the worktree release point.
+    if needs_investigation:
+        selected_steps = _insert_investigate_before_plan(selected_steps)
 
     project_root = resolve_flow_project_root(flow)
 
@@ -417,3 +517,21 @@ def _update_flow_steps(
     flow.state.selected_steps = insert_confirmation_steps(selected_steps, project_root)
     
     logger.info(f"Using step sequence for {task_type}: {[s.value for s in flow.state.selected_steps]}")
+
+
+def _insert_investigate_before_plan(steps: List[StepType]) -> List[StepType]:
+    """Return ``steps`` with an INVESTIGATE step placed before the first PLAN.
+
+    A sequence with no PLAN (review / small / survey) is returned untouched:
+    INVESTIGATE exists to feed a plan, and survey already carries its own.
+    Idempotent — a sequence that already has INVESTIGATE is left alone.
+    """
+    result = list(steps)
+    if StepType.INVESTIGATE in result:
+        return result
+    try:
+        insert_at = result.index(StepType.PLAN)
+    except ValueError:
+        return result
+    result.insert(insert_at, StepType.INVESTIGATE)
+    return result

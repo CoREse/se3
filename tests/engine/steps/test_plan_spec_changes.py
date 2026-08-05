@@ -87,8 +87,8 @@ class TestBuildPrompt:
 
     def test_shallow_depth_has_no_spec_machinery(self):
         prompt = _build_prompt(
-            task_description="Directive Z",
-            task_type="directive",
+            task_description="Small tweak Z",
+            task_type="small",
             scope="module_c",
             project_summary="summary",
             revision_section="",
@@ -228,8 +228,8 @@ class TestVersionFileGuardrail:
 
     def test_shallow_depth_includes_guardrail(self):
         prompt = _build_prompt(
-            task_description="Directive Z",
-            task_type="directive",
+            task_description="Small tweak Z",
+            task_type="small",
             scope="m",
             project_summary="p",
             revision_section="",

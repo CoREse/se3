@@ -142,7 +142,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     is_revision = step.inputs.get("is_revision", False)
 
     # If no design_doc available, create a minimal one from proposal or task description
-    # This handles cases where DESIGN step was skipped (e.g., directive task type)
+    # This handles cases where DESIGN step was skipped (e.g., the small task type)
     if not design_doc:
         logger.info("No design document available, creating minimal design from context")
         
@@ -173,14 +173,14 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 "architecture_decisions": [],
             }
 
-    # Track whether we're on the no-design path (bugfix/directive)
+    # Track whether we're on the no-design path (bugfix/small)
     had_design = bool(step.inputs.get("design_doc"))
 
     # Format inputs for prompt
     design_text = _format_design_doc(design_doc)
     proposal_text = _format_proposal(proposal)
 
-    # Inject spec content when design step was skipped (bugfix/directive),
+    # Inject spec content when design step was skipped (bugfix/small),
     # since spec info wasn't digested through propose → design pipeline
     spec_section = ""
     if not had_design and spec_content:

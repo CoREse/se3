@@ -11,7 +11,11 @@ from tianluo.engine.models import StepType, get_default_step_sequence
 from tianluo.config import StepConfig, load_step_config, apply_step_config
 
 
-ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "directive", "discovery"]
+# WHY: the full classification space plus `discovery` (which is the --discover
+# entry's flow shape, not something analyze can classify into). Kept identical
+# across every file that enumerates task types, so a type added to the sequence
+# table can never be silently skipped by a parametrised sweep.
+ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "survey", "discovery"]
 
 
 class TestSummarizeInDefaults:
@@ -38,7 +42,7 @@ class TestSummarizeInDefaults:
         assert steps.count(StepType.SUMMARIZE) == 1
 
     @pytest.mark.parametrize(
-        "task_type", ["feature", "bugfix", "small", "directive", "discovery"]
+        "task_type", ["feature", "bugfix", "small", "discovery"]
     )
     def test_summarize_follows_commit(self, task_type):
         """For non-review sequences SUMMARIZE immediately follows COMMIT."""
@@ -60,6 +64,21 @@ class TestSummarizeInDefaults:
         assert steps[-1] == StepType.SUMMARIZE
         invariant_idx = steps.index(StepType.INVARIANT_CHECK)
         assert steps.index(StepType.SUMMARIZE) == invariant_idx + 1
+
+    def test_survey_summarize_follows_investigate(self):
+        """The survey sequence is ANALYZE → INVESTIGATE → SUMMARIZE.
+
+        Like review it has no COMMIT tail; its deliverable is the investigation
+        report carried in step outputs, so SUMMARIZE closes the flow directly.
+        """
+        steps = get_default_step_sequence("survey")
+        assert steps == [
+            StepType.ANALYZE,
+            StepType.INVESTIGATE,
+            StepType.SUMMARIZE,
+        ]
+        assert StepType.COMMIT not in steps
+        assert steps.index(StepType.SUMMARIZE) == steps.index(StepType.INVESTIGATE) + 1
 
     def test_unknown_task_type_falls_back_to_feature_with_summarize(self):
         """An unknown task type falls back to the feature sequence, ending in SUMMARIZE."""
@@ -88,7 +107,7 @@ class TestCharterStepsInDefaults:
         ic_idx = steps.index(StepType.INVARIANT_CHECK)
         assert ic_idx == sc_idx + 1, "INVARIANT_CHECK must immediately follow SELF_CHECK"
 
-    @pytest.mark.parametrize("task_type", ["feature", "bugfix", "discovery", "small", "directive"])
+    @pytest.mark.parametrize("task_type", ["feature", "bugfix", "discovery", "small"])
     def test_charter_freshness_precedes_version_analyze(self, task_type):
         steps = get_default_step_sequence(task_type)
         cf_idx = steps.index(StepType.CHARTER_FRESHNESS)
@@ -103,7 +122,24 @@ class TestCharterStepsInDefaults:
         assert StepType.INVARIANT_CHECK in steps
         assert StepType.CHARTER_FRESHNESS not in steps
 
-    @pytest.mark.parametrize("task_type", ["small", "directive"])
+    def test_survey_has_no_code_changing_or_gate_steps(self):
+        """survey produces no code change, so it carries none of the quality
+        gates or the version/commit tail that guard one."""
+        steps = get_default_step_sequence("survey")
+        for absent in (
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+            StepType.INVARIANT_CHECK,
+            StepType.CHARTER_FRESHNESS,
+            StepType.VERSION_ANALYZE,
+            StepType.COMMIT,
+        ):
+            assert absent not in steps, (
+                f"{absent.value} should not appear in the survey sequence"
+            )
+
+    @pytest.mark.parametrize("task_type", ["small"])
     def test_lightweight_flows_have_charter_freshness_only(self, task_type):
         """Lightweight commit-only flows get CHARTER_FRESHNESS but not INVARIANT_CHECK."""
         steps = get_default_step_sequence(task_type)

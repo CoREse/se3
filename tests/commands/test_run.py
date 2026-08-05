@@ -1031,8 +1031,13 @@ class TestDiscoverFromIssueCombination:
         # The issue-sourced flow is a plain synchronous run (no worktree mode).
         assert kwargs.get("is_worktree_mode", False) is False
 
-    def test_from_issue_without_discover_keeps_default_type(self, tmp_path):
-        """Without --discover the issue-sourced flow keeps the default type."""
+    def test_from_issue_without_discover_leaves_type_pending(self, tmp_path):
+        """Without --discover the issue-sourced flow leaves the type pending.
+
+        An issue carries no classification of its own, so the run must reach
+        analyze unpinned — a concrete default here would be recorded as an
+        explicit --type and would override whatever analyze concludes.
+        """
         issue = self._make_project_with_issue(tmp_path)
         rf = MagicMock(return_value=0)
 
@@ -1040,7 +1045,7 @@ class TestDiscoverFromIssueCombination:
 
         assert result.exit_code == 0
         kwargs = rf.call_args.kwargs
-        assert kwargs["task_type"] == "feature"
+        assert kwargs["task_type"] == "pending"
         assert kwargs["source_issue_id"] == issue.id
 
     def test_discover_from_issue_runs_issue_lifecycle(self, tmp_path):

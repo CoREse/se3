@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.3.0 - 2026-08-05
+
+- Add an INVESTIGATE step for root-cause investigation of problems whose cause is unknown: the agent may make experimental edits (temporary logging, probe patches, scratch scripts) during the step but must revert them all before it ends — the engine compares before/after workspace snapshots (tracked diff plus non-ignored untracked files), asks the agent to restore any leftovers, fails the step if they persist, and never resets or checks out anything itself
+- Insert INVESTIGATE automatically before PLAN for bugfix runs whose root cause analyze judges unclear, via a new `root_cause_clear` analyze output; explicit `--type bugfix` skips classification but still gets the judgment, and `--discover` flows pick up the same conditional insertion
+- Run investigation as its own bounded loop, repeating the step until it reports a conclusive root cause or the new `investigation.max_iterations` config key is exhausted (default 3, 0 means unlimited, documented in tianluo.example.yaml); when the budget runs out the flow continues into PLAN with the best low-confidence hypothesis instead of failing
+- Feed the structured root-cause report (conclusion, evidence, files involved, suggested fix direction, confidence) into the PLAN and IMPLEMENT prompts — including fix iterations — as a dedicated context section, keeping it out of the effective task description so self_check's verbatim-quote validation is unaffected
+- Add a `survey` task type for pure investigation work whose deliverable is a conclusion rather than code: ANALYZE → INVESTIGATE → SUMMARIZE, with no implement, test, commit, or version bump, and a graceful no-op merge when run under `--worktree`
+- Remove the `directive` task type, whose sequence ran PLAN + IMPLEMENT + COMMIT with no TEST, SELF_CHECK, or INVARIANT_CHECK and could be auto-selected by analyze, thereby bypassing every quality gate; mechanical small changes are covered by `small`
+- Reject unknown `--type` values with an explicit error instead of silently falling back to `feature`; the accepted set is now feature, bugfix, small, review, and survey (`discovery` remains reachable only through `--discover`)
+- Keep already-persisted flows working across the removal: `--type directive` runs recorded earlier still resume from their stored step selection, and CLI/WebUI fall back to showing the raw task-type string when no label exists, with new i18n entries for the investigate step and the survey type in both en-US and zh-CN
 ## 12.2.1 - 2026-08-04
 
 - Show only the stored file's content-hash prefix in the WebUI attachment strip subtitle (e.g. '2 KB · d8fdda666ced') instead of the full stored basename, so each attachment block no longer stretches to the column width limit on desktop

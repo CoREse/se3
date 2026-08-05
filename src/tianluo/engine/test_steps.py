@@ -38,6 +38,7 @@ class TestAnalyzeStep:
             "scope": "backend",
             "complexity": "medium",
             "reasoning": "New user login feature",
+            "root_cause_clear": True,
         })
         MockLLMCaller.return_value = mock_caller
 
@@ -61,6 +62,7 @@ class TestAnalyzeStep:
         assert step.outputs["scope"] == "backend"
         assert step.outputs["complexity"] == "medium"
         assert step.outputs["reasoning"] == "New user login feature"
+        assert step.outputs["root_cause_clear"] is True
         # Project summary is collected programmatically
         assert isinstance(step.outputs["project_summary"], str)
         assert len(step.outputs["project_summary"]) > 0
@@ -70,6 +72,45 @@ class TestAnalyzeStep:
         assert step.outputs["selected_items"] == []
         # The legacy selected_specs key must never appear
         assert "selected_specs" not in step.outputs
+
+    @patch("tianluo.engine.steps.analyze.ProjectContextCollector")
+    @patch("tianluo.engine.steps.analyze.LLMCaller")
+    def test_analyze_missing_root_cause_clear_defaults_to_false(
+        self, MockLLMCaller, MockCollector, caplog
+    ):
+        """An analysis that never made the judgement degrades toward investigating.
+
+        Older agents (and any prompt drift) can omit the field entirely; the
+        conservative default must be false — a needless investigation round is
+        cheap, planning a fix for an unidentified mechanism is not.
+        """
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps({
+            "task_type": "bugfix",
+            "scope": "backend",
+            "complexity": "medium",
+            "reasoning": "Login sometimes 500s",
+        })
+        MockLLMCaller.return_value = mock_caller
+
+        mock_collector_inst = MagicMock()
+        mock_collector_inst.collect.return_value = {
+            "git": {"branch": "main", "uncommitted_count": 0},
+        }
+        MockCollector.return_value = mock_collector_inst
+
+        flow = FlowInstance(task_description="Login sometimes 500s")
+        step = Step(step_type=StepType.ANALYZE)
+        step.inputs["task_description"] = "Login sometimes 500s"
+
+        with caplog.at_level("WARNING", logger="tianluo.engine.steps.analyze"):
+            result = analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["root_cause_clear"] is False
+        assert "root_cause_clear" in caplog.text
+        # An unclear bugfix earns an investigation round before planning.
+        assert StepType.INVESTIGATE in flow.state.selected_steps
 
     @patch("tianluo.engine.steps.analyze.LLMCaller")
     def test_analyze_invalid_json(self, MockLLMCaller):
@@ -1209,9 +1250,9 @@ class TestStepSequences:
     """Tests verifying step sequences do not contain deprecated PROJECT_SUMMARY/READ_SPEC."""
 
     def test_all_task_types_exclude_project_summary(self):
-        """All 6 task type sequences must not contain PROJECT_SUMMARY."""
+        """No default task-type sequence may contain PROJECT_SUMMARY."""
         from .models import get_default_step_sequence
-        for task_type in ["feature", "bugfix", "review", "small", "directive", "discovery"]:
+        for task_type in ["feature", "bugfix", "review", "small", "discovery"]:
             seq = get_default_step_sequence(task_type)
             assert StepType.PROJECT_SUMMARY not in seq, (
                 f"{task_type} sequence still contains PROJECT_SUMMARY"

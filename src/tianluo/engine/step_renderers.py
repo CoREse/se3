@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 STEP_TITLE_KEYS: Dict[StepType, str] = {
     StepType.DISCOVERY: "cli.steprender.title.discovery",
     StepType.ANALYZE: "cli.steprender.title.analyze",
+    StepType.INVESTIGATE: "cli.steprender.title.investigate",
     StepType.PROJECT_SUMMARY: "cli.steprender.title.project_summary",
     StepType.PROPOSE: "cli.steprender.title.propose",
     StepType.DESIGN: "cli.steprender.title.design",
@@ -695,6 +696,83 @@ def _render_analyze(step: Step) -> None:
         lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
     render_full("\n".join(lines), title=t("cli.steprender.title.analyze"))
+
+
+@register_renderer(StepType.INVESTIGATE)
+def _render_investigate(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    lines: list[str] = []
+
+    # ── Verdict line ──────────────────────────────────────────────
+    confidence = outputs.get("confidence", "?")
+    iteration = outputs.get("investigation_iteration")
+    if step.status == StepStatus.FAILED:
+        lines.append(t("cli.steprender.status.failed"))
+    elif outputs.get("conclusive"):
+        lines.append(t("cli.steprender.investigate.conclusive", confidence=confidence))
+    else:
+        lines.append(
+            t("cli.steprender.investigate.inconclusive", confidence=confidence)
+        )
+    if iteration:
+        lines.append(t("cli.steprender.investigate.round", iteration=iteration))
+
+    # ── Root cause ────────────────────────────────────────────────
+    root_cause = outputs.get("root_cause", "")
+    if root_cause:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(
+            f"[bold cyan]{t('cli.steprender.investigate.root_cause')}[/bold cyan]"
+        )
+        lines.append(f"  {root_cause}")
+
+    # ── Evidence ──────────────────────────────────────────────────
+    evidence = outputs.get("evidence") or []
+    if isinstance(evidence, list) and evidence:
+        lines.append("")
+        lines.append(
+            f"[bold yellow]{t('cli.steprender.investigate.evidence')}[/bold yellow]"
+        )
+        for item in evidence:
+            lines.append(f"  • {item}")
+
+    # ── Files involved ────────────────────────────────────────────
+    files_involved = outputs.get("files_involved") or []
+    if isinstance(files_involved, list) and files_involved:
+        lines.append("")
+        lines.append(
+            f"[bold]{t('cli.steprender.investigate.files_involved')}[/bold]"
+        )
+        for path in files_involved:
+            lines.append(f"  • {path}")
+
+    # ── Suggested fix direction ───────────────────────────────────
+    direction = outputs.get("suggested_fix_direction", "")
+    if direction:
+        lines.append("")
+        lines.append(
+            f"[bold green]{t('cli.steprender.investigate.suggested_fix')}[/bold green]"
+        )
+        lines.append(f"  {direction}")
+
+    # ── Net-zero-diff violation ───────────────────────────────────
+    workspace_delta = outputs.get("workspace_delta", "")
+    if workspace_delta:
+        lines.append("")
+        lines.append(t("cli.steprender.investigate.workspace_dirty"))
+        lines.append(f"  {workspace_delta}")
+
+    # ── Error ─────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(
+            f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}"
+        )
+
+    render_full("\n".join(lines), title=t("cli.steprender.title.investigate"))
 
 
 @register_renderer(StepType.SELF_CHECK)

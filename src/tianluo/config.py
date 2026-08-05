@@ -2541,6 +2541,11 @@ DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD = 3
 # ``null``) disables the periodic safety net (adjudicate then runs only on the
 # structural signal triggers); negative values are rejected fail-fast at load.
 DEFAULT_ADJUDICATE_PERIOD = 10
+# Rounds the ``investigate`` step's own bounded loop may run before the flow
+# proceeds to PLAN with the best hypothesis so far (flagged low-confidence).
+# ``0`` (or ``null``) means unlimited, matching the ``max_fix_iterations``
+# sentinel convention; negative values are rejected fail-fast at load.
+DEFAULT_INVESTIGATION_MAX_ITERATIONS = 3
 
 # Dedup set for the "which config source won" load-time log line, keyed by the
 # resolved active config path. ``WorkflowConfig.load`` is called per step, so
@@ -2860,6 +2865,104 @@ def load_workflow_config(project_root: Optional[Path] = None) -> WorkflowConfig:
     if project_root is None:
         project_root = Path.cwd()
     return WorkflowConfig.load(project_root)
+
+
+@dataclass
+class InvestigationConfig:
+    """Configuration for the ``investigate`` step's own bounded loop.
+
+    Loaded from the tianluo.yaml ``investigation:`` section. The investigation loop
+    is deliberately SEPARATE from the fix loop (``workflow.max_fix_iterations``):
+    an investigation round is an exploration budget, not a repair attempt, so
+    mixing the two counters would let a long repair history silently starve
+    investigation (or vice versa).
+    """
+
+    max_iterations: int = DEFAULT_INVESTIGATION_MAX_ITERATIONS
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "InvestigationConfig":
+        """Create InvestigationConfig from a dict, with validation.
+
+        Args:
+            data: Raw dict from the ``investigation:`` YAML section (or the full
+                config dict, in which case the ``investigation`` key is extracted).
+
+        Raises:
+            ConfigError: If ``max_iterations`` is negative.
+        """
+        if not data:
+            return cls()
+
+        section = data.get("investigation", data)
+        if not isinstance(section, dict):
+            return cls()
+
+        # Sentinel: None/null normalizes to 0 (= unlimited rounds), matching the
+        # ``workflow.max_fix_iterations`` convention so users learn one rule for
+        # every iteration cap. bool/float/non-integer warn and fall back to the
+        # default; negatives fail-fast so a typo cannot silently uncap the loop.
+        if "max_iterations" in section and section["max_iterations"] is None:
+            max_iterations = 0
+        else:
+            raw = section.get("max_iterations", DEFAULT_INVESTIGATION_MAX_ITERATIONS)
+            if isinstance(raw, bool) or isinstance(raw, float):
+                if isinstance(raw, float) and raw == 0.0:
+                    logger.warning(
+                        f"investigation.max_iterations={raw!r} is a float, not an "
+                        f"integer; the unlimited sentinel must be the literal int 0 "
+                        f"or null/None, not 0.0. Falling back to default "
+                        f"{DEFAULT_INVESTIGATION_MAX_ITERATIONS} — write "
+                        f"`max_iterations: 0` or `max_iterations: null` to opt into "
+                        f"unlimited."
+                    )
+                else:
+                    logger.warning(
+                        f"investigation.max_iterations={raw!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_INVESTIGATION_MAX_ITERATIONS}"
+                    )
+                max_iterations = DEFAULT_INVESTIGATION_MAX_ITERATIONS
+            else:
+                try:
+                    max_iterations = int(raw)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"investigation.max_iterations={raw!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_INVESTIGATION_MAX_ITERATIONS}"
+                    )
+                    max_iterations = DEFAULT_INVESTIGATION_MAX_ITERATIONS
+
+        if max_iterations < 0:
+            raise ConfigError(
+                f"investigation.max_iterations={max_iterations!r} must be >= 0 "
+                f"(use 0 or null for unlimited)"
+            )
+
+        return cls(max_iterations=max_iterations)
+
+    @classmethod
+    def load(cls, project_root: Path) -> "InvestigationConfig":
+        """Load investigation configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        return cls.from_dict(data)
+
+
+def load_investigation_config(
+    project_root: Optional[Path] = None,
+) -> InvestigationConfig:
+    """Load investigation configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        InvestigationConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return InvestigationConfig.load(project_root)
 
 
 @dataclass

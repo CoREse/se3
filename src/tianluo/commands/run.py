@@ -1957,6 +1957,11 @@ def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:
 def _get_display_task_type(flow: FlowInstance) -> Optional[str]:
     """Get the task type to display, or None if pending.
 
+    WHY the raw string is returned rather than a looked-up label: a flow
+    persisted under a since-retired task type must still display as itself.
+    Mapping through a table would render such a flow blank the moment the type
+    is dropped from the current classification space.
+
     Args:
         flow: The flow instance
 

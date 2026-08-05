@@ -361,7 +361,7 @@ class TestContextDisplayType:
 
     def test_display_type_various_types(self):
         """display_type should work for all valid task types."""
-        valid_types = ["feature", "bugfix", "review", "small", "directive"]
+        valid_types = ["feature", "bugfix", "review", "small", "survey"]
 
         for task_type in valid_types:
             state = State()
@@ -394,12 +394,12 @@ class TestContextDisplayType:
         # Create context with a mock state that has task_type attr
         class MockState:
             context = {}
-            task_type = "directive"
+            task_type = "small"
 
         context = Context("Test task", MockState())
 
         # Should fall back to state's task_type attribute
-        assert context.task_type == "directive"
+        assert context.task_type == "small"
 
     def test_context_repr(self):
         """Context repr should show type and pending status."""
@@ -580,7 +580,9 @@ class TestContextDiscoverySanitization:
 class TestAnalyzePersistsAnalyzedType:
     """analyze persists the real analyzed type without touching the sequence type."""
 
-    def _run_analyze(self, project_root, explicit_type, llm_task_type):
+    def _run_analyze(
+        self, project_root, explicit_type, llm_task_type, root_cause_clear=True
+    ):
         """Drive analyze_handler with a stubbed LLM and collector."""
         from tianluo.engine.steps import analyze as analyze_mod
         from tianluo.engine.models import Step, StepType
@@ -603,6 +605,10 @@ class TestAnalyzePersistsAnalyzedType:
             "complexity": "medium",
             "reasoning": "because",
         }
+        # ``None`` models an LLM that omitted the field entirely, so callers can
+        # exercise the conservative default path.
+        if root_cause_clear is not None:
+            llm_result["root_cause_clear"] = root_cause_clear
 
         with patch.object(analyze_mod, "_collect_project_summary", return_value="ctx"), \
             patch.object(analyze_mod, "get_charter_injection", return_value="", create=True), \
@@ -652,6 +658,19 @@ class TestAnalyzePersistsAnalyzedType:
             assert flow.task_type == "bugfix"
             assert flow.state.context["resolved_type"] == "bugfix"
 
+    def test_root_cause_clear_defaults_to_false_when_absent(self):
+        """A missing judgement is recorded as 'not established', not as clear."""
+        with tempfile.TemporaryDirectory() as td:
+            _flow, step, status = self._run_analyze(
+                Path(td),
+                explicit_type=None,
+                llm_task_type="bugfix",
+                root_cause_clear=None,
+            )
+
+            assert status == StepStatus.COMPLETED
+            assert step.outputs["root_cause_clear"] is False
+
 
 class TestAnalyzeStepTypeExtraction:
     """Test the _extract_task_type helper function."""
@@ -689,9 +708,85 @@ class TestAnalyzeStepTypeExtraction:
         """Should accept all valid task types."""
         from tianluo.engine.steps.analyze import _extract_task_type
 
-        valid_types = ["feature", "bugfix", "review", "small", "directive"]
+        # Mirrors analyze._extract_task_type's own valid set — an unlisted type
+        # here would silently be left unasserted while the extractor quietly
+        # coerced it to 'feature'.
+        valid_types = ["feature", "bugfix", "review", "small", "survey"]
         flow = self._make_flow()
 
         for task_type in valid_types:
             result = _extract_task_type({"task_type": task_type}, flow)
             assert result == task_type
+
+
+class TestRetiredTaskTypeCompatibility:
+    """A flow persisted under a since-retired task type must still resume/display.
+
+    'directive' was removed from the classification space, but old engine.json
+    files on disk still carry it. Resume must replay their stored selected_steps
+    verbatim rather than re-deriving a sequence from the (now absent) table
+    entry, and the display layer must echo the raw string back.
+    """
+
+    # The sequence a directive flow was created with, before the type was retired.
+    LEGACY_DIRECTIVE_STEPS = [
+        StepType.ANALYZE,
+        StepType.PLAN,
+        StepType.IMPLEMENT,
+        StepType.CHARTER_FRESHNESS,
+        StepType.VERSION_ANALYZE,
+        StepType.COMMIT,
+        StepType.SUMMARIZE,
+    ]
+
+    def _persist_legacy_flow(self, project_root: Path) -> FlowInstance:
+        from tianluo.engine.persistence import PersistenceManager
+
+        state = State()
+        state.selected_steps = list(self.LEGACY_DIRECTIVE_STEPS)
+        state.current_step_index = 2
+        state.update_task_type("directive")
+        state.context["explicit_type"] = "directive"
+
+        flow = FlowInstance(
+            flow_id="20260101-000000_legacy01",
+            status=FlowStatus.PAUSED,
+            task_description="A directive-era task",
+            task_type="directive",
+            state=state,
+        )
+
+        persistence = PersistenceManager(project_root)
+        persistence.ensure_directories()
+        persistence.save_flow(flow)
+        return flow
+
+    def test_legacy_directive_flow_reloads_stored_sequence(self):
+        from tianluo.engine.persistence import PersistenceManager
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            project_root = Path(tmpdir)
+            self._persist_legacy_flow(project_root)
+
+            loaded = PersistenceManager(project_root).load_flow()
+
+            assert loaded is not None
+            assert loaded.task_type == "directive"
+            # Stored sequence is replayed item-for-item, not re-derived.
+            assert loaded.state.selected_steps == self.LEGACY_DIRECTIVE_STEPS
+            assert loaded.state.current_step_index == 2
+
+    def test_legacy_directive_flow_displays_raw_type(self):
+        from tianluo.commands.run import _get_display_task_type
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow = self._persist_legacy_flow(Path(tmpdir))
+
+            assert _get_display_task_type(flow) == "directive"
+
+    def test_get_default_step_sequence_tolerates_retired_type(self):
+        """The lookup must fall back, never raise, for a retired/unknown type."""
+        from tianluo.engine.models import get_default_step_sequence
+
+        seq = get_default_step_sequence("directive")
+        assert seq == get_default_step_sequence("feature")

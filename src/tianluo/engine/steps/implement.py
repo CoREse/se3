@@ -37,6 +37,9 @@ from ..models import FlowInstance, Step, StepStatus
 from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
 from .plan import VERSION_FILE_GUARDRAIL as _PLAN_VERSION_FILE_GUARDRAIL
+# The root-cause section is defined once in plan.py and shared, so the two
+# consumers of an investigation report cannot render it differently.
+from .plan import ROOT_CAUSE_SECTION, render_root_cause_section  # noqa: F401
 
 # Re-export for tests / clarity at the implement.py module level.
 VERSION_FILE_GUARDRAIL = _PLAN_VERSION_FILE_GUARDRAIL
@@ -181,7 +184,7 @@ Preferred alternatives, in order:
 
 ## Task Type
 {task_type}
-
+{root_cause_section}
 {design_section}
 
 ## Task Groups
@@ -253,7 +256,7 @@ Preferred alternatives, in order:
 
 ## Task Type
 {task_type}
-
+{root_cause_section}
 {design_section}
 
 ## Current Group Tasks
@@ -329,7 +332,7 @@ Preferred alternatives, in order:
 ## Project Conventions
 {spec_summary}
 {design_section}
-
+{root_cause_section}
 ## Fix Instructions
 {fix_instructions}
 
@@ -465,6 +468,15 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     spec_summary = _format_spec_brief(spec_content)
 
+    # Root-cause report from a preceding INVESTIGATE round, if any. Rendered
+    # once and shared by every prompt path below (single call, grouped,
+    # DAG-parallel, fix iteration) so no path silently loses it. Empty string
+    # when no investigation ran, which keeps those prompts byte-identical.
+    root_cause_section = render_root_cause_section(
+        step.inputs.get("root_cause_report"),
+        exhausted=bool(step.inputs.get("investigation_exhausted")),
+    )
+
     # Append issue discovery injection if applicable
     from ..context_builder import (
         get_issue_discovery_injection,
@@ -503,6 +515,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             fix_history=fix_history_text,
             spec_summary=spec_summary,
             design_section=fix_design,
+            root_cause_section=root_cause_section,
         )
         if injection:
             prompt += injection
@@ -539,6 +552,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             design_section=design_section,
             task_groups=task_groups_text,
             spec_summary=spec_summary,
+            root_cause_section=root_cause_section,
         )
         if injection:
             prompt += injection
@@ -571,6 +585,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             design_section=design_section,
             task_groups=task_groups_text,
             spec_summary=spec_summary,
+            root_cause_section=root_cause_section,
         )
         if injection:
             prompt += injection
@@ -701,6 +716,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         spec_summary=spec_summary,
                         injection=injection,
                         retry_count=retry_count,
+                        root_cause_section=root_cause_section,
                         prior_outputs={
                             "files_changed": list(step.outputs.get("files_changed", [])),
                             "tests_added": list(step.outputs.get("tests_added", [])),
@@ -735,6 +751,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             spec_summary=spec_summary,
             injection=injection,
             retry_count=retry_count,
+            root_cause_section=root_cause_section,
             prior_outputs=prior_outputs,
         )
         step.outputs["session_commits"] = _collect_session_commits(
@@ -812,6 +829,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             current_group=json.dumps(group, indent=2, ensure_ascii=False),
             previous_results=prev_ctx,
             spec_summary=spec_summary,
+            root_cause_section=root_cause_section,
         )
         if injection:
             prompt += injection
@@ -1043,6 +1061,7 @@ def _make_execute_fn(
     injection: str | None,
     retry_count: int,
     group_agent_info: dict[str, tuple[str, str | None]] | None = None,
+    root_cause_section: str = "",
 ) -> Callable[[dict, dict[str, GroupResult], RelayContext], GroupResult]:
     """Build the execute_fn closure for relay-based DAG parallel execution.
 
@@ -1189,6 +1208,7 @@ def _make_execute_fn(
                 current_group=json.dumps(group, indent=2, ensure_ascii=False),
                 previous_results=prev_ctx,
                 spec_summary=spec_summary,
+                root_cause_section=root_cause_section,
             )
             if injection:
                 prompt += injection
@@ -1947,6 +1967,7 @@ def _run_dag_parallel(
     injection: str | None,
     retry_count: int,
     prior_outputs: dict[str, Any] | None = None,
+    root_cause_section: str = "",
 ) -> StepStatus:
     """DAG parallel execution path for implement step.
 
@@ -2130,6 +2151,7 @@ def _run_dag_parallel(
         injection=injection,
         retry_count=retry_count,
         group_agent_info=group_agent_info,
+        root_cause_section=root_cause_section,
     )
 
     results: list[GroupResult] = []

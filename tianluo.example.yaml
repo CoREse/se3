@@ -139,6 +139,17 @@ workflow:
   # (the historical behavior). Default: 3.
   # self_check_defer_fix_threshold: 3
 
+# 调查步骤（investigate）配置
+# investigate 面向『症状已知、原因不明』的问题做探索式根因调查：允许临时日志 /
+# 验证性补丁等实验手段，但步骤结束前必须全部还原（净零 diff，由引擎前后快照校验，
+# 引擎自身绝不 reset/checkout）。它自带一个与 fix loop 相互独立的有界循环——
+# 一轮调查若未得出结论（conclusive=false），状态机再排一轮。
+investigation:
+  # 调查最多重跑几轮。打满仍未得出结论时，流程不失败：带着当前最优假设（标注为低
+  # 置信）继续进入 PLAN。设为 0（或 null）表示无上限——与 workflow.max_fix_iterations
+  # 的哨兵约定一致；负数会在加载时直接报错。默认：3。
+  max_iterations: 3
+
 # Preset Prompts (common-task library)
 # Project-level presets override the built-in presets shipped with tianluo
 # (read at runtime from the package, never copied by `luo init`). Each

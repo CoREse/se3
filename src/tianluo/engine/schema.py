@@ -51,6 +51,7 @@ class StepTypeValue(str, Enum):
     DESIGN = "design"  # deprecated: use PLAN
     PLAN_TASKS = "plan_tasks"  # deprecated: use PLAN
     CONFIRM = "confirm"
+    INVESTIGATE = "investigate"
     IMPLEMENT = "implement"
     TEST = "test"
     SELF_CHECK = "self_check"
