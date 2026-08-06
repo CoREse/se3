@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.3.1 - 2026-08-06
+
+- Replace the static README version badge with a shields.io dynamic TOML badge that reads the version straight from pyproject.toml, and strip every hardcoded version number from both READMEs, so releases no longer require documentation edits
+- Configure this repository's `documentation.readme_badge` template to match the dynamic badge, making the commit step's README badge rewrite an idempotent no-op instead of reverting to a static badge or inserting a duplicate; covered by a new regression test
+- Add docs/configuration.md and docs/configuration.zh.md — a full authoritative configuration reference documenting every block and key against the dataclasses in config.py, including blocks absent from the example file (documentation, implement, steps.append, code_index, conflict_resolver, server, test, version, self_check), with spec_governance and spec_loading collected in a Legacy section
+- Warn explicitly about two high-frequency configuration traps: tianluo.local.yaml overrides the config file as a whole rather than merging per key, and llm_caller.steps.<step> is a hard override with no fallback, so the default chain must be listed explicitly
+- Correct the global configuration path in tianluo.example.yaml from ~/.tianluo/config.yaml to the ~/.se3/config.yaml the code actually reads, and point the example at the new reference document
+- Add a Why tianluo section covering the five design pillars, including code-level evidence that the framework does not rely on the LLM's self-discipline, and correct the outdated single-runner claim to reflect the three shipped adapters (claude-code, claude-interactive, codex)
+- Bring the README flow description in line with the 12.3.0 state machine — a Mermaid diagram covering discovery → analyze → investigate → plan → confirm → implement → test → checks → commit with the fix loop, plus the feature/bugfix/small/review/survey task-type table
+- Rewrite the migrate section as an upgrade-path table (spec-to-new-system for pre-11.0.0 projects, rename-to-tianluo for pre-12.0.0), document the previously missing `luo end-session`, `luo merge-unlock` and `luo worktree gc` commands, expand the WebUI section with three screenshots, and add the tianluo/uploads/ directory and an extended-documentation index
 ## 12.3.0 - 2026-08-05
 
 - Add an INVESTIGATE step for root-cause investigation of problems whose cause is unknown: the agent may make experimental edits (temporary logging, probe patches, scratch scripts) during the step but must revert them all before it ends — the engine compares before/after workspace snapshots (tracked diff plus non-ignored untracked files), asks the agent to restore any leftovers, fails the step if they persist, and never resets or checks out anything itself

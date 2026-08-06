@@ -281,6 +281,12 @@ stateDiagram-v2
 | `survey` | analyze → investigate → summarize | 交付物是结论而非 diff——因此无 implement/test/commit，也无 `version_analyze`。 |
 | *（`--discover`）* | discovery → *`feature` 链路* | 经 `--discover` 进入，而非 `--type`。 |
 
+上表列的是 `models.py` 里字面声明的默认序列，其中并不含 `confirm` 条目。**引擎随后
+会在每个 `plan` step 之后无条件插入一个 `confirm` step** —— 无论
+`confirmation.steps` 是否提到 `plan`，`plan` 一律要过确认闸口，因此所有带 `plan`
+的类型实际跑的是 `plan → confirm → implement`。这也正是没有 `plan` 的 `small`
+同时也没有 confirm 闸口的原因。
+
 `analyze` 仍可能调整选定的序列；上表是起点，不是冻结的契约。
 
 ### 三种运行形态

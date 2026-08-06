@@ -1,8 +1,8 @@
 id: '208'
 description: se3流程类型问题：现在的流程其实已经是半死了，每个流程步骤都差不多。我想重构一下流程，比如改成feature, bugfix, small,
   review这几个老的，再加上survey（暂定）。然后bugfix和survey都要加入一个调查的流程，适用于那些不清楚原因的bug，需要设计一套流程探索而不是直接plan计划。不过感觉这种情况只有bugfix会出现，survey这种类型是不是没有必要？你帮我好好分析一下。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-06-18T10:54:51.506146'
-updated_at: '2026-08-05T10:42:40.446394'
+updated_at: '2026-08-05T23:19:07.899035'

@@ -105,9 +105,15 @@ workflow:
 ```
 
 Result: `max_fix_iterations` falls back to the default `100` (coincidentally the
-same here), **and the `agents` registry and `llm_caller.defaults` vanish
-entirely** — the run falls back to the built-in PATH-probed agent chain. To keep
-a value, repeat it in the local file. This is why `tianluo.example.yaml`
+same here), **and the project-level `agents` registry and `llm_caller.defaults`
+are gone** — the project side of those blocks is now empty. What the run
+actually uses then depends on the global layer, in this order: the `agents`
+entries and `llm_caller.defaults` declared in `~/.se3/config.yaml`, then a chain
+implied by a legacy `claude_commands:` block, and only if none of those supply a
+chain does it reach the built-in PATH-probed one. So on a machine whose
+`~/.se3/config.yaml` configures agents, the run silently switches from the
+project's chain to the *global* chain — not to the built-in probe. To keep a
+value, repeat it in the local file. This is why `tianluo.example.yaml`
 annotates `workflow.max_fix_iterations` with "intentionally identical to
 `tianluo.local.yaml` so the local override does not silently shadow a different
 value".
@@ -496,8 +502,16 @@ and disables the gate rather than raising.
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `group_loc_threshold` | int | `300` | Total estimated LOC at or below which a multi-group task plan is merged into a **single** LLM call instead of being farmed out per group. Also feeds the sequential-vs-DAG-parallel decision above the threshold. |
+| `group_loc_threshold` | int | `300` | Total estimated LOC at or below which a multi-group task plan is merged into a **single** LLM call instead of being farmed out per group. Also feeds the sequential-vs-DAG-parallel decision above the threshold. **Fail-fast, not clamp-and-warn** (see below). |
 | `use_worktree` | bool | `true` | Whether implement groups run in isolated git worktrees. Accepts the usual boolean spellings; an unrecognised string falls back to the default rather than flipping behaviour. **Overridable at runtime by the `SE3_IMPLEMENT_USE_WORKTREE` environment variable**, which wins over the YAML value. |
+
+`group_loc_threshold` is one of the explicit exceptions to the clamp-and-warn
+rule: `ImplementConfig.from_dict` calls bare `int(...)` on the value with no
+`try`/`except`, and its caller in the implement step does not guard it either.
+A value that `int()` cannot parse — e.g. `group_loc_threshold: "300 LOC"` —
+raises an uncaught `ValueError` out of `ImplementConfig.load` and **fails the
+implement step** rather than falling back to `300`. A float or bool is accepted
+but silently truncated by `int()` (`300.9` → `300`, `true` → `1`).
 
 ### `steps`
 
@@ -570,7 +584,7 @@ the updater, superseding the legacy `version.templates`.
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `readme_badge_template` | string | `![Version](https://img.shields.io/badge/version-{{version}}-blue)` | Markdown written in place of the README version badge. |
-| `versions_entry_template` | string | first `##` block of the packaged `versions_md.md` template, else `## {{version}} - {{date}}\n\n{{changes}}\n` | The VERSIONS.md entry prepended for each release. When supplied explicitly it must contain both `{{version}}` and `{{changes}}`. |
+| `versions_entry_template` | string | first `##` block of the packaged `versions_md.md` template, else `## {{version}} - {{date}}\n\n{{changes}}\n` | The VERSIONS.md entry prepended for each release. An explicit config value is taken verbatim and **not** validated — one missing `{{changes}}` silently yields release entries with no changelog body. The `{{version}}` + `{{changes}}` requirement applies only to the packaged-file fallback: the first `##` block of `versions_md.md` is accepted as a template only when it carries both, otherwise the built-in default is used. |
 | `readme_header_template` | string | *(unset)* | Optional. When present, a version header line in the README is replaced too. Unset means the header pass is skipped entirely. |
 
 Non-string values (and a non-mapping `documentation:` section) are dropped, so

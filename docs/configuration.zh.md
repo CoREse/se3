@@ -100,9 +100,13 @@ workflow:
   self_check_passes_required: 2
 ```
 
-结果:`max_fix_iterations` 回落到默认值 `100`(此处恰好相同),**而 `agents`
-注册表与 `llm_caller.defaults` 则整个消失** —— 这次运行退回到内置的、从 PATH
-探测出来的 agent 链路。想保住某个值,就得在本地文件里把它重写一遍。这也正是
+结果:`max_fix_iterations` 回落到默认值 `100`(此处恰好相同),**而项目级的
+`agents` 注册表与 `llm_caller.defaults` 也一并没了** —— 这两个块的项目侧此刻
+为空。这次运行实际用什么,取决于全局层,顺序是:先看 `~/.se3/config.yaml` 里的
+`agents` 条目与 `llm_caller.defaults`,再看 legacy `claude_commands:` 块隐含的
+链路,以上都拿不出链路时才轮到内置的 PATH 探测链路。所以在 `~/.se3/config.yaml`
+配了 agents 的机器上,这次运行是从项目链路悄悄切到了**全局**链路,而不是切到内置
+探测链路。想保住某个值,就得在本地文件里把它重写一遍。这也正是
 `tianluo.example.yaml` 给 `workflow.max_fix_iterations` 加注『与
 `tianluo.local.yaml` 中的值刻意保持一致,以免本地覆盖悄悄遮蔽掉一个不同的值』的
 原因。
@@ -449,8 +453,15 @@ verbose 命令**,例如 `python -m pytest -v`。
 
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
-| `group_loc_threshold` | int | `300` | 估算 LOC 总量在此值及以下时,多 group 的任务计划会被合并成**单次** LLM 调用,而不是逐 group 分发。超过阈值时,它还参与『顺序 vs DAG 并行』的判定。 |
+| `group_loc_threshold` | int | `300` | 估算 LOC 总量在此值及以下时,多 group 的任务计划会被合并成**单次** LLM 调用,而不是逐 group 分发。超过阈值时,它还参与『顺序 vs DAG 并行』的判定。**属于 fail-fast,而非 clamp-and-warn**(见下)。 |
 | `use_worktree` | bool | `true` | implement 的各 group 是否在隔离的 git worktree 中运行。接受常见的布尔写法;无法识别的字符串回落到默认值,而不是反转行为。**可在运行时被 `SE3_IMPLEMENT_USE_WORKTREE` 环境变量覆盖**,该变量胜过 YAML 中的值。 |
+
+`group_loc_threshold` 是 clamp-and-warn 规则的显式例外之一:`ImplementConfig.from_dict`
+对该值直接调用裸的 `int(...)`,既没有 `try`/`except`,implement step 里的调用方也没有
+兜底。`int()` 解析不了的值 —— 例如 `group_loc_threshold: "300 LOC"` —— 会从
+`ImplementConfig.load` 抛出未捕获的 `ValueError`,直接**让 implement step 失败**,而
+不是回落到 `300`。float 与 bool 可以被接受,但会被 `int()` 静默截断(`300.9` → `300`,
+`true` → `1`)。
 
 ### `steps`
 
@@ -516,7 +527,7 @@ commit step 机械地更新 `README.md` 与 `VERSIONS.md` 时,`DocumentationUpda
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
 | `readme_badge_template` | string | `![Version](https://img.shields.io/badge/version-{{version}}-blue)` | 写到 README 版本徽章位置上的 markdown。 |
-| `versions_entry_template` | string | 打包内置的 `versions_md.md` 模板里的第一个 `##` 块;没有则为 `## {{version}} - {{date}}\n\n{{changes}}\n` | 每次发布时前插到 VERSIONS.md 的条目。显式提供时必须同时包含 `{{version}}` 与 `{{changes}}`。 |
+| `versions_entry_template` | string | 打包内置的 `versions_md.md` 模板里的第一个 `##` 块;没有则为 `## {{version}} - {{date}}\n\n{{changes}}\n` | 每次发布时前插到 VERSIONS.md 的条目。显式配置的值会被**原样采用、不做任何校验** —— 漏写 `{{changes}}` 就会静默产出没有变更正文的发布条目。`{{version}}` + `{{changes}}` 这个要求只作用于打包文件回落路径:`versions_md.md` 的第一个 `##` 块只有同时带上两者才会被当作模板接受,否则改用内置默认值。 |
 | `readme_header_template` | string | *(未设置)* | 可选。设置后,README 中的版本头行也会被一并替换。未设置意味着整个 header 环节被跳过。 |
 
 非字符串的值(以及非 mapping 的 `documentation:` 段)会被丢弃,于是 updater 保留

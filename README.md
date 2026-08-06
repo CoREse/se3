@@ -289,6 +289,13 @@ sequence.
 | `survey` | analyze → investigate → summarize | Deliverable is a conclusion, not a diff — so no implement/test/commit, and no `version_analyze`. |
 | *(`--discover`)* | discovery → *the `feature` chain* | Entered via `--discover`, not `--type`. |
 
+The sequences above are the literal defaults declared in `models.py`, which
+contain no `confirm` entry. **The engine then inserts a `confirm` step after
+every `plan` step, unconditionally** — `plan` is always confirmed regardless of
+whether `confirmation.steps` mentions it, so every plan-bearing type really runs
+`plan → confirm → implement`. That is why `small`, which has no `plan`, also has
+no confirm gate.
+
 `analyze` may still adjust the selected sequence; the table is the starting
 point, not a frozen contract.
 
