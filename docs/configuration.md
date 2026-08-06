@@ -368,10 +368,10 @@ Two independent language settings, merged **field by field** with
 | `language` | string or null | `null` | The unified **human language**. Drives both the CLI/console UI copy (via the i18n catalogs) and the language injected into human-facing LLM step outputs (summarize / discovery / confirmed steps). e.g. `zh-CN`, `en-US`. `null` = no restriction on LLM output (UI copy still resolves through the chain below). |
 | `spec_language` | string or null | `null` | The **knowledge-asset language** — the writing language of `tianluo/charter.md` and the code-index, injected into the `charter_freshness` and code-index summary prompts. `null` = no restriction. |
 
-CLI UI-text resolution order: `SE3_LANG` env > this key (project, then global)
-> system locale (`LC_ALL` / `LC_MESSAGES` / `LANG`) > `en-US`. `en-US` is the
-baseline catalog holding the full key set; a missing key or unsupported language
-code falls back to it.
+CLI UI-text resolution order: `SE3_LANG` env > this key (project, then
+global) > system locale (`LC_ALL` / `LC_MESSAGES` / `LANG`) > `en-US`. `en-US`
+is the baseline catalog holding the full key set; a missing key or unsupported
+language code falls back to it.
 
 Changing either setting affects only content generated *after* the change; it
 does not retroactively translate existing knowledge assets.
