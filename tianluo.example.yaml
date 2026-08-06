@@ -6,6 +6,10 @@
 # or maintain a gitignored local override:
 #   tianluo.local.yaml                          # wins over tianluo.yaml
 # (Legacy se3.yaml / se3.local.yaml keep working through 12.x.)
+#
+# This is a getting-started sample, not an exhaustive list of settings.
+# Full reference (every block, every key): docs/configuration.md /
+# docs/configuration.zh.md
 
 human_call:
   timeout_days: 7
@@ -80,13 +84,13 @@ version:
 
 # Language Configuration
 # Two independent language settings, merged project-over-global with
-# ~/.tianluo/config.yaml.
+# ~/.se3/config.yaml.
 language:
   # Unified human language: drives BOTH the CLI's fixed UI copy AND the
   # LLM human-facing step outputs (summarize / discovery / confirmed steps).
   # (The central WebUI console's interface language is a per-user browser /
   #  localStorage preference and does NOT follow this project setting.)
-  # CLI resolution precedence: SE3_LANG env > this key > ~/.tianluo/config.yaml >
+  # CLI resolution precedence: SE3_LANG env > this key > ~/.se3/config.yaml >
   # system locale (LANG/LC_ALL) > en-US. e.g. "zh-CN", "en-US".
   # null = no LLM-output restriction (CLI UI copy still resolves via the chain).
   language: zh-CN
