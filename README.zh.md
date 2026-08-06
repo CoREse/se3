@@ -458,6 +458,7 @@ your-project/
     ├── code-index.md             # ✅ 入库 — 权威结构地图（注入 LLM，可供人 review）
     ├── charter.md                # ✅ 入库 — 项目身份 / 架构 / 不变量，每个 step 全量注入
     ├── issues/                   # ✅ 入库 — open/ 与 closed/ YAML 记录
+    ├── scripts/                  # ✅ 入库 — 可选的项目版本脚本（version.py / version.sh）
     ├── prompts/                  # ✅ 入库 — 项目级 preset prompt 正文（luo run --preset）
     ├── version-intents/          # ✅ 入库 — per-flow 版本意图，merge 时消费
     ├── version-rules.md          # ✅ 入库 — 可选，默认不存在

@@ -489,6 +489,7 @@ your-project/
     ├── code-index.md             # ✅ tracked — authoritative structure map (LLM-injected, human-reviewable)
     ├── charter.md                # ✅ tracked — project identity / architecture / invariants, injected in full every step
     ├── issues/                   # ✅ tracked — open/ and closed/ YAML records
+    ├── scripts/                  # ✅ tracked — optional project version script (version.py / version.sh)
     ├── prompts/                  # ✅ tracked — project-level preset prompt bodies (luo run --preset)
     ├── version-intents/          # ✅ tracked — per-flow version intents consumed at merge time
     ├── version-rules.md          # ✅ tracked — optional, not present by default
