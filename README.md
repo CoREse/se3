@@ -2,7 +2,7 @@
 
 # tianluo (田螺) — the Software Engineering 3.0 flow engine
 
-![Version](https://img.shields.io/badge/version-12.3.0-blue)
+![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FCoREse%2Ftianluo%2Fmaster%2Fpyproject.toml&query=%24.project.version&label=version&color=blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
@@ -16,13 +16,47 @@ tianluo (formerly published as *se3*; the methodology is still called **SE 3.0**
 
 ---
 
+## Why tianluo
+
+Five load-bearing bets, each with the one line of evidence that makes it real rather than aspirational.
+
+**1. What it saves is human attention, not tokens.** A flow is measured by how few times it makes a person read, judge, and decide — not by how cheap the LLM calls were.
+*Evidence:* the only two points where attention is structurally required are the opening prompt and the `plan` confirmation gate; everything from `implement` through `commit` runs with nobody watching.
+
+**2. The program is the supervisor; the human is out of the loop.** The thing that decides what happens next is a deterministic Python state machine, not the model and not a person at a terminal.
+*Evidence:* `tianluo/state/engine.json` persists step / attempt / context / fix-loop history, so a flow survives terminal exits, machine restarts, and hand-offs between machines — and resumes at the exact interruption point with `luo run --resume`.
+
+**3. Code is the single source of truth.** Knowledge is exposed through three colocated artifacts — code-index, charter, why-comments — all anchored to the code itself, never a prose mirror of it.
+*Evidence:* the `tianluo/specs/**` mirror and its entire governance stack (`luo sync`, `verify_spec`, `update_spec`, `spec_gate`, per-requirement drift baselines) were retired; what replaced them is a deterministically-enumerated structure map plus two anchored checks.
+
+**4. It does not assume the LLM will be conscientious.** Every property the system depends on is enforced by code that runs whether or not the model cooperates:
+
+- **Step routing is a deterministic state machine.** The step pool and the per-task-type default sequences live in `engine/models.py`; `engine/state_machine.py` walks them. The LLM never chooses the next step.
+- **code-index completeness is a property of the enumerator.** A filesystem walk + AST symbol enumeration decides *who is on the map*; the LLM only writes the one-line summary for symbols it is handed, so it cannot omit one.
+- **`invariant_check` hard-guards `WHY:` / `INVARIANT:` comments.** A diff that deletes or rewrites one without restoring it — or without declaring the new rationale in an updated marked comment — returns `REVISION_NEEDED`.
+- **A check-step finding has exactly one destination: the fix loop, now.** There is no discard channel, no severity-based pass-through, no "file it as an issue and fix it later" (the `out_of_scope` escape hatch was removed).
+- **`test.critical_tests` blocks skips masquerading as passes.** If a configured critical test is skipped rather than run, the test step fails instead of reporting green.
+- **The test baseline is captured deterministically before `implement` writes anything.** It is frozen by the engine, so an inherited red test can never be re-labelled as "caused by this change" — nor the reverse.
+- **`investigate`'s net-zero diff is verified by the engine, not promised by the model.** The workspace is snapshotted before and after the step and compared; a mismatch fails the step. The engine never resets or checks out anything itself, because the tree may hold unrelated uncommitted work.
+- **plan-confirm is always-on.** The `CONFIRM` insertion after `plan` does not depend on a `confirmation.steps.plan` entry existing — it is mechanical, decoupled from configuration.
+- **`version_analyze` errors out when `suggested_version` is missing.** There is no silent patch-bump fallback; the flow stops and asks for a human.
+
+  *In short:* anything that would otherwise hold only because "the LLM should remember to" has been rewritten to hold because the code makes it hold.
+
+**5. It is not tied to one agent.** The `AgentRunner` abstraction already has three shipped adapters, and which one runs is a per-step configuration decision.
+*Evidence:* `claude-code`, `claude-interactive`, and `codex` are all live runner types; the `agents` registry mixes vendors and price tiers in one pool; and `llm_caller.steps.<step>` pins a specific chain to a specific step, with automatic rotation *within* that chain.
+
+The long-form version of all five is below: [Design Philosophy](#design-philosophy) for the paradigm, [The knowledge system](#the-knowledge-system-code-index--charter--why-comments) for the code-first bet.
+
+---
+
 ## Design Philosophy
 
 ### 1. A different paradigm: program-as-supervisor, human out-of-the-loop
 
 Skills, subagents, and dynamic workflows make a *single AI turn* smarter or more parallel. They are valuable, but they assume a human is present, reading output and steering after every step.
 
-tianluo makes a different bet. The unit of work is not a turn; it is a **project task**. Between `luo run "…"` and the final commit there may be dozens of LLM calls across plan / implement / test / self-check / invariant-check / commit steps, multiple agent rotations, fix loops, and even multi-machine collaboration via the daemon and central server. The supervisor of all this is the tianluo engine — Python code running a deterministic state machine — not a person watching a terminal.
+tianluo makes a different bet. The unit of work is not a turn; it is a **project task**. Between `luo run "…"` and the final commit there may be dozens of LLM calls across discovery / analyze / (investigate) / plan / confirm / implement / test / self-check / invariant-check / charter-freshness / version-analyze / commit / summarize steps, multiple agent rotations, fix loops, and even multi-machine collaboration via the daemon and central server. The supervisor of all this is the tianluo engine — Python code running a deterministic state machine — not a person watching a terminal.
 
 | Tool class | Scope | Who supervises | Where state lives |
 |------------|-------|----------------|-------------------|
@@ -35,21 +69,27 @@ LLMs are not the bottleneck. *Human attention* is. The cost of any agentic syste
 
 The ideal tianluo session looks like this:
 
-1. **Prompt** — you type `luo run "…"` (or open a discovery session).
+1. **Prompt** — you type `luo run "…"` (or open a discovery session with `--discover`).
 2. **Discover** — the engine asks a few targeted clarifying questions until requirements converge.
-3. **Fire-and-forget** — you walk away. The engine plans, implements, tests, self-checks, checks the diff against recorded invariants, flags any charter drift, bumps the version, and commits.
-4. **Pick up the deliverable** — you come back to a clean commit on a branch, with the version, history, and code-index already aligned.
+3. **Confirm the plan** — one always-on gate: you approve the plan, or send it back for revision.
+4. **Fire-and-forget** — you walk away. The engine implements, tests, self-checks, checks the diff against recorded invariants, flags any charter drift, decides the version, and commits.
+5. **Pick up the deliverable** — you come back to a clean commit on a branch, with the version, history, and code-index already aligned.
 
-Steps 1 and 2 are the only places where human attention is genuinely required. Everything else is the program's job.
+Steps 1–3 are the only places where human attention is genuinely required. Everything else is the program's job.
 
 ### 3. The four moats that make this paradigm work
 
 A program-as-supervisor paradigm only holds up if the framework provides four things that in-session tools cannot:
 
-- **Cross-session state machine** — `tianluo/state/engine.json` persists the exact step, attempt, context, and fix-loop history of every flow. `luo daemon` keeps a resident process supervising local `luo run` flows; `tianluo-server` aggregates many daemons into one web view; `luo run --loop` chains tasks autonomously on isolated git worktrees. The flow survives terminal exits, machine restarts, and hand-offs between machines. *Why this paradigm needs it:* without durable state, "walking away" loses the work.
+- **Cross-session state machine** — `tianluo/state/engine.json` persists the exact step, attempt, context, and fix-loop history of every flow. `luo daemon` keeps a resident process supervising local `luo run` flows; `tianluo-server` aggregates many daemons into one web view; `luo run --worktree` runs the identical flow on an isolated git worktree and merges it back on success. The flow survives terminal exits, machine restarts, and hand-offs between machines. *Why this paradigm needs it:* without durable state, "walking away" loses the work.
 - **A code-first knowledge system (code-index + charter + why-comments)** — the source of truth is the code itself. A `tianluo/code-index.md` structure map (auto-maintained, self-freshening) gives the agent an orientation map of *what modules and symbols exist and where*; a small hand-maintained `tianluo/charter.md` carries only the high-altitude facts every step needs in full (project identity, top-level architecture, project-wide invariants); colocated why-comments carry intent the code cannot express. *Why this paradigm needs it:* a long-running unattended agent needs to orient itself in the codebase cheaply on every step without a curated mirror of the code rotting beside it. See [The knowledge system](#the-knowledge-system-code-index--charter--why-comments) below for why this beats the spec-mirror it replaces.
 - **Failure recovery built in** — `luo salvage` rescues a crashed session by committing dangling changes, filing follow-up issues, and archiving the state. The test-baseline cache distinguishes a new regression from a pre-existing red test. Issue discovery promotes any unresolved concern into a tracked `tianluo/issues/` record. *Why this paradigm needs it:* when no human is watching, the framework must catch its own failures rather than leak them.
-- **Portable substrate** — the engine is pure Python over the file system. The LLM call layer is a thin `AgentRunner` adapter; today's concrete runner is the Claude Code CLI, but the abstraction (`AgentRunner` / `RunResult` / `InfraErrorType`) is provider-neutral. *Why this paradigm needs it:* a paradigm bet should not be a single-vendor bet.
+- **Portable substrate** — the engine is pure Python over the file system, and the LLM call layer is a thin `AgentRunner` adapter. This is no longer a single-vendor bet in principle only: three adapters ship today and have run across vendors —
+  - **`claude-code`** — a one-shot `claude -p` subprocess (`src/tianluo/claude_runner.py`). The default.
+  - **`claude-interactive`** — a pexpect-driven interactive PTY session (`src/tianluo/claude_interactive_runner.py`). Opt-in only: it needs a real terminal, so it is never auto-selected.
+  - **`codex`** — the OpenAI Codex CLI (`src/tianluo/codex_runner.py`).
+
+  The abstraction (`AgentRunner` / `RunResult` / `InfraErrorType`) stays provider-neutral, and the boundary is deliberate: **rotation and fallback across commands belong to `LLMCaller`; a single runner never rotates on its own.** Each adapter only knows how to make *one call to one CLI*, translating intent through `build_call_args`, so a new vendor plugs in without touching any caller above it. *Why this paradigm needs it:* a paradigm bet should not be a single-vendor bet.
 
 ### luo vs Claude Code Dynamic Workflows (complementary, not competing)
 
@@ -69,11 +109,11 @@ Earlier tianluo versions kept a parallel corpus of `tianluo/specs/**/spec.md` fi
 
 - **code-index** — a *structure map* of the project. Its structure comes deterministically from the code (a filesystem walk + Python AST symbol enumeration: directory/package → file/module → class → function/method); a one-line LLM summary, synthesized bottom-up (a directory's summary from its files', a file's from its symbols'), is attached to each level. It lands as **one self-sufficient file**, `tianluo/code-index.md` — the **authoritative product, committed to git**. It *is* the map, and it is what `luo code-index` renders and what gets injected into every flow step. Because it is plain text in a diff, a wrong summary can be spotted by a human reviewer and corrected, and the correction lands durably. Each node line also carries an embedded content fingerprint (a terse, render-invisible HTML comment), so the committed md *alone* decides what changed: on rebuild only fingerprint-changed nodes are re-summarized by the LLM, unchanged nodes reuse their existing summary (so human corrections survive), and the md is flushed periodically during a build so a crash resumes from where it stopped. There is no separate cache file — structure, summaries, and fingerprints all live in the one committed, human-diffable file.
 
-  The structure comes from the **code**, not the json; the json is just a rebuild accelerator. Display reads only the `.md`. The optimization goal is **structural coverage, not summary depth** — the map answers *which modules/symbols exist and where*, and deliberately does not descend into implementation detail (that is the source code's job; copying it into the index would just reproduce a worse-than-code mirror).
+  The structure comes from the **code**, not from any cache; display reads only the `.md`. The optimization goal is **structural coverage, not summary depth** — the map answers *which modules/symbols exist and where*, and deliberately does not descend into implementation detail (that is the source code's job; copying it into the index would just reproduce a worse-than-code mirror).
 
 - **charter** — `tianluo/charter.md`, the slimmed, renamed successor of the old base spec. It is injected, in full, into every step, and doubles as the conventions channel for sandboxed sub-processes (which cannot read `CLAUDE.md`). An *altitude gate* admits only what is **un-sayable in code and needed in full by the whole project**: project identity, top-level architecture, and project-wide cross-cutting invariants. The per-module locator index that used to bloat the base spec is gone — that job belongs to code-index. A byte threshold is a monitoring light, not a hard wall: because charter content is decoupled from project size (it grows with architectural complexity, not LOC), full-loading it stays cheap even on large projects; if it ever grows hard to load in full, that is a red flag that low-altitude content leaked in — not a reason to build an index over the charter.
 
-- **why-comments** — colocated comments that carry *only* the why/intent that code cannot express, updated only when the why changes. They are not a source for code-index, so there is no per-change synchronization tax; the implement step's prompt simply asks the agent to update the colocated why-comment when a change's intent changes. This is honestly a prompt-level soft convention (same strength as the other conventions), pressing the comment-discipline surface to its minimum rather than eliminating it.
+- **why-comments** — colocated comments that carry *only* the why/intent that code cannot express, updated only when the why changes. They are not a source for code-index, so there is no per-change synchronization tax; the implement step's prompt simply asks the agent to update the colocated why-comment when a change's intent changes. This is honestly a prompt-level soft convention (same strength as the other conventions), pressing the comment-discipline surface to its minimum rather than eliminating it. The subset marked `WHY:` / `INVARIANT:` is the exception: those are hard-guarded by the `invariant_check` step.
 
 ### What actually got better (an honest accounting)
 
@@ -81,8 +121,8 @@ This refactor does **not** make code descriptions more semantically correct: an 
 
 - **Source of truth returns to the code.** Navigation and intent live next to the code, not in a separate corpus that has to be kept honest.
 - **Staleness is eliminated.** code-index regenerates incrementally with zero discipline required: a deterministic enumerator re-walks the tree every build, so a newly added symbol is enumerated, a deleted one is pruned, and only fingerprint-changed symbols are re-summarized. Completeness is a *property of the enumerator*, not of LLM diligence — the LLM only summarizes the symbols it is handed and never decides who is included, so it cannot omit a symbol, and a mis-summarized line still appears on the map.
-- **The governance maintenance surface collapses.** The entire `sync_*` stack, `verify_spec`, `update_spec`, `spec_gate`, the per-requirement drift baselines, and the old `spec_check` all retire. What remains is two cheap, anchored checks: `INVARIANT_CHECK` (does the diff violate any *already-recorded* binding invariant — anchored to {task description, charter, the touched code's why-comments}?) and `CHARTER_FRESHNESS` (an advisory that flags only when the diff plausibly touches one of charter's content classes, and otherwise passes for free).
-- **Granularity and admission become explicit knobs.** code-index granularity bottoms out at each file's smallest *natural* semantic unit (code → function/method; structured non-code → its natural unit; opaque files → one file-level line), with line/byte chunking only as a last-resort degrade mode gated behind three simultaneous conditions; the four thresholds are exposed in `tianluo.yaml` (`spec_governance:`). Charter content is gated by an admission standard you can read and enforce. Both are dials you turn, not emergent behavior you fight.
+- **The governance maintenance surface collapses.** The entire `sync_*` stack, `verify_spec`, `update_spec`, `spec_gate`, the per-requirement drift baselines, and the old `spec_check` all retire. What remains is two cheap, anchored checks: `invariant_check` (does the diff violate any *already-recorded* binding invariant — anchored to {task description, charter, the touched code's why-comments}?) and `charter_freshness` (an advisory that flags only when the diff plausibly touches one of charter's content classes, and otherwise passes for free).
+- **Granularity and admission become explicit knobs.** code-index granularity bottoms out at each file's smallest *natural* semantic unit (code → function/method; structured non-code → its natural unit; opaque files → one file-level line), with line/byte chunking only as a last-resort degrade mode gated behind three simultaneous conditions. Charter content is gated by an admission standard you can read and enforce. Both are dials you turn, not emergent behavior you fight.
 - **Charter volume is decoupled from project scale.** It grows with architecture, not lines of code.
 - **The failure floor is higher than the old system's.** Even if every soft discipline lapses, the one automatically-maintained artifact — code-index — stays self-fresh. The system's worst case is therefore strictly better than the old system's worst case of *a rotting spec corpus + grep*.
 
@@ -113,7 +153,7 @@ pip install 'tianluo[server]'
 pip install 'tianluo[browser]'
 ```
 
-Current version: **12.0.0**. The installed console scripts:
+The installed console scripts:
 
 | Script | Purpose |
 |--------|---------|
@@ -129,18 +169,30 @@ The core CLI never imports the web stack, so installing without `[server]` keeps
 > (the Teal compiler owns it, and two competing short commands would split the
 > docs and community vocabulary).
 
-### Migrating an existing se3 project
+### Migrating an existing project
 
-Everything keeps working unchanged through 12.x: the `se3` command, a legacy
-`se3/` runtime directory, and `se3.yaml` / `se3.local.yaml` configs are all
-still honoured. To move a project to the new layout in one reviewable,
-`git revert`-able commit:
+Two migrators are registered. Which ones you need depends only on how old the
+project is — pick your row:
+
+| Your project was last set up on | Run, in this order | What it does |
+|---|---|---|
+| Before **11.0.0** (the `tianluo/specs/` spec-mirror era) | `luo migrate run spec-to-new-system`, then `luo migrate run rename-to-tianluo` | First retire the spec mirror, then rename the layout. |
+| **11.x** (already on code-index + charter, still named `se3`) | `luo migrate run rename-to-tianluo` | `git mv se3/ → tianluo/`, config renames, `.gitignore` rewrite. |
+| **12.0.0 or later** | nothing | Already on the current layout. |
 
 ```bash
-luo migrate run rename-to-tianluo   # git mv se3/ → tianluo/, config renames, .gitignore rewrite
+luo migrate list          # every registered migrator, with its id and description
+luo migrate run <id>      # run one, as a single reviewable, `git revert`-able commit
 ```
 
-All legacy fallbacks are removed in **13.0.0**.
+Order matters for the oldest projects: `spec-to-new-system` converts the legacy
+`tianluo/specs/` corpus to the code-index + charter + why-comments system, and
+`rename-to-tianluo` then moves the runtime root and configs onto the new names.
+
+Nothing breaks in the meantime. Through all of 12.x the compatibility layer is
+still honoured: the `se3` / `se3-server` commands, a legacy `se3/` runtime
+directory, and `se3.yaml` / `se3.local.yaml` configs all keep working. **All
+legacy fallbacks are removed in 13.0.0** — migrate before then.
 
 ---
 
@@ -154,33 +206,159 @@ luo init
 # 2. Optional: explore vague requirements through multi-turn discovery first
 luo run --discover "I want a CLI tool that does X"
 
-# 3. Run a task end-to-end (analyze → plan → implement → test → self_check →
-#    invariant_check → charter_freshness → version_analyze → commit → summarize)
+# 3. Run a task end-to-end (see the state machine below)
 luo run "Add JWT authentication"
 
 # 4. Resume an interrupted flow exactly where it stopped
 luo run --resume
 
 # 5. Navigate the codebase via the structure map
-luo code-index                          # adaptive root map: a budgeted, zoomable directory tree
+luo code-index                              # adaptive root map: a budgeted, zoomable directory tree
 luo code-index index src/tianluo/engine     # drill one literal level (a directory's immediate children)
 luo code-index show src/tianluo/cli.py      # one file's full function/method detail
 ```
 
+### The flow state machine
+
+This is the full-sequence shape (`feature`, `bugfix`, and `--discover` runs).
+Every node name is the literal step identifier you will see in logs, in
+`tianluo/state/engine.json`, and in `luo history show`:
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    [*] --> discovery: discovery mode
+    [*] --> analyze: normal run
+    discovery --> analyze: requirements converged
+
+    analyze --> investigate: bugfix with unclear root cause
+    analyze --> plan: root cause already clear
+    investigate --> plan: root-cause report
+
+    plan --> confirm: always-on gate
+    confirm --> plan: revision requested
+    confirm --> implement: approved
+
+    implement --> test
+    test --> self_check: no new failures
+    self_check --> invariant_check: no findings
+    invariant_check --> charter_freshness: no violation
+    charter_freshness --> version_analyze
+    version_analyze --> commit: suggested_version
+    commit --> summarize
+    summarize --> [*]
+
+    test --> implement: fix loop
+    self_check --> implement: fix loop
+    invariant_check --> implement: fix loop
+```
+
+Three things in that picture are easy to miss:
+
+- **`investigate` is conditional, not a fixed stage.** It is inserted before
+  `plan` only when `analyze` classifies the task as a `bugfix` *and* reports
+  `root_cause_clear = false`. (The `survey` task type is the other way in — it
+  carries `investigate` in its default sequence unconditionally.) The step runs
+  under a **net-zero-diff** contract that the engine verifies by comparing a
+  workspace snapshot taken before it against one taken after.
+- **`confirm` after `plan` is always on.** It is inserted mechanically, whether
+  or not `confirmation.steps.plan` appears in your config. A rejection sends the
+  flow back to `plan`, not forward.
+- **The fix loop is shared.** `test`, `self_check`, and `invariant_check` all
+  route failures/findings back into `implement`. A check-step finding has no
+  other destination — it cannot be waived, deferred, or downgraded.
+
+### Task types
+
+`luo run --type/-t` accepts exactly five values — `feature`, `bugfix`, `small`,
+`review`, `survey`. An unrecognized value is **rejected with an error**, not
+silently coerced. Omitting `--type` leaves the run on the `pending` sentinel,
+which means *let `analyze` classify it*.
+
+`discovery` is **not** a `--type` value: it is a run mode you enter with
+`luo run --discover` / `-d`, and it prepends a `discovery` step to the full
+sequence.
+
+| `--type` | Default step sequence | Notes |
+|---|---|---|
+| `feature` | analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | The full chain; also the fallback for an unknown persisted type. |
+| `bugfix` | same as `feature`, plus a conditional `investigate` before `plan` | The only type that can gain `investigate` conditionally. |
+| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | No `plan` (so no confirm gate), no `self_check`, no `invariant_check`. |
+| `review` | analyze → invariant_check → summarize | Read-and-judge only: no implement, no test, no commit. |
+| `survey` | analyze → investigate → summarize | Deliverable is a conclusion, not a diff — so no implement/test/commit, and no `version_analyze`. |
+| *(`--discover`)* | discovery → *the `feature` chain* | Entered via `--discover`, not `--type`. |
+
+`analyze` may still adjust the selected sequence; the table is the starting
+point, not a frozen contract.
+
 ### Three operating modes
 
-- **`--loop`** — Run tasks back-to-back on an isolated git worktree branch
-  (`loop/<slug>-<n>`). Each iteration gets its own clean working tree; the
-  branch is auto-merged or auto-discarded when the loop ends, or preserved
-  for deferred merge if you Ctrl-C.
+- **`luo run --worktree`** — Run the **identical** flow inside its own git
+  worktree: same steps, same state persistence, same `--resume`, same `--type`.
+  On success the heavyweight `luo merge` orchestrator merges the branch back
+  into the originating branch automatically. Several `--worktree` runs can
+  execute concurrently — the flow body holds no lock — and they contend only at
+  their final merge, where the main-worktree mutex
+  (`tianluo/state/merge.lock`, blocking queue-and-wait) serializes them against
+  each other and against any synchronous run. Leaked worktrees from terminal
+  runs are reclaimed by `luo worktree gc`.
 - **`luo daemon start`** — Launch a resident background process that
   supervises every local `luo run`, aggregates state under
   `tianluo/state|logs|calls|issues`, and (optionally) dials out to a central
-  server. Lets you check on a flow from anywhere.
+  server over a single outbound connection. Lets you check on a flow from
+  anywhere.
 - **`tianluo-server`** — A FastAPI + WebSocket central server (with a bundled
   static web console at `/`) that merges many daemons into one multi-machine
   view. Useful for fleets, remote launch, and watching long-running flows
   from a browser. Defaults to `127.0.0.1:8080`.
+
+### The web console
+
+![tianluo web console](https://raw.githubusercontent.com/CoREse/tianluo/master/docs/assets/webui.png)
+
+The console is not a log viewer bolted onto the CLI — it is the second full
+control surface, and for the out-of-the-loop workflow it is usually the one you
+live in. What it gives you:
+
+- **Fleet overview across machines.** Every daemon that has bound itself to
+  your account shows up in one list, with its projects and its live flows.
+  One browser tab covers a laptop, a workstation, and a build box at once.
+- **Launch new tasks from the browser.** *+ New Task* picks a target machine, a
+  registered project root (or a manually entered absolute path — the daemon
+  runs `luo init` there first if it is not a tianluo project yet), a task type
+  (or `auto`), and the task text. You never need a shell on the target machine.
+- **Answer discovery from the web.** A `--discover` run's multi-turn
+  requirement clarification is fully answerable in the browser; the checkbox
+  *"Start from discovery step"* is available both on the new-task form and when
+  launching a flow from an issue.
+- **Human-intervention gates.** A flow that needs you shows up as **PAUSED** /
+  **needs response**; you reply inline, approve or reject a plan confirmation
+  (`approve` / `reject`, or any other text as a revision request), interject an
+  instruction into a still-running flow, then **Resume** — or **End** the
+  session and archive it.
+- **History.** Finished sessions are browsable step-by-step, with per-step
+  records and the total tokens and cost the session consumed.
+- **Issues panel.** Browse open and closed issues across machines and projects,
+  filter by source / project / type, create issues, close them with a reason,
+  and launch a flow directly from one.
+- **File uploads, inlined into the prompt.** Drag, paste, or pick files; they
+  are relayed to the owning daemon and stored under the project's
+  `tianluo/uploads/` as `<content-hash>_<filename>` (20 MB limit per file).
+  The path is inlined into the prompt text the agent receives, and image
+  attachments additionally render as inline thumbnails under the message —
+  the thumbnail is an addition to the prompt text, never a substitution for it,
+  and one click opens the full-resolution image.
+- **Mobile layout.** The console is responsive down to phone width, so the
+  approve/reject gate is answerable from wherever you actually are.
+
+![Multi-machine fleet overview](https://raw.githubusercontent.com/CoREse/tianluo/master/docs/assets/webui_0.png)
+
+*The fleet overview: several machines, their projects, and every live flow in one view. Screenshot taken on an earlier release, before the rename — the UI still carries the SE3 branding.*
+
+![Mobile confirmation gate](https://raw.githubusercontent.com/CoREse/tianluo/master/docs/assets/webui_2.jpg)
+
+*Answering a confirmation gate from a phone. Screenshot taken on an earlier release, before the rename — the UI still carries the SE3 branding.*
 
 #### Web console authentication
 
@@ -206,25 +384,48 @@ for the full end-to-end auth walkthrough and configuration keys.
 
 ## Command Reference
 
-All commands found below are present in `src/tianluo/cli.py` or its registered
-sub-typers as of version 12.0.0.
+Every command below is registered in `src/tianluo/cli.py` or one of its
+sub-typers.
 
 ### Top-level commands
 
 | Command | Purpose |
 |---------|---------|
-| `luo run [TASK]` | Unified entry point. Drives the flow engine state machine (analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize). Supports `--resume`, `--flow-id`, `--loop`, `--max-iterations`, `--no-worktree`, `--merge`, `--list-loops`, `--discover`, `--from-issue`, `--change`, `--type`, `--preset`, `--output-format`. |
-| `luo init` | Initialize a new project: writes `tianluo.yaml`, `tianluo/charter.md`, `.gitignore`, and runs `git init` if needed. Flags: `--project-root`, `--name`, `--force`. |
+| `luo run [TASK]` | Unified entry point. Drives the flow-engine state machine (see [the diagram above](#the-flow-state-machine)). Flags: `--resume` / `-r`, `--type` / `-t`, `--change` / `-c`, `--flow-id`, `--discover` / `-d`, `--from-issue`, `--output-format`, `--preset`, `--worktree`. |
+| `luo init` | Initialize a new project: writes `tianluo.yaml`, `tianluo/charter.md`, `.gitignore`, and runs `git init` if needed. Flags: `--project-root` / `-p`, `--name` / `-n`, `--force` / `-f`. |
+| `luo guardrails <spec-file>` | Run tianluo guardrails on a file (deleted-line / weakened-language detection); `--sizes` runs project-wide size checks. Used by `luo merge`. Flag: `--original` / `-o <baseline-file>`. |
+| `luo merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution, then reconcile the final version from the merged-in intents. Flags: `--strategy` / `-s` `fast\|safe\|strict`, `--delete-merged` / `-d`, `--no-delete-merged`. Runtime data under `tianluo/` is synchronized per the tiered policy. |
+| `luo merge-respond <call-file>` | Apply a human decision file produced by `luo merge` when conflicts or guardrail violations escalated to a human call. |
+| `luo merge-unlock` | Inspect and release the project's merge lock (`tianluo/state/merge.lock`). Always reports the holder PID, its liveness, and the lock path. A stale lock is cleaned up automatically; a lock held by a live *local* process is refused unless `--force` / `-f` is given. A lock owned by **another machine** is never auto-broken — releasing it is always an explicit operator decision. |
+| `luo salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. Flag: `--project-root` / `-p <path>`. |
+| `luo end-session [FLOW_ID]` | End and archive a session: terminate the live `luo run` process (clearing its pid file) and archive the state. A `--worktree` session is archived like a completed run — worktree archived, terminal state promoted, history synced, isolation branch and worktree removed — but its unfinished work is **not** merged. Flags: `--project-root` / `-p`, `--pid`, `--no-archive-worktree`. |
+
+#### `luo run` flags worth knowing
+
+- **`--preset <name>`** — Run a task from the **preset prompt library** instead
+  of typing the prompt. Presets come from two layers merged into one registry:
+  the built-in layer shipped inside the package, and a project layer of
+  markdown files under `tianluo/prompts/` (committed with the project), whose
+  metadata — `type` and `prompt_file` — is declared in the `presets:` block of
+  `tianluo.yaml`. **The project layer overrides the built-in layer on a name
+  collision.** `luo run --preset list` prints every available preset with its
+  type and layer. A preset carries its own task type, so it is mutually
+  exclusive with an explicit `--type`.
+- **`--from-issue <id>`** — Start a flow whose input is an existing issue from
+  `tianluo/issues/`, and write the outcome back to that issue when the flow
+  finishes (a completed flow resolves it). This is the intended follow-up path
+  after `luo salvage` files issues for unfinished work.
+
+### `luo code-index` — the structure map
+
+| Subcommand | Purpose |
+|------------|---------|
 | `luo code-index` | Render the **adaptive root map** from `tianluo/code-index.md`: a byte-budgeted, zoomable directory tree (top level always shown; code directories expanded a few levels deep within the budget). This is the same map injected into every flow step. Reads the committed map (reports "not built" until you run `rebuild`); flow steps keep it fresh lazily/incrementally. |
 | `luo code-index index [PATH]` | Render exactly **one literal level** at `PATH`: a directory's immediate children (subdirs + files), or a file's functions/methods. No argument → the literal root level. Unlike the bare command, it never auto-expands. |
 | `luo code-index show <path>` | Print one file's full function/method detail (and any degraded chunks) from the structure map. |
+| `luo code-index search <pattern>` | Grep the map's item lines — a drop-in for `grep tianluo/code-index.md`, except a matched **symbol** line carries its owning file's full path (`relpath::local_id`) and no fingerprint comments leak into the output. Grep-aligned syntax: regex by default, `-i` / `--ignore-case`, `-F` / `--fixed-strings`, `-m N` / `--max-count`, `-n` / `--line-number`. Exit code follows grep (0 = matched, 1 = none, 2 = bad regex). |
 | `luo code-index rebuild [--force]` | Rebuild the code-index, flushing the md periodically as a checkpoint. Incremental by default (only fingerprint-changed nodes are re-summarized); `--force` re-summarizes everything. |
 | `luo code-index inspect` | Show code-index stats (file / symbol / degraded-chunk counts) from the on-disk map. |
-| `luo migrate run <id>` / `luo migrate list` | Run a registered version/format migration (`run <id>`), or list the available migrators (`list`). A reusable registry skeleton; the first migrator (`spec-to-new-system`) converts a legacy `tianluo/specs/` project to the code-index + charter + why-comments system in one reviewable, `git revert`-able change. |
-| `luo guardrails <spec-file>` | Run tianluo guardrails on a file (deleted-line / weakened-language detection); `--sizes` runs project-wide size checks. Used by `luo merge`. Flag: `--original` / `-o <baseline-file>`. |
-| `luo merge <branch> [<branch> ...]` | Sequentially merge branches into HEAD with LLM-driven conflict resolution. Flags: `--strategy fast\|safe\|strict`, `--delete-merged` / `--no-delete-merged`. Runtime data under `tianluo/` is synchronized per the tiered policy. |
-| `luo merge-respond <call-file>` | Apply a human decision file produced by `luo merge` when conflicts or guardrail violations escalated to a human MCP call. |
-| `luo salvage` | Best-effort recovery of an abnormally terminated session: tolerant state load, commit dangling diff, file follow-up issues, archive the session. Flag: `--project-root` / `-p <path>`. |
 
 ### `luo history` — flow history
 
@@ -242,7 +443,22 @@ sub-typers as of version 12.0.0.
 | `luo issue` / `luo issue list` | List open issues (default). `--all` includes closed; `--type <t>` filters by type. |
 | `luo issue show <id>` | Render an issue's full details. |
 | `luo issue create` | Interactively create a new issue (title, description, type, priority, tags). |
+| `luo issue edit <id>` | Open the issue in `$EDITOR` (falling back to `vi`) and write back the edited YAML. |
+| `luo issue close <id>` | Close an issue. `--reason <text>` records why. |
 | `luo issue reset <id>` | Reset an in-progress issue back to `open`. |
+
+### `luo migrate` — layout / format migrations
+
+| Subcommand | Purpose |
+|------------|---------|
+| `luo migrate list` | List the registered migrators — currently `spec-to-new-system` and `rename-to-tianluo`. |
+| `luo migrate run <id>` | Run one migrator as a single reviewable, `git revert`-able change. See [Migrating an existing project](#migrating-an-existing-project) for which to run. |
+
+### `luo worktree` — isolation worktrees
+
+| Subcommand | Purpose |
+|------------|---------|
+| `luo worktree gc` | Garbage-collect leaked `luo run --worktree` runs: enumerates worktree runs under `tianluo/worktrees/` whose engine state is terminal (COMPLETED / FAILED) and idle at least `--max-age-hours` (default 24), then per run archives it, promotes its terminal state into the main archive, and removes the worktree. A branch is deleted **only when provably merged**; an unmerged branch's ref is always retained and reported with a loud warning. Flags: `--max-age-hours`, `--dry-run`, `--project-root` / `-p`. Exits non-zero if any run errored. |
 
 ### `luo daemon` — resident control plane
 
@@ -258,30 +474,34 @@ sub-typers as of version 12.0.0.
 
 Everything under `tianluo/` is gitignored by default *except* the whitelisted
 sub-paths shown below (the code-index map, charter, issues, scripts, prompts,
-and `version-rules.md` are tracked; runtime state and logs are not).
+version-intents, and `version-rules.md` are tracked; runtime state and logs are
+not).
 
 ```
 your-project/
-├── tianluo.yaml                       # Project config (tracked)
-├── tianluo.local.yaml                 # Local override   (gitignored)
+├── tianluo.yaml                   # Project config (tracked)
+├── tianluo.local.yaml             # Local override — WHOLE-FILE, not key-merge (gitignored)
 ├── pyproject.toml                 # Single source of truth for project version
 ├── VERSIONS.md                    # Changelog (maintained by documentation-updater)
 ├── scripts/                       # Helper scripts
 ├── .gitignore                     # Written / extended by `luo init`
-└── tianluo/                           # tianluo runtime root
+└── tianluo/                       # tianluo runtime root
     ├── code-index.md             # ✅ tracked — authoritative structure map (LLM-injected, human-reviewable)
     ├── charter.md                # ✅ tracked — project identity / architecture / invariants, injected in full every step
     ├── issues/                   # ✅ tracked — open/ and closed/ YAML records
     ├── prompts/                  # ✅ tracked — project-level preset prompt bodies (luo run --preset)
+    ├── version-intents/          # ✅ tracked — per-flow version intents consumed at merge time
     ├── version-rules.md          # ✅ tracked — optional, not present by default
-    ├── state/                    # ❌ runtime — engine.json, …
+    ├── state/                    # ❌ runtime — engine.json, merge.lock, run.pid, …
     │   └── archive/              #   archived engine snapshots
     ├── history/                  # ❌ runtime — per-flow per-step jsonl conversations
     ├── logs/                     # ❌ runtime — execution logs (incl. logs/llm/ traces)
-    ├── calls/                    # ❌ runtime — pending human MCP call files
+    ├── calls/                    # ❌ runtime — pending human call files
+    ├── collab/                   # ❌ runtime — collaboration artifacts
+    ├── uploads/                  # ❌ runtime — web-console attachments, `<content-hash>_<filename>`
     ├── cache/                    # ❌ runtime — derived caches (build locks, etc.)
     ├── tmp/                      # ❌ runtime — transient prompt/response snapshots
-    └── worktrees/                # ❌ runtime — loop-mode / DAG isolation worktrees
+    └── worktrees/                # ❌ runtime — `--worktree` isolation worktrees (+ .archive/)
 ```
 
 ---
@@ -293,9 +513,10 @@ drill down — you read the map's few lines first, and open source files only
 when you need the implementation detail behind a specific symbol:
 
 ```bash
-luo code-index                           # the adaptive root map (budgeted zoomable tree)
-luo code-index index src/tianluo/engine      # one level: the engine package's immediate children
+luo code-index                                         # the adaptive root map (budgeted zoomable tree)
+luo code-index index src/tianluo/engine                # one level: the engine package's immediate children
 luo code-index show src/tianluo/engine/code_index.py   # that file's full symbol tree
+luo code-index search 'merge.*lock'                    # find items by keyword or regex
 ```
 
 The same root-view map is injected automatically into every flow step, so the
@@ -306,8 +527,20 @@ architecture, and project-wide invariants — that every step needs to see whole
 
 ---
 
+## Further documentation
+
+| Document | What it covers |
+|---|---|
+| [docs/configuration.md](docs/configuration.md) ([中文](docs/configuration.zh.md)) | The authoritative configuration reference: how the config file is resolved, then every block and every key with its type, default, meaning, and pitfalls. Read this before writing anything into `tianluo.yaml`. |
+| [docs/daemon-and-server.md](docs/daemon-and-server.md) ([中文](docs/daemon-and-server.zh.md)) | The optional always-on control plane: installing and running `luo daemon` and `tianluo-server`, the connection model, multi-tenant auth, TLS reverse-proxy deployment, and the bundled web console. |
+
+`tianluo.example.yaml` in the repository root stays a deliberately small
+starter config; it is a starting point, not the reference.
+
+---
+
 ## Version & License
 
-- Version is owned by `pyproject.toml` (`12.0.0`) and bumped by the engine's `version_analyze` + `commit` steps. Do not hand-edit it.
+- The version lives in `pyproject.toml` and nowhere else. It is decided by the engine's `version_analyze` step and written by `commit` — do not hand-edit it, and do not copy it into other files (the badge at the top of this README reads it live from `pyproject.toml` for exactly that reason).
 - License: Apache-2.0.
 - See [VERSIONS.md](VERSIONS.md) for the full changelog.
