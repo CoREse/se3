@@ -1,0 +1,25 @@
+# tianluo project configuration — this repository (self-hosting).
+#
+# Scope: this file currently carries ONLY the `documentation:` block. It is
+# not a full project config; everything else (agents, llm_caller, version,
+# language, ...) stays on built-in defaults or on a maintainer's local file.
+#
+# Whole-file select-one, NOT key merge: config loading picks exactly ONE
+# config file (worktree/tianluo.local.yaml > main-repo/tianluo.local.yaml >
+# worktree/tianluo.yaml > main-repo/tianluo.yaml) and reads it alone. When a
+# `tianluo.local.yaml` exists anywhere on that chain, THIS FILE IS NOT READ AT
+# ALL — its keys are not merged in. So any block here must be mirrored
+# verbatim into that local file to take effect on such a machine.
+# See docs/configuration.md for the full rules.
+
+# WHY: README carries a shields.io *dynamic* badge that reads the version
+# straight out of pyproject.toml at render time, so the version number is
+# never duplicated into README. Configuring the badge template to that exact
+# literal (no `{{version}}` placeholder) makes DocumentationUpdater's badge
+# rewrite on every commit a byte-for-byte no-op: it still matches and
+# substitutes the badge, but substitutes it with itself, so README is left
+# untouched. Do NOT put a version placeholder back here — that would
+# reintroduce a hardcoded version into README on the next commit. Keep this
+# string identical to the badge line in README.md / README.zh.md.
+documentation:
+  readme_badge_template: '![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FCoREse%2Ftianluo%2Fmaster%2Fpyproject.toml&query=%24.project.version&label=version&color=blue)'
