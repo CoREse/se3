@@ -1,0 +1,90 @@
+# Example `tianluo/e2e/environment.yaml`.
+#
+# This file is a *reference sample* shipped inside tianluo, not a live
+# configuration: the bootstrap step injects it into the generation prompt so the
+# model has a concrete, schema-valid shape to imitate, and a human can read it to
+# learn the vocabulary without digging through `tianluo/e2e/config_schema.py`.
+#
+# One environment = one container network + one or more services. Every service
+# name doubles as its hostname on that network, which is why peers below address
+# each other as `db:5432` / `app:8000`. A single-container project is simply the
+# degenerate case: declare one service.
+#
+# The project's source tree is bind-mounted into every service that sets
+# `mount_source: true` (the default), so a fix-loop iteration only restarts
+# containers — it does not rebuild images. Images are rebuilt only when the
+# build steps below change.
+
+network: tianluo-e2e
+
+services:
+  # ---------------------------------------------------------------------
+  # The application under test. `base_kind: base` puts a public image from a
+  # registry underneath and layers the declarative build steps on top.
+  # ---------------------------------------------------------------------
+  - name: app
+    image: python:3.12-slim
+    base_kind: base
+    # Build steps become Dockerfile layers *in the order written*: BuildKit's
+    # cache is positional, so put the slow-changing steps first.
+    build:
+      - apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+      - pip install --no-cache-dir -e .
+    command: ["python", "-m", "myapp.server", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      APP_ENV: e2e
+      DATABASE_URL: postgresql://app:app@db:5432/app
+    # Readiness kinds: command | http | tcp | log. A service without a probe is
+    # assumed ready the moment its container starts, which is almost never true
+    # for a server — scenarios would then race the boot and fail intermittently
+    # for reasons that have nothing to do with the code.
+    readiness:
+      kind: http
+      url: http://localhost:8000/health
+      timeout: 60
+      interval: 1
+
+  # ---------------------------------------------------------------------
+  # An external dependency. Stock public image, no build layer, and crucially
+  # no source mount: a database has no business seeing the project tree.
+  # ---------------------------------------------------------------------
+  - name: db
+    image: postgres:16
+    base_kind: base
+    mount_source: false
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: app
+    readiness:
+      kind: command
+      command: ["pg_isready", "-U", "app", "-d", "app"]
+      timeout: 60
+
+  # ---------------------------------------------------------------------
+  # A browser driver, only needed by scenarios that assert on a rendered page.
+  # `base_kind: playwright` pins the browsers, system libraries AND fonts, which
+  # is what makes a tier-2 baseline screenshot reproducible: a baseline captured
+  # in one image and compared in another differs by font rasterisation alone.
+  # ---------------------------------------------------------------------
+  - name: browser
+    image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    base_kind: playwright
+    readiness:
+      kind: command
+      command: ["node", "--version"]
+      timeout: 30
+
+  # ---------------------------------------------------------------------
+  # A desktop GUI application. `base_kind: gui-xvfb` layers Xvfb, a light window
+  # manager, scrot and xdotool on top of `image`, so a windowed app can run and
+  # be screenshotted with no physical display. Uncomment for a GUI project.
+  # ---------------------------------------------------------------------
+  # - name: desktop
+  #   image: debian:stable-slim
+  #   base_kind: gui-xvfb
+  #   build:
+  #     - apt-get update && apt-get install -y --no-install-recommends python3-tk && rm -rf /var/lib/apt/lists/*
+  #   readiness:
+  #     kind: command
+  #     command: ["xdotool", "getdisplaygeometry"]

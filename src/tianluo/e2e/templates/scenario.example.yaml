@@ -1,0 +1,122 @@
+# Example `tianluo/e2e/scenarios/<name>.yaml` — one file, one scenario.
+#
+# A reference sample shipped inside tianluo, not a live configuration: the
+# bootstrap step injects it into the generation prompt so the model has a
+# concrete, schema-valid shape to imitate.
+#
+# THE ASSERTION LADDER (enforced by the schema, not merely suggested):
+#   tier 1 — deterministic. exit_code / stdout / stderr / http_status /
+#            http_body / file_exists / file_content / dom. The default; needs no
+#            declaration. Use it whenever it can express the check at all.
+#   tier 2 — screenshot_diff against a git-tracked baseline image. Allowed ONLY
+#            when the thing under test genuinely is a visual rendering, and only
+#            with `visual_regression: true` on the assertion.
+#   tier 3 — visual_semantic: an LLM looks at an image. Last resort. Needs
+#            `semantic_visual: true` AND `require_evidence: true`, because an
+#            LLM verdict is admissible only alongside a reviewable description
+#            of what it saw.
+# Escalating past a tier that could have done the job is a validation error, not
+# a style preference: a screenshot comparison where a DOM query would do turns
+# deterministic verification into probabilistic verification.
+#
+# The same ladder governs *driving*: `visual_click` (clicking screen
+# coordinates) is reserved for GUIs with no programmatic entry point and
+# requires `visual_driving: true` at scenario level.
+
+name: api-smoke
+
+# Which container the actions and assertions run in. Must be one of the services
+# declared in environment.yaml. For a browser scenario this is the Playwright
+# service; for a CLI scenario it is the application container itself.
+driver: app
+
+description: >
+  Seeds the fixture data through the CLI, then checks that the HTTP API answers
+  with the seeded items. Everything here is tier 1 — nothing about this
+  behaviour is visual.
+
+# Per-scenario time budget in seconds. Overrides e2e.scenario_timeout from
+# tianluo.yaml. Exceeding it is reported as a hang, not as a slow machine.
+timeout: 120
+
+tags: [smoke, api]
+
+# Actions run in order before the assertions are evaluated.
+# Kinds: exec | http | browser | wait | screenshot | visual_click.
+actions:
+  - action: exec
+    command: ["python", "-m", "myapp.cli", "seed", "--fixture", "e2e"]
+
+  - action: wait
+    seconds: 1
+
+# Every assertion is evaluated (set `fail_fast: true` at scenario level to stop
+# at the first failure instead) so one expensive e2e round yields the complete
+# failure surface rather than only its first symptom.
+assertions:
+  # The exit code of the most recent `exec` action.
+  - kind: exit_code
+    equals: 0
+
+  - kind: stdout
+    contains: "seeded 3 items"
+
+  # `from: <service>` issues the request from inside that container, which is
+  # what lets the URL use a peer service's network name.
+  - kind: http_status
+    url: http://app:8000/api/items
+    from: app
+    equals: 200
+
+  - kind: http_body
+    url: http://app:8000/api/items
+    from: app
+    matches: '"total"\s*:\s*3'
+
+  - kind: file_exists
+    path: /workspace/build/e2e-report.json
+
+# ---------------------------------------------------------------------------
+# Browser scenario shape (driver: browser). Note that the assertion is a DOM
+# query — tier 1 — NOT a screenshot: a rendered page with a queryable DOM offers
+# a deterministic entry point, so escalating to pixels would be a ladder
+# violation.
+# ---------------------------------------------------------------------------
+# actions:
+#   - action: browser
+#     op: goto
+#     url: http://app:8000/dashboard
+#   - action: browser
+#     op: click
+#     selector: "#refresh"
+# assertions:
+#   - kind: dom
+#     selector: ".item-row"
+#     count: 3
+
+# ---------------------------------------------------------------------------
+# Tier 2 — visual regression. Legitimate only when the subject IS the rendering.
+# The baseline must live in `tianluo/e2e/baselines/` and be committed; capture it
+# with `luo e2e run --write-baselines`, look at the image, then commit it.
+# ---------------------------------------------------------------------------
+# actions:
+#   - action: browser
+#     op: goto
+#     url: http://app:8000/report
+#   - action: screenshot
+#     name: report.png
+# assertions:
+#   - kind: screenshot_diff
+#     baseline: report.png
+#     threshold: 0.01
+#     visual_regression: true
+
+# ---------------------------------------------------------------------------
+# Tier 3 — semantic visual judgement. Only for a GUI with no queryable
+# structure at all. Both flags are mandatory.
+# ---------------------------------------------------------------------------
+# assertions:
+#   - kind: visual_semantic
+#     question: "Is the chart legend fully visible and not clipped by the window edge?"
+#     semantic_visual: true
+#     require_evidence: true

@@ -36,6 +36,22 @@ from tianluo.engine.models import (
 from tianluo.engine.steps.e2e import e2e_handler
 
 
+@pytest.fixture(autouse=True)
+def no_content_generation(monkeypatch):
+    """Keep the bootstrap hook from reaching a real agent.
+
+    ``tmp_path`` never has a ``tianluo/e2e/`` directory, so with e2e enabled the
+    handler's bootstrap hook would legitimately try to *generate* one — which
+    means constructing an LLMCaller and calling an agent. These tests are about
+    the handler's routing, not about content generation (``tests/e2e/
+    test_bootstrap.py`` owns that), so the hook is neutralised here. The two
+    tests in :class:`TestBootstrapHook` install their own stand-ins on top.
+    """
+    from tianluo.e2e import bootstrap
+
+    monkeypatch.setattr(bootstrap, "ensure_content", lambda *a, **k: None)
+
+
 def _write_config(project_root: Path, *, enabled: bool) -> None:
     project_root.mkdir(parents=True, exist_ok=True)
     (project_root / "tianluo.yaml").write_text(
@@ -283,9 +299,19 @@ class TestEnvironmentFailure:
 
 
 class TestBootstrapHook:
-    def test_absent_bootstrap_module_does_not_block(self, tmp_path):
+    def test_absent_bootstrap_module_does_not_block(self, tmp_path, monkeypatch):
         """Content already in place needs no generation, so a missing bootstrap
         module must not stop the run."""
+        import sys
+
+        import tianluo.e2e as e2e_pkg
+
+        # Simulate the module genuinely not being importable: drop the package
+        # attribute (otherwise `from ...e2e import bootstrap` resolves it without
+        # ever attempting an import) and poison the sys.modules entry.
+        monkeypatch.delattr(e2e_pkg, "bootstrap", raising=False)
+        monkeypatch.setitem(sys.modules, "tianluo.e2e.bootstrap", None)
+
         _write_config(tmp_path, enabled=True)
         step, flow = _step(), _flow(tmp_path)
 

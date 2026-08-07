@@ -512,6 +512,12 @@ from .commands.migrate_cmd import migrate_app
 # deps, so core/server dependency isolation is preserved.
 from .commands.worktree_cmd import worktree_app
 
+# Import e2e command (manual trigger for the end-to-end subsystem). Its module
+# level imports nothing from tianluo.e2e — every one of them sits inside a
+# command body — so building the command tree on a core-only install never
+# reaches for the `tianluo[e2e]` extra.
+from .commands.e2e_cmd import e2e_app
+
 
 @app.command(name="init", help=t("cli.help.init.desc"))
 def init_cmd(
@@ -728,6 +734,10 @@ app.add_typer(migrate_app, name="migrate", help=t("cli.help.migrate"))
 # Register worktree command (isolation-worktree operator surface; `luo worktree
 # gc` reclaims leaked terminal --worktree runs stranded under tianluo/worktrees/)
 app.add_typer(worktree_app, name="worktree", help=t("cli.help.worktree"))
+
+# Register e2e command (run / list / doctor / bootstrap). Shares session.run_e2e
+# with the engine's E2E step so a manual run and a flow run cannot diverge.
+app.add_typer(e2e_app, name="e2e", help=t("cli.help.e2e"))
 
 
 # ---------------------------------------------------------------------------

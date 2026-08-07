@@ -140,6 +140,10 @@ artifacts = [
     "src/tianluo/server/static/**",
     "src/tianluo/i18n/locales/*.json",
     "src/tianluo/e2e/templates/*.tmpl",
+    # The example environment/scenario documents the bootstrap step injects into
+    # its generation prompt. Same reasoning as the Dockerfile templates: they are
+    # framework assets, not part of the optional extra.
+    "src/tianluo/e2e/templates/*.yaml",
 ]
 
 [tool.pytest.ini_options]
