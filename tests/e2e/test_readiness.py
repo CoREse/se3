@@ -99,6 +99,77 @@ class TestHttpProbe:
         with pytest.raises(E2EEnvironmentError):
             wait(FakeBackend(), make_handle(tmp_path), probe)
 
+    def test_a_declared_status_is_what_counts_as_ready(self, tmp_path, monkeypatch):
+        """An auth-guarded root answers 401 when perfectly healthy."""
+        monkeypatch.setattr(
+            readiness.urllib.request,
+            "urlopen",
+            _fake_urlopen([urllib.error.HTTPError("u", 401, "auth", None, None)]),
+        )
+        probe = ReadinessProbe(
+            kind="http", url="http://127.0.0.1:18000/", status=401, timeout=3
+        )
+
+        assert wait(FakeBackend(), make_handle(tmp_path), probe) is True
+
+    def test_a_declared_3xx_is_observed_instead_of_followed(
+        self, tmp_path, monkeypatch
+    ):
+        """A redirect-to-login can itself be the "service is up" signal.
+
+        The default opener follows redirects transparently, so the status a probe
+        sees is always the terminal one — a declared 302 could never match, and a
+        healthy service burned the whole budget before being reported as an
+        environment failure.
+        """
+        openers = []
+
+        class _Opener:
+            def open(self, url, timeout=None):
+                openers.append((url, timeout))
+                raise urllib.error.HTTPError(url, 302, "Found", None, None)
+
+        def _build_opener(*handlers):
+            openers.append(handlers)
+            return _Opener()
+
+        monkeypatch.setattr(readiness.urllib.request, "build_opener", _build_opener)
+        monkeypatch.setattr(
+            readiness.urllib.request, "urlopen", _fake_urlopen([200] * 50)
+        )
+        probe = ReadinessProbe(
+            kind="http", url="http://127.0.0.1:18000/", status=302, timeout=3
+        )
+
+        assert wait(FakeBackend(), make_handle(tmp_path), probe) is True
+        # The redirect handler is what makes the 302 observable at all.
+        assert readiness._NoRedirectHandler in openers[0]
+
+    def test_a_non_redirect_probe_keeps_the_default_opener(
+        self, tmp_path, monkeypatch
+    ):
+        """Only the 3xx case needs a private opener; everything else must not."""
+
+        def _refuse(*handlers):  # pragma: no cover - must never be called
+            raise AssertionError("build_opener used for a non-redirect probe")
+
+        monkeypatch.setattr(readiness.urllib.request, "build_opener", _refuse)
+        monkeypatch.setattr(readiness.urllib.request, "urlopen", _fake_urlopen([200]))
+        probe = ReadinessProbe(kind="http", url="http://127.0.0.1:18000/")
+
+        assert wait(FakeBackend(), make_handle(tmp_path), probe) is True
+
+    def test_a_declared_status_also_excludes_other_answers(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            readiness.urllib.request, "urlopen", _fake_urlopen([200] * 50)
+        )
+        probe = ReadinessProbe(
+            kind="http", url="http://127.0.0.1:18000/", status=401, timeout=3
+        )
+
+        with pytest.raises(E2EEnvironmentError):
+            wait(FakeBackend(), make_handle(tmp_path), probe)
+
     def test_an_http_probe_without_a_url_is_a_config_error(self, tmp_path):
         with pytest.raises(E2EConfigError):
             wait(FakeBackend(), make_handle(tmp_path), ReadinessProbe(kind="http"))
@@ -206,6 +277,38 @@ class TestTimeout:
 
         assert len(backend.exec_calls) == 1
 
+    def test_the_sleep_never_outlasts_the_remaining_budget(self, tmp_path):
+        """A long interval must not stretch the wait far past its timeout.
+
+        timeout 5 with interval 30 used to sleep the whole 30s after the first
+        failed attempt — six times the budget the caller sized the E2E step
+        against — before reporting the environment failure.
+        """
+        backend = FakeBackend(exec_results=[ExecResult(exit_code=1)] * 200)
+        probe = ReadinessProbe(
+            kind="command", command=("true",), timeout=5, interval=30
+        )
+        clock = FakeClock()
+
+        with pytest.raises(E2EEnvironmentError):
+            wait(backend, make_handle(tmp_path), probe, clock=clock)
+
+        assert clock.slept and max(clock.slept) <= 5
+        assert clock.now <= 5.01
+
+    def test_a_short_interval_is_still_slept_in_full(self, tmp_path):
+        """The clamp must only ever shorten the last sleep, not every sleep."""
+        backend = FakeBackend(
+            exec_results=[ExecResult(exit_code=1), ExecResult(exit_code=0)]
+        )
+        probe = ReadinessProbe(
+            kind="command", command=("true",), timeout=60, interval=2
+        )
+        clock = FakeClock()
+
+        assert wait(backend, make_handle(tmp_path), probe, clock=clock) is True
+        assert clock.slept == [2]
+
     def test_probe_mechanism_errors_do_not_abort_the_wait(self, tmp_path):
         class Flaky(FakeBackend):
             def __init__(self):
@@ -246,6 +349,30 @@ class TestLogTail:
         tail = readiness.read_log_tail(backend, make_handle(tmp_path), "app", lines=5)
 
         assert tail.splitlines() == ["95", "96", "97", "98", "99"]
+
+    def test_no_destination_is_requested_so_polling_leaves_no_host_files(
+        self, tmp_path
+    ):
+        """A `log` probe reads this once per poll; a file per call would pile up."""
+        backend = FakeBackend(log_text="ready")
+        probe = ReadinessProbe(kind="log", pattern="ready")
+
+        wait(backend, make_handle(tmp_path), probe)
+
+        assert backend.snapshot_calls
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_snapshot_without_a_path_still_yields_its_text(self, tmp_path):
+        """The real backend answers a destination-less log capture in metadata."""
+        from tianluo.e2e.backend import Snapshot
+
+        class TextOnly(FakeBackend):
+            def snapshot(self, handle, service, target, *, kind="file", destination=None):
+                return Snapshot(
+                    kind="log", path=None, service=service, metadata={"text": "up\n"}
+                )
+
+        assert readiness.read_log_tail(TextOnly(), make_handle(tmp_path), "app") == "up"
 
     def test_a_backend_that_cannot_snapshot_yields_no_diagnostic(self, tmp_path):
         class Broken(FakeBackend):

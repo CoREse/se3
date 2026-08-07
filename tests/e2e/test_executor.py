@@ -134,6 +134,53 @@ class TestActions:
 
         assert backend.exec_calls[0][1] == ["sh", "-lc", "luo --version | head -1"]
 
+    def test_a_quoted_action_timeout_is_coerced(self, tmp_path):
+        """Machine-written YAML quotes numbers; that must not reach arithmetic raw."""
+        backend = FakeBackend()
+        executor, _ = build(tmp_path, backend)
+
+        result = executor.run_scenario(
+            scenario(
+                actions=(action("exec", command=["luo"], timeout="5"),),
+                assertions=(assertion("exit_code"),),
+            )
+        )
+
+        assert result.passed
+        assert backend.exec_calls[0][2]["timeout"] == 5.0
+
+    @pytest.mark.parametrize("bad", ["fast", 0, -3])
+    def test_a_non_numeric_action_timeout_is_a_located_config_error(
+        self, tmp_path, bad
+    ):
+        backend = FakeBackend()
+        executor, _ = build(tmp_path, backend)
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            executor.run_scenario(
+                scenario(
+                    name="smoke",
+                    actions=(action("exec", command=["luo"], timeout=bad),),
+                    assertions=(assertion("exit_code"),),
+                )
+            )
+
+        assert "smoke" in str(excinfo.value)
+
+    def test_a_non_numeric_wait_interval_is_a_located_config_error(self, tmp_path):
+        backend = FakeBackend(exec_results=[ExecResult(exit_code=0)])
+        executor, _ = build(tmp_path, backend)
+
+        with pytest.raises(E2EConfigError):
+            executor.run_scenario(
+                scenario(
+                    actions=(
+                        action("wait", until=["test", "-e", "/tmp/x"], interval="soon"),
+                    ),
+                    assertions=(assertion("exit_code"),),
+                )
+            )
+
     def test_exec_honours_service_workdir_and_environment(self, tmp_path):
         backend = FakeBackend()
         executor, _ = build(
@@ -182,6 +229,35 @@ class TestActions:
         assert result.passed
         assert len(backend.exec_calls) == 2
         assert any("exited 1" in note for note in result.evidence)
+        # A non-zero exec is a note, not a verdict: the exit_code / stdout /
+        # stderr assertions are what judge a command. It still has to reach the
+        # fix loop, which reads `notes`.
+        assert any("exited 1" in note for note in result.notes)
+        assert result.action_failures == []
+
+    def test_an_unreachable_http_action_fails_the_scenario(
+        self, tmp_path, monkeypatch
+    ):
+        """No assertion adjudicates a driving request: `http_status` re-fetches."""
+        import urllib.error
+        import urllib.request
+
+        def refuse(url, timeout=None):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr(urllib.request, "urlopen", refuse)
+        executor, _ = build(tmp_path, FakeBackend())
+
+        result = executor.run_scenario(
+            scenario(
+                actions=(action("http", url="http://127.0.0.1:1/gone"),),
+                assertions=(assertion("file_exists", path="/pre/existing"),),
+            )
+        )
+
+        assert result.assertions[0].passed
+        assert not result.passed
+        assert any("action http" in failure for failure in result.action_failures)
 
     def test_empty_command_is_a_config_error(self, tmp_path):
         executor, _ = build(tmp_path, FakeBackend())
@@ -237,13 +313,45 @@ class TestActions:
 
         result = executor.run_scenario(
             scenario(
-                actions=(action("wait", until=["pgrep", "server"]),),
+                actions=(
+                    action("wait", until=["pgrep", "server"]),
+                    action("exec", command=["run"]),
+                ),
                 assertions=(assertion("exit_code"),),
             )
         )
 
         assert result.passed
         assert len(backend.argv_containing("pgrep")) == 3
+
+    def test_poll_probe_is_not_the_exec_an_assertion_describes(self, tmp_path):
+        """A `wait.until` probe must not become the scenario's `last_exec`.
+
+        The probe necessarily ends up exiting 0 (that is what stops the poll), so
+        letting it take the slot would report a green exit code for whatever the
+        scenario's own command did.
+        """
+        backend = FakeBackend(
+            exec_results=[
+                ExecResult(exit_code=3, stdout="broke"),  # the declared exec
+                ExecResult(exit_code=0),  # the wait.until probe
+            ]
+        )
+        clock = FakeClock()
+        executor, _ = build(tmp_path, backend, clock=clock, sleeper=clock.sleep)
+
+        result = executor.run_scenario(
+            scenario(
+                actions=(
+                    action("exec", command=["run-me"]),
+                    action("wait", until=["pgrep", "server"]),
+                ),
+                assertions=(assertion("exit_code", equals=0),),
+            )
+        )
+
+        assert not result.passed
+        assert "exit_code == 3" in result.assertions[0].actual
 
     def test_screenshot_action_records_an_artifact(self, tmp_path):
         shot = write_png(tmp_path / "src.png")
@@ -433,6 +541,62 @@ class TestBrowserScenarios:
 
         assert not result.passed
         assert "selector not found" in result.action_failures[0]
+
+    def test_a_failed_browser_op_condemns_even_a_green_assertion_set(self, tmp_path):
+        """A click that never landed leaves the behaviour under test unexercised.
+
+        The assertions here are deliberately unrelated to the UI (a file that was
+        already there), which is exactly the shape that used to report PASSED.
+        """
+        backend = FakeBackend(
+            exec_handler=lambda service, argv: ExecResult(
+                exit_code=0,
+                stdout=marked(
+                    {
+                        "ops": [
+                            {"op": "click", "ok": False, "error": "selector not found"}
+                        ],
+                        "queries": [],
+                    }
+                )
+                if argv and argv[0] == "node"
+                else "",
+            )
+        )
+        executor, _ = build(tmp_path, backend, services=browser_services())
+
+        result = executor.run_scenario(
+            scenario(
+                driver="driver",
+                actions=(action("browser", op="click", selector="#gone"),),
+                assertions=(assertion("file_exists", path="/pre/existing"),),
+            )
+        )
+
+        assert result.assertions[0].passed
+        assert not result.passed
+
+    def test_a_non_browser_action_after_a_browser_one_is_refused(self, tmp_path):
+        """The declared order could not be honoured, so the document is rejected.
+
+        Browser ops are batched into one program that runs last; an `exec`
+        declared after them would in fact execute first.
+        """
+        executor, _ = build(tmp_path, FakeBackend(), services=browser_services())
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            executor.run_scenario(
+                scenario(
+                    driver="driver",
+                    actions=(
+                        action("browser", op="goto", url="http://app/"),
+                        action("exec", command=["seed"]),
+                    ),
+                    assertions=(assertion("dom", selector="h1"),),
+                )
+            )
+
+        assert "browser" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------

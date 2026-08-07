@@ -462,6 +462,64 @@ class TestRenderer:
         assert "#welcome absent" in content
         assert log_dump not in content
 
+    def test_renderer_separates_environment_build_time_from_scenario_time(self):
+        """Two different diagnoses hide behind one wall clock.
+
+        A slow e2e step means "the image rebuilt" or "the suite is heavy"; the
+        panel has to say which, so the environment duration is reported next to
+        the runtime rather than folded into the scenario total.
+        """
+        from tianluo.engine.step_renderers import _render_e2e
+
+        step = Step(step_type=StepType.E2E, status=StepStatus.COMPLETED)
+        step.outputs = {
+            "e2e_results": {
+                "runtime": "docker",
+                "total": 1,
+                "passed": 1,
+                "failed": 0,
+                "duration": 4.0,
+                "environment_duration": 92.5,
+                "scenarios": [{"name": "smoke", "passed": True, "assertions": []}],
+            }
+        }
+
+        with patch("tianluo.engine.step_renderers.render_full") as render_full:
+            _render_e2e(step)
+
+        content = render_full.call_args[0][0]
+        assert "92.5" in content
+        assert "4.0" in content
+
+    def test_renderer_headline_accounts_for_an_unverified_critical_scenario(self):
+        """No failed scenario, yet the step is not green: say so.
+
+        A critical scenario that never ran blocks the verdict without appearing in
+        `failed`, so a headline driven by the failure count alone would read
+        "passed" above a step the state machine routed into the fix loop.
+        """
+        from tianluo.engine.step_renderers import _render_e2e
+
+        step = Step(step_type=StepType.E2E, status=StepStatus.REVISION_NEEDED)
+        step.outputs = {
+            "e2e_results": {
+                "runtime": "docker",
+                "total": 1,
+                "passed": 1,
+                "failed": 0,
+                "critical_scenarios": ["login"],
+                "critical_unverified": ["login"],
+                "scenarios": [{"name": "smoke", "passed": True, "assertions": []}],
+            }
+        }
+
+        with patch("tianluo.engine.step_renderers.render_full") as render_full:
+            _render_e2e(step)
+
+        content = render_full.call_args[0][0]
+        assert "login" in content
+        assert "FAILED" in content and "PASSED" not in content
+
     def test_renderer_shows_remediation_for_environment_failure(self):
         from tianluo.engine.step_renderers import _render_e2e
 
@@ -503,3 +561,93 @@ class TestRenderer:
 
         with patch("tianluo.engine.step_renderers.render_full"):
             _render_e2e(step)
+
+
+# ---------------------------------------------------------------------------
+# The enable suggestion — the one thing the flow says while e2e is OFF
+# ---------------------------------------------------------------------------
+
+
+class TestEnableSuggestion:
+    """The switch is the user's to flip, so the flow's only move is to say so.
+
+    ``suggest_enable`` is text-only by construction; what is pinned here is that
+    it actually reaches a flow's output — a suggestion nothing calls is a
+    documented behaviour that never happens.
+    """
+
+    def _step_and_flow(self, tmp_path):
+        flow = FlowInstance(task_description="x", task_type="feature")
+        flow.state.context["project_root"] = str(tmp_path)
+        return Step(step_type=StepType.TEST, status=StepStatus.RUNNING), flow
+
+    def test_test_step_emits_the_suggestion_when_e2e_is_off(self, tmp_path):
+        from tianluo.engine.steps import test as test_step
+
+        _enable(tmp_path, enabled=False)
+        (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        step, flow = self._step_and_flow(tmp_path)
+
+        with patch.object(test_step, "run_and_classify_tests") as run:
+            run.return_value = test_step.TestVerdict(
+                test_results={"phases": []},
+                overall_passed=True,
+                should_fix=False,
+            )
+            with patch.object(test_step, "_record_test_history"):
+                test_step.test_handler(step, flow)
+
+        assert step.outputs["e2e_suggestion"]
+        assert "e2e.enabled" in step.outputs["e2e_suggestion"]
+
+    def test_the_suggestion_is_not_repeated_every_fix_iteration(self, tmp_path):
+        from tianluo.engine.steps import test as test_step
+
+        _enable(tmp_path, enabled=False)
+        (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        step, flow = self._step_and_flow(tmp_path)
+
+        with patch.object(test_step, "run_and_classify_tests") as run:
+            run.return_value = test_step.TestVerdict(
+                test_results={"phases": []},
+                overall_passed=True,
+                should_fix=False,
+            )
+            with patch.object(test_step, "_record_test_history"):
+                test_step.test_handler(step, flow)
+                second = Step(step_type=StepType.TEST, status=StepStatus.RUNNING)
+                test_step.test_handler(second, flow)
+
+        assert "e2e_suggestion" not in second.outputs
+
+    def test_nothing_is_suggested_once_e2e_is_enabled(self, tmp_path):
+        from tianluo.engine.steps import test as test_step
+
+        _enable(tmp_path, enabled=True)
+        (tmp_path / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+        step, flow = self._step_and_flow(tmp_path)
+
+        with patch.object(test_step, "run_and_classify_tests") as run:
+            run.return_value = test_step.TestVerdict(
+                test_results={"phases": []},
+                overall_passed=True,
+                should_fix=False,
+            )
+            with patch.object(test_step, "_record_test_history"):
+                test_step.test_handler(step, flow)
+
+        assert "e2e_suggestion" not in step.outputs
+
+    def test_the_suggestion_is_rendered_with_the_test_step(self):
+        from tianluo.engine.step_renderers import _render_test
+
+        step = Step(step_type=StepType.TEST, status=StepStatus.COMPLETED)
+        step.outputs = {
+            "test_results": {"passed": True, "phases": []},
+            "e2e_suggestion": "turn e2e on yourself",
+        }
+
+        with patch("tianluo.engine.step_renderers.render_full") as render_full:
+            _render_test(step)
+
+        assert "turn e2e on yourself" in render_full.call_args[0][0]

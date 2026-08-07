@@ -165,6 +165,10 @@ e2e:
   # declared under tianluo/e2e/scenarios/. Narrow it so a fix loop need not
   # replay the whole suite on every iteration.
   scenarios: []
+  # Scenarios that must genuinely run for the result to count: each one is added
+  # to the selection above (narrowing `scenarios` cannot drop it), and a critical
+  # scenario with no passing result fails the run. A name no scenario answers to
+  # is a configuration error — the guarantee could never be met.
   critical_scenarios: []
 
   # Leave containers and the network alive after the run so you can attach and

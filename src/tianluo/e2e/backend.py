@@ -58,6 +58,14 @@ class ReadinessProbe:
     an acceptable status), ``"tcp"`` (connect to ``port``), ``"log"`` (wait for
     ``pattern`` in the container log). A service with no probe is considered
     ready as soon as its container is running.
+
+    WHY ``http``/``tcp`` carry host-side addresses while ``command`` runs inside
+    the container: the first two are issued by the tianluo process itself, so
+    they can only reach ports the service *publishes to the host*. Checking a
+    service that publishes nothing is what ``command`` is for (run ``curl`` /
+    ``pg_isready`` inside the network). The schema layer enforces the
+    distinction, so a probe aimed at an unreachable address is rejected at parse
+    time instead of silently burning its whole timeout budget.
     """
 
     kind: str
@@ -65,6 +73,11 @@ class ReadinessProbe:
     url: Optional[str] = None
     port: Optional[int] = None
     pattern: Optional[str] = None
+    # Expected HTTP status for an `http` probe. ``None`` means "any answer in
+    # the 2xx/3xx range", which is what an ordinary health route gives; a service
+    # whose only reachable endpoint answers 401 (or an intentional 404-means-up
+    # check) names the status it actually returns.
+    status: Optional[int] = None
     # Total budget for this probe, and the pause between attempts.
     timeout: float = 60.0
     interval: float = 1.0
@@ -157,10 +170,17 @@ class Snapshot:
     ``kind`` says what it is (``"screenshot"``, ``"file"``, ``"log"``);
     ``path`` is where it landed on the host, which is what the assertion layer
     compares against a git-tracked baseline.
+
+    WHY ``path`` may be ``None``: a ``"log"`` capture taken without an explicit
+    destination is a *diagnostic* read whose text is delivered in ``metadata``,
+    and readiness polls it once per attempt. Materializing a host file for each
+    of those would leak one temp file per poll — dozens per service start — for
+    content nobody ever opens. Every artifact-producing capture (screenshot,
+    file) still lands on disk and carries a path.
     """
 
     kind: str
-    path: Path
+    path: Optional[Path]
     service: str
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
@@ -183,13 +203,23 @@ class IsolationBackend(ABC):
     orchestrator always runs it from a ``finally``.
     """
 
+    # INVARIANT: `create` publishes the handle it is filling in here *before* it
+    # touches the host, and leaves it in place when it raises. A create that
+    # fails partway (network up, one image built, the next build broken) has
+    # already made host-side resources, but its return value never reaches the
+    # caller — so this attribute is the session's only record of what to tear
+    # down. Without it every failed build permanently leaks a network.
+    last_handle: Optional[EnvironmentHandle] = None
+
     @abstractmethod
     def create(self, spec: EnvironmentSpec) -> EnvironmentHandle:
         """Materialize the environment: network, images, containers (not running).
 
         Returns a handle describing everything created. Raises
         :class:`~tianluo.e2e.errors.E2EEnvironmentError` when the host cannot
-        provide the environment (build failure, runtime error).
+        provide the environment (build failure, runtime error) — in which case
+        :attr:`last_handle` must still describe whatever was created before the
+        failure, so the caller can destroy it.
         """
 
     @abstractmethod

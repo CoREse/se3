@@ -37,6 +37,7 @@ from .assertions import (
     AssertionContext,
     AssertionResult,
     BrowserBridge,
+    budget_seconds,
     evaluate,
     fetch_http,
 )
@@ -111,6 +112,10 @@ class ScenarioResult:
     timed_out: bool = False
     error: str = ""
     action_failures: List[str] = field(default_factory=list)
+    # Context the fix loop needs but which does not by itself condemn the
+    # scenario — chiefly a declared `exec` that exited non-zero, whose verdict
+    # belongs to the assertions that read it.
+    notes: List[str] = field(default_factory=list)
     logs: str = ""
 
     @property
@@ -139,6 +144,7 @@ class ScenarioResult:
             "timed_out": self.timed_out,
             "error": self.error,
             "action_failures": list(self.action_failures),
+            "notes": list(self.notes),
             "evidence": list(self.evidence),
             "artifacts": list(self.artifacts),
             "assertions": [
@@ -273,13 +279,24 @@ class Executor:
         result.duration = max(self.clock() - started, 0.0)
         result.timed_out = timed_out
         result.artifacts = [str(path) for path in ctx.artifacts]
+        result.notes = list(ctx.notes)
+        for failure in ctx.failures:
+            if failure not in result.action_failures:
+                result.action_failures.append(failure)
         result.evidence = [
             item.evidence for item in result.assertions if item.evidence
         ] + list(ctx.notes)
+        # INVARIANT: an action that failed outright condemns the scenario even
+        # when every assertion happened to hold. A Playwright click that never
+        # landed leaves the UI in the state the scenario never reached, so
+        # assertions aimed elsewhere (a pre-existing file, a static endpoint) can
+        # all pass while the behaviour under test was never exercised — reporting
+        # that as green is exactly the silent false pass e2e exists to prevent.
         result.passed = (
             not timed_out
             and bool(result.assertions)
             and all(item.passed for item in result.assertions)
+            and not result.action_failures
             and not result.error
         )
         if timed_out and not result.error:
@@ -299,9 +316,15 @@ class Executor:
     ) -> bool:
         """Execute the action sequence; returns whether the budget ran out.
 
-        Actions that *fail* (a non-zero exit, an unreachable URL) are recorded
-        and execution continues: the assertions are what decide the verdict, and
-        a command exiting non-zero is frequently the very thing under test.
+        A failing action never aborts the sequence — the remaining actions still
+        run so one round exposes the whole picture — but *how* the failure counts
+        depends on whether anything else can adjudicate it. A non-zero ``exec``
+        is a note, because the ``exit_code`` / ``stdout`` / ``stderr`` assertions
+        exist precisely to judge it and a command that fails is frequently the
+        very thing under test. Everything else (an unreachable ``http`` action, a
+        ``wait.until`` that never came true, a coordinate click that missed, a
+        browser op that threw) has no assertion counterpart, so it is recorded as
+        an action failure and the scenario cannot be reported as passed.
         """
         for index, action in enumerate(scenario.actions):
             if self._exhausted(ctx):
@@ -323,6 +346,18 @@ class Executor:
         self, action: ActionDecl, ctx: AssertionContext, scenario: ScenarioDecl
     ) -> None:
         kind = (action.kind or "").strip()
+
+        # INVARIANT: nothing may be declared after a browser action. Browser ops
+        # are batched into one Playwright program that necessarily runs after the
+        # immediately-executed actions, so honouring such a document would invert
+        # the declared order — the "seed the database" exec would run before the
+        # navigation it was written to follow. The schema rejects the shape; this
+        # is its twin for a declaration built in code, which never passed through
+        # validation.
+        if kind != "browser" and ctx.browser is not None and ctx.browser.pending:
+            raise E2EConfigError(
+                t("e2e.exec.action_after_browser", action=kind, scenario=scenario.name)
+            )
 
         if kind == "exec":
             self._action_exec(action, ctx)
@@ -359,7 +394,14 @@ class Executor:
         if not argv:
             raise E2EConfigError(t("e2e.exec.empty_command", scenario=ctx.scenario))
         service = str(action.get("service") or ctx.driver)
-        timeout = ctx.timeout_for(float(action.get("timeout") or _DEFAULT_ACTION_TIMEOUT))
+        timeout = ctx.timeout_for(
+            budget_seconds(
+                action.get("timeout"),
+                _DEFAULT_ACTION_TIMEOUT,
+                field="timeout",
+                scenario=ctx.scenario,
+            )
+        )
         environment = action.get("environment")
         outcome = self.backend.exec(
             ctx.handle,
@@ -384,11 +426,18 @@ class Executor:
             url,
             ctx=ctx,
             from_service=str(from_service) if from_service else None,
-            timeout=action.get("timeout"),
+            timeout=budget_seconds(
+                action.get("timeout"), field="timeout", scenario=ctx.scenario
+            ),
         )
         ctx.last_http = record
         if record.error:
-            ctx.notes.append("action http {} failed: {}".format(url, record.error))
+            # A driving request that never reached the service is a failure of
+            # the sequence, not an observation: the `http_status` assertion does
+            # its own fetch, so nothing downstream ever judges this one.
+            ctx.failures.append(
+                "action http {} failed: {}".format(url, record.error)
+            )
 
     def _action_browser(
         self, action: ActionDecl, ctx: AssertionContext, scenario: ScenarioDecl
@@ -459,16 +508,25 @@ class Executor:
         if not argv:
             raise E2EConfigError(t("e2e.exec.empty_command", scenario=ctx.scenario))
         service = str(action.get("service") or ctx.driver)
-        interval = float(action.get("interval") or _WAIT_POLL_INTERVAL)
+        interval = budget_seconds(
+            action.get("interval"),
+            _WAIT_POLL_INTERVAL,
+            field="interval",
+            scenario=ctx.scenario,
+        )
         while True:
             outcome = self.backend.exec(
                 ctx.handle, service, argv, timeout=ctx.timeout_for(_WAIT_POLL_INTERVAL * 30)
             )
-            ctx.record_exec(service, argv, outcome)
+            # internal=True: the poll is tianluo's own probe. Recorded for the
+            # trace, but it must not become the `last_exec` an exit_code /
+            # stdout / stderr assertion is describing — that is the scenario's
+            # own exec action.
+            ctx.record_exec(service, argv, outcome, internal=True)
             if getattr(outcome, "ok", False):
                 return
             if self._exhausted(ctx):
-                ctx.notes.append(
+                ctx.failures.append(
                     "wait.until {} never succeeded within the scenario budget".format(
                         " ".join(argv)
                     )
@@ -515,9 +573,12 @@ class Executor:
         outcome = self.backend.exec(
             ctx.handle, service, argv, timeout=ctx.timeout_for(_DEFAULT_ACTION_TIMEOUT)
         )
-        ctx.record_exec(service, argv, outcome)
+        ctx.record_exec(service, argv, outcome, internal=True)
         if not getattr(outcome, "ok", False):
-            ctx.notes.append(
+            # No assertion adjudicates an input injection: if the click never
+            # landed, everything the scenario claims to test afterwards is
+            # unexercised, so this ends the scenario as a failure.
+            ctx.failures.append(
                 "visual_click at ({}, {}) failed: {}".format(
                     x, y, (outcome.stderr or outcome.stdout or "").strip()
                 )

@@ -477,7 +477,7 @@ flow 永远不会替你翻转它 —— 至多在输出里提示这个项目看�
 | `scenario_timeout` | int `>= 1`(秒) | `300` | 每个场景的默认预算。单个场景可用自己的 `timeout:` 覆盖。 |
 | `estimated_e2e_duration` | int `>= 1`(秒)或 null | `null` | 对应 [`test`](#test) 中 `estimated_test_duration` 所起的作用:让监管方分得清『还在跑』与『卡死了』。 |
 | `scenarios` | list of strings | `[]` | 按名字做场景选择。**空表示『全部跑』**,而非『一个都不跑』。收窄它,使 fix loop 每轮不必重放整套 —— 与 `test.critical_tests` 是同一个先例。 |
-| `critical_scenarios` | list of strings | `[]` | 必须真正跑到、结果才算数的场景。 |
+| `critical_scenarios` | list of strings | `[]` | 必须真正跑到、结果才算数的场景。这里列出的每个名字都会**追加到本轮已解析出的选择集之上** —— 为提速收窄 `scenarios`、或调试时传 `--scenario`,都不可能把它悄悄漏掉 —— 而某个关键场景若没有产出通过结果,本轮即判失败,与 [`test.critical_tests`](#test) 的『跳过不算通过』是同一条守卫。若某个名字在已声明场景中不存在,则按配置错误报错:那条保证根本无法成立。 |
 | `keep_environment` | bool | `false` | 运行结束后保留容器与网络,便于 attach 进去查看。调试用;运行会打印出清理所需的 `rm -f` / `network rm` 命令原文。 |
 
 每个字段都遵循 [`test`](#test) 的 clamp-and-warn 策略:非法值只记日志并回落为默认值,
@@ -552,7 +552,9 @@ mount* 进容器的,而不是 `COPY` 进镜像,因此 fix loop 每轮迭代只�
 步骤本身变更时才触发镜像重建。
 
 开关已开但目录尚不存在时,flow 会在首次使用时生成它,此后按增量演进维护 —— 只新增与
-修订,不覆盖你的手工改动。你也可以手动驱动:
+修订,不覆盖你的手工改动。演进在 `E2E` step 内、场景执行**之前**进行,每个 flow 仅一次:
+本次任务新增的行为所对应的场景,由同一次 run 立即执行;fix loop 的各轮迭代只重跑场景、
+不再演进内容(绝不会为了让失败消失而改写场景)。你也可以手动驱动:
 
 ```bash
 luo e2e bootstrap          # 生成 / 演进内容目录
@@ -581,6 +583,14 @@ services:
       timeout: 60
 ```
 
+**就绪探测在哪里执行很关键。** `command` 探测在容器*内部*执行,因此能看到共享网络、
+可用 service 名互访(`curl http://app:8000/health`、`pg_isready -h db`);而 `http` /
+`tcp` 探测由 tianluo 自身发起,即**从宿主机**拨号,只能访问该 service 已发布到宿主机的
+端口 —— 需同时写 `ports: ["18000:8000"]` 与 `url: http://127.0.0.1:18000/health`。把
+`http` 探测指向 `app:8000` 或未发布的 `localhost:8000` 会在校验阶段直接报错,而不是留到
+运行时干等到超时。`http` 探测默认接受任意 2xx/3xx 应答;若服务健康时返回的是其它状态码,
+用 `status: 401` 显式声明。
+
 ……以及 `tianluo/e2e/scenarios/cli-smoke.yaml`:
 
 ```yaml
@@ -596,10 +606,28 @@ assertions:
     contains: "myapp "
 ```
 
+**操作顺序,以及关于 `browser` 的一条规则。** actions 按声明顺序执行,唯一的例外被校验器
+挡在了门外:`browser` 操作会被汇集成**一个** Playwright 程序,在序列其余部分之后统一执行
+(页面状态无法跨一次性的 `exec` 存活,批处理正是让整条场景共用一个浏览器会话的办法)。因此
+在 `browser` 操作**之后**再声明非 browser 操作属于校验错误 —— 它实际会先跑,悄悄颠倒你写下
+的顺序。请把所有 `exec` / `http` / `wait` 放在浏览器序列之前;页面截图用 browser 的
+`op: screenshot`,而不是 `screenshot` 操作(后者截的是虚拟 X 显示,属于 `gui-xvfb` driver)。
+
+操作*失败*不会中断序列,但也不是没有代价。`exec` 返回非零只记为一条 note,交给断言裁决 ——
+它的退出码与输出流正是 `exit_code` / `stdout` / `stderr` 断言的用武之地,而『命令失败』本身
+常常就是被测对象。其余各类(`http` 操作打不通、`wait.until` 始终不成立、坐标点击没落上、
+browser 操作抛错)没有对应的断言去裁决,因此记为 action 失败,场景**不得**被判为通过 ——
+否则一个坏掉的 UI 只要断言恰好看向别处,就会报绿。
+
 `base_kind` 决定在 `image` 之上叠哪一份内置 Dockerfile 模板:`base`(纯 CLI / web /
 API)、`playwright`(浏览器 driver —— 官方镜像固定了浏览器、系统依赖*与字体*,这正是
 第二层基线可复现的前提)、`gui-xvfb`(Xvfb + 轻量窗口管理器 + scrot + xdotool,使桌面
 应用无需物理显示器即可运行并被截图)。
+
+场景的 `driver` 必须具备该场景所声明动作的能力,这一点在校验期就会检查:`browser` 操作与
+`dom` 断言都需要浏览器,因此 driver 必须是 `playwright` service。把这类场景指向 `base`
+driver 属于配置错误,在任何镜像构建之前即报出 —— 否则这处不匹配要等到所有镜像构建完、
+所有就绪探测跑完之后才暴露,并会中断整轮运行,连同本轮已通过场景的结果一起丢弃。
 
 **断言升级阶梯由 schema 强制,而非仅仅建议。** 第一层是确定性断言(`exit_code`、
 `stdout`、`stderr`、`http_status`、`http_body`、`file_exists`、`file_content`、`dom`),
@@ -609,6 +637,16 @@ API)、`playwright`(浏览器 driver —— 官方镜像固定了浏览器、系
 证据描述一起才可采信。越过本可胜任的低层而升级到高层是**校验错误**:DOM 查询就能解决的
 地方改用截图对比,等于把确定性验证退化成概率性验证。驱动侧同理 —— 点击屏幕坐标
 (`visual_click`)只保留给没有任何程序化入口的 GUI。
+
+**首个第二层基线怎么来。** 基线只能在渲染对比截图的那个镜像内生成 —— 字体与光栅化都
+住在镜像里 —— 所以一条新的 `screenshot_diff` 起初在 `baselines/` 下没有任何文件。跑一次
+`luo e2e run --write-baselines`:它会采集缺失的图片,并仍把该场景报为**未通过**(还没有
+人看过这份渲染),由你人工确认图片后再提交进 git。不带这个开关时,声明了却不存在的基线
+按配置错误报出并点名该文件,而不是场景失败 —— 对比根本没发生过,归咎于代码是谎报。
+
+`baseline:` 的取值必须是 `baselines/` **目录内**的普通相对文件名 —— 不得为绝对路径,也不得
+含 `..`。其余写法在校验期即被拒绝:逃出该目录的路径会去读(在 `--write-baselines` 下还会去
+写)版本控制之外的文件,悄悄让『基线是进 git 的资产』这条约定失效。
 
 #### E2E step 在流程中的位置,以及失败如何路由
 

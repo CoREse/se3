@@ -31,6 +31,10 @@ services:
       - apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
       - pip install --no-cache-dir -e .
     command: ["python", "-m", "myapp.server", "--host", "0.0.0.0", "--port", "8000"]
+    # `<host>:<container>`. The host side is what an `http`/`tcp` readiness probe
+    # can dial, and a distinctive number keeps it from colliding with whatever
+    # the developer is already running locally.
+    ports: ["18000:8000"]
     environment:
       APP_ENV: e2e
       DATABASE_URL: postgresql://app:app@db:5432/app
@@ -38,9 +42,16 @@ services:
     # assumed ready the moment its container starts, which is almost never true
     # for a server — scenarios would then race the boot and fail intermittently
     # for reasons that have nothing to do with the code.
+    #
+    # `http` and `tcp` probes are issued by tianluo itself, i.e. FROM THE HOST,
+    # so they must address a published host port (`127.0.0.1:18000` below), not
+    # the in-network `app:8000` / `localhost:8000` a peer container would use.
+    # To check a service that publishes nothing, use a `command` probe — it runs
+    # inside the container and sees the network (the `db` service below does).
+    # Add `status: 401` to accept a specific non-2xx answer as "up".
     readiness:
       kind: http
-      url: http://localhost:8000/health
+      url: http://127.0.0.1:18000/health
       timeout: 60
       interval: 1
 

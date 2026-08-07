@@ -27,7 +27,10 @@ name: api-smoke
 
 # Which container the actions and assertions run in. Must be one of the services
 # declared in environment.yaml. For a browser scenario this is the Playwright
-# service; for a CLI scenario it is the application container itself.
+# service; for a CLI scenario it is the application container itself. The choice
+# is validated against what the scenario declares: a `browser` action or a `dom`
+# assertion needs a `base_kind: playwright` driver, and naming a plain `base`
+# service there is a configuration error, not a run-time surprise.
 driver: app
 
 description: >
@@ -43,6 +46,10 @@ tags: [smoke, api]
 
 # Actions run in order before the assertions are evaluated.
 # Kinds: exec | http | browser | wait | screenshot | visual_click.
+# `browser` operations are collected into ONE Playwright program that runs after
+# the rest of the sequence, so nothing may be declared after a browser action —
+# put every exec / http / wait first. The validator rejects the other order
+# rather than silently running it inverted.
 actions:
   - action: exec
     command: ["python", "-m", "myapp.cli", "seed", "--fixture", "e2e"]
@@ -99,15 +106,20 @@ assertions:
 # The baseline must live in `tianluo/e2e/baselines/` and be committed; capture it
 # with `luo e2e run --write-baselines`, look at the image, then commit it.
 # ---------------------------------------------------------------------------
+# The shot itself is taken by the browser (`op: screenshot`), not by the
+# `screenshot` action: the latter captures a virtual X display and belongs to the
+# GUI/Xvfb driver, and it may not follow a browser action anyway.
 # actions:
 #   - action: browser
 #     op: goto
 #     url: http://app:8000/report
-#   - action: screenshot
+#   - action: browser
+#     op: screenshot
 #     name: report.png
 # assertions:
 #   - kind: screenshot_diff
 #     baseline: report.png
+#     screenshot: report.png
 #     threshold: 0.01
 #     visual_regression: true
 

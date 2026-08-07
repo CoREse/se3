@@ -3155,6 +3155,12 @@ class E2EConfig:
     # empty means run everything, otherwise only the named ones — so a fix loop
     # need not replay the full suite on every iteration.
     scenarios: list[str] = field(default_factory=list)
+    # Scenarios whose result the verdict depends on. WHY it is not just
+    # documentation: the session force-includes every name here in the selection
+    # and refuses to call a run passed while one of them has no passing result —
+    # the same "a skip is not a pass" guard `critical_tests` applies. Without
+    # that, `scenarios: [smoke]` plus `critical_scenarios: [login]` would report
+    # a green e2e step for a login that never ran.
     critical_scenarios: list[str] = field(default_factory=list)
     # Debugging aid: keep containers and network alive after the run so a human
     # can attach and look around.
@@ -3177,7 +3183,10 @@ class E2EConfig:
             if not e2e_data:
                 return cls()
 
-            enabled = _coerce_bool(e2e_data.get("enabled", False), default=False)
+            enabled = _bool_field(
+                e2e_data.get("enabled", False),
+                default=False, label="e2e.enabled", source=source_label,
+            )
 
             raw_runtime = e2e_data.get("runtime", "auto")
             runtime = str(raw_runtime).strip().lower() if raw_runtime is not None else ""
@@ -3233,8 +3242,10 @@ class E2EConfig:
                     e2e_data.get("critical_scenarios"),
                     label="e2e.critical_scenarios", source=source_label,
                 ),
-                keep_environment=_coerce_bool(
-                    e2e_data.get("keep_environment", False), default=False
+                keep_environment=_bool_field(
+                    e2e_data.get("keep_environment", False),
+                    default=False, label="e2e.keep_environment",
+                    source=source_label,
                 ),
             )
         except Exception as e:
@@ -3262,10 +3273,26 @@ def _positive_int_field(
 
     Shared by :class:`E2EConfig`'s timeout knobs so "0", "-1" and "soon" all
     degrade the same way instead of each growing its own branch.
+
+    Booleans are rejected rather than coerced: YAML reads a bare ``yes`` as
+    ``True``, and ``int(True)`` is a perfectly positive 1 — which would quietly
+    install a one-second build budget where the author meant "on". A malformed
+    value must warn and fall back like every other one.
     """
+    if isinstance(value, bool):
+        logger.warning(
+            "Invalid %s %r in %s; using default %r", label, value, source, default
+        )
+        return default
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    # OverflowError is in the tuple because a non-finite float reaches here: YAML
+    # reads `.inf` — and any overlarge literal such as `1e999` — as
+    # float('inf'), and int() raises OverflowError rather than ValueError for it.
+    # Escaping this handler would hit E2EConfig.load's blanket `except`, which
+    # discards the *whole* block: one malformed timeout would silently reset
+    # `enabled: true` back to off. Per-field fallback is the contract.
+    except (TypeError, ValueError, OverflowError):
         logger.warning(
             "Invalid %s %r in %s; using default %r", label, value, source, default
         )
@@ -3277,6 +3304,32 @@ def _positive_int_field(
         )
         return default
     return parsed
+
+
+def _bool_field(value: Any, *, default: bool, label: str, source: str) -> bool:
+    """Coerce a YAML scalar to bool, warning when the value is not recognized.
+
+    WHY not plain :func:`_coerce_bool`: that helper falls back silently, which is
+    right for internal/env plumbing but wrong for a user-facing switch. A typo'd
+    ``enabled: ture`` would otherwise leave e2e off with nothing anywhere saying
+    why, while the user believes their scenarios are running — every other field
+    of :class:`E2EConfig` warns on fallback, and the master switch is the one
+    where silence costs the most.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off"):
+            return False
+    logger.warning(
+        "Invalid %s %r in %s; using default %r", label, value, source, default
+    )
+    return default
 
 
 def _string_list_field(value: Any, *, label: str, source: str) -> list[str]:

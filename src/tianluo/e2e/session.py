@@ -89,6 +89,12 @@ class E2EVerdict:
     fix_instructions: str = ""
     fix_context: Dict[str, Any] = field(default_factory=dict)
     summary: Dict[str, Any] = field(default_factory=dict)
+    # Localized lines the caller must show the user regardless of the outcome —
+    # currently the kept-environment cleanup commands. WHY not logging: the `luo`
+    # CLI installs no logging handler, so anything below WARNING is dropped
+    # outright and a user who asked to keep the environment would be left with
+    # live containers and nothing on screen naming them.
+    notices: List[str] = field(default_factory=list)
 
     @property
     def should_fix(self) -> bool:
@@ -160,6 +166,9 @@ def run_e2e(
     handle: Optional[EnvironmentHandle] = None
     live_backend: Optional[IsolationBackend] = None
     results: List[ScenarioResult] = []
+    # Held so the `finally` can attach the kept-environment notice to whatever
+    # verdict is on its way out; mutating it there is still visible to the caller.
+    verdict: Optional[E2EVerdict] = None
 
     try:
         # INVARIANT: preflight comes first and nothing is created before it
@@ -172,7 +181,15 @@ def run_e2e(
 
             resolved_probe = preflight(config, runner=runner)
 
-        bundle = content if content is not None else load_content_config(root)
+        bundle = (
+            content
+            if content is not None
+            # An explicitly requested first capture must survive content loading:
+            # the baseline it is about to write does not exist yet by definition.
+            else load_content_config(
+                root, require_baselines=not write_missing_baselines
+            )
+        )
         if bundle is None:
             raise E2EConfigError(
                 t(
@@ -181,13 +198,18 @@ def run_e2e(
                 )
             )
 
-        selected = _select_scenarios(bundle, config, scenarios)
+        critical = _critical_names(bundle, config)
+        selected = _select_scenarios(bundle, config, scenarios, critical)
         if not selected:
             # Reported rather than silently green: "nothing selected" and
             # "everything passed" must not look the same in the step output.
-            summary = _build_summary(bundle, [], selected_names=[], runtime="")
+            summary = _build_summary(
+                bundle, [], selected_names=[], runtime="", critical=critical,
+                environment_duration=0.0,
+            )
             logger.warning("e2e ran no scenario: selection matched nothing")
-            return E2EVerdict(passed=True, summary=summary)
+            verdict = E2EVerdict(passed=True, summary=summary)
+            return verdict
 
         live_backend = backend
         if live_backend is None:
@@ -200,9 +222,15 @@ def run_e2e(
             )
 
         spec = _environment_spec(bundle, network_suffix)
+        # Measured separately from scenario time: image builds and readiness
+        # waits dominate a cold run, and a user looking at a slow e2e step needs
+        # to see which half of it was slow — the aggregate scenario duration
+        # alone cannot distinguish "the suite is heavy" from "the image rebuilt".
+        environment_started = clock()
         handle = live_backend.create(spec)
         live_backend.start(handle)
         _await_services(live_backend, handle, spec)
+        environment_duration = max(clock() - environment_started, 0.0)
 
         executor = Executor(
             live_backend,
@@ -219,11 +247,11 @@ def run_e2e(
         for scenario in selected:
             result = executor.run_scenario(scenario)
             if not result.passed:
-                # Captured while the container is still alive: the log is the
+                # Captured while the containers are still alive: the logs are the
                 # single most useful thing in the fix instructions, and after
-                # destroy it is gone for good.
-                result.logs = read_log_tail(
-                    live_backend, handle, result.driver, lines=LOG_TAIL_LINES
+                # destroy they are gone for good.
+                result.logs = _collect_logs(
+                    live_backend, handle, spec, result.driver
                 )
             results.append(result)
             logger.info("e2e %s", result.summary_line())
@@ -231,9 +259,11 @@ def run_e2e(
         runtime_name = getattr(resolved_probe, "name", "") or getattr(
             handle, "runtime", ""
         )
-        return _verdict_for(
-            bundle, results, [s.name for s in selected], runtime_name
+        verdict = _verdict_for(
+            bundle, results, [s.name for s in selected], runtime_name, critical,
+            environment_duration=environment_duration,
         )
+        return verdict
 
     except E2EEnvironmentError as exc:
         # Uniform funnel for every host-side problem — an unusable runtime, a
@@ -241,7 +271,7 @@ def run_e2e(
         # "the machine cannot run e2e", so all of them return a verdict the
         # handler maps to FAILED with guidance rather than to the fix loop.
         logger.warning("e2e environment error: %s", exc.message)
-        return E2EVerdict(
+        verdict = E2EVerdict(
             passed=False,
             environment_error=exc.message,
             remediation=exc.remediation,
@@ -252,25 +282,42 @@ def run_e2e(
                 "scenarios": [result.to_dict() for result in results],
             },
         )
+        return verdict
 
     finally:
         # INVARIANT: teardown runs on every exit path, including an exception
         # raised mid-scenario. A leaked container keeps a port and an image layer
         # busy and makes the *next* run fail for a reason unrelated to the code.
-        if handle is not None and live_backend is not None:
+        target = handle
+        if target is None and live_backend is not None:
+            # `create` raised partway: it never returned the handle, so the
+            # network and images it already made are only reachable through the
+            # backend's published record of them.
+            target = getattr(live_backend, "last_handle", None)
+        if target is not None and live_backend is not None:
             if keep:
-                logger.info(
-                    "%s",
-                    t(
-                        "e2e.session.kept_environment",
-                        network=handle.spec.network,
-                        containers=", ".join(handle.containers) or "-",
-                        runtime=handle.runtime,
-                    ),
+                notice = t(
+                    "e2e.session.kept_environment",
+                    network=target.spec.network,
+                    containers=", ".join(target.containers) or "-",
+                    runtime=target.runtime,
                 )
+                # WHY warning + notice rather than info: `luo` installs no
+                # logging handler, so an info record is discarded and the user
+                # would never learn which containers survived. The notice is what
+                # the CLI prints; the warning covers non-CLI callers.
+                logger.warning("%s", notice)
+                if verdict is not None:
+                    verdict.notices.append(notice)
+                    verdict.summary["kept_environment"] = {
+                        "network": target.spec.network,
+                        "containers": sorted(target.containers),
+                        "runtime": target.runtime,
+                        "cleanup": notice,
+                    }
             else:
                 try:
-                    live_backend.destroy(handle)
+                    live_backend.destroy(target)
                 except Exception as exc:  # pragma: no cover - destroy is lenient
                     logger.warning("e2e teardown could not finish: %s", exc)
 
@@ -287,8 +334,38 @@ def _default_backend_factory(probe: Any, **kwargs: Any) -> IsolationBackend:
     return ContainerBackend(probe, **kwargs)
 
 
+def _critical_names(content: E2EContent, config: Any) -> List[str]:
+    """The configured ``critical_scenarios``, checked against the declared set.
+
+    A critical name that no scenario answers to cannot possibly "genuinely run",
+    so the promise the key makes is unsatisfiable and the run stops with a
+    locating configuration error. Deliberately *not* routed into the fix loop:
+    ``critical_scenarios`` lives in ``tianluo.yaml``, which the flow never
+    writes, so no code change the implementing agent can make would fix it.
+    """
+    critical = [str(name) for name in (getattr(config, "critical_scenarios", None) or [])]
+    if not critical:
+        return []
+    declared = {scenario.name for scenario in content.scenarios}
+    unknown = [name for name in critical if name not in declared]
+    if unknown:
+        raise E2EConfigError(
+            t(
+                "e2e.session.unknown_critical_scenarios",
+                scenarios=", ".join(unknown),
+                known=", ".join(sorted(declared)) or "-",
+            )
+        )
+    # De-duplicated, declaration order preserved, so the augmentation below is
+    # stable no matter how the user ordered the key.
+    return [scenario.name for scenario in content.scenarios if scenario.name in critical]
+
+
 def _select_scenarios(
-    content: E2EContent, config: Any, requested: Optional[Sequence[str]]
+    content: E2EContent,
+    config: Any,
+    requested: Optional[Sequence[str]],
+    critical: Sequence[str] = (),
 ) -> List[Any]:
     """Resolve which scenarios this run executes.
 
@@ -296,8 +373,26 @@ def _select_scenarios(
     configured selection. Unknown names are an error rather than an empty run:
     a typo that silently selects nothing would report a passing e2e step for a
     suite that never executed.
+
+    INVARIANT: every scenario named in ``critical_scenarios`` is appended to
+    whatever the selection resolved to. That is what makes "must genuinely run
+    for the result to count" true by construction rather than by hope — narrowing
+    ``scenarios`` to speed up a fix loop, or passing ``--scenario`` while
+    debugging, must not be able to quietly exclude a scenario the user declared
+    load-bearing. Anything already selected is not run twice.
     """
     declared = {scenario.name: scenario for scenario in content.scenarios}
+
+    def with_critical(chosen: List[Any]) -> List[Any]:
+        names = {scenario.name for scenario in chosen}
+        added = [declared[name] for name in critical if name not in names]
+        if added:
+            logger.info(
+                "e2e selection extended with critical scenario(s): %s",
+                ", ".join(scenario.name for scenario in added),
+            )
+        return chosen + added
+
     if requested:
         names = [str(name) for name in requested]
         unknown = [name for name in names if name not in declared]
@@ -309,7 +404,7 @@ def _select_scenarios(
                     known=", ".join(declared) or "-",
                 )
             )
-        return [declared[name] for name in names]
+        return with_critical([declared[name] for name in names])
 
     configured = list(getattr(config, "scenarios", None) or [])
     if configured:
@@ -322,7 +417,7 @@ def _select_scenarios(
                     known=", ".join(declared) or "-",
                 )
             )
-        return [declared[name] for name in configured]
+        return with_critical([declared[name] for name in configured])
 
     return list(content.scenarios)
 
@@ -360,24 +455,70 @@ def _await_services(
             wait_ready(backend, handle, service.name, service.readiness)
 
 
+def _collect_logs(
+    backend: IsolationBackend,
+    handle: EnvironmentHandle,
+    spec: EnvironmentSpec,
+    driver: str,
+) -> str:
+    """Log tails of every service in the environment, labelled by service.
+
+    WHY not the driver alone: in the primary web topology the driver is the
+    Playwright container, so its log carries the *client* side of the failure —
+    while the stack trace that actually explains a failed dom/http assertion sits
+    in the application service's log. Sending the fix loop only the browser's
+    output makes the iteration guess at a server-side cause it was never shown.
+    Declaration order puts the application services ahead of the driver, which is
+    also the order a reader wants them in.
+    """
+    sections: List[str] = []
+    for service in spec.services:
+        tail = read_log_tail(backend, handle, service.name, lines=LOG_TAIL_LINES)
+        if not tail.strip():
+            continue
+        label = service.name + (" (driver)" if service.name == driver else "")
+        sections.append("--- {} ---\n{}".format(label, tail.rstrip()))
+    return "\n".join(sections)
+
+
 def _verdict_for(
     content: E2EContent,
     results: Sequence[ScenarioResult],
     selected_names: Sequence[str],
     runtime: str,
+    critical: Sequence[str] = (),
+    *,
+    environment_duration: float = 0.0,
 ) -> E2EVerdict:
     failed = [result for result in results if not result.passed]
-    summary = _build_summary(content, results, selected_names, runtime)
-    if not failed:
+    # INVARIANT: a critical scenario that produced no result must not count as a
+    # pass — the same "a skip is not a pass" guard `test.critical_tests` applies.
+    # Selection force-includes the critical set, so reaching here means the run
+    # was cut short (a scenario raised, a selection path was bypassed); either
+    # way nothing verified what the user declared load-bearing.
+    unverified = _unverified_critical(results, critical)
+    summary = _build_summary(
+        content, results, selected_names, runtime, critical,
+        environment_duration=environment_duration,
+    )
+    if not failed and not unverified:
         return E2EVerdict(passed=True, scenario_results=list(results), summary=summary)
 
     return E2EVerdict(
         passed=False,
         scenario_results=list(results),
-        fix_instructions=_fix_instructions(failed),
-        fix_context=_fix_context(failed),
+        fix_instructions=_fix_instructions(failed, unverified),
+        fix_context=_fix_context(failed, unverified),
         summary=summary,
     )
+
+
+def _unverified_critical(
+    results: Sequence[ScenarioResult], critical: Sequence[str]
+) -> List[str]:
+    """Critical scenario names with no passing result of their own."""
+    passed_names = {result.name for result in results if result.passed}
+    return [name for name in critical if name not in passed_names]
 
 
 def _build_summary(
@@ -385,6 +526,9 @@ def _build_summary(
     results: Sequence[ScenarioResult],
     selected_names: Sequence[str],
     runtime: str,
+    critical: Sequence[str] = (),
+    *,
+    environment_duration: float = 0.0,
 ) -> Dict[str, Any]:
     """The structured record written to ``step.outputs["e2e_results"]``."""
     failed = [result for result in results if not result.passed]
@@ -392,12 +536,23 @@ def _build_summary(
         "runtime": runtime,
         "declared_scenarios": [scenario.name for scenario in content.scenarios],
         "selected_scenarios": list(selected_names),
+        "critical_scenarios": list(critical),
+        # Named separately from `scenarios_failed`: a critical scenario that
+        # never ran is a different diagnosis from one that ran and failed.
+        "critical_unverified": [
+            name
+            for name in _unverified_critical(results, critical)
+            if name not in {result.name for result in failed}
+        ],
         "total": len(results),
         "passed": len(results) - len(failed),
         "failed": len(failed),
         "scenarios_passed": [r.name for r in results if r.passed],
         "scenarios_failed": [r.name for r in failed],
         "duration": round(sum(result.duration for result in results), 3),
+        # The other half of the wall clock: building images, starting containers
+        # and waiting for every readiness probe.
+        "environment_duration": round(float(environment_duration), 3),
         "artifacts": sorted(
             {artifact for result in results for artifact in result.artifacts}
         ),
@@ -405,18 +560,34 @@ def _build_summary(
     }
 
 
-def _fix_instructions(failed: Sequence[ScenarioResult]) -> str:
+def _fix_instructions(
+    failed: Sequence[ScenarioResult], unverified_critical: Sequence[str] = ()
+) -> str:
     """LLM-facing description of what broke.
 
     Deliberately not localized: like every other prompt payload in the engine,
     this is written *for the implementing agent*, and it quotes the expected and
     actual values verbatim so nothing has to be re-derived from prose.
     """
-    lines: List[str] = [
-        "{} e2e scenario(s) failed. Fix the code under test so every assertion "
-        "holds.".format(len(failed)),
-        "",
+    lines: List[str] = []
+    missing = [
+        name
+        for name in unverified_critical
+        if name not in {result.name for result in failed}
     ]
+    if missing:
+        lines += [
+            "These scenarios are declared critical in e2e.critical_scenarios but "
+            "produced no passing result, so this run does not count as verified: "
+            + ", ".join(missing),
+            "",
+        ]
+    if failed:
+        lines += [
+            "{} e2e scenario(s) failed. Fix the code under test so every "
+            "assertion holds.".format(len(failed)),
+            "",
+        ]
     for result in failed:
         lines.append("## Scenario: {} ({})".format(result.name, result.source))
         lines.append("driver: {}".format(result.driver))
@@ -430,6 +601,12 @@ def _fix_instructions(failed: Sequence[ScenarioResult]) -> str:
             lines.append("error: {}".format(result.error))
         for note in result.action_failures:
             lines.append("action problem: {}".format(note))
+        # The action-sequence trace (a declared command that exited non-zero, a
+        # browser shot that was taken) is frequently the *cause* of the assertion
+        # that failed further down. Without it the fix iteration debugs the
+        # symptom with the root cause missing from its prompt.
+        for note in result.notes:
+            lines.append("action note: {}".format(note))
 
         failures = result.failed_assertions
         if failures:
@@ -445,16 +622,35 @@ def _fix_instructions(failed: Sequence[ScenarioResult]) -> str:
                     lines.append("  evidence: {}".format(assertion.evidence))
         if result.logs:
             lines.append("")
-            lines.append("Container log tail ({}):".format(result.driver))
+            lines.append("Container log tails (driver: {}):".format(result.driver))
             lines.append(result.logs)
         lines.append("")
     return "\n".join(lines).strip() + "\n"
 
 
-def _fix_context(failed: Sequence[ScenarioResult]) -> Dict[str, Any]:
+def _fix_context(
+    failed: Sequence[ScenarioResult], unverified_critical: Sequence[str] = ()
+) -> Dict[str, Any]:
     """Structured fix context consumed by the implement step."""
     issues: List[Dict[str, Any]] = []
     for result in failed:
+        for failure in result.action_failures:
+            # An action that could not be performed is its own issue: the
+            # assertion list may look untouched (or even green) while the
+            # sequence never reached the state it was written to verify.
+            issues.append(
+                {
+                    "scenario": result.name,
+                    "source": result.source,
+                    "driver": result.driver,
+                    "kind": "action",
+                    "tier": 0,
+                    "expected": "the declared action sequence runs to completion",
+                    "actual": failure,
+                    "message": failure,
+                    "evidence": "; ".join(result.notes),
+                }
+            )
         for assertion in result.failed_assertions:
             issues.append(
                 {
@@ -469,7 +665,7 @@ def _fix_context(failed: Sequence[ScenarioResult]) -> Dict[str, Any]:
                     "evidence": assertion.evidence,
                 }
             )
-        if not result.failed_assertions:
+        if not result.failed_assertions and not result.action_failures:
             # A scenario can fail without a failing assertion — a timeout, or a
             # driver error before any assertion ran. Recording it keeps the
             # issue list a faithful account of every failure.
@@ -488,8 +684,27 @@ def _fix_context(failed: Sequence[ScenarioResult]) -> Dict[str, Any]:
                     "evidence": "",
                 }
             )
+
+    failed_names = [result.name for result in failed]
+    missing = [name for name in unverified_critical if name not in failed_names]
+    for name in missing:
+        issues.append(
+            {
+                "scenario": name,
+                "source": "tianluo.yaml: e2e.critical_scenarios",
+                "driver": "-",
+                "kind": "critical_scenario_not_verified",
+                "tier": 0,
+                "expected": "critical scenario '{}' runs and passes".format(name),
+                "actual": "it produced no result in this run",
+                "message": "A scenario declared critical must genuinely run; a "
+                "missing result does not count as a pass.",
+                "evidence": "",
+            }
+        )
     return {
         "reason": FIX_REASON,
-        "scenarios_failed": [result.name for result in failed],
+        "scenarios_failed": failed_names,
+        "critical_unverified": missing,
         "issues": issues,
     }

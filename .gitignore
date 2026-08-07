@@ -43,13 +43,15 @@ prompts/
 # (the broad `prompts/` rule above would otherwise swallow them, so the
 # root-cause doc-sync fix could never be committed/shipped).
 !/src/tianluo/templates/prompts/
-e2e
-# The bare `e2e` rule above matches *any* path component named `e2e`, which
-# would swallow the e2e subsystem's source package and its tests wholesale —
-# they would never be committed, and the wheel would ship without the framework
-# code the extra is explicitly NOT supposed to gate. Whitelist the two real
-# source trees (same pattern as the preset-prompts exception above); the
-# original rule keeps covering runtime scratch directories.
+
+# There used to be a bare `e2e` rule here, matching *any* path component named
+# `e2e`. It was removed because it swallowed the e2e subsystem's source package
+# and its tests wholesale — they could never be committed, and the wheel would
+# have shipped without the framework code the extra is explicitly NOT supposed
+# to gate. Scratch `e2e/` directories at the repo root stay ignored by the `/*`
+# rule at the top of this file, so nothing was lost. These two whitelists are
+# kept as an explicit guard: they pin the intent, so re-adding a broad `e2e`
+# rule cannot silently untrack the subsystem again.
 !/src/tianluo/e2e/
 !/tests/e2e/
 materials
@@ -63,6 +65,12 @@ materials
 !/tianluo/issues/
 !/tianluo/scripts/
 !/tianluo/prompts/
+# Flow-authored e2e content (services topology, build steps, scenarios and the
+# baseline screenshots tier-2 diffs compare against). It is a committed asset
+# like charter/issues, not runtime state: without this whitelist `luo e2e
+# bootstrap` on this very repository would write files git silently refuses to
+# track, and a baseline image could never enter version control at all.
+!/tianluo/e2e/
 !/tianluo/version-rules.md
 !/tianluo/version-intents/
 
@@ -73,6 +81,7 @@ materials
 !/tianluo/issues/
 !/tianluo/scripts/
 !/tianluo/prompts/
+!/tianluo/e2e/
 !/tianluo/version-rules.md
 # Version-reconcile intent metadata: written by a worktree session's commit
 # step and committed on the flow branch so the merge-side reconcile step can

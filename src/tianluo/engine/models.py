@@ -876,10 +876,12 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "name": "e2e",
         # WHY uses_llm is False: the scenario executor is *program*-driven end to
         # end — it builds the environment, runs the declared action sequence and
-        # evaluates deterministic assertions in Python. The third assertion tier
-        # (an LLM looking at a screenshot) is an internal, opt-in call made from
-        # inside the executor for scenarios that explicitly declare a semantic
-        # visual assertion; it is not the step's mode of operation, so declaring
+        # evaluates deterministic assertions in Python. The two LLM call sites it
+        # does have are internal and narrowly scoped: maintaining the declarative
+        # content under tianluo/e2e/ (authoring it on first use, evolving it
+        # incrementally afterwards) and the third assertion tier (an LLM looking
+        # at a screenshot) for scenarios that explicitly declare a semantic visual
+        # assertion. Neither is the step's mode of operation, so declaring
         # uses_llm=True here would mislabel every ordinary e2e run (and mis-drive
         # the agent-dispatch / read-only tooling that keys off this flag).
         # read_only is False because the environment binds the source tree in and

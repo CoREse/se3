@@ -334,6 +334,15 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["pre_existing_failures"] = verdict.inherited_list
     step.outputs["inherited_failures"] = verdict.inherited_list
 
+    # Surface the "this project looks like a fit for e2e" hint, at most once per
+    # flow (the fix loop re-runs this step, and repeating the same sentence every
+    # iteration would turn a suggestion into noise).
+    if not flow.state.context.get("e2e_suggestion_shown"):
+        suggestion = _e2e_enable_suggestion(project_root)
+        if suggestion:
+            step.outputs["e2e_suggestion"] = suggestion
+            flow.state.context["e2e_suggestion_shown"] = True
+
     # Record test results in history (phase_results == test_results["phases"]).
     _record_test_history(
         project_root, flow, step,
@@ -361,6 +370,29 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.REVISION_NEEDED
 
     return StepStatus.COMPLETED
+
+
+def _e2e_enable_suggestion(project_root: Path) -> str:
+    """Text suggesting the user enable e2e, or ``""`` when there is nothing to say.
+
+    WHY it is raised from *this* step: the ``E2E`` step only joins the sequence
+    once ``e2e.enabled`` is true, so a suggestion to turn the switch on can only
+    come from a step that runs while it is off — and the test step is exactly
+    where e2e would sit. The flow says it and never writes it: flipping
+    ``e2e.enabled`` asserts something about the user's machine (an unprivileged
+    Docker or Podman) and about how much time the fix loop may spend, which is
+    theirs to promise.
+
+    Imported inside the function for the charter's core/extra isolation, and
+    failure-tolerant because a hint must never be able to fail a passing suite.
+    """
+    try:
+        from ...e2e.bootstrap import suggest_enable
+
+        return suggest_enable(project_root)
+    except Exception as exc:  # pragma: no cover - defensive; a hint is optional
+        logger.debug("e2e enable suggestion unavailable: %s", exc)
+        return ""
 
 
 def run_and_classify_tests(

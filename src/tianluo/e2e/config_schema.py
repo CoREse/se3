@@ -23,16 +23,20 @@ locatable message, before a single container is built.
 
 Pure function, stdlib only: no container, no network, and no IO beyond the
 optional baseline-file existence check (which is skipped entirely when the
-caller passes no ``baselines_dir``). No third-party validation library either —
+caller passes no ``baselines_dir``, or passes
+``require_existing_baselines=False`` — the first-capture path, see
+:func:`_check_baseline`). No third-party validation library either —
 the rules below are specific enough that a jsonschema document would be both
 larger and unable to express the ladder checks.
 """
 
 from __future__ import annotations
 
+import math
 import re
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from urllib.parse import urlparse
 
 from tianluo.i18n import t
 
@@ -40,10 +44,13 @@ __all__ = [
     "ACTION_KINDS",
     "BASE_KINDS",
     "DETERMINISTIC_ASSERTIONS",
+    "PLAYWRIGHT_BASE_KIND",
     "READINESS_KINDS",
     "SEMANTIC_VISUAL_ASSERTIONS",
     "SERVICE_NAME_PATTERN",
     "VISUAL_REGRESSION_ASSERTIONS",
+    "baseline_is_contained",
+    "service_base_kinds",
     "validate_content",
     "validate_environment",
     "validate_scenario",
@@ -58,7 +65,24 @@ SERVICE_NAME_PATTERN = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 # Dockerfile template family each one selects.
 BASE_KINDS = ("base", "playwright", "gui-xvfb")
 
+# The base kind that ships a browser, and therefore the only driver that can
+# execute a `browser` action or answer a `dom` query.
+PLAYWRIGHT_BASE_KIND = "playwright"
+
+# Scenario constructs the executor can only serve from a Playwright driver.
+_BROWSER_ONLY_ACTIONS = ("browser",)
+_BROWSER_ONLY_ASSERTIONS = ("dom",)
+
 READINESS_KINDS = ("command", "http", "tcp", "log")
+
+# Addresses that mean "this host" to a probe issued by the tianluo process.
+# WHY the distinction matters: `http` and `tcp` probes are dialled from the
+# host, so they can only ever reach a *published* port; `command` probes run
+# inside the container and see the network. A probe pointed at an in-network
+# address is not slow — it is unreachable, and would burn its whole timeout
+# before reporting an environment failure for a service that was healthy all
+# along. Both halves of that trap are rejected below.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"})
 
 # kind -> (always-required fields, at-least-one-of fields)
 _READINESS_FIELDS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
@@ -66,6 +90,19 @@ _READINESS_FIELDS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
     "http": (("url",), ()),
     "tcp": (("port",), ()),
     "log": (("pattern",), ()),
+}
+
+# Field -> value shape, checked whenever the field is present. WHY presence is
+# not enough: the conversion layer turns these straight into a ReadinessProbe
+# (`int(port)`, `tuple(str(part) for part in command)`), so a document that only
+# had its *names* vetted reaches `int("abc")` and the E2E step dies with a bare
+# ValueError traceback instead of a located configuration error the author can
+# act on.
+_READINESS_FIELD_SHAPES: Dict[str, str] = {
+    "command": "argv",
+    "url": "string",
+    "pattern": "string",
+    "port": "port",
 }
 
 _ACTION_FIELDS: Dict[str, Tuple[Tuple[str, ...], Tuple[str, ...]]] = {
@@ -152,7 +189,18 @@ def _require_string(
 
 
 def _require_positive(value: Any, errors: List[str], source: str, path: str) -> None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    # WHY finiteness is part of "positive": YAML admits `.inf` and `.nan`, and
+    # neither is caught by a `<= 0` test — NaN compares false against everything
+    # and inf is enthusiastically positive. Both then reach the conversion layer,
+    # where `int(math.ceil(...))` dies with a bare OverflowError/ValueError
+    # traceback instead of the located configuration error this vetting exists to
+    # produce, and a NaN readiness budget yields a deadline no comparison can
+    # ever satisfy.
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
         _err(errors, source, path, "e2e.schema.not_positive", value=repr(value))
         return
     if value <= 0:
@@ -230,6 +278,15 @@ def validate_environment(raw: Any, source: str) -> Tuple[List[str], List[str]]:
         _err(errors, source, "services", "e2e.schema.no_services")
         return errors, service_names
 
+    # Collected up front because a readiness probe may address a service
+    # declared further down the list, and the reachability rule below has to
+    # recognise the name wherever it appears.
+    declared_names = {
+        str(entry.get("name"))
+        for entry in services
+        if isinstance(entry, Mapping) and isinstance(entry.get("name"), str)
+    }
+
     seen: set = set()
     for index, entry in enumerate(services):
         path = f"services[{index}]"
@@ -260,7 +317,8 @@ def validate_environment(raw: Any, source: str) -> Tuple[List[str], List[str]]:
 
         _validate_build_steps(service.get("build"), errors, source, f"{path}.build")
         _validate_readiness(
-            service.get("readiness"), errors, source, f"{path}.readiness"
+            service.get("readiness"), errors, source, f"{path}.readiness",
+            ports=service.get("ports"), declared_names=declared_names,
         )
 
         for list_field in ("ports", "command"):
@@ -289,6 +347,30 @@ def validate_environment(raw: Any, source: str) -> Tuple[List[str], List[str]]:
     return errors, service_names
 
 
+def service_base_kinds(raw: Any) -> Dict[str, str]:
+    """Map each declared service name to its ``base_kind``.
+
+    Read straight off the raw environment document (rather than off the typed
+    declarations) so scenario validation can consult it in the same pass that
+    validates the environment — including for a bundle the bootstrap step has
+    generated but not yet written to disk.
+    """
+    kinds: Dict[str, str] = {}
+    if not isinstance(raw, Mapping):
+        return kinds
+    services = raw.get("services")
+    if not isinstance(services, list):
+        return kinds
+    for entry in services:
+        if not isinstance(entry, Mapping):
+            continue
+        name = entry.get("name")
+        kind = entry.get("base_kind", "base")
+        if isinstance(name, str) and name and isinstance(kind, str):
+            kinds.setdefault(name, kind)
+    return kinds
+
+
 def _validate_build_steps(
     value: Any, errors: List[str], source: str, path: str
 ) -> None:
@@ -302,7 +384,13 @@ def _validate_build_steps(
 
 
 def _validate_readiness(
-    value: Any, errors: List[str], source: str, path: str
+    value: Any,
+    errors: List[str],
+    source: str,
+    path: str,
+    *,
+    ports: Any = None,
+    declared_names: Optional[Iterable[str]] = None,
 ) -> None:
     if value is None:
         return
@@ -316,9 +404,156 @@ def _validate_readiness(
         probe, _READINESS_FIELDS[kind], errors, source, path,
         context=t("e2e.schema.context.readiness", kind=kind),
     )
+    _check_readiness_shapes(probe, errors, source, path)
     for budget in ("timeout", "interval"):
         if probe.get(budget) is not None:
             _require_positive(probe[budget], errors, source, f"{path}.{budget}")
+    if kind == "http" and probe.get("status") is not None:
+        _require_http_status(probe["status"], errors, source, f"{path}.status")
+    if kind in ("http", "tcp"):
+        _check_probe_reachability(
+            probe, kind, errors, source, path, ports, declared_names or ()
+        )
+
+
+def _check_readiness_shapes(
+    probe: Mapping[str, Any], errors: List[str], source: str, path: str
+) -> None:
+    """Type-check every readiness field the conversion layer will coerce."""
+    for name, shape in _READINESS_FIELD_SHAPES.items():
+        value = probe.get(name)
+        if value is None:
+            continue
+        field_path = f"{path}.{name}"
+        if shape == "string":
+            _require_string(value, errors, source, field_path)
+        elif shape == "port":
+            _require_port(value, errors, source, field_path)
+        elif shape == "argv":
+            _require_argv(value, errors, source, field_path)
+
+
+def _require_port(value: Any, errors: List[str], source: str, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+        _err(errors, source, path, "e2e.schema.invalid_port", value=repr(value))
+
+
+def _require_argv(value: Any, errors: List[str], source: str, path: str) -> None:
+    """A command is either a shell string or a list of argv strings."""
+    if isinstance(value, str):
+        _require_string(value, errors, source, path)
+        return
+    if isinstance(value, list):
+        if not value:
+            _err(errors, source, path, "e2e.schema.empty")
+            return
+        for index, part in enumerate(value):
+            _require_string(part, errors, source, f"{path}[{index}]")
+        return
+    _err(
+        errors, source, path,
+        "e2e.schema.not_string_or_list", actual=_type_name(value),
+    )
+
+
+def _require_http_status(value: Any, errors: List[str], source: str, path: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not 100 <= value <= 599:
+        _err(errors, source, path, "e2e.schema.invalid_status", value=repr(value))
+
+
+def _published_host_ports(ports: Any) -> Optional[Set[int]]:
+    """Host ports a service's ``ports`` mapping publishes.
+
+    ``None`` means "cannot be determined" — a range, a bare container port
+    (whose host side the runtime picks at random), or a shape this parser does
+    not recognise. Callers skip the reachability check then rather than reject a
+    mapping they simply failed to read.
+    """
+    if ports is None:
+        return set()
+    if isinstance(ports, str):
+        ports = [ports]
+    if not isinstance(ports, (list, tuple)):
+        return None
+    published: Set[int] = set()
+    for entry in ports:
+        text = str(entry).strip()
+        if not text:
+            continue
+        text = text.split("/", 1)[0]
+        parts = text.split(":")
+        if len(parts) < 2:
+            # `-p 8000` publishes to an ephemeral host port, so no fixed
+            # address can be asserted about it.
+            return None
+        host_part = parts[-2]
+        if not host_part.isdigit():
+            return None
+        published.add(int(host_part))
+    return published
+
+
+def _probe_address(probe: Mapping[str, Any], kind: str) -> Tuple[Optional[str], Optional[int]]:
+    """The (host, port) an ``http``/``tcp`` probe dials, as readiness reads it."""
+    url = probe.get("url")
+    host: Optional[str] = None
+    port: Optional[int] = None
+    if isinstance(url, str) and url.strip():
+        parsed = urlparse(url if "//" in url else "//" + url)
+        host = parsed.hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if port is None and parsed.scheme in ("http", "https"):
+            port = 443 if parsed.scheme == "https" else 80
+    if kind == "tcp":
+        raw_port = probe.get("port")
+        if isinstance(raw_port, int) and not isinstance(raw_port, bool):
+            port = raw_port
+        if host is None:
+            # `_tcp_host` defaults to the host loopback when no url is given.
+            host = "127.0.0.1"
+    return host, port
+
+
+def _check_probe_reachability(
+    probe: Mapping[str, Any],
+    kind: str,
+    errors: List[str],
+    source: str,
+    path: str,
+    ports: Any,
+    declared_names: Iterable[str],
+) -> None:
+    """Reject an ``http``/``tcp`` probe the host process cannot actually reach.
+
+    Two shapes fail, both of which look perfectly reasonable in a generated
+    document: addressing a peer by its in-network service name (only the
+    container network resolves that), and dialling a loopback port the service
+    never published. Either one makes the probe poll until its budget runs out
+    and then report a healthy service as an environment failure.
+    """
+    host, port = _probe_address(probe, kind)
+    if not host:
+        return
+    lowered = host.lower()
+    if lowered in {str(name).lower() for name in declared_names}:
+        _err(
+            errors, source, path, "e2e.schema.readiness_in_network_host",
+            host=host, kind=kind,
+        )
+        return
+    if lowered not in _LOOPBACK_HOSTS or port is None:
+        return
+    published = _published_host_ports(ports)
+    if published is None or port in published:
+        return
+    _err(
+        errors, source, path, "e2e.schema.readiness_port_not_published",
+        port=port, kind=kind,
+        published=", ".join(str(value) for value in sorted(published)) or "-",
+    )
 
 
 def validate_scenario(
@@ -328,8 +563,16 @@ def validate_scenario(
     service_names: Iterable[str],
     environment_source: str,
     baselines_dir: Optional[Path] = None,
+    require_existing_baselines: bool = True,
+    service_kinds: Optional[Mapping[str, str]] = None,
 ) -> List[str]:
-    """Validate one ``scenarios/*.yaml`` document against the declared services."""
+    """Validate one ``scenarios/*.yaml`` document against the declared services.
+
+    ``service_kinds`` maps a declared service name to its ``base_kind`` and is
+    what lets the driver be checked for *capability* rather than mere existence;
+    omit it (as a caller validating a scenario in isolation does) and only the
+    name check runs.
+    """
     errors: List[str] = []
     known_services = list(service_names)
 
@@ -349,14 +592,81 @@ def validate_scenario(
             errors, source, "driver", "e2e.schema.unknown_driver",
             driver=driver, environment=environment_source,
         )
+    _check_driver_capability(
+        data, driver, errors, source, service_kinds, environment_source
+    )
 
     if data.get("timeout") is not None:
         _require_positive(data["timeout"], errors, source, "timeout")
 
-    visual_driving = bool(data.get("visual_driving", False))
+    visual_driving = _declared_flag(data, "visual_driving", errors, source)
+    # Vetted like the ladder flags even though it unlocks nothing: the parse
+    # layer reads every declaration flag by identity against `True`, so a
+    # non-boolean `fail_fast: "true"` would otherwise validate cleanly and then
+    # reach the executor as False — the author's explicit instruction discarded
+    # with nothing on screen saying so.
+    _declared_flag(data, "fail_fast", errors, source)
     _validate_actions(data.get("actions"), errors, source, visual_driving)
-    _validate_assertions(data.get("assertions"), errors, source, baselines_dir)
+    _validate_assertions(
+        data.get("assertions"), errors, source, baselines_dir,
+        require_existing_baselines,
+    )
     return errors
+
+
+def _check_driver_capability(
+    data: Mapping[str, Any],
+    driver: Optional[str],
+    errors: List[str],
+    source: str,
+    service_kinds: Optional[Mapping[str, str]],
+    environment_source: str,
+) -> None:
+    """Reject a scenario whose driver cannot perform what the scenario declares.
+
+    WHY at validation time rather than at execution: a ``browser`` action or a
+    ``dom`` assertion needs a browser, which only the ``playwright`` base kind
+    ships. The executor does raise on the mismatch — but only after the whole
+    environment has been built and every readiness probe awaited, and the raise
+    aborts the run, discarding the results of scenarios that already passed in
+    the same round. The mismatch is knowable from the two documents alone, so it
+    belongs where every other statically-decidable rule lives: before a single
+    image is built, and before the bootstrap step writes the content out.
+    """
+    if driver is None or not service_kinds:
+        return
+    kind = service_kinds.get(driver)
+    # An unknown driver, or one whose own `base_kind` is invalid, is already
+    # reported where it belongs; deriving a second complaint from it would only
+    # bury the first.
+    if kind is None or kind not in BASE_KINDS or kind == PLAYWRIGHT_BASE_KIND:
+        return
+
+    actions = data.get("actions")
+    if isinstance(actions, list):
+        for index, entry in enumerate(actions):
+            if (
+                isinstance(entry, Mapping)
+                and entry.get("action") in _BROWSER_ONLY_ACTIONS
+            ):
+                _err(
+                    errors, source, f"actions[{index}]",
+                    "e2e.schema.driver_not_browser",
+                    driver=driver, base_kind=kind, environment=environment_source,
+                )
+
+    assertions = data.get("assertions")
+    if isinstance(assertions, list):
+        for index, entry in enumerate(assertions):
+            if (
+                isinstance(entry, Mapping)
+                and entry.get("kind") in _BROWSER_ONLY_ASSERTIONS
+            ):
+                _err(
+                    errors, source, f"assertions[{index}]",
+                    "e2e.schema.driver_not_browser",
+                    driver=driver, base_kind=kind, environment=environment_source,
+                )
 
 
 def _validate_actions(
@@ -371,6 +681,7 @@ def _validate_actions(
         )
         return
 
+    saw_browser = False
     for index, entry in enumerate(value):
         path = f"actions[{index}]"
         action = _require_mapping(entry, errors, source, path)
@@ -379,6 +690,22 @@ def _validate_actions(
         kind = action.get("action")
         if not _check_choice(kind, ACTION_KINDS, errors, source, f"{path}.action"):
             continue
+        # INVARIANT: browser ops are batched into ONE Playwright program per
+        # scenario (page state cannot survive `backend.exec`, which is one-shot),
+        # and that program necessarily runs after the non-browser actions have
+        # already executed. A non-browser action declared *after* a browser one
+        # would therefore run BEFORE it — the declared order silently inverted,
+        # so an `exec` meant to seed state for a loaded page would seed it before
+        # the navigation. Rejecting the shape is honest; honouring it would mean
+        # flushing the program early and losing the very page state the following
+        # browser ops depend on.
+        if kind == "browser":
+            saw_browser = True
+        elif saw_browser:
+            _err(
+                errors, source, path,
+                "e2e.schema.action_after_browser", kind=str(kind),
+            )
         _check_required_fields(
             action, _ACTION_FIELDS[kind], errors, source, path,
             context=t("e2e.schema.context.action", kind=kind),
@@ -404,6 +731,7 @@ def _validate_assertions(
     errors: List[str],
     source: str,
     baselines_dir: Optional[Path],
+    require_existing_baselines: bool = True,
 ) -> None:
     if value is None:
         _err(errors, source, "assertions", "e2e.schema.no_assertions")
@@ -423,7 +751,10 @@ def _validate_assertions(
         assertion = _require_mapping(entry, errors, source, path)
         if assertion is None:
             continue
-        _validate_one_assertion(assertion, errors, source, path, baselines_dir)
+        _validate_one_assertion(
+            assertion, errors, source, path, baselines_dir,
+            require_existing_baselines,
+        )
 
 
 def _validate_one_assertion(
@@ -432,6 +763,7 @@ def _validate_one_assertion(
     source: str,
     path: str,
     baselines_dir: Optional[Path],
+    require_existing_baselines: bool = True,
 ) -> None:
     kind = assertion.get("kind")
     all_kinds = (
@@ -442,8 +774,8 @@ def _validate_one_assertion(
     if not _check_choice(kind, all_kinds, errors, source, f"{path}.kind"):
         return
 
-    declared_visual = bool(assertion.get("visual_regression", False))
-    declared_semantic = bool(assertion.get("semantic_visual", False))
+    declared_visual = _declared_flag(assertion, "visual_regression", errors, source, path)
+    declared_semantic = _declared_flag(assertion, "semantic_visual", errors, source, path)
 
     if kind in DETERMINISTIC_ASSERTIONS:
         _check_required_fields(
@@ -494,7 +826,10 @@ def _validate_one_assertion(
                     errors, source, f"{path}.threshold",
                     "e2e.schema.invalid_threshold", value=repr(threshold),
                 )
-        _check_baseline(assertion, errors, source, path, baselines_dir)
+        _check_baseline(
+            assertion, errors, source, path, baselines_dir,
+            require_existing_baselines,
+        )
         return
 
     # Tier 3.
@@ -504,9 +839,37 @@ def _validate_one_assertion(
     )
     if not declared_semantic:
         _err(errors, source, path, "e2e.schema.ladder_semantic_visual_undeclared")
-    if not assertion.get("require_evidence", False):
+    if not _declared_flag(assertion, "require_evidence", errors, source, path):
         _err(errors, source, path, "e2e.schema.ladder_evidence_required")
     _check_downgrade(assertion, _TIER3_DOWNGRADE_FIELDS, kind, errors, source, path)
+
+
+def _declared_flag(
+    holder: Mapping[str, Any],
+    name: str,
+    errors: List[str],
+    source: str,
+    path: str = "",
+) -> bool:
+    """Read a ladder opt-in flag, demanding a real boolean.
+
+    INVARIANT: the ladder rules say a tier is unlocked only by an explicit
+    ``true``. Python truthiness would let the quoted string ``"false"`` — a
+    plausible slip in a machine-written YAML document — read as a declaration,
+    so the flag that is supposed to *record a deliberate escalation* would be
+    satisfied by a value whose author meant the opposite. Anything that is not a
+    bool is reported and counts as undeclared.
+    """
+    value = holder.get(name)
+    if value is None:
+        return False
+    if not isinstance(value, bool):
+        _err(
+            errors, source, f"{path}.{name}" if path else name,
+            "e2e.schema.not_bool", actual=_type_name(value),
+        )
+        return False
+    return value
 
 
 def _check_downgrade(
@@ -527,21 +890,90 @@ def _check_downgrade(
             )
 
 
+def baseline_is_contained(baseline: str) -> bool:
+    """Whether ``baseline`` names a file *inside* the baselines directory.
+
+    INVARIANT: a baseline is a git-tracked asset of ``tianluo/e2e/baselines/``.
+    Joining an absolute path onto that directory discards the directory outright
+    (``Path("/x") / "/etc/hosts"`` is ``/etc/hosts``), and ``..`` walks out of
+    it — so without this check a scenario could compare against, and
+    ``--write-baselines`` could overwrite, an arbitrary file on the host while
+    the "baseline lives in git" contract silently stopped holding.
+
+    Shared with the runtime comparison in :mod:`tianluo.e2e.assertions`, so a
+    declaration built in code (never validated here) is rejected too.
+    """
+    text = str(baseline or "").strip()
+    if not text:
+        return False
+    # Both flavours are checked: a document written on one platform is read on
+    # whichever platform runs the flow, and "C:/x" must not become admissible
+    # just because the reader is POSIX.
+    #
+    # WHY anchoring is tested directly instead of trusting is_absolute(): a
+    # Windows path counts as absolute only when it carries *both* a drive and a
+    # root, so the rooted-but-driveless "\evil.png" and the drive-relative
+    # "C:evil.png" both report False — yet joining either onto the baselines
+    # directory throws that directory away (the first keeps the drive and lands
+    # at its root, the second re-anchors on the drive's own cwd). What has to be
+    # rejected is any name that carries its own anchor, drive or root.
+    windows = PureWindowsPath(text)
+    if text.startswith(("/", "\\")) or windows.drive or windows.root:
+        return False
+    parts = PurePosixPath(text.replace("\\", "/")).parts
+    return bool(parts) and ".." not in parts
+
+
 def _check_baseline(
     assertion: Mapping[str, Any],
     errors: List[str],
     source: str,
     path: str,
     baselines_dir: Optional[Path],
+    require_existing: bool = True,
 ) -> None:
     """Existence check for a tier-2 baseline image.
 
     The only IO this module performs, and only when the caller supplies a
     directory — so validating an in-memory document (bootstrap, tests) stays a
     pure function.
+
+    WHY ``require_existing`` exists: a baseline can only ever be produced by
+    *running* the scenario inside the image that renders it, so the very first
+    run of a new tier-2 assertion necessarily starts with no file on disk. If
+    absence were unconditionally fatal, content loading — the first thing both
+    the E2E step and ``luo e2e run`` do — would abort before the assertion layer
+    could capture that first shot, making ``luo e2e run --write-baselines``
+    unreachable and a flow-authored visual-regression scenario impossible.
+    Callers that have explicitly asked for first capture (or are validating a
+    just-generated document) pass ``False``; everyone else keeps the strict rule,
+    so an ordinary run still reports a vanished baseline as a locatable
+    configuration problem instead of silently degrading to "no comparison".
     """
     baseline = assertion.get("baseline")
-    if baselines_dir is None or not isinstance(baseline, str) or not baseline:
+    if baseline is None:
+        # Absence is already reported as a missing required field; saying it
+        # twice would only pad the report.
+        return
+    # A non-string baseline must not slip through as "check skipped": the value
+    # goes on to be joined onto a path at run time, and a validator that stays
+    # silent here would hand the assertion layer something it never vetted.
+    if not isinstance(baseline, str):
+        _err(
+            errors, source, f"{path}.baseline",
+            "e2e.schema.not_string", actual=_type_name(baseline),
+        )
+        return
+    if not baseline.strip():
+        _err(errors, source, f"{path}.baseline", "e2e.schema.empty")
+        return
+    if not baseline_is_contained(baseline):
+        _err(
+            errors, source, f"{path}.baseline",
+            "e2e.schema.baseline_escapes", baseline=baseline,
+        )
+        return
+    if not require_existing or baselines_dir is None:
         return
     if not (Path(baselines_dir) / baseline).is_file():
         _err(
@@ -556,6 +988,7 @@ def validate_content(
     source: str,
     *,
     baselines_dir: Optional[Path] = None,
+    require_existing_baselines: bool = True,
 ) -> List[str]:
     """Validate a whole ``tianluo/e2e/`` content bundle.
 
@@ -570,7 +1003,10 @@ def validate_content(
 
     ``source`` labels the directory itself and is used for problems that belong
     to no single file. Pass ``baselines_dir`` to additionally check that every
-    tier-2 baseline image exists; omit it to keep the call pure.
+    tier-2 baseline image exists; omit it to keep the call pure. Pass
+    ``require_existing_baselines=False`` when a not-yet-captured baseline is
+    legitimate (first capture, or a freshly generated document) — see
+    :func:`_check_baseline`.
     """
     errors: List[str] = []
 
@@ -583,6 +1019,7 @@ def validate_content(
         bundle.get("environment"), env_source
     )
     errors.extend(env_errors)
+    service_kinds = service_base_kinds(bundle.get("environment"))
 
     scenarios = bundle.get("scenarios")
     if not isinstance(scenarios, Mapping):
@@ -601,6 +1038,8 @@ def validate_content(
                 service_names=service_names,
                 environment_source=env_source,
                 baselines_dir=baselines_dir,
+                require_existing_baselines=require_existing_baselines,
+                service_kinds=service_kinds,
             )
         )
         # Scenario names are the selection keys `e2e.scenarios` matches on, so a

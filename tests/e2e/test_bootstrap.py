@@ -207,6 +207,49 @@ class TestEnsureContent:
         assert "svc" in caller.prompts[0]
 
 
+class TestUnusableContentOnDisk:
+    """A document that exists but cannot be read is an error, not an absence.
+
+    Reading it tolerantly made the two halves of generation disagree — the prompt
+    asked for a complete environment while the writer kept the unusable one — so
+    both LLM calls produced answers that were discarded before a guaranteed
+    validation failure. The file is never rewritten either: unparsable YAML may
+    still hold work a person typed.
+    """
+
+    @pytest.mark.parametrize("body", ["", "\n# only a comment\n", "services: [oops\n"])
+    def test_an_unusable_environment_fails_before_any_model_call(
+        self, project: Path, body: str
+    ) -> None:
+        directory = content_dir(project)
+        directory.mkdir(parents=True)
+        (directory / "environment.yaml").write_text(body, encoding="utf-8")
+        before = snapshot(project)
+        caller = FakeCaller([generation()])
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            bootstrap.ensure_content(project, None, caller=caller)
+
+        assert "environment.yaml" in str(excinfo.value)
+        assert caller.prompts == []
+        assert snapshot(project) == before
+
+    def test_an_unusable_scenario_file_fails_before_any_model_call(
+        self, project: Path
+    ) -> None:
+        write_content(project)
+        (content_dir(project) / "scenarios" / "cli-smoke.yaml").write_text(
+            "", encoding="utf-8"
+        )
+        caller = FakeCaller([generation()])
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            bootstrap.ensure_content(project, None, caller=caller)
+
+        assert "cli-smoke.yaml" in str(excinfo.value)
+        assert caller.prompts == []
+
+
 class TestGenerationIsValidatedBeforeWriting:
     def test_a_ladder_violation_is_retried_with_the_validator_complaints(
         self, project: Path
@@ -226,6 +269,35 @@ class TestGenerationIsValidatedBeforeWriting:
         assert result.created is True
         assert len(caller.prompts) == 2
         assert "visual_regression" in caller.prompts[1]
+
+    def test_a_declared_tier2_scenario_is_accepted_before_its_baseline_exists(
+        self, project: Path
+    ) -> None:
+        """A first baseline can only come from running the scenario.
+
+        Requiring the image at generation time would make it impossible for the
+        flow to ever author a visual-regression scenario, however clearly the
+        subject under test is a rendering.
+        """
+        visual = scenario_doc(
+            "home",
+            assertions=[
+                {
+                    "kind": "screenshot_diff",
+                    "baseline": "home.png",
+                    "visual_regression": True,
+                }
+            ],
+        )
+        caller = FakeCaller(
+            [generation(scenarios=[{"file": "home.yaml", "document": visual}])]
+        )
+
+        result = bootstrap.ensure_content(project, None, caller=caller)
+
+        assert result.created is True
+        assert len(caller.prompts) == 1
+        assert "tianluo/e2e/scenarios/home.yaml" in result.written
 
     def test_a_persistently_invalid_proposal_writes_nothing(
         self, project: Path
@@ -540,6 +612,29 @@ class TestEvolveContent:
 
         assert result.created is True
         assert (content_dir(project) / "environment.yaml").is_file()
+
+    def test_a_corrupted_scenario_file_is_reported_not_silently_completed(
+        self, project: Path
+    ) -> None:
+        """Only a *half-present* directory falls through to generation.
+
+        A valid environment plus one unparsable scenario is corruption, and every
+        other e2e command rejects it. Treating it as "nothing to evolve" reported
+        success at the exact command the user ran to have the content maintained.
+        """
+        write_content(project)
+        (content_dir(project) / "scenarios" / "cli-smoke.yaml").write_text(
+            "name: [unclosed\n", encoding="utf-8"
+        )
+        before = snapshot(project)
+        caller = FakeCaller([generation()])
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            bootstrap.evolve_content(project, None, ["hint"], caller=caller)
+
+        assert "cli-smoke.yaml" in str(excinfo.value)
+        assert caller.prompts == []
+        assert snapshot(project) == before
 
     def test_an_invalid_proposal_degrades_instead_of_breaking_the_run(
         self, project: Path

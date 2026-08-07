@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.4.0 - 2026-08-08
+
+- Add an opt-in end-to-end testing subsystem, enabled with `e2e.enabled: true` in `tianluo.yaml`; projects that leave it off see no behavior change and no new dependencies
+- Add a new `E2E` flow step that runs after `test` and before `self_check`, routing scenario failures into the existing fix loop under `workflow.max_fix_iterations` while reporting environment/preflight problems as environment errors instead
+- Add a Docker/Podman container backend behind a pluggable isolation abstraction, covering network orchestration, image builds, multi-container startup, command execution, screenshot snapshots and idempotent teardown — all rootless, with no sudo and correct bind-mount file ownership
+- Add `e2e.runtime` (`auto`/`docker`/`podman`) with executable availability probing: `auto` prefers a working Docker then Podman, while an explicit choice fails loudly with fix guidance rather than silently switching runtimes
+- Add the two-layer e2e configuration model — runtime settings in the `tianluo.yaml` `e2e:` block, and flow-maintained content configuration (services topology, environment build steps, scenarios, visual baselines) under `tianluo/e2e/` — with schema validation, bootstrap on first use and incremental evolution that preserves manual edits
+- Add a scenario executor with the three-tier assertion ladder (deterministic assertions first, baseline screenshot diff for visual regression, LLM visual judgement only when explicitly declared), plus scenario selection and timeout budgets so fix-loop iterations need not rerun everything
+- Ship Dockerfile templates for plain CLI/web, Playwright browser and Xvfb-based GUI services as packaged assets, and isolate the extra Python dependencies behind the `tianluo[e2e]` extra with a clear `pip install 'tianluo[e2e]'` hint when it is missing
+- Add the `luo e2e` command (run/list/doctor/bootstrap) for manual triggering, replace the obsolete unread `e2e` block in `tianluo.example.yaml`, and document the new configuration in docs/configuration.md and its Chinese variant
 ## 12.3.1 - 2026-08-06
 
 - Replace the static README version badge with a shields.io dynamic TOML badge that reads the version straight from pyproject.toml, and strip every hardcoded version number from both READMEs, so releases no longer require documentation edits

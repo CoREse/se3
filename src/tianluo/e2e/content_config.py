@@ -14,23 +14,25 @@ declarations and hands the raw documents to
 schema stays a pure function that a caller can run against a document it has not
 written to disk yet (the bootstrap step does exactly that).
 
-stdlib + PyYAML only — PyYAML is already a core dependency, so this module is
-importable without the ``tianluo[e2e]`` extra.
+stdlib + PyYAML + tianluo's own i18n only — PyYAML is already a core dependency,
+so this module is importable without the ``tianluo[e2e]`` extra.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
 import yaml
 
+from tianluo.i18n import t
 from tianluo.runtime_paths import runtime_dir, runtime_relpath
 
 from .backend import BindMount, EnvironmentSpec, ReadinessProbe, ServiceSpec
-from .errors import E2EConfigError
+from .errors import E2EConfigError, E2EContentIncompleteError
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +241,14 @@ def _readiness_to_probe(raw: Optional[Mapping[str, Any]]) -> Optional[ReadinessP
         return None
     command = raw.get("command") or ()
     if isinstance(command, str):
-        command = (command,)
+        # WHY the shell rather than a one-element argv: the schema admits a bare
+        # string command, and `backend.exec` runs argv without a shell — so
+        # `("pg_isready -U app",)` would exec a binary whose name contains a
+        # space, fail every attempt, burn the probe's whole budget and report a
+        # healthy service as an environment failure. This is the identical
+        # normalisation `executor._argv_of` applies to a string action command;
+        # the two layers read the same declaration and must agree on it.
+        command = ("sh", "-lc", command)
     probe_kwargs: Dict[str, Any] = {
         "kind": str(raw.get("kind", "command")),
         "command": tuple(str(part) for part in command),
@@ -248,6 +257,8 @@ def _readiness_to_probe(raw: Optional[Mapping[str, Any]]) -> Optional[ReadinessP
     }
     port = raw.get("port")
     probe_kwargs["port"] = int(port) if port is not None else None
+    status = raw.get("status")
+    probe_kwargs["status"] = int(status) if status is not None else None
     if raw.get("timeout") is not None:
         probe_kwargs["timeout"] = float(raw["timeout"])
     if raw.get("interval") is not None:
@@ -266,21 +277,28 @@ def _read_yaml(path: Path, label: str) -> Any:
     try:
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
-        raise E2EConfigError(f"{label}: cannot be read: {exc}") from exc
+        raise E2EConfigError(
+            t("e2e.content.unreadable", file=label, detail=str(exc))
+        ) from exc
     try:
         return yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise E2EConfigError(f"{label}: is not valid YAML: {exc}") from exc
+        raise E2EConfigError(
+            t("e2e.content.invalid_yaml", file=label, detail=str(exc))
+        ) from exc
 
 
 def read_raw_content(project_root: Path) -> Optional[Dict[str, Any]]:
     """Read the content directory into the raw bundle the schema validates.
 
     Returns ``None`` when the directory does not exist at all — the
-    "not bootstrapped yet" signal. Raises :class:`E2EConfigError` when the
-    directory exists but is structurally unusable (half-present: an
-    ``environment.yaml`` with no scenarios, or scenarios with no environment),
-    because that state is a broken bootstrap rather than an absent one.
+    "not bootstrapped yet" signal. Raises
+    :class:`~tianluo.e2e.errors.E2EContentIncompleteError` when the directory
+    exists but is structurally half-present (an ``environment.yaml`` with no
+    scenarios, or scenarios with no environment), because that state is a broken
+    bootstrap rather than an absent one — and it is the only content problem the
+    generator can finish off. Any other malformed content raises the plain
+    :class:`E2EConfigError`.
     """
     root = content_dir(project_root)
     if not root.is_dir():
@@ -300,19 +318,25 @@ def read_raw_content(project_root: Path) -> Optional[Dict[str, Any]]:
 
     if not env_path.is_file():
         if scenario_paths:
-            raise E2EConfigError(
-                f"{dir_label}: scenarios are declared but {ENVIRONMENT_FILENAME} "
-                f"is missing; the services topology they run against is undefined"
+            raise E2EContentIncompleteError(
+                t(
+                    "e2e.content.environment_missing",
+                    directory=dir_label,
+                    environment=ENVIRONMENT_FILENAME,
+                )
             )
         # Directory present but empty — indistinguishable from "not bootstrapped"
         # for the caller's purposes, so report the same sentinel.
         return None
 
     if not scenario_paths:
-        raise E2EConfigError(
-            f"{dir_label}: {ENVIRONMENT_FILENAME} is present but "
-            f"{SCENARIOS_DIR_NAME}/ declares no scenario; e2e would build an "
-            f"environment and assert nothing"
+        raise E2EContentIncompleteError(
+            t(
+                "e2e.content.scenarios_missing",
+                directory=dir_label,
+                environment=ENVIRONMENT_FILENAME,
+                scenarios_dir=SCENARIOS_DIR_NAME,
+            )
         )
 
     scenarios: Dict[str, Any] = {}
@@ -332,13 +356,23 @@ def read_raw_content(project_root: Path) -> Optional[Dict[str, Any]]:
     }
 
 
-def load_content_config(project_root: Path) -> Optional[E2EContent]:
+def load_content_config(
+    project_root: Path, *, require_baselines: bool = True
+) -> Optional[E2EContent]:
     """Load and validate ``tianluo/e2e/`` into typed declarations.
 
     Returns ``None`` when the directory has not been bootstrapped yet, so the
     caller can trigger first-time generation instead of treating an absent
     directory as an error. Raises :class:`E2EConfigError` when the content is
     present but invalid.
+
+    ``require_baselines=False`` admits a tier-2 assertion whose baseline image is
+    not on disk yet. WHY it is not the default: an absent baseline in an ordinary
+    run means the comparison cannot happen at all, and reporting that as a
+    locatable config problem is far more useful than a scenario failure blamed on
+    the code. Only a caller that has *asked* for first capture
+    (``luo e2e run --write-baselines``) relaxes it, so the assertion layer gets
+    the chance to take that first shot.
     """
     raw = read_raw_content(project_root)
     if raw is None:
@@ -349,11 +383,15 @@ def load_content_config(project_root: Path) -> Optional[E2EContent]:
     from . import config_schema
 
     errors = config_schema.validate_content(
-        raw, raw["source"], baselines_dir=baselines_dir(project_root)
+        raw,
+        raw["source"],
+        baselines_dir=baselines_dir(project_root),
+        require_existing_baselines=require_baselines,
     )
     if errors:
         raise E2EConfigError(
-            "e2e configuration is invalid:\n"
+            t("e2e.content.invalid")
+            + "\n"
             + "\n".join(f"  - {message}" for message in errors)
         )
 
@@ -419,9 +457,9 @@ def _build_scenario(data: Mapping[str, Any], source: str) -> ScenarioDecl:
                 if k not in ("kind", "visual_regression", "semantic_visual",
                              "require_evidence")
             },
-            visual_regression=bool(entry.get("visual_regression", False)),
-            semantic_visual=bool(entry.get("semantic_visual", False)),
-            require_evidence=bool(entry.get("require_evidence", False)),
+            visual_regression=_flag(entry.get("visual_regression")),
+            semantic_visual=_flag(entry.get("semantic_visual")),
+            require_evidence=_flag(entry.get("require_evidence")),
         )
         for entry in (data.get("assertions") or [])
     )
@@ -433,8 +471,48 @@ def _build_scenario(data: Mapping[str, Any], source: str) -> ScenarioDecl:
         description=str(data.get("description") or ""),
         actions=actions,
         assertions=assertions,
-        timeout=int(raw_timeout) if raw_timeout is not None else None,
+        # Rounded *up*: the schema admits any positive number, so a declared
+        # 0.5s budget must not truncate to 0 — which the executor reads as "no
+        # budget declared" and silently replaces with the 300s config default,
+        # running a scenario the document said to cut off in half a second.
+        timeout=_ceil_seconds(raw_timeout),
         tags=_as_tuple(data.get("tags")),
-        visual_driving=bool(data.get("visual_driving", False)),
-        fail_fast=bool(data.get("fail_fast", False)),
+        visual_driving=_flag(data.get("visual_driving")),
+        fail_fast=_flag(data.get("fail_fast")),
     )
+
+
+def _flag(value: Any) -> bool:
+    """Read a declaration flag exactly as :mod:`.config_schema` validates it.
+
+    WHY identity against ``True`` rather than ``bool(value)``: the ladder's
+    opt-ins are *declarations*, and the schema rejects anything that is not a
+    real boolean. Coercing here would make the parsed scenario disagree with the
+    document that was validated — the quoted string ``"false"`` would arrive at
+    the executor as a declared tier-3 assertion.
+    """
+    return value is True
+
+
+def _ceil_seconds(value: Any) -> Optional[int]:
+    """Whole seconds that never round a declared budget down to nothing.
+
+    The finiteness guard duplicates a schema rule on purpose: this parse layer is
+    reachable from a caller that built the document in code and never ran
+    :func:`~tianluo.e2e.config_schema.validate_content`, and `.inf`/`.nan` would
+    otherwise surface as a bare OverflowError/ValueError from ``int()`` with no
+    hint of which scenario carried it.
+    """
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError) as exc:
+        raise E2EConfigError(
+            t("e2e.content.timeout_not_a_number", value=repr(value))
+        ) from exc
+    if not math.isfinite(seconds):
+        raise E2EConfigError(
+            t("e2e.content.timeout_not_finite", value=repr(value))
+        )
+    return int(math.ceil(seconds))

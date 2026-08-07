@@ -52,7 +52,9 @@ PROBE_KINDS = ("command", "http", "tcp", "log")
 # Status codes an `http` probe accepts when the probe itself names none. Any 2xx
 # or 3xx means "the server answered", which is what readiness asks; a 404 does
 # not, because it usually means the app is up but the health route is wrong and
-# the author should hear about that rather than have it pass silently.
+# the author should hear about that rather than have it pass silently. A service
+# whose healthy answer falls outside that range (an auth-guarded root replying
+# 401) states its own `status:` instead.
 _DEFAULT_OK_STATUS = tuple(range(200, 400))
 
 # How much of the service log accompanies a readiness timeout. Enough to show
@@ -77,6 +79,12 @@ def read_log_tail(
     satisfies the narrow interface — a VM backend included. Never raises: this
     only ever runs while *reporting* another failure, and losing the diagnostic
     must not replace it.
+
+    WHY no destination is passed: a `log` probe calls this once per poll, so a
+    persisted file per call would accumulate on the host for text that is read
+    once and thrown away. The backend answers with the text in ``metadata`` and
+    writes nothing; the ``path`` fallback below only serves a backend that
+    delivers the log as a file it already owns.
     """
     try:
         snapshot = backend.snapshot(handle, service, "", kind="log")
@@ -87,7 +95,7 @@ def read_log_tail(
     metadata = getattr(snapshot, "metadata", None) or {}
     if isinstance(metadata, dict):
         text = str(metadata.get(_LOG_TEXT_KEY) or "")
-    if not text:
+    if not text and getattr(snapshot, "path", None) is not None:
         try:
             text = snapshot.path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:  # pragma: no cover - unreadable temp file
@@ -119,6 +127,35 @@ def _check_command(
     return bool(getattr(result, "ok", False))
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Makes urllib surface a redirect instead of following it.
+
+    Returning ``None`` from ``redirect_request`` leaves the 3xx to propagate as
+    an ``HTTPError``, which is exactly the observation a probe declaring
+    ``status: 302`` is asking for.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def _open_http(url: str, probe: ReadinessProbe, timeout: float):
+    """Open ``url`` the way this probe's declared status can be observed.
+
+    WHY the branch: the default opener follows redirects transparently, so the
+    status a probe sees is always the terminal one. A service whose healthy
+    answer *is* the redirect (a 302 to a login page as the "up" signal) could
+    then never match its own declared ``status:`` — the probe would compare the
+    wrong code on every attempt, spend its whole budget and report a healthy
+    service as an environment failure. Only that case gets a private opener; the
+    ordinary probe keeps ``urlopen`` and its default handler chain.
+    """
+    if probe.status is not None and 300 <= int(probe.status) < 400:
+        opener = urllib.request.build_opener(_NoRedirectHandler)
+        return opener.open(url, timeout=timeout)
+    return urllib.request.urlopen(url, timeout=timeout)
+
+
 def _check_http(service: str, probe: ReadinessProbe, attempt_timeout: float) -> bool:
     if not probe.url:
         raise E2EConfigError(
@@ -128,14 +165,17 @@ def _check_http(service: str, probe: ReadinessProbe, attempt_timeout: float) -> 
     # service publishes to the host, which is the only address the host can
     # reach before any container exists to run a request from. A service that is
     # only reachable *inside* the network uses a `command` probe instead (curl
-    # from a peer container), which is why both kinds exist.
+    # from a peer container), which is why both kinds exist — and why
+    # `config_schema` rejects an `http` probe aimed at an in-network address.
     try:
-        with urllib.request.urlopen(probe.url, timeout=attempt_timeout) as response:
+        with _open_http(probe.url, probe, attempt_timeout) as response:
             status = int(getattr(response, "status", 0) or response.getcode() or 0)
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
     except (urllib.error.URLError, OSError, ValueError):
         return False
+    if probe.status is not None:
+        return status == int(probe.status)
     return status in _DEFAULT_OK_STATUS
 
 
@@ -242,6 +282,10 @@ def wait_ready(
     while True:
         attempts += 1
         remaining = deadline - clock()
+        # Floored at 1s: a sub-second per-attempt timeout makes every probe
+        # report a timeout of its own, hiding the fact that it was the *budget*
+        # that ran out. The overshoot it can cause is bounded by that one second;
+        # the sleep below is what has to respect the budget exactly.
         attempt_timeout = max(min(remaining, float(probe.timeout or 0.0)), 1.0)
         try:
             if kind == "command":
@@ -275,7 +319,12 @@ def wait_ready(
 
         if clock() >= deadline:
             break
-        sleeper(interval)
+        # INVARIANT: the wait never outlasts its declared budget. Sleeping the
+        # full interval regardless of what is left would let a probe with a long
+        # interval and a short timeout (interval 30, timeout 5) run six times
+        # over budget before reporting the environment failure — the budget is
+        # what the caller sized the whole e2e step against.
+        sleeper(max(min(interval, deadline - clock()), 0.0))
         if clock() >= deadline:
             break
 

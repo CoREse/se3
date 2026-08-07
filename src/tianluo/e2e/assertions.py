@@ -34,7 +34,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -45,6 +47,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from tianluo.i18n import t
 
 from .backend import EnvironmentHandle, ExecResult, IsolationBackend
+from .config_schema import baseline_is_contained
 from .content_config import AssertionDecl
 from .errors import E2EConfigError, E2EDependencyMissingError
 
@@ -59,6 +62,7 @@ __all__ = [
     "TIER1_KINDS",
     "TIER2_KINDS",
     "TIER3_KINDS",
+    "budget_seconds",
     "evaluate",
     "fetch_http",
 ]
@@ -142,11 +146,21 @@ class AssertionResult:
 
 @dataclass
 class ExecRecord:
-    """One command executed inside the environment during a scenario."""
+    """One command executed inside the environment during a scenario.
+
+    ``internal`` marks a command *tianluo itself* ran to service another
+    construct — the in-container HTTP fetch helper, the ``wait.until`` poll
+    probe. INVARIANT: those never become ``last_exec``. ``exit_code`` / ``stdout``
+    / ``stderr`` assertions describe the scenario's own ``exec`` action, and a
+    helper silently taking that slot would report a green exit code for a command
+    under test that failed (the helper's own 0), or a false failure for one that
+    succeeded.
+    """
 
     service: str
     argv: Tuple[str, ...]
     result: ExecResult
+    internal: bool = False
 
 
 @dataclass
@@ -195,10 +209,23 @@ class AssertionContext:
     remote_screenshots: Dict[str, str] = field(default_factory=dict)
     artifacts: List[Path] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    # Action-sequence failures that no assertion can adjudicate — a browser op
+    # that threw, a coordinate click that missed, an unreachable `http` action, a
+    # `wait.until` that never came true. WHY separate from `notes`: these decide
+    # the scenario's verdict (the executor refuses to call a scenario passed with
+    # any of them), whereas a note is context. A failed `exec` is deliberately a
+    # note and not a failure: its exit code and streams are exactly what the
+    # tier-1 assertions exist to judge, so the scenario author decides whether a
+    # non-zero exit is the defect or the expectation.
+    failures: List[str] = field(default_factory=list)
 
     @property
     def last_exec(self) -> Optional[ExecRecord]:
-        return self.execs[-1] if self.execs else None
+        """The most recent command the *scenario* declared, ignoring helpers."""
+        for record in reversed(self.execs):
+            if not record.internal:
+                return record
+        return None
 
     def remaining(self) -> Optional[float]:
         """Seconds left in the scenario budget, or ``None`` when unbounded."""
@@ -216,8 +243,20 @@ class AssertionContext:
         # scenario, hiding which one actually ran out.
         return max(min(default, remaining), 1.0)
 
-    def record_exec(self, service: str, argv: Sequence[str], result: ExecResult) -> ExecRecord:
-        record = ExecRecord(service=service, argv=tuple(str(a) for a in argv), result=result)
+    def record_exec(
+        self,
+        service: str,
+        argv: Sequence[str],
+        result: ExecResult,
+        *,
+        internal: bool = False,
+    ) -> ExecRecord:
+        record = ExecRecord(
+            service=service,
+            argv=tuple(str(a) for a in argv),
+            result=result,
+            internal=internal,
+        )
         self.execs.append(record)
         return record
 
@@ -286,6 +325,50 @@ def _numeric(value: Any, default: float) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return float(default)
     return float(value)
+
+
+def budget_seconds(
+    value: Any,
+    default: Optional[float] = None,
+    *,
+    field: str = "timeout",
+    scenario: str = "",
+) -> Optional[float]:
+    """Coerce a declared time budget to seconds, or raise a located error.
+
+    Returns ``default`` when nothing was declared (``None`` default meaning "let
+    the callee pick", which is how the HTTP paths keep their own default in one
+    place).
+
+    WHY coercion here rather than trust: assertion- and action-level ``timeout``
+    / ``interval`` are ordinary YAML scalars that flow straight into arithmetic
+    (``min(default, remaining)``, ``float(...)``). A quoted ``"5"`` — a routine
+    slip in a machine-written document — used to surface as a bare ``TypeError``
+    from inside a comparison, naming neither the scenario nor the field, and
+    ``timeout: fast`` as an equally bare ``ValueError``. This is the same
+    tolerate-then-locate pattern the ``wait`` action already applies to
+    ``seconds``: a numeric string is accepted, anything that is not a positive
+    finite number is a configuration error the author can act on.
+    """
+    if value is None:
+        return None if default is None else float(default)
+    if isinstance(value, bool):
+        seconds = float("nan")
+    else:
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            seconds = float("nan")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise E2EConfigError(
+            t(
+                "e2e.assert.bad_timeout",
+                field=field,
+                value=repr(value),
+                scenario=scenario or "-",
+            )
+        )
+    return seconds
 
 
 def _tier_of(kind: str) -> int:
@@ -371,7 +454,15 @@ def fetch_http(
             ["python3", "-c", _IN_CONTAINER_FETCH, url, str(budget)],
             timeout=budget,
         )
-        ctx.record_exec(from_service, ["python3", "-c", "<http fetch>", url], result)
+        # internal=True: this helper is tianluo's own transport, not a command
+        # the scenario asked for, so it must not become the `last_exec` an
+        # exit_code / stdout / stderr assertion describes.
+        ctx.record_exec(
+            from_service,
+            ["python3", "-c", "<http fetch>", url],
+            result,
+            internal=True,
+        )
         payload = _parse_marked_json(result.stdout)
         if payload is None:
             return HttpRecord(
@@ -639,13 +730,25 @@ def _assert_stream(
             message=t("e2e.assert.no_exec"),
         )
     text = record.result.stdout if stream == "stdout" else record.result.stderr
-    passed, expected = _match_text(text, decl.params)
+    matched, expected = _match_text(text, decl.params)
+    # A killed command's partial output is not evidence that it worked: a server
+    # that prints "started" and then hangs would otherwise satisfy
+    # `contains: "started"` while the exec was cut off by its timeout. Same guard
+    # the exit_code assertion applies, for the same record.
+    timed_out = bool(record.result.timed_out)
     return AssertionResult(
         kind=stream,
-        passed=passed,
+        passed=matched and not timed_out,
         expected="{} {}".format(stream, expected),
-        actual=_clip(text) or "(empty)",
-        details={"command": " ".join(record.argv), "service": record.service},
+        actual="{}{}".format(
+            _clip(text) or "(empty)", " (command timed out)" if timed_out else ""
+        ),
+        message=t("e2e.assert.exec_timed_out") if timed_out else "",
+        details={
+            "command": " ".join(record.argv),
+            "service": record.service,
+            "timed_out": timed_out,
+        },
     )
 
 
@@ -656,7 +759,9 @@ def _http_record_for(decl: AssertionDecl, ctx: AssertionContext) -> HttpRecord:
         url,
         ctx=ctx,
         from_service=str(from_service) if from_service else None,
-        timeout=decl.get("timeout"),
+        timeout=budget_seconds(
+            decl.get("timeout"), field="timeout", scenario=ctx.scenario
+        ),
     )
     ctx.last_http = record
     return record
@@ -772,14 +877,44 @@ def _assert_file(
     kind = "file_content" if content else "file_exists"
     target = str(decl.get("path") or "")
     service = str(decl.get("service") or ctx.driver)
-    timeout = ctx.timeout_for(float(decl.get("timeout") or _DEFAULT_EXEC_TIMEOUT))
+    timeout = ctx.timeout_for(
+        budget_seconds(
+            decl.get("timeout"),
+            _DEFAULT_EXEC_TIMEOUT,
+            field="timeout",
+            scenario=ctx.scenario,
+        )
+    )
 
     if not content:
         probe = ctx.backend.exec(
             ctx.handle, service, ["test", "-e", target], timeout=timeout
         )
-        exists = bool(getattr(probe, "ok", False))
         want_absent = bool(decl.get("absent", False))
+        # `test -e` answers 0 (present) or 1 (absent); anything else means the
+        # probe never ran — a dead container exits 126, an exec failure or a
+        # timeout something else again. WHY that must fail rather than read as
+        # "absent": with `absent: true` a probe that could not execute would
+        # otherwise be reported as the assertion holding, turning a broken
+        # environment into a green scenario.
+        if bool(getattr(probe, "timed_out", False)) or probe.exit_code not in (0, 1):
+            return AssertionResult(
+                kind=kind,
+                passed=False,
+                expected="{} {} in {}".format(
+                    target, "absent" if want_absent else "exists", service
+                ),
+                actual=_clip(probe.stderr or probe.stdout, 400)
+                or "probe exited {}".format(probe.exit_code),
+                message=t("e2e.assert.file_probe_failed", path=target, service=service),
+                details={
+                    "path": target,
+                    "service": service,
+                    "exit_code": probe.exit_code,
+                    "timed_out": bool(getattr(probe, "timed_out", False)),
+                },
+            )
+        exists = probe.exit_code == 0
         return AssertionResult(
             kind=kind,
             passed=(not exists) if want_absent else exists,
@@ -1008,6 +1143,15 @@ def _assert_screenshot_diff(
     baseline_name = str(decl.get("baseline") or "")
     if not baseline_name:
         raise E2EConfigError(t("e2e.assert.baseline_unnamed", scenario=ctx.scenario))
+    if not baseline_is_contained(baseline_name):
+        # Defensive twin of the schema rule: an absolute name would discard the
+        # baselines directory on join, so this comparison would read — and
+        # `--write-baselines` would write — a file outside the git-tracked asset
+        # directory the baseline contract rests on.
+        raise E2EConfigError(
+            t("e2e.assert.baseline_escapes", baseline=baseline_name,
+              scenario=ctx.scenario)
+        )
     baselines = Path(ctx.baselines_dir) if ctx.baselines_dir else None
     baseline_path = (baselines / baseline_name) if baselines else Path(baseline_name)
 
@@ -1181,6 +1325,11 @@ The evidence field is mandatory and must describe observable detail a human
 reviewer could check against the same image. A verdict without such evidence is
 not admissible and will be treated as a failure."""
 
+# Distinguishes "the budget ran out around the LLM call" from "the LLM had no
+# usable answer": both fail the assertion, but only the first is a timeout the
+# author fixes by widening the scenario budget.
+_LLM_TIMED_OUT = object()
+
 
 def _assert_visual_semantic(
     decl: AssertionDecl, ctx: AssertionContext
@@ -1208,7 +1357,17 @@ def _assert_visual_semantic(
         raise E2EConfigError(t("e2e.assert.question_missing", scenario=ctx.scenario))
 
     image_path = _resolve_screenshot(decl, ctx)
-    response = _call_semantic_llm(ctx, question, Path(image_path))
+    # The scenario budget covers this call like every other blocking primitive in
+    # this module: an LLM invocation is the one step with no natural ceiling, so
+    # without the clamp a hung agent would hold the whole E2E step open long past
+    # the timeout the scenario declared.
+    budget = ctx.remaining()
+    if budget is not None and budget <= 0:
+        return _semantic_timeout_result(question, image_path, 0.0)
+
+    response = _call_semantic_llm(ctx, question, Path(image_path), budget)
+    if response is _LLM_TIMED_OUT:
+        return _semantic_timeout_result(question, image_path, budget or 0.0)
     if response is None:
         return AssertionResult(
             kind="visual_semantic",
@@ -1255,10 +1414,65 @@ def _assert_visual_semantic(
     )
 
 
+def _semantic_timeout_result(
+    question: str, image_path: Any, budget: float
+) -> AssertionResult:
+    """The tier-3 outcome when the scenario budget ran out around the LLM call."""
+    detail = t("e2e.assert.llm_budget_exhausted", seconds=round(max(budget, 0.0), 1))
+    return AssertionResult(
+        kind="visual_semantic",
+        passed=False,
+        tier=3,
+        expected=question,
+        actual=detail,
+        message=detail,
+        artifacts=(str(image_path),),
+        details={"image": str(image_path), "timed_out": "true"},
+    )
+
+
+def _call_bounded(work: Callable[[], Any], budget: Optional[float]) -> Any:
+    """Run ``work``, giving up on it after ``budget`` seconds.
+
+    WHY a thread rather than a timeout argument: ``LLMCaller.call`` takes a
+    ``timeout`` only for API compatibility — it governs nothing — so the call is
+    genuinely unbounded from here. Abandoning it on a daemon thread is the point:
+    the budget belongs to the E2E step, and a hung agent must not be able to hold
+    the step open. The abandoned call keeps running until the process exits,
+    which is accepted — a leaked background call is strictly cheaper than a
+    blocked flow, and the thread is a daemon so it never delays shutdown.
+    """
+    if budget is None:
+        return work()
+
+    box: Dict[str, Any] = {}
+
+    def runner() -> None:
+        try:
+            box["value"] = work()
+        except BaseException as exc:  # re-raised on the calling thread below
+            box["error"] = exc
+
+    thread = threading.Thread(target=runner, name="tianluo-e2e-tier3", daemon=True)
+    thread.start()
+    thread.join(budget)
+    if thread.is_alive():
+        return _LLM_TIMED_OUT
+    if "error" in box:
+        raise box["error"]
+    return box.get("value")
+
+
 def _call_semantic_llm(
-    ctx: AssertionContext, question: str, image: Path
-) -> Optional[Dict[str, Any]]:
-    """Ask the configured LLM about ``image``; ``None`` when it cannot answer.
+    ctx: AssertionContext,
+    question: str,
+    image: Path,
+    budget: Optional[float] = None,
+) -> Any:
+    """Ask the configured LLM about ``image``.
+
+    Returns the parsed answer, ``None`` when the LLM could not answer, or
+    :data:`_LLM_TIMED_OUT` when the scenario's remaining budget expired first.
 
     WHY the import is inside: :mod:`tianluo.e2e` sits *below* the engine in the
     dependency order (the engine's step handler imports e2e, not the reverse). A
@@ -1275,14 +1489,24 @@ def _call_semantic_llm(
         prompt = _SEMANTIC_PROMPT.format(
             image=str(image), scenario=ctx.scenario or "-", question=question
         )
-        response = caller.call(
-            prompt=prompt,
-            context_files=[Path(image)],
-            json_mode="two_phase",
-            json_schema_hint='{"verdict": "pass|fail", "evidence": "...", '
-            '"confidence": "high|medium|low"}',
-            required_keys=["verdict", "evidence"],
+        response = _call_bounded(
+            lambda: caller.call(
+                prompt=prompt,
+                context_files=[Path(image)],
+                json_mode="two_phase",
+                json_schema_hint='{"verdict": "pass|fail", "evidence": "...", '
+                '"confidence": "high|medium|low"}',
+                required_keys=["verdict", "evidence"],
+            ),
+            budget,
         )
+        if response is _LLM_TIMED_OUT:
+            logger.warning(
+                "tier-3 visual assertion abandoned: the LLM call outlasted the "
+                "scenario's remaining %.1fs budget",
+                budget or 0.0,
+            )
+            return _LLM_TIMED_OUT
     except Exception as exc:
         logger.warning("tier-3 visual assertion could not reach the LLM: %s", exc)
         return None

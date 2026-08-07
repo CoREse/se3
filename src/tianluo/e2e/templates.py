@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from string import Template
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union
 
 from tianluo.i18n import t
 
@@ -130,7 +130,17 @@ def available_kinds() -> List[str]:
 
 
 def _read_resource(name: str) -> Optional[str]:
-    """Read ``templates/<name>`` as package data, or ``None`` if unreadable."""
+    """Read ``templates/<name>`` as package data, or ``None`` if unreadable.
+
+    WHY both readers go through the import system: the templates are package
+    data, so the only correct way to reach them is to ask the loader that
+    imported the package. Joining a path onto ``__file__`` would work in a source
+    checkout and silently report "template missing" for a package imported from
+    a zip — for files that are demonstrably there. ``importlib.resources.files``
+    is the modern spelling; ``pkgutil.get_data`` is its Python 3.8 equivalent
+    (this package supports 3.8) and delegates the read to the same loader, so
+    neither path assumes the package was materialized as loose files.
+    """
     try:
         from importlib.resources import files as _files
     except ImportError:  # pragma: no cover - Python 3.8 only
@@ -144,17 +154,20 @@ def _read_resource(name: str) -> Optional[str]:
             return None
         except Exception as exc:  # pragma: no cover - depends on interpreter
             # files() has interpreter-dependent failure modes for a package it
-            # cannot resolve; degrade to the filesystem scan rather than
+            # cannot resolve; degrade to the loader read below rather than
             # enumerating them (same reasoning as tianluo.i18n.loader).
             logger.debug("importlib.resources could not resolve templates: %s", exc)
 
-    # Fallback for Python 3.8 (no `files()`) and for a resolution failure above.
-    from pathlib import Path  # pragma: no cover - fallback path
+    import pkgutil
 
-    candidate = Path(__file__).resolve().parent / _TEMPLATE_DIR / name
-    if candidate.is_file():  # pragma: no cover - fallback path
-        return candidate.read_text(encoding="utf-8")
-    return None  # pragma: no cover - fallback path
+    try:
+        raw = pkgutil.get_data(_ANCHOR_PACKAGE, "{}/{}".format(_TEMPLATE_DIR, name))
+    except (OSError, ImportError, ValueError) as exc:
+        logger.debug("could not read template resource %s: %s", name, exc)
+        return None
+    if raw is None:
+        return None
+    return raw.decode("utf-8")
 
 
 def load_template(kind: str) -> str:
@@ -178,7 +191,7 @@ def load_template(kind: str) -> str:
     return text
 
 
-def expand_build_steps(steps: Optional[Iterable[Any]]) -> str:
+def expand_build_steps(steps: Union[str, Iterable[Any], None]) -> str:
     """Expand declarative build steps into Dockerfile layers.
 
     INVARIANT: the declared order is preserved verbatim. BuildKit's cache is
@@ -186,20 +199,66 @@ def expand_build_steps(steps: Optional[Iterable[Any]]) -> str:
     reordering (or "optimizing") steps here would silently turn an incremental
     rebuild into a full one and, worse, make two runs of the same configuration
     produce different caches.
+
+    WHY a bare string is wrapped rather than iterated: a string *is* an Iterable,
+    so ``build_steps="pip install ."`` would otherwise expand character by
+    character into one nonsense ``RUN p`` layer per letter — a Dockerfile that is
+    syntactically valid and only fails much later, inside ``docker build``, where
+    it reads as a host problem. This is the same scalar-or-list normalisation
+    :func:`tianluo.e2e.content_config._as_tuple` applies to the YAML value, so a
+    caller that hands us the raw declaration gets the same single layer as one
+    that pre-wrapped it.
     """
     if not steps:
         return ""
+    if isinstance(steps, str):
+        steps = (steps,)
     lines: List[str] = []
     for raw in steps:
-        step = str(raw).strip()
-        if not step:
+        for instruction in _logical_lines(str(raw)):
+            lines.append(_as_instruction(instruction))
+    return "\n".join(line for line in lines if line)
+
+
+def _logical_lines(step: str) -> List[str]:
+    """Split one declared step into Dockerfile *logical* lines.
+
+    WHY a single step may hold several: a YAML block scalar is the natural way to
+    write a multi-command step, and prefixing ``RUN`` to the whole blob left every
+    line after the first standing alone as a bare Dockerfile line — ``docker
+    build`` then died with "unknown instruction: apt-get", and the failure was
+    reported as a host environment problem for what is really a configuration
+    input. Each line therefore becomes its own instruction, which preserves the
+    declared execution order exactly. Backslash continuations are honoured, so a
+    step deliberately written as one long instruction still builds one layer.
+    """
+    logical: List[str] = []
+    buffer: List[str] = []
+    for raw_line in step.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip() and not buffer:
             continue
-        head = step.split(None, 1)[0].upper()
-        if head in _DOCKERFILE_INSTRUCTIONS:
-            lines.append(step)
-        else:
-            lines.append("RUN " + step)
-    return "\n".join(lines)
+        buffer.append(line)
+        if line.endswith("\\"):
+            continue
+        logical.append("\n".join(buffer))
+        buffer = []
+    if buffer:
+        logical.append("\n".join(buffer))
+    return [item for item in logical if item.strip()]
+
+
+def _as_instruction(line: str) -> str:
+    """Wrap one logical line in ``RUN`` unless it already names an instruction."""
+    text = line.strip()
+    if not text:
+        return ""
+    # A comment the author wrote stays a comment: wrapping it in RUN would build
+    # a layer that does nothing but run `#`.
+    if text.startswith("#"):
+        return text
+    head = text.split(None, 1)[0].upper()
+    return text if head in _DOCKERFILE_INSTRUCTIONS else "RUN " + text
 
 
 def _build_context(kind: str, context: Optional[Mapping[str, Any]]) -> Dict[str, Any]:

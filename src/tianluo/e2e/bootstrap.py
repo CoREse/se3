@@ -67,7 +67,7 @@ from .content_config import (
     content_relpath,
     read_raw_content,
 )
-from .errors import E2EConfigError
+from .errors import E2EConfigError, E2EContentIncompleteError
 
 logger = logging.getLogger(__name__)
 
@@ -141,20 +141,31 @@ def ensure_content(
     is fed to the model as context and left untouched on disk.
 
     Raises :class:`~tianluo.e2e.errors.E2EConfigError` when admissible content
-    could not be produced. Nothing is written in that case.
+    could not be produced, and when content that is already on disk cannot be
+    read. Nothing is written in either case.
     """
     root = Path(project_root)
     directory = str(content_relpath(root))
 
-    has_environment = (content_dir(root) / ENVIRONMENT_FILENAME).is_file()
+    # INVARIANT: a document that exists but cannot be used is an error here, not
+    # an absence. Reading it tolerantly (empty file -> {}) made the two halves of
+    # generation disagree — the prompt would ask for a complete environment while
+    # `apply` kept the empty one — so both LLM calls were spent producing answers
+    # that were then discarded, and the guaranteed failure arrived at the end.
+    # Failing now costs no call and names the offending file. Overwriting it is
+    # not an option either: unparsable YAML may still hold hand-written content.
+    env_path = content_dir(root) / ENVIRONMENT_FILENAME
+    environment_doc: Optional[Dict[str, Any]] = (
+        _read_document(env_path, str(content_relpath(root, ENVIRONMENT_FILENAME)))
+        if env_path.is_file()
+        else None
+    )
     existing_scenarios = _existing_scenarios(root)
-    if has_environment and existing_scenarios:
+    if environment_doc is not None and existing_scenarios:
         logger.debug("e2e content already present under %s", directory)
         return BootstrapResult()
 
-    environment_doc: Optional[Dict[str, Any]] = None
-    if has_environment:
-        environment_doc = _read_yaml(content_dir(root) / ENVIRONMENT_FILENAME)
+    has_environment = environment_doc is not None
 
     proposal = _generate(
         root,
@@ -207,10 +218,15 @@ def evolve_content(
 
     try:
         raw = read_raw_content(root)
-    except E2EConfigError:
+    except E2EContentIncompleteError:
         # A structurally half-present directory (an environment with no
         # scenarios, or the reverse) is a failed earlier bootstrap, not something
-        # to evolve — completing it is what generation does.
+        # to evolve — completing it is what generation does. WHY only this
+        # subclass: catching every E2EConfigError swallowed a corrupted scenario
+        # file too, and generation's own "already complete" check would then find
+        # the broken file present and report "unchanged" with exit 0 — hiding, at
+        # the exact command the user ran to maintain the content, a directory
+        # every other e2e command rejects.
         raw = None
     if raw is None:
         # Nothing to evolve yet — the honest response to "evolve" on an
@@ -397,9 +413,18 @@ def _call_model(
     """Ask the model, apply its answer, validate the result — up to N attempts.
 
     The candidate is validated with the *same* :func:`validate_content` the
-    loader runs, and against the real baselines directory, so anything this
-    accepts is by construction loadable afterwards. Validation happens entirely
-    in memory: the caller only writes once a candidate has been accepted.
+    loader runs, so anything this accepts is by construction loadable afterwards.
+    Validation happens entirely in memory: the caller only writes once a
+    candidate has been accepted.
+
+    WHY the baseline-existence rule is relaxed here: a scenario being authored
+    for the first time cannot have its baseline screenshot yet — the image can
+    only be produced by running the scenario inside the container that renders
+    it. Requiring the file at generation time would make it impossible for the
+    flow to ever author a visual-regression scenario, no matter how clearly the
+    subject under test is a visual rendering. The capture step
+    (``luo e2e run --write-baselines``, reviewed then committed by a human) is
+    what closes the gap, and every other baseline rule still applies.
     """
     live_caller = caller if caller is not None else _build_caller(root, flow)
     feedback = ""
@@ -427,6 +452,7 @@ def _call_model(
             _bundle(root, candidate["environment"], candidate["scenarios"]),
             directory,
             baselines_dir=baselines,
+            require_existing_baselines=False,
         )
         if not errors:
             return candidate
@@ -665,19 +691,31 @@ def _existing_scenarios(root: Path) -> Dict[str, Dict[str, Any]]:
         return {}
     found: Dict[str, Dict[str, Any]] = {}
     for path in sorted(directory.glob("*.yaml")) + sorted(directory.glob("*.yml")):
-        found[path.name] = _read_yaml(path)
+        found[path.name] = _read_document(
+            path, str(content_relpath(root, SCENARIOS_DIR_NAME, path.name))
+        )
     return found
 
 
-def _read_yaml(path: Path) -> Dict[str, Any]:
+def _read_document(path: Path, label: str) -> Dict[str, Any]:
+    """Parse one on-disk content document, refusing an unusable one.
+
+    WHY strict rather than degrading to ``{}``: an empty or unparsable file
+    counted as "present" for the completeness check and as "absent" for the
+    prompt, so generation would either burn its whole call budget on answers it
+    discarded or report "nothing to do" for a directory the loader rejects. The
+    file is never rewritten — malformed YAML can still hold work a person typed —
+    so the honest outcome is a located error telling them which file to fix.
+    """
     try:
-        return _as_mapping(yaml.safe_load(path.read_text(encoding="utf-8")))
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
-        # A malformed file on disk is not this module's problem to diagnose — the
-        # loader reports it with a precise location. Treating it as empty here
-        # keeps generation from crashing before that better message is produced.
-        logger.debug("e2e bootstrap could not read %s: %s", path, exc)
-        return {}
+        raise E2EConfigError(
+            t("e2e.bootstrap.unreadable_document", file=label, detail=str(exc))
+        ) from exc
+    if not isinstance(data, Mapping) or not data:
+        raise E2EConfigError(t("e2e.bootstrap.unusable_document", file=label))
+    return dict(data)
 
 
 def _as_mapping(value: Any) -> Dict[str, Any]:
@@ -777,6 +815,29 @@ ASSERTION LADDER — a hard rule, enforced by the schema validator, not advice:
   `require_evidence: true`. Last resort, for GUIs with no queryable structure.
 - The same rule governs driving: `visual_click` needs `visual_driving: true` at
   scenario level and is only for GUIs with no programmatic entry point.
+
+DRIVER CAPABILITY — `browser` actions and `dom` assertions need a browser, so the
+scenario's driver must be a service with `base_kind: playwright`. Declare one (the
+official Playwright image) and point the scenario at it; a `base` driver with a
+`dom` assertion is a validation error.
+
+ACTION ORDER — `browser` operations are batched into ONE Playwright program that
+runs after every other action of the scenario, so a non-browser action declared
+AFTER a browser one is a validation error: put all exec / http / wait / screenshot
+actions first, then the browser sequence. To capture a page image inside a browser
+scenario use a browser `op: screenshot` (the `screenshot` action captures a virtual
+X display and belongs to a gui-xvfb driver).
+
+READINESS PROBES — where the probe runs decides what it can address:
+- `command` probes run INSIDE the container, so they see the shared network and
+  may address peers by service name (curl http://app:8000/health, pg_isready -h
+  db). This is the default choice.
+- `http` and `tcp` probes are dialled FROM THE HOST, so they only reach a port
+  the service publishes: `ports: ["18000:8000"]` together with
+  `url: http://127.0.0.1:18000/health`. An `http`/`tcp` probe aimed at a service
+  name, or at an unpublished localhost port, is a validation error.
+- An `http` probe accepts 2xx/3xx by default; add `status: <code>` when the
+  service answers something else while healthy.
 """
 
 
@@ -861,7 +922,9 @@ def _generate_prompt(
         + (" (omit it: one already exists)" if existing_environment else "")
         + ". Each `scenarios[]` entry gives a file name (one path component, "
         "`.yaml` suffix) and the complete scenario document. Every scenario's "
-        "`driver` must name a service declared in `environment`.",
+        "`driver` must name a service declared in `environment`, and it must be "
+        "able to do what the scenario declares: a `browser` action or a `dom` "
+        "assertion needs a service whose `base_kind` is `playwright`.",
     ]
 
     if feedback:

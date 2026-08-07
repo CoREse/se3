@@ -10,11 +10,12 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
 
-from tianluo.e2e.backend import BindMount, EnvironmentHandle
+from tianluo.e2e.backend import BindMount, EnvironmentHandle, ServiceSpec
 from tianluo.e2e.container_backend import (
     ContainerBackend,
     container_name,
@@ -29,6 +30,13 @@ def make_backend(runtime="docker", runner=None, **kwargs):
     runner = runner or FakeRunner()
     backend = ContainerBackend(probe(runtime), runner=runner, **kwargs)
     return backend, runner
+
+
+def _app_runs(runner):
+    """How many `run` attempts targeted the app service's container name."""
+    return len(
+        [a for a in runner.argv_for("run") if "tianluo-e2e-demo-app" in a]
+    )
 
 
 def started_handle(backend, runner, tmp_path, **spec_kwargs):
@@ -55,11 +63,13 @@ class TestCreate:
 
         build = runner.first("build")
         assert build is not None
-        assert "-t" in build and image_tag("tianluo-e2e-demo", "app") in build
+        assert "-t" in build
+        tag = build[build.index("-t") + 1]
+        assert tag.startswith("tianluo-e2e/app:")
         # The external dependency service is used as published, not rebuilt.
         assert runner.first("pull") == ["docker", "pull", "postgres:16"]
         assert handle.images["db"] == "postgres:16"
-        assert handle.images["app"] == image_tag("tianluo-e2e-demo", "app")
+        assert handle.images["app"] == tag
 
     def test_build_context_is_a_throwaway_dir_not_the_project_root(self, tmp_path):
         backend, runner = make_backend()
@@ -107,6 +117,29 @@ class TestCreate:
 
         assert "app" in str(excinfo.value)
 
+    def test_a_failed_build_leaves_the_created_network_recoverable(self, tmp_path):
+        """The network is created first, so a failing build has already made one.
+
+        `create` never returns in that case, so unless the handle it was filling
+        in stays reachable the session cannot tear the network down and every
+        failing run leaks one more of them.
+        """
+        runner = FakeRunner([(lambda a: a[1] == "build", (1, "", "step 3 failed"))])
+        backend, _ = make_backend(runner=runner)
+
+        with pytest.raises(E2EEnvironmentError):
+            backend.create(sample_spec(tmp_path))
+
+        partial = backend.last_handle
+        assert partial is not None
+        assert partial.network_id == "tianluo-e2e-demo"
+
+        runner.calls.clear()
+        backend.destroy(partial)
+        assert ["docker", "network", "rm", "tianluo-e2e-demo"] in [
+            call.argv for call in runner.calls
+        ]
+
     def test_pull_failure_is_tolerated_when_the_image_is_already_local(self, tmp_path):
         runner = FakeRunner(
             [
@@ -151,14 +184,14 @@ class TestStart:
 
     def test_run_argv_carries_env_ports_workdir_and_image(self, tmp_path):
         backend, runner = make_backend()
-        started_handle(backend, runner, tmp_path)
+        handle = started_handle(backend, runner, tmp_path)
 
         run = runner.first("run")
 
         assert "APP_ENV=test" in run
         assert "18000:8000" in run
         assert run[run.index("-w") + 1] == "/workspace"
-        assert run[-1] == image_tag("tianluo-e2e-demo", "app")
+        assert run[-1] == handle.images["app"]
 
     def test_source_is_bind_mounted_never_copied(self, tmp_path):
         backend, runner = make_backend()
@@ -183,6 +216,49 @@ class TestStart:
         assert labelled[labelled.index("-v") + 1].endswith(":Z")
         assert not plain[plain.index("-v") + 1].endswith(":Z")
 
+    def test_a_source_mounted_into_two_services_gets_the_shared_label(
+        self, tmp_path
+    ):
+        """`:Z` is private per container — the second start would revoke the first.
+
+        On an SELinux host the app and the Playwright driver both bind-mount the
+        project source; a private relabel by the browser container would take
+        /workspace away from the app container mid-run, and the permission errors
+        that follow look exactly like application bugs.
+        """
+        backend, runner = make_backend()
+        services = (
+            ServiceSpec(
+                name="app",
+                base_image="python:3.12-slim",
+                mounts=(BindMount(source=tmp_path, target="/workspace"),),
+            ),
+            ServiceSpec(
+                name="browser",
+                base_image="mcr.microsoft.com/playwright:v1.44.0",
+                mounts=(BindMount(source=tmp_path, target="/workspace"),),
+            ),
+        )
+        started_handle(backend, runner, tmp_path, services=services)
+
+        mounts = [
+            argv[argv.index("-v") + 1]
+            for argv in runner.argv_for("run")
+            if "-v" in argv
+        ]
+        assert len(mounts) == 2
+        assert all(mount.endswith(":z") for mount in mounts)
+
+    def test_a_source_mounted_into_one_service_keeps_the_private_label(
+        self, tmp_path
+    ):
+        backend, runner = make_backend()
+        started_handle(backend, runner, tmp_path)
+
+        run = runner.first("run")
+
+        assert run[run.index("-v") + 1].endswith(":Z")
+
     def test_read_only_mount_renders_ro(self, tmp_path):
         backend, _ = make_backend()
         mount = BindMount(source=tmp_path, target="/fixtures", read_only=True)
@@ -200,6 +276,29 @@ class TestStart:
 
         assert "--userns=keep-id" in podman_run
         assert "--userns=keep-id" not in docker_run
+
+    def test_a_podman_probe_invokes_the_podman_binary_for_every_verb(
+        self, tmp_path
+    ):
+        """The binary switch itself, not just the flag deltas around it.
+
+        Every other cross-runtime test here compares argv *after* argv[0] or keys
+        on the probe's name, so a backend that ignored ``probe.binary`` and hard-
+        coded ``docker`` would keep them all green — and then, on a podman-only
+        host that had just passed preflight, every container operation would shell
+        out to a binary that is not installed and report a host problem tianluo
+        had itself manufactured.
+        """
+        backend, runner = make_backend("podman")
+        handle = started_handle(backend, runner, tmp_path)
+        backend.exec(handle, "app", ["true"])
+        backend.destroy(handle)
+
+        binaries = {call.argv[0] for call in runner.calls}
+
+        assert binaries == {"podman"}
+        # And the verbs really were exercised, so an empty call list cannot pass.
+        assert {"run", "exec", "rm"} <= set(runner.verbs())
 
     def test_the_only_run_argv_difference_between_runtimes_is_uid_mapping(
         self, tmp_path
@@ -249,6 +348,103 @@ class TestStart:
             backend.start(handle)
 
         assert "app" in str(excinfo.value)
+
+    def test_a_leftover_container_under_our_own_name_is_replaced(self, tmp_path):
+        """`keep_environment` plus a deterministic name would wedge the fix loop.
+
+        The container name is `<network>-<service>` and the network carries the
+        flow id, so the next iteration of the same flow asks for exactly the name
+        the kept environment still holds. Failing there reports a host-permission
+        remediation for a host that is fine, and stops a bounded fix loop dead.
+        """
+        attempts = {"n": 0}
+
+        def run_result(argv):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return (
+                    1,
+                    "",
+                    'Error response from daemon: Conflict. The container name '
+                    '"/tianluo-e2e-demo-app" is already in use by container "old".',
+                )
+            return (0, "cid-new\n", "")
+
+        runner = FakeRunner([(lambda a: a[1] == "run", run_result)])
+        backend, _ = make_backend(runner=runner)
+        handle = backend.create(sample_spec(tmp_path))
+        runner.calls.clear()
+
+        backend.start(handle)
+
+        assert ["docker", "rm", "-f", "-v", "tianluo-e2e-demo-app"] in [
+            call.argv for call in runner.calls
+        ]
+        assert _app_runs(runner) == 2
+        assert handle.containers["app"] == "cid-new"
+
+    def test_podman_name_conflict_wording_is_recognised_too(self, tmp_path):
+        attempts = {"n": 0}
+
+        def run_result(argv):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                return (
+                    1,
+                    "",
+                    'Error: creating container storage: the container name '
+                    '"tianluo-e2e-demo-app" is already in use by 9f2c.',
+                )
+            return (0, "cid-new\n", "")
+
+        runner = FakeRunner([(lambda a: a[1] == "run", run_result)])
+        backend, _ = make_backend("podman", runner=runner)
+        handle = backend.create(sample_spec(tmp_path))
+
+        backend.start(handle)
+
+        assert _app_runs(runner) == 2
+        assert handle.containers["app"] == "cid-new"
+
+    def test_a_port_conflict_is_not_mistaken_for_a_name_conflict(self, tmp_path):
+        """A busy host port belongs to a foreign process — removing our container
+        cannot free it, and retrying would only hide the real cause."""
+        runner = FakeRunner(
+            [
+                (
+                    lambda a: a[1] == "run",
+                    (1, "", "Bind for 0.0.0.0:18000 failed: port is already allocated"),
+                )
+            ]
+        )
+        backend, _ = make_backend(runner=runner)
+        handle = backend.create(sample_spec(tmp_path))
+        runner.calls.clear()
+
+        with pytest.raises(E2EEnvironmentError):
+            backend.start(handle)
+
+        assert _app_runs(runner) == 1
+        assert runner.argv_for("rm") == []
+
+    def test_a_persistent_name_conflict_still_reports_the_service(self, tmp_path):
+        runner = FakeRunner(
+            [
+                (
+                    lambda a: a[1] == "run",
+                    (1, "", 'the container name "x" is already in use'),
+                ),
+                (lambda a: a[1] == "rm", (1, "", "permission denied")),
+            ]
+        )
+        backend, _ = make_backend(runner=runner)
+        handle = backend.create(sample_spec(tmp_path))
+
+        with pytest.raises(E2EEnvironmentError) as excinfo:
+            backend.start(handle)
+
+        assert "app" in str(excinfo.value)
+        assert _app_runs(runner) == 2
 
     def test_buildkit_is_requested_for_docker_but_not_podman(self, tmp_path):
         docker, docker_runner = make_backend("docker")
@@ -381,6 +577,24 @@ class TestSnapshot:
         assert "listening on 8000" in snapshot.metadata["text"]
         assert "listening on 8000" in snapshot.path.read_text(encoding="utf-8")
 
+    def test_log_snapshot_without_a_destination_writes_no_host_file(self, tmp_path):
+        """A `log` readiness probe snapshots once per poll.
+
+        Persisting a temp file per poll leaks one file per attempt — dozens per
+        service start — for text the caller reads straight out of the metadata.
+        """
+        runner = FakeRunner([(lambda a: a[1] == "logs", (0, "booting\n", ""))])
+        backend, _ = make_backend(runner=runner)
+        handle = started_handle(backend, runner, tmp_path)
+
+        before = sorted(Path(tempfile.gettempdir()).glob("tianluo-e2e-*.log"))
+        snapshot = backend.snapshot(handle, "app", "", kind="log")
+        after = sorted(Path(tempfile.gettempdir()).glob("tianluo-e2e-*.log"))
+
+        assert snapshot.path is None
+        assert snapshot.metadata["text"] == "booting\n"
+        assert after == before
+
     def test_file_copy_failure_is_an_environment_error(self, tmp_path):
         runner = FakeRunner([(lambda a: a[1] == "cp", (1, "", "no such file"))])
         backend, _ = make_backend(runner=runner)
@@ -437,6 +651,34 @@ class TestDestroy:
         backend.destroy(handle)  # must not raise on an already-torn-down handle
 
         assert handle.containers == {}
+
+    def test_removes_by_deterministic_name_when_the_run_never_recorded_one(
+        self, tmp_path
+    ):
+        """A stale container must not be able to wedge the environment forever.
+
+        Container names are deterministic per flow, so a run killed between
+        `start` and `destroy` — or a `run` that fails on "name already in use" —
+        leaves a container nothing recorded. Teardown driven by the recorded map
+        alone would then never remove it, the network would keep active
+        endpoints, and every later iteration would fail identically.
+        """
+        runner = FakeRunner([(lambda a: a[1] == "run", (1, "", "name already in use"))])
+        backend, _ = make_backend(runner=runner)
+        handle = backend.create(sample_spec(tmp_path))
+
+        with pytest.raises(E2EEnvironmentError):
+            backend.start(handle)
+
+        assert handle.containers == {}
+        runner.calls.clear()
+        backend.destroy(handle)
+
+        removed = [argv[-1] for argv in runner.argv_for("rm")]
+        assert removed == [
+            container_name("tianluo-e2e-demo", "app"),
+            container_name("tianluo-e2e-demo", "db"),
+        ]
 
     def test_survives_a_half_finished_create(self, tmp_path):
         backend, runner = make_backend()
@@ -499,7 +741,42 @@ class TestNaming:
         assert container_name("proj/one", "web app") == "proj-one-web-app"
 
     def test_image_tags_are_namespaced(self):
-        assert image_tag("net", "app") == "tianluo-e2e/net-app:latest"
+        assert image_tag("app", "abc123") == "tianluo-e2e/app:abc123"
+
+    def test_image_tag_is_keyed_to_the_build_recipe_not_the_flow(self, tmp_path):
+        """An unchanged environment must resolve to the tag the last flow built.
+
+        The network name carries the flow id, so a network-derived tag minted one
+        orphaned image per flow that no later flow could reuse.
+        """
+        first, first_runner = make_backend()
+        second, second_runner = make_backend()
+
+        one = first.create(sample_spec(tmp_path, network="tianluo-e2e-flow-a"))
+        two = second.create(sample_spec(tmp_path, network="tianluo-e2e-flow-b"))
+
+        assert one.images["app"] == two.images["app"]
+        assert "flow-a" not in one.images["app"]
+
+    def test_a_changed_build_recipe_gets_its_own_tag(self, tmp_path):
+        backend, _ = make_backend()
+
+        one = backend.create(sample_spec(tmp_path))
+        two = backend.create(
+            sample_spec(
+                tmp_path,
+                services=(
+                    ServiceSpec(
+                        name="app",
+                        base_image="python:3.12-slim",
+                        template="base",
+                        build_steps=("pip install -e .", "pip install pytest"),
+                    ),
+                ),
+            )
+        )
+
+        assert one.images["app"] != two.images["app"]
 
 
 def test_no_direct_subprocess_run_call_outside_the_injection_point():

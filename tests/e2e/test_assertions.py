@@ -5,6 +5,12 @@ shared :class:`FakeBackend`, host-side HTTP is monkeypatched at ``urlopen``, and
 the tier-3 LLM arrives through the injected ``llm_factory``. What *is* real is
 the tier-2 pixel comparison — Pillow runs against PNGs written into ``tmp_path``,
 because a fake diff would prove nothing about the assertion that matters most.
+
+Pillow is the whole content of the optional ``tianluo[e2e]`` extra, so the few
+cases that reach the real comparison carry ``@requires_pillow`` and skip on a
+core-only install. Everything else here — including the ladder's config-error
+and dependency-missing checks — runs unconditionally, so the extra's absence can
+never hide a regression in the parts that do not need it.
 """
 
 from __future__ import annotations
@@ -29,7 +35,7 @@ from tianluo.e2e.assertions import (
 from tianluo.e2e.backend import EnvironmentHandle, EnvironmentSpec, ExecResult
 from tianluo.e2e.errors import E2EConfigError, E2EDependencyMissingError
 
-from ._stubs import FakeBackend, assertion, marked, write_png
+from ._stubs import FakeBackend, assertion, marked, requires_pillow, write_png
 
 
 def make_ctx(backend: FakeBackend, tmp_path: Path, **kwargs) -> AssertionContext:
@@ -87,6 +93,32 @@ class TestExitCodeAndStreams:
 
         assert not result.passed
         assert "timed out" in result.actual
+
+    def test_timed_out_command_never_passes_a_stream_match(self, tmp_path):
+        """Partial output from a killed command is not evidence it worked."""
+        ctx = make_ctx(FakeBackend(), tmp_path)
+        ctx.record_exec(
+            "app",
+            ["serve"],
+            ExecResult(exit_code=-1, stdout="Server started\n", timed_out=True),
+        )
+
+        result = evaluate(assertion("stdout", contains="Server started"), ctx)
+
+        assert not result.passed
+        assert result.details["timed_out"] is True
+
+    def test_internal_helper_is_not_the_exec_under_assertion(self, tmp_path):
+        """tianluo's own helper commands must not take the `last_exec` slot."""
+        ctx = make_ctx(FakeBackend(), tmp_path)
+        ctx.record_exec("app", ["run-me"], ExecResult(exit_code=3, stdout="broke"))
+        ctx.record_exec(
+            "app", ["python3", "-c", "<http fetch>"], ExecResult(exit_code=0),
+            internal=True,
+        )
+
+        assert evaluate(assertion("exit_code", equals=3), ctx).passed
+        assert evaluate(assertion("stdout", contains="broke"), ctx).passed
 
     def test_without_any_command_the_assertion_fails_loudly(self, tmp_path):
         result = evaluate(assertion("exit_code"), make_ctx(FakeBackend(), tmp_path))
@@ -312,6 +344,48 @@ class TestHttpAssertions:
 # ---------------------------------------------------------------------------
 
 
+class TestDeclaredTimeBudgets:
+    """A declared `timeout` reaches arithmetic, so its shape has to be checked.
+
+    The scenario-level budget is validated by the schema; these per-assertion and
+    per-action ones were not, and went uncoerced into ``min(default, remaining)``
+    and bare ``float(...)`` — a quoted ``"5"`` surfaced as a TypeError from inside
+    a comparison and ``timeout: fast`` as a ValueError, neither naming the
+    scenario or the field.
+    """
+
+    def test_a_quoted_number_is_accepted(self, tmp_path, monkeypatch):
+        calls = []
+        stub_urlopen(monkeypatch, _Response(200, b"ok"), recorder=calls)
+        ctx = make_ctx(FakeBackend(), tmp_path)
+
+        result = evaluate(
+            assertion("http_status", url="http://h/x", timeout="5"), ctx
+        )
+
+        assert result.passed
+        assert calls[0][1] == 5.0
+
+    @pytest.mark.parametrize("bad", ["fast", 0, -1, True, [3]])
+    def test_a_non_numeric_timeout_is_a_located_config_error(
+        self, tmp_path, monkeypatch, bad
+    ):
+        stub_urlopen(monkeypatch, _Response(200, b"ok"))
+        ctx = make_ctx(FakeBackend(), tmp_path)
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            evaluate(assertion("http_status", url="http://h/x", timeout=bad), ctx)
+
+        assert "smoke" in str(excinfo.value)
+
+    def test_a_file_assertion_timeout_is_coerced_too(self, tmp_path):
+        backend = FakeBackend(exec_results={("app", "test"): ExecResult(exit_code=0)})
+        ctx = make_ctx(backend, tmp_path)
+
+        with pytest.raises(E2EConfigError):
+            evaluate(assertion("file_exists", path="/tmp/x", timeout="soon"), ctx)
+
+
 class TestFileAssertions:
     def test_file_exists_uses_test_e(self, tmp_path):
         backend = FakeBackend()
@@ -339,6 +413,26 @@ class TestFileAssertions:
         )
 
         assert result.passed
+
+    @pytest.mark.parametrize(
+        "probe",
+        [
+            ExecResult(exit_code=126, stderr="container not running"),
+            ExecResult(exit_code=1, timed_out=True),
+        ],
+    )
+    def test_a_probe_that_could_not_run_is_not_evidence_of_absence(
+        self, tmp_path, probe
+    ):
+        """`absent: true` must not be satisfied by a probe that never executed."""
+        backend = FakeBackend(exec_results=[probe])
+        result = evaluate(
+            assertion("file_exists", path="/out/stale.lock", absent=True),
+            make_ctx(backend, tmp_path),
+        )
+
+        assert not result.passed
+        assert "probe" in result.message.lower()
 
     def test_file_content_matches(self, tmp_path):
         backend = FakeBackend(
@@ -594,6 +688,36 @@ class TestScreenshotDiff:
 
         assert "visual_regression" in str(excinfo.value)
 
+    @pytest.mark.parametrize(
+        "baseline",
+        [
+            "/etc/hosts",
+            "../../outside.png",
+            "sub/../../out.png",
+            "C:/Windows/out.png",
+            # Rooted-but-driveless and drive-relative: neither reports as absolute
+            # to PureWindowsPath, but both discard the baselines directory when
+            # joined onto it. The runtime twin of the schema check must agree.
+            "\\out.png",
+            "C:out.png",
+        ],
+    )
+    def test_a_baseline_outside_the_directory_is_refused(self, tmp_path, baseline):
+        """Joining an anchored or `..` name would read/write outside git."""
+        shot = write_png(tmp_path / "shot.png")
+        _, ctx = self._ctx(tmp_path, shot=shot)
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            evaluate(
+                assertion(
+                    "screenshot_diff", baseline=baseline, visual_regression=True
+                ),
+                ctx,
+            )
+
+        assert baseline in str(excinfo.value)
+
+    @requires_pillow
     def test_identical_images_pass(self, tmp_path):
         shot = write_png(tmp_path / "shot.png")
         write_png(tmp_path / "baselines" / "home.png")
@@ -608,6 +732,7 @@ class TestScreenshotDiff:
         assert result.tier == 2
         assert result.details["ratio"] == 0.0
 
+    @requires_pillow
     def test_difference_ratio_is_reported(self, tmp_path):
         write_png(tmp_path / "baselines" / "home.png", size=(4, 4))
         shot = write_png(
@@ -628,6 +753,7 @@ class TestScreenshotDiff:
         assert "6.25" in result.actual
         assert result.evidence
 
+    @requires_pillow
     def test_threshold_admits_a_small_difference(self, tmp_path):
         write_png(tmp_path / "baselines" / "home.png", size=(4, 4))
         shot = write_png(
@@ -647,6 +773,7 @@ class TestScreenshotDiff:
 
         assert result.passed
 
+    @requires_pillow
     def test_geometry_change_is_called_out(self, tmp_path):
         write_png(tmp_path / "baselines" / "home.png", size=(4, 4))
         shot = write_png(tmp_path / "shot.png", size=(8, 4))
@@ -689,6 +816,7 @@ class TestScreenshotDiff:
         assert not result.passed
         assert result.details["baseline_created"] is True
 
+    @requires_pillow
     def test_an_earlier_screenshot_action_is_reused(self, tmp_path):
         write_png(tmp_path / "baselines" / "home.png")
         captured = write_png(tmp_path / "already.png")
@@ -709,6 +837,7 @@ class TestScreenshotDiff:
         assert result.passed
         assert backend.snapshot_calls == []
 
+    @requires_pillow
     def test_browser_written_shot_is_copied_out_not_recaptured(self, tmp_path):
         """A Playwright shot lives inside the container: copy it, don't re-shoot."""
         write_png(tmp_path / "baselines" / "home.png")
@@ -789,6 +918,7 @@ class TestPillowIsolation:
         assert "pip install 'tianluo[e2e]'" in message
         assert "Pillow" in message
 
+    @requires_pillow
     def test_compare_images_counts_single_channel_drift(self, tmp_path):
         """A one-channel shift must not be rounded away by luminance conversion."""
         write_png(tmp_path / "a.png", size=(2, 2), color=(10, 10, 10))
@@ -975,6 +1105,76 @@ class TestSemanticVisual:
                 ),
                 ctx,
             )
+
+    def test_a_hanging_llm_is_abandoned_at_the_scenario_budget(self, tmp_path):
+        """Tier 3 is the one blocking call with no natural ceiling.
+
+        Without the clamp a hung agent holds the whole E2E step open long past
+        the scenario's declared timeout, and the budget check between assertions
+        never runs again if this was the last one.
+        """
+        import threading
+        import time as _time
+
+        release = threading.Event()
+
+        class HangingCaller:
+            def __init__(self):
+                self.calls = []
+
+            def call(self, **kwargs):
+                self.calls.append(kwargs)
+                release.wait(30)
+                return {"verdict": "pass", "evidence": "eventually"}
+
+        caller = HangingCaller()
+        shot = write_png(tmp_path / "shot.png")
+        backend = FakeBackend(screenshot_bytes=shot.read_bytes())
+        ctx = make_ctx(
+            backend,
+            tmp_path,
+            llm_factory=lambda: caller,
+            deadline=_time.monotonic() + 0.2,
+        )
+
+        started = _time.monotonic()
+        try:
+            result = evaluate(
+                assertion(
+                    "visual_semantic",
+                    question="is it legible?",
+                    semantic_visual=True,
+                    require_evidence=True,
+                ),
+                ctx,
+            )
+        finally:
+            release.set()
+
+        assert not result.passed
+        assert _time.monotonic() - started < 5, "the call was not abandoned"
+        assert result.details.get("timed_out") == "true"
+        assert caller.calls, "the LLM was consulted, just not awaited forever"
+
+    def test_an_exhausted_budget_never_reaches_the_llm(self, tmp_path):
+        import time as _time
+
+        caller = FakeCaller({"verdict": "pass", "evidence": "x"})
+        _, ctx = self._ctx(tmp_path, caller)
+        ctx.deadline = _time.monotonic() - 1
+
+        result = evaluate(
+            assertion(
+                "visual_semantic",
+                question="is it legible?",
+                semantic_visual=True,
+                require_evidence=True,
+            ),
+            ctx,
+        )
+
+        assert not result.passed
+        assert caller.calls == []
 
     def test_prompt_demands_reviewable_evidence(self, tmp_path):
         caller = FakeCaller({"verdict": "pass", "evidence": "x"})

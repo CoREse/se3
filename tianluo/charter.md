@@ -63,6 +63,20 @@ flow（相同步骤/状态持久化/`--resume`/`--type`），成功后经重量�
 queue-and-wait）将同步 run 与所有 merge 相互串行化；worktree 模式的 flow body
 不持该锁，故多个 `--worktree` run 可并发执行，仅在各自最终 merge 处竞争。
 
+**E2E isolation subsystem (opt-in).** e2e is a capability offered to every managed
+project regardless of its shape, gated by a single user-owned switch (`e2e.enabled`
+in `tianluo.yaml`): with the switch off the state machine behaves exactly as it did
+before the subsystem existed, and the flow never flips it on by itself. Two
+boundaries define the subsystem. First, framework vs. project — the scenario
+executor, config schema and image templates live in tianluo and evolve with it,
+while a managed project carries only declarative content config and baseline assets
+under `tianluo/e2e/` (in git, incrementally maintained by the flow), never a copy of
+framework code. Second, execution vs. environment — the isolation backend is a
+deliberately narrow pluggable abstraction (environment create / start / exec /
+snapshot / destroy), whose only implementation is a container backend; a VM-level
+backend later is a new class behind the same interface, with nothing above the line
+changing.
+
 **Cross-machine single writer.** Project state may live on a filesystem shared by
 several machines, so process liveness is not decidable from the local process table
 alone. Every on-disk execution-ownership marker (the merge lock holder record and the
@@ -109,8 +123,15 @@ treated as local, preserving pre-upgrade behaviour.
 - **LLM 子进程隔离**：流程引擎的若干 step（如 analyze、plan）以 LLM 子进程执行，
   这些子进程读不到 CLAUDE.md，只能经本 charter（及沙箱 conventions 通道）获得
   项目级约定。因此项目级约定必须落在 charter，而非 CLAUDE.md。
-- **core/server 依赖隔离**：仅装 core 时 `luo` 命令族不得因 server 代码引发 import
-  错误；对 `tianluo.server` 包及其重依赖的引用必须延迟到 `tianluo-server` 入口真正运行。
+- **Optional-extra dependency isolation**: a core-only install of the `luo` command
+  family must never raise an import error because of code behind an optional extra.
+  References to the `tianluo.server` package and its heavy dependencies stay deferred
+  until the `tianluo-server` entry point actually runs. `tianluo[e2e]` follows the same
+  rule, with one clarification: an extra isolates a third-party *dependency*, not
+  tianluo's own code — the e2e framework and its templates ship in every wheel,
+  references to extra-only dependencies are deferred until e2e actually executes, and a
+  missing extra must surface an actionable `pip install 'tianluo[e2e]'` message rather
+  than a raw ModuleNotFoundError.
 - **代码即真相源**：未来意图经 issue（`luo issue`）进入，不得改写 charter /
   code-index / why-comments 去描述尚未构建的未来。
 - **check 类步骤的 finding 只有一条去向**：任何 check 类步骤（self_check /

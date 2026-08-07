@@ -67,6 +67,24 @@ class TestEnabled:
     def test_falsy_and_unparseable_forms_stay_off(self, tmp_path, raw):
         assert load(tmp_path, {"enabled": raw}).enabled is False
 
+    @pytest.mark.parametrize("raw", ["ture", "maybe", ["yes"]])
+    def test_an_unrecognized_switch_warns_before_falling_back(
+        self, tmp_path, raw, caplog
+    ):
+        """Silence here is the costly kind: the user believes e2e is running."""
+        with caplog.at_level("WARNING"):
+            config = load(tmp_path, {"enabled": raw})
+
+        assert config.enabled is False
+        assert "e2e.enabled" in caplog.text
+
+    def test_an_unrecognized_keep_environment_warns_too(self, tmp_path, caplog):
+        with caplog.at_level("WARNING"):
+            config = load(tmp_path, {"keep_environment": "kinda"})
+
+        assert config.keep_environment is False
+        assert "e2e.keep_environment" in caplog.text
+
 
 class TestRuntimeSelection:
     @pytest.mark.parametrize("value", E2E_RUNTIME_CHOICES)
@@ -107,8 +125,10 @@ class TestTimeouts:
         assert config.build_timeout == 60
         assert config.scenario_timeout == 30
 
-    @pytest.mark.parametrize("raw", [0, -1, "soon", None, [30]])
+    @pytest.mark.parametrize("raw", [0, -1, "soon", None, [30], True, False])
     def test_non_positive_and_malformed_clamp_to_default(self, tmp_path, raw):
+        """`build_timeout: yes` is a YAML bool, and int(True) is a positive 1 —
+        a one-second build budget nobody asked for unless bools are refused."""
         config = load(tmp_path, {"build_timeout": raw, "scenario_timeout": raw})
         assert config.build_timeout == 1800
         assert config.scenario_timeout == 300
@@ -199,6 +219,23 @@ class TestFullBlock:
         assert config.enabled is True
         assert config.runtime == "auto"
         assert config.scenario_timeout == 42
+
+    @pytest.mark.parametrize("value", [float("inf"), float("nan"), 1e999])
+    def test_a_non_finite_timeout_does_not_disable_e2e(self, tmp_path, value):
+        """`int(inf)` raises OverflowError, which the field guard must absorb.
+
+        Escaping it reaches ``load``'s blanket handler, which discards the whole
+        block — turning one malformed timeout into a silent ``enabled: False``
+        for a user who explicitly switched e2e on. A typo like ``1e999`` reaches
+        the same place: YAML parses it as infinity.
+        """
+        config = load(
+            tmp_path,
+            {"enabled": True, "runtime": "podman", "build_timeout": value},
+        )
+        assert config.enabled is True
+        assert config.runtime == "podman"
+        assert config.build_timeout == 1800
 
     def test_malformed_yaml_file_yields_defaults(self, tmp_path):
         (tmp_path / "tianluo.yaml").write_text("e2e: [unclosed\n", encoding="utf-8")

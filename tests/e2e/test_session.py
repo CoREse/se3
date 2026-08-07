@@ -24,7 +24,15 @@ from tianluo.e2e.errors import (
 )
 from tianluo.e2e.session import FIX_REASON, E2EVerdict, run_e2e
 
-from ._stubs import FakeBackend, assertion, content, scenario, service_decl
+from ._stubs import (
+    FakeBackend,
+    FakeClock,
+    action,
+    assertion,
+    content,
+    scenario,
+    service_decl,
+)
 
 
 def working_runner(argv, **kwargs):
@@ -239,6 +247,102 @@ class TestConfigurationAndSelection:
                 backend=FakeBackend(),
             )
 
+    def test_a_critical_scenario_runs_even_when_the_selection_excludes_it(
+        self, tmp_path
+    ):
+        """The documented guarantee: critical scenarios genuinely run.
+
+        Narrowing `scenarios` to keep a fix loop fast must not be able to skip a
+        scenario the user declared load-bearing.
+        """
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(scenarios=["smoke"], critical_scenarios=["login"]),
+            content=content(
+                tmp_path,
+                scenarios=(passing_scenario("smoke"), passing_scenario("login")),
+            ),
+            backend=FakeBackend(),
+        )
+
+        assert verdict.summary["selected_scenarios"] == ["smoke", "login"]
+        assert verdict.summary["critical_scenarios"] == ["login"]
+        assert verdict.passed
+
+    def test_a_critical_scenario_is_added_to_an_explicit_scenario_argument_too(
+        self, tmp_path
+    ):
+        verdict = run_e2e(
+            tmp_path,
+            scenarios=["smoke"],
+            config=enabled_config(critical_scenarios=["login"]),
+            content=content(
+                tmp_path,
+                scenarios=(passing_scenario("smoke"), passing_scenario("login")),
+            ),
+            backend=FakeBackend(),
+        )
+
+        assert [r.name for r in verdict.scenario_results] == ["smoke", "login"]
+
+    def test_a_selected_critical_scenario_is_not_run_twice(self, tmp_path):
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(scenarios=["smoke"], critical_scenarios=["smoke"]),
+            content=content(tmp_path, scenarios=(passing_scenario("smoke"),)),
+            backend=FakeBackend(),
+        )
+
+        assert [r.name for r in verdict.scenario_results] == ["smoke"]
+
+    def test_a_failing_critical_scenario_fails_the_run(self, tmp_path):
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(critical_scenarios=["broken"]),
+            content=content(
+                tmp_path,
+                scenarios=(passing_scenario("smoke"), failing_scenario("broken")),
+            ),
+            backend=FakeBackend(
+                exec_handler=lambda service, argv: ExecResult(exit_code=1)
+            ),
+        )
+
+        assert verdict.passed is False
+        assert verdict.should_fix is True
+
+    def test_an_undeclared_critical_scenario_is_a_configuration_error(self, tmp_path):
+        backend = FakeBackend()
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            run_e2e(
+                tmp_path,
+                config=enabled_config(critical_scenarios=["ghost"]),
+                content=content(tmp_path, scenarios=(passing_scenario("smoke"),)),
+                backend=backend,
+            )
+
+        assert "ghost" in str(excinfo.value)
+        assert "smoke" in str(excinfo.value)
+        # A promise that cannot be met stops the run before anything is built.
+        assert backend.created == []
+
+    def test_an_unverified_critical_scenario_cannot_pass(self, tmp_path):
+        """Defensive net: no result for a critical scenario is not a pass."""
+        from tianluo.e2e.session import _verdict_for
+
+        bundle = content(tmp_path, scenarios=(passing_scenario("login"),))
+        verdict = _verdict_for(bundle, [], [], "docker", ["login"])
+
+        assert verdict.passed is False
+        assert verdict.should_fix is True
+        assert verdict.summary["critical_unverified"] == ["login"]
+        assert "login" in verdict.fix_instructions
+        assert verdict.fix_context["critical_unverified"] == ["login"]
+        assert verdict.fix_context["issues"][0]["kind"] == (
+            "critical_scenario_not_verified"
+        )
+
     def test_nothing_selected_builds_no_environment(self, tmp_path):
         backend = FakeBackend()
 
@@ -307,19 +411,40 @@ class TestLifecycle:
     def test_keep_environment_skips_teardown(self, tmp_path, caplog):
         backend = FakeBackend()
 
-        with caplog.at_level("INFO"):
-            run_e2e(
-                tmp_path,
-                config=enabled_config(keep_environment=True),
-                content=content(tmp_path, scenarios=(passing_scenario(),)),
-                backend=backend,
-            )
+        # No at_level(): a real `luo` run installs no logging handler, so
+        # anything the session emits below WARNING never reaches the user.
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(keep_environment=True),
+            content=content(tmp_path, scenarios=(passing_scenario(),)),
+            backend=backend,
+        )
 
         assert backend.destroyed == 0
         kept = "\n".join(caplog.messages)
         assert "keep_environment" in kept
         # The hint must say how to clean up by hand, or the leak is on us.
         assert "network rm" in kept
+        assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+        # And it must be handed to the caller as data, so the CLI can print it
+        # without depending on logging configuration at all.
+        assert len(verdict.notices) == 1
+        assert "network rm" in verdict.notices[0]
+        kept_summary = verdict.summary["kept_environment"]
+        assert kept_summary["network"] == "tianluo-e2e"
+        assert kept_summary["containers"] == ["app"]
+
+    def test_a_torn_down_environment_produces_no_cleanup_notice(self, tmp_path):
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(tmp_path, scenarios=(passing_scenario(),)),
+            backend=FakeBackend(),
+        )
+
+        assert verdict.notices == []
+        assert "kept_environment" not in verdict.summary
 
     def test_keep_environment_argument_overrides_the_config(self, tmp_path):
         backend = FakeBackend()
@@ -400,7 +525,14 @@ class TestLifecycle:
         assert verdict.remediation == "do X"
         assert backend.destroyed == 1
 
-    def test_create_failure_leaves_nothing_to_tear_down(self, tmp_path):
+    def test_a_partially_created_environment_is_still_torn_down(self, tmp_path):
+        """`create` raising must not orphan the network it already made.
+
+        The real backend creates the shared network first and *then* builds each
+        service image, so a failing build leaves a live network behind while the
+        exception discards the handle. Teardown therefore has to fall back to the
+        handle the backend published before it started.
+        """
         backend = FakeBackend(create_error=E2EEnvironmentError("no disk space"))
 
         verdict = run_e2e(
@@ -411,6 +543,20 @@ class TestLifecycle:
         )
 
         assert verdict.environment_error == "no disk space"
+        assert backend.destroyed == 1
+
+    def test_nothing_is_torn_down_when_create_was_never_reached(self, tmp_path):
+        backend = FakeBackend()
+
+        run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(tmp_path, scenarios=(passing_scenario(),)),
+            backend_factory=RecordingFactory(backend),
+            runner=broken_runner,
+        )
+
+        assert backend.last_handle is None
         assert backend.destroyed == 0
 
 
@@ -456,6 +602,91 @@ class TestVerdict:
         # The log was captured while the container still existed.
         assert ("app", "", "log") in backend.snapshot_calls
 
+    def test_the_log_tail_covers_every_service_not_only_the_driver(self, tmp_path):
+        """The server-side traceback lives in the application service's log.
+
+        In the primary web topology the driver is the Playwright container, so a
+        driver-only capture hands the fix loop the browser's view of a failure
+        whose cause is in another container's log.
+        """
+
+        class PerServiceLogs(FakeBackend):
+            def snapshot(self, handle, service, target, *, kind="file",
+                         destination=None):
+                self.log_text = "{}: log line".format(service)
+                return super().snapshot(
+                    handle, service, target, kind=kind, destination=destination
+                )
+
+        backend = PerServiceLogs(
+            exec_handler=lambda service, argv: ExecResult(exit_code=1)
+        )
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(
+                tmp_path,
+                services=(service_decl("app"), service_decl("db", mount_source=False)),
+                scenarios=(failing_scenario(),),
+            ),
+            backend=backend,
+        )
+
+        text = verdict.fix_instructions
+        assert "app: log line" in text
+        assert "db: log line" in text
+
+    def test_action_trace_reaches_the_fix_instructions(self, tmp_path):
+        """The failed command is usually the *cause* of the failed assertion.
+
+        Without it in the prompt, the fix iteration debugs the symptom while the
+        root cause stays invisible.
+        """
+        backend = FakeBackend(exec_handler=lambda service, argv: ExecResult(exit_code=3))
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(
+                tmp_path,
+                scenarios=(
+                    scenario(
+                        "broken",
+                        driver="app",
+                        actions=(action("exec", command=["run-me"]),),
+                        assertions=(assertion("file_exists", path="/nope"),),
+                    ),
+                ),
+            ),
+            backend=backend,
+        )
+
+        assert "run-me" in verdict.fix_instructions
+        assert "exited 3" in verdict.fix_instructions
+
+    def test_an_action_failure_becomes_its_own_fix_issue(self, tmp_path):
+        """An unreachable driving request is a failure no assertion adjudicates."""
+        backend = FakeBackend()
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(
+                tmp_path,
+                scenarios=(
+                    scenario(
+                        "unreachable",
+                        driver="app",
+                        actions=(action("http", url="http://app:8000/x"),),
+                        assertions=(assertion("file_exists", path="/present"),),
+                    ),
+                ),
+            ),
+            backend=backend,
+        )
+
+        assert verdict.should_fix is True
+        kinds = [issue["kind"] for issue in verdict.fix_context["issues"]]
+        assert "action" in kinds
+
     def test_fix_context_is_structured(self, tmp_path):
         _, verdict = self._failing_verdict(tmp_path)
 
@@ -490,6 +721,32 @@ class TestVerdict:
         assert summary["scenarios_failed"] == ["bad"]
         assert summary["runtime"] == "fake"
         assert [s["name"] for s in summary["scenarios"]] == ["ok", "bad"]
+
+    def test_summary_times_the_environment_apart_from_the_scenarios(self, tmp_path):
+        """Two halves of the wall clock, two different diagnoses.
+
+        Image builds and readiness waits dominate a cold run; folding them into
+        the scenario total would leave "the suite is heavy" and "the image
+        rebuilt" indistinguishable in the step output.
+        """
+        clock = FakeClock()
+
+        class SlowStart(FakeBackend):
+            def start(self, handle):
+                clock.sleep(30)
+                super().start(handle)
+
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            content=content(tmp_path, scenarios=(passing_scenario(),)),
+            backend=SlowStart(),
+            clock=clock,
+            sleeper=clock.sleep,
+        )
+
+        assert verdict.summary["environment_duration"] >= 30
+        assert verdict.summary["duration"] < verdict.summary["environment_duration"]
 
     def test_as_failure_exposes_the_exception_form(self, tmp_path):
         _, verdict = self._failing_verdict(tmp_path)
@@ -566,6 +823,29 @@ def _write_content(project_root: Path) -> None:
     )
 
 
+def _write_visual_content(project_root: Path) -> None:
+    """Write content whose only assertion is a tier-2 diff with no baseline yet."""
+    _write_content(project_root)
+    root = project_root / "tianluo" / "e2e"
+    (root / "scenarios" / "cli-smoke.yaml").unlink()
+    (root / "scenarios" / "home.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "home",
+                "driver": "app",
+                "assertions": [
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": "home.png",
+                        "visual_regression": True,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 class TestOnDiskContent:
     def test_yaml_scenario_runs_end_to_end_against_the_fake_backend(self, tmp_path):
         _write_content(tmp_path)
@@ -602,6 +882,43 @@ class TestOnDiskContent:
 
         assert "visual_regression" in str(excinfo.value)
         assert backend.created == []
+
+    def test_an_absent_baseline_aborts_the_load_by_default(self, tmp_path):
+        """Strict by default: an ordinary run cannot compare against nothing."""
+        _write_visual_content(tmp_path)
+
+        with pytest.raises(E2EConfigError) as excinfo:
+            run_e2e(tmp_path, config=enabled_config(), backend=FakeBackend())
+
+        assert "home.png" in str(excinfo.value)
+        # The message has to say how to produce that first image.
+        assert "--write-baselines" in str(excinfo.value)
+
+    def test_write_missing_baselines_reaches_the_assertion_layer(self, tmp_path):
+        """The regression this guards: first capture must be reachable.
+
+        Content loading happens before any assertion runs, so a strict
+        baseline-existence check there made ``--write-baselines`` — and every
+        flow-authored tier-2 scenario — impossible to ever satisfy.
+        """
+        from ._stubs import png_bytes
+
+        _write_visual_content(tmp_path)
+        backend = FakeBackend(screenshot_bytes=png_bytes())
+
+        verdict = run_e2e(
+            tmp_path,
+            config=enabled_config(),
+            backend=backend,
+            artifacts_dir=tmp_path / "artifacts",
+            write_missing_baselines=True,
+        )
+
+        captured = tmp_path / "tianluo" / "e2e" / "baselines" / "home.png"
+        assert captured.is_file()
+        # Captured but deliberately not green: nobody has reviewed the image yet.
+        assert verdict.passed is False
+        assert verdict.should_fix is True
 
     def test_config_is_loaded_from_the_project_when_not_passed(self, tmp_path):
         _write_content(tmp_path)

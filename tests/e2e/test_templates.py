@@ -169,9 +169,73 @@ class TestBuildSteps:
     def test_blank_steps_are_dropped(self):
         assert templates.expand_build_steps(["", "   ", "echo hi"]) == "RUN echo hi"
 
+    def test_a_block_scalar_step_becomes_one_layer_per_line(self):
+        """A YAML `|` block is a natural shape in a generated environment.yaml.
+
+        Prefixing `RUN ` to the whole blob left every line after the first as a
+        bare Dockerfile line, so `docker build` died with "unknown instruction:
+        apt-get" — a configuration input misreported as a host environment
+        failure, with no fix-loop path to it.
+        """
+        expanded = templates.expand_build_steps(
+            ["apt-get update\napt-get install -y curl\n", "pip install -e ."]
+        )
+
+        assert expanded.splitlines() == [
+            "RUN apt-get update",
+            "RUN apt-get install -y curl",
+            "RUN pip install -e .",
+        ]
+
+    def test_a_backslash_continuation_stays_one_instruction(self):
+        """A step deliberately written as one long instruction keeps its layer."""
+        expanded = templates.expand_build_steps(
+            ["apt-get update \\\n    && apt-get install -y curl"]
+        )
+
+        assert expanded == "RUN apt-get update \\\n    && apt-get install -y curl"
+
+    def test_instruction_and_comment_lines_inside_a_block_are_respected(self):
+        expanded = templates.expand_build_steps(["# why\nENV LANG=C.UTF-8\nmake build"])
+
+        assert expanded.splitlines() == ["# why", "ENV LANG=C.UTF-8", "RUN make build"]
+
+    def test_every_rendered_line_is_a_valid_dockerfile_instruction(self):
+        """The property the bug broke: no line may stand alone as a bare command."""
+        rendered = render(
+            "base",
+            base_image="python:3.12-slim",
+            build_steps=["apt-get update\napt-get install -y curl"],
+        )
+
+        # FROM opens the template itself; it is not admissible as a build step.
+        allowed = set(templates._DOCKERFILE_INSTRUCTIONS) | {"FROM"}
+        continued = False
+        for line in rendered.splitlines():
+            stripped = line.strip()
+            was_continued, continued = continued, stripped.endswith("\\")
+            if not stripped or stripped.startswith("#") or was_continued:
+                continue
+            assert stripped.split()[0].upper() in allowed
+
     def test_no_steps_renders_nothing(self):
         assert templates.expand_build_steps(None) == ""
         assert templates.expand_build_steps([]) == ""
+
+    def test_a_bare_string_is_one_step_not_one_layer_per_character(self):
+        """A string is an Iterable, so iterating it yields *letters*.
+
+        The flow's own callers pre-wrap the YAML value, but a direct caller of the
+        public API passing ``build_steps="pip install ."`` got thirteen one-letter
+        ``RUN`` layers — a Dockerfile valid enough to reach ``docker build``, which
+        then failed with "p: command not found" and looked like a broken host.
+        """
+        assert templates.expand_build_steps("pip install .") == "RUN pip install ."
+
+        rendered = render("base", base_image="python:3.12-slim", build_steps="make test")
+
+        assert "RUN make test" in rendered
+        assert "RUN m\n" not in rendered
 
     def test_render_for_service_maps_service_fields(self):
         rendered = templates.render_for_service(
@@ -208,13 +272,19 @@ class TestPackaging:
         assert "jinja2" not in sys.modules
         assert "mako" not in sys.modules
 
-    def test_loader_reads_through_importlib_resources(self):
+    def test_loader_reads_through_the_import_system_only(self):
+        """No path is ever joined onto ``__file__``.
+
+        Both readers (``importlib.resources.files`` on 3.9+, ``pkgutil.get_data``
+        on 3.8) delegate to the package's loader, so a package imported from a
+        zip resolves its templates like any other install.
+        """
         from pathlib import Path
 
         source = Path(templates.__file__).read_text(encoding="utf-8")
-        head = source.split("# Fallback for Python 3.8")[0]
 
-        assert "importlib.resources" in head
-        # The only `__file__` use is the documented Python 3.8 fallback, which
-        # sits after the marker above.
-        assert "__file__" not in head
+        assert "importlib.resources" in source
+        assert "pkgutil.get_data" in source
+        # `__file__` survives only inside the prose that explains why it is not
+        # used; no line of code references it.
+        assert "__file__" not in source.replace("``__file__``", "")

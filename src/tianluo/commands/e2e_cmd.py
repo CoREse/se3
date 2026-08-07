@@ -63,7 +63,12 @@ def _resolve_root(project_root: Optional[str]) -> Path:
     if project_root:
         from ..i18n import bind_project_root
 
-        root = Path(project_root)
+        # Absolutized here rather than deeper down: the project root becomes the
+        # host side of every service's bind mount, and docker/podman reject a
+        # relative `-v .:/workspace` as an invalid volume name — so `luo e2e run
+        # -p .` would fail to start every container and report it as a host
+        # environment problem, for input the CLI had accepted without complaint.
+        root = Path(project_root).resolve()
         # get_project_root() binds the language itself; an explicit
         # --project-root bypasses it, so bind here too.
         bind_project_root(root)
@@ -135,7 +140,10 @@ def run_command(
     # does not probe twice — same logic, one execution.
     try:
         probe_result = preflight(config)
-        content = load_content_config(root)
+        # --write-baselines is precisely the request "a declared baseline may be
+        # absent"; loading strictly here would reject the content before the
+        # assertion layer could capture that first shot.
+        content = load_content_config(root, require_baselines=not write_baselines)
     except E2EEnvironmentError as exc:
         _print_environment_error(exc.message, exc.remediation)
         raise typer.Exit(EXIT_ENVIRONMENT)
@@ -175,6 +183,13 @@ def run_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(EXIT_CONFIG)
 
+    # Printed before the verdict and on every route: the kept-environment hint
+    # names containers and a network that are still alive on this host, and it is
+    # the only place those names appear (a log record would be dropped — the CLI
+    # installs no logging handler).
+    for notice in getattr(verdict, "notices", None) or []:
+        typer.echo(notice)
+
     if verdict.environment_error:
         _print_environment_error(verdict.environment_error, verdict.remediation)
         raise typer.Exit(EXIT_ENVIRONMENT)
@@ -194,7 +209,7 @@ def run_command(
         err=True,
     )
     for result in verdict.failed_scenarios[:_MAX_FAILED_SHOWN]:
-        typer.echo("  " + result.summary_line(), err=True)
+        typer.echo("  " + _scenario_line(result), err=True)
     remaining = len(verdict.failed_scenarios) - _MAX_FAILED_SHOWN
     if remaining > 0:
         typer.echo(
@@ -202,6 +217,29 @@ def run_command(
         )
     _print_artifacts(summary, artifacts)
     raise typer.Exit(EXIT_SCENARIO_FAILED)
+
+
+def _scenario_line(result: Any) -> str:
+    """One scenario's outcome, rendered for a human.
+
+    WHY not ``ScenarioResult.summary_line()``: that helper is the *log and
+    report* rendering — deliberately a fixed English string, because it also
+    lands in structured records read by tooling. Console output is UI text and
+    goes through ``t()`` like every other line this module prints, so a zh-CN
+    user does not get one hardcoded English row amid localized output.
+    """
+    passed_count = len(result.assertions) - len(result.failed_assertions)
+    return t(
+        "cli.e2e.scenario_result",
+        status=t(
+            "cli.steprender.e2e.passed" if result.passed
+            else "cli.steprender.e2e.failed"
+        ),
+        name=result.name,
+        passed=passed_count,
+        total=len(result.assertions),
+        seconds=round(result.duration, 1),
+    )
 
 
 def _print_artifacts(summary: Any, artifacts: Path) -> None:

@@ -358,6 +358,12 @@ def _render_test(step: Step) -> None:
         return
 
     lines = _build_test_summary_lines(test_results)
+    # The e2e enable hint rides on the test step because that is where e2e would
+    # run; it is advice only — nothing here or downstream touches tianluo.yaml.
+    suggestion = outputs.get("e2e_suggestion")
+    if suggestion:
+        lines.append("")
+        lines.append(str(suggestion))
     render_full("\n".join(lines), title=t("cli.steprender.title.test"))
 
 
@@ -425,12 +431,28 @@ def _render_e2e(step: Step) -> None:
     failed_count = results.get("failed", 0) or 0
     passed_count = results.get("passed", 0) or 0
 
+    # A critical scenario that produced no result blocks the verdict without
+    # appearing in `failed`, so the headline has to account for it — otherwise the
+    # panel would read "passed" above a step the state machine sent to the fix
+    # loop.
+    unverified = results.get("critical_unverified")
+    unverified = [name for name in unverified if isinstance(name, str)] if isinstance(
+        unverified, list
+    ) else []
+
     status = (
         t("cli.steprender.e2e.failed")
-        if failed_count
+        if failed_count or unverified
         else t("cli.steprender.e2e.passed")
     )
     lines.append(t("cli.steprender.e2e.status", status=status))
+    if unverified:
+        lines.append(
+            t(
+                "cli.steprender.e2e.critical_unverified",
+                scenarios=", ".join(unverified),
+            )
+        )
     lines.append(
         t(
             "cli.steprender.e2e.counts",
@@ -443,6 +465,20 @@ def _render_e2e(step: Step) -> None:
     runtime = results.get("runtime") or ""
     if runtime:
         lines.append(t("cli.steprender.e2e.runtime", runtime=runtime))
+
+    # Both halves of the wall clock, kept apart: a slow step is diagnosed very
+    # differently depending on whether the time went into rebuilding the
+    # environment or into running the scenarios.
+    environment_duration = results.get("environment_duration")
+    if isinstance(environment_duration, (int, float)) and not isinstance(
+        environment_duration, bool
+    ):
+        lines.append(
+            t(
+                "cli.steprender.e2e.environment_duration",
+                seconds=f"{environment_duration:.1f}",
+            )
+        )
 
     duration = results.get("duration")
     if isinstance(duration, (int, float)):

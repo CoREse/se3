@@ -21,6 +21,7 @@ dependencies (image diffing), never the framework itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ContainerBackend",
+    "build_fingerprint",
     "container_name",
     "image_tag",
 ]
@@ -97,9 +99,26 @@ def container_name(network: str, service: str) -> str:
     return "{}-{}".format(_sanitize(network), _sanitize(service))
 
 
-def image_tag(network: str, service: str) -> str:
-    """Local tag for the image built for ``service``."""
-    return "tianluo-e2e/{}-{}:latest".format(_sanitize(network), _sanitize(service))
+def build_fingerprint(dockerfile: str) -> str:
+    """Short stable digest of a rendered Dockerfile."""
+    return hashlib.sha256(dockerfile.encode("utf-8")).hexdigest()[:12]
+
+
+def image_tag(service: str, fingerprint: str) -> str:
+    """Local tag for the image built for ``service``.
+
+    WHY the build fingerprint rather than the environment's network name: the
+    network carries the flow id (two concurrent worktree runs must not share a
+    network), so a network-derived tag minted a brand-new image on *every* flow —
+    one that no later flow could reuse and that nothing ever removed, since a
+    tagged image survives `image prune`. Keying the tag on the rendered
+    Dockerfile instead makes an unchanged environment resolve to the identical
+    tag, so the next flow reuses the image it already has and only a genuine
+    change to the build recipe mints a new one. Two projects whose recipes are
+    byte-identical legitimately share the image: the source tree is bind-mounted
+    at run time and is not part of what was built.
+    """
+    return "tianluo-e2e/{}:{}".format(_sanitize(service), _sanitize(fingerprint))
 
 
 class ContainerBackend(IsolationBackend):
@@ -255,6 +274,11 @@ class ContainerBackend(IsolationBackend):
         run.
         """
         handle = EnvironmentHandle(runtime=self.runtime, spec=spec)
+        # Published before the first host-side call: a build that fails on the
+        # third service has already created the network and two images, and the
+        # exception discards the return value, so the session can only find them
+        # through here (see IsolationBackend.last_handle).
+        self.last_handle = handle
         self._create_network(handle)
         for service in spec.services:
             handle.images[service.name] = self._materialize_image(handle, service)
@@ -313,13 +337,13 @@ class ContainerBackend(IsolationBackend):
         return self._cli("image", "inspect", image).ok
 
     def _build(self, handle: EnvironmentHandle, service: ServiceSpec) -> str:
-        tag = image_tag(handle.spec.network, service.name)
         dockerfile = render_for_service(
             service.template or "base",
             service.base_image,
             workdir=service.workdir or DEFAULT_WORKDIR,
             build_steps=service.build_steps,
         )
+        tag = image_tag(service.name, build_fingerprint(dockerfile))
         # INVARIANT: the build context is a throwaway directory holding nothing
         # but the rendered Dockerfile — never the project root. The source tree
         # is bind-mounted at run time, so shipping it as build context would
@@ -370,6 +394,23 @@ class ContainerBackend(IsolationBackend):
     def _run_service(self, handle: EnvironmentHandle, service: ServiceSpec) -> None:
         args = self.build_run_args(handle, service)
         result = self._cli(*args, timeout=self.cli_timeout)
+        if not result.ok and _name_taken(result):
+            # INVARIANT: a leftover container under this environment's *own*
+            # deterministic name must never wedge the next run. The name is
+            # `<network>-<service>` and the network carries the flow id, so every
+            # iteration of one flow asks for the identical name — and with
+            # `keep_environment` the session deliberately skips `destroy`, as does
+            # a run killed between `start` and teardown. The runtime then rejects
+            # `run` with a name conflict, which would surface as an environment
+            # error carrying host-permission remediation ("join the docker
+            # group") and abort a fix loop whose host is perfectly fine. Clearing
+            # our own leftover and retrying is the same reuse tolerance
+            # `_create_network` already applies to the network. Replace rather
+            # than restart: the stale container still holds the previous
+            # iteration's process state, and only a fresh one is guaranteed to be
+            # running the code that is on the bind mount now.
+            self._remove_stale_container(handle, service)
+            result = self._cli(*args, timeout=self.cli_timeout)
         if not result.ok:
             raise E2EEnvironmentError(
                 t(
@@ -381,6 +422,28 @@ class ContainerBackend(IsolationBackend):
             )
         handle.containers[service.name] = (result.stdout or "").strip() or (
             container_name(handle.spec.network, service.name)
+        )
+
+    def _remove_stale_container(
+        self, handle: EnvironmentHandle, service: ServiceSpec
+    ) -> None:
+        """Drop the container squatting on this service's deterministic name.
+
+        Scoped to that one name on purpose: it is a name this backend minted, so
+        removing it can only ever discard our own leftover — never a container
+        the user or a concurrent run owns.
+        """
+        name = container_name(handle.spec.network, service.name)
+        removal = self._cli("rm", "-f", "-v", name)
+        if removal.ok or _already_gone(removal):
+            logger.info("replaced leftover e2e container %s", name)
+            return
+        # Not fatal here: the retry that follows produces the error the caller
+        # should actually see, and it names the service.
+        logger.warning(
+            "could not remove leftover e2e container %s: %s",
+            name,
+            _detail(removal.stderr or removal.stdout),
         )
 
     def build_run_args(
@@ -439,8 +502,14 @@ class ContainerBackend(IsolationBackend):
             args += ["-e", "{}={}".format(key, value)]
         for port in service.ports:
             args += ["-p", str(port)]
+        shared_sources = self._shared_mount_sources(handle)
         for mount in service.mounts:
-            args += ["-v", self.format_mount(mount)]
+            args += [
+                "-v",
+                self.format_mount(
+                    mount, shared=_mount_key(mount) in shared_sources
+                ),
+            ]
         if service.workdir:
             args += ["-w", service.workdir]
 
@@ -448,17 +517,39 @@ class ContainerBackend(IsolationBackend):
         args += list(service.command)
         return args
 
-    def format_mount(self, mount: BindMount) -> str:
-        """Render one bind mount as a ``-v`` argument."""
+    def _shared_mount_sources(self, handle: EnvironmentHandle) -> set:
+        """Host paths this environment mounts into more than one service."""
+        counts: Dict[str, int] = {}
+        for service in handle.spec.services:
+            # A service mounting one path twice does not make it shared, so each
+            # service contributes a given source at most once.
+            for key in {_mount_key(mount) for mount in service.mounts}:
+                counts[key] = counts.get(key, 0) + 1
+        return {key for key, count in counts.items() if count > 1}
+
+    def format_mount(self, mount: BindMount, *, shared: bool = False) -> str:
+        """Render one bind mount as a ``-v`` argument.
+
+        ``shared`` selects the SELinux relabel mode and is decided by the
+        topology, not by the mount alone — see the comment below.
+        """
         options: List[str] = []
         if mount.read_only:
             options.append("ro")
         if self.selinux_label:
-            # `:Z` relabels the mounted tree private to this container. It is a
-            # no-op on hosts without SELinux, which is why it is on by default —
-            # but it *rewrites* labels on the host path, so a project sharing the
-            # source tree with SELinux-confined services can turn it off.
-            options.append("Z")
+            # SELinux relabelling. A no-op on hosts without SELinux, which is why
+            # it is on by default; a project sharing the source tree with
+            # SELinux-confined services can turn it off.
+            #
+            # INVARIANT: a host path mounted into more than one container gets
+            # `:z` (shared), never `:Z`. `:Z` stamps a *private* MCS category on
+            # the host path, so the second container to start would relabel the
+            # project source out from under the first — the app container loses
+            # access to /workspace the moment the browser container comes up, and
+            # the resulting permission errors look exactly like application bugs
+            # and get routed into the fix loop as code regressions. `:Z` stays for
+            # genuinely single-container mounts, where the tighter label is free.
+            options.append("z" if shared else "Z")
         spec = "{}:{}".format(Path(mount.source).as_posix(), mount.target)
         if options:
             spec += ":" + ",".join(options)
@@ -614,11 +705,18 @@ class ContainerBackend(IsolationBackend):
     ) -> Snapshot:
         result = self._cli("logs", container)
         text = (result.stdout or "") + (result.stderr or "")
-        path = self._destination(destination, ".log")
-        try:
-            path.write_text(text, encoding="utf-8")
-        except OSError as exc:  # pragma: no cover - unwritable temp dir
-            logger.debug("could not persist %s log: %s", service, exc)
+        # INVARIANT: no destination means no host file. A `log` readiness probe
+        # snapshots once per poll — dozens of times per service start — and the
+        # caller reads the text straight out of `metadata`, so minting a temp
+        # file per call would leak one file per poll with nothing to unlink it.
+        # A caller that wants the log kept says so by naming a destination.
+        path: Optional[Path] = None
+        if destination is not None:
+            path = self._destination(destination, ".log")
+            try:
+                path.write_text(text, encoding="utf-8")
+            except OSError as exc:  # pragma: no cover - unwritable destination
+                logger.debug("could not persist %s log: %s", service, exc)
         return Snapshot(
             kind="log",
             path=path,
@@ -633,15 +731,29 @@ class ContainerBackend(IsolationBackend):
     def destroy(self, handle: EnvironmentHandle) -> None:
         """Remove every container and the shared network.
 
+        Images are deliberately left behind: they are the reusable half of the
+        environment and their tags are keyed to the build recipe (see
+        :func:`image_tag`), so the next flow with an unchanged environment
+        reuses them instead of rebuilding. Deleting them here would make every
+        run pay a full rebuild for a cache that is correct by construction.
+
         INVARIANT: idempotent and never raising. The session orchestrator calls
         this from a ``finally``, including after a half-finished ``create``, so
         a resource that is already gone — or was never created — must be a
         no-op rather than masking the original failure with a teardown error.
+
+        INVARIANT: removal is driven by the *declared* services, not only by the
+        containers ``start`` managed to record. A `run` that creates a container
+        but fails to start it, or a previous run killed between `start` and
+        `destroy`, leaves a container under the deterministic
+        ``<network>-<service>`` name that nothing recorded — and since the name
+        is stable per flow, the next run's `run` then fails with "name already
+        in use" and the network cannot be removed for having active endpoints,
+        wedging every subsequent iteration. Removing an object that was never
+        created is already a no-op here, so sweeping the full topology costs one
+        cheap call per service and makes that dead end unreachable.
         """
-        for service in list(handle.containers):
-            target = handle.containers.get(service) or container_name(
-                handle.spec.network, service
-            )
+        for target in self._removal_targets(handle):
             result = self._cli("rm", "-f", "-v", target)
             if not result.ok and not _already_gone(result):
                 logger.warning(
@@ -649,7 +761,7 @@ class ContainerBackend(IsolationBackend):
                     target,
                     _detail(result.stderr or result.stdout),
                 )
-            handle.containers.pop(service, None)
+        handle.containers.clear()
 
         if handle.network_id or handle.spec.network:
             result = self._cli("network", "rm", handle.spec.network)
@@ -662,6 +774,57 @@ class ContainerBackend(IsolationBackend):
             handle.network_id = None
 
         handle.started = False
+
+    def _removal_targets(self, handle: EnvironmentHandle) -> List[str]:
+        """Every container reference ``destroy`` must try, in a stable order.
+
+        The recorded id when ``start`` got that far, the deterministic name
+        otherwise — plus anything recorded under a service the spec no longer
+        declares, so an edited topology cannot strand a live container.
+        """
+        targets: List[str] = []
+        seen: set = set()
+
+        def add(target: str) -> None:
+            if target and target not in seen:
+                seen.add(target)
+                targets.append(target)
+
+        for service in handle.spec.services:
+            add(
+                handle.containers.get(service.name)
+                or container_name(handle.spec.network, service.name)
+            )
+        for name, recorded in handle.containers.items():
+            add(recorded or container_name(handle.spec.network, name))
+        return targets
+
+
+def _mount_key(mount: BindMount) -> str:
+    """Identity of a bind mount's *host* side, for sharing detection."""
+    return Path(mount.source).as_posix()
+
+
+_NAME_TAKEN = re.compile(
+    r"(container name\b[^\n]*\balready in use"
+    r"|already in use by container"
+    r"|name is already in use"
+    r"|container\b[^\n]*\balready exists)",
+    re.IGNORECASE,
+)
+
+
+def _name_taken(result: ExecResult) -> bool:
+    """Whether ``run`` failed only because the container name is occupied.
+
+    Deliberately narrower than a bare "already in use" substring: a service that
+    publishes a host port already bound by something else fails with "port is
+    already allocated"/"address already in use", and that is a genuine conflict
+    with a foreign process — retrying it after removing our container would just
+    hide the real cause behind a second identical failure.
+    """
+    text = (result.stderr or "") + (result.stdout or "")
+    return bool(_NAME_TAKEN.search(text))
 
 
 def _already_gone(result: ExecResult) -> bool:

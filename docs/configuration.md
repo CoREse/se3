@@ -530,7 +530,7 @@ writes `tianluo.yaml`" is checkable by looking at which paths were touched.
 | `scenario_timeout` | int `>= 1` (seconds) | `300` | Default per-scenario budget. A scenario may override it with its own `timeout:`. |
 | `estimated_e2e_duration` | int `>= 1` (seconds) or null | `null` | The e2e counterpart of [`test.estimated_test_duration`](#test)'s role: lets a supervising runner tell "still running" apart from "hung". |
 | `scenarios` | list of strings | `[]` | Scenario selection by name. **Empty means "run everything"**, not "run nothing". Narrow it so a fix loop need not replay the full suite on every iteration — the same precedent as `test.critical_tests`. |
-| `critical_scenarios` | list of strings | `[]` | Scenarios that must genuinely run for the result to count. |
+| `critical_scenarios` | list of strings | `[]` | Scenarios that must genuinely run for the result to count. Every name listed here is **added to whatever the selection resolved to** — narrowing `scenarios` for speed, or passing `--scenario` while debugging, cannot quietly drop one — and a critical scenario that produced no passing result makes the run fail, the same "a skip is not a pass" guard [`test.critical_tests`](#test) applies. A name that no declared scenario answers to is a configuration error: the guarantee could never be met. |
 | `keep_environment` | bool | `false` | Leave containers and the network alive after the run so you can attach and look around. Debugging aid; the run prints the exact `rm -f` / `network rm` commands to clean up. |
 
 Every field follows the clamp-and-warn policy used by [`test`](#test): a
@@ -623,8 +623,11 @@ change.
 
 The flow generates this directory on first use (when `enabled` is true but the
 directory does not yet exist) and evolves it incrementally thereafter — it
-adds and revises, it does not overwrite your hand edits. You can also drive it
-manually:
+adds and revises, it does not overwrite your hand edits. Evolution runs once per
+flow, in the `E2E` step and *before* the scenarios execute, so a scenario added
+for the behaviour this task introduced is exercised by the same run; fix-loop
+iterations re-run the suite but never re-evolve it (a scenario is never rewritten
+to make a failure go away). You can also drive it manually:
 
 ```bash
 luo e2e bootstrap          # generate / evolve the content directory
@@ -654,6 +657,16 @@ services:
       timeout: 60
 ```
 
+**Where a readiness probe runs matters.** `command` probes execute *inside* the
+container, so they see the shared network and can address peers by service name
+(`curl http://app:8000/health`, `pg_isready -h db`). `http` and `tcp` probes are
+dialled by tianluo itself, i.e. **from the host**, so they can only reach a port
+the service publishes — `ports: ["18000:8000"]` plus
+`url: http://127.0.0.1:18000/health`. Pointing an `http` probe at `app:8000` or
+at an unpublished `localhost:8000` is rejected at validation time rather than
+left to time out. An `http` probe accepts any 2xx/3xx answer by default; add
+`status: 401` when the service's healthy answer is a specific other code.
+
 …and `tianluo/e2e/scenarios/cli-smoke.yaml`:
 
 ```yaml
@@ -669,12 +682,41 @@ assertions:
     contains: "myapp "
 ```
 
+**Action order, and one rule about `browser`.** Actions execute in declaration
+order, with a single exception the validator makes impossible to hit by accident:
+`browser` operations are collected into **one** Playwright program that runs
+after the rest of the sequence (page state cannot survive a one-shot `exec`, so
+batching is what keeps one browser session alive across the whole scenario).
+Declaring a non-`browser` action *after* a `browser` one is therefore a
+validation error — it would have run first, silently inverting the order you
+wrote. Put every `exec` / `http` / `wait` ahead of the browser sequence, and take
+in-page screenshots with a browser `op: screenshot` rather than the `screenshot`
+action (which captures a virtual X display and belongs to a `gui-xvfb` driver).
+
+An action that *fails* does not abort the sequence, but it is not free either. A
+non-zero `exec` is recorded as a note and left to the assertions to judge — its
+exit code and streams are exactly what `exit_code` / `stdout` / `stderr` exist
+for, and a command that fails is frequently the thing under test. Everything else
+(an unreachable `http` action, a `wait.until` that never came true, a coordinate
+click that missed, a browser op that threw) has no assertion counterpart, so it
+is reported as an action failure and the scenario **cannot** be reported as
+passed — otherwise a broken UI whose assertions happen to look elsewhere would
+come back green.
+
 `base_kind` picks which bundled Dockerfile template is layered over `image`:
 `base` (plain CLI / web / API), `playwright` (a browser driver — the official
 image pins browsers, system libraries *and fonts*, which is what makes a tier-2
 baseline reproducible), or `gui-xvfb` (Xvfb + a light window manager + scrot +
 xdotool, so a desktop application can run and be screenshotted with no physical
 display).
+
+A scenario's `driver` must be able to perform what the scenario declares, and
+that is checked at validation time: a `browser` action or a `dom` assertion needs
+a browser, so the driver has to be a `playwright` service. Pointing such a
+scenario at a `base` driver is a configuration error reported before anything is
+built — otherwise the mismatch would only surface after every image was built and
+every readiness probe awaited, aborting the run and discarding the results of the
+scenarios that already passed in the same round.
 
 **The assertion ladder is enforced by the schema, not merely recommended.**
 Tier 1 is deterministic (`exit_code`, `stdout`, `stderr`, `http_status`,
@@ -689,6 +731,21 @@ comparison where a DOM query would do turns deterministic verification into
 probabilistic verification. The same rule governs *driving* — clicking screen
 coordinates (`visual_click`) is reserved for GUIs with no programmatic entry
 point.
+
+**Getting the first tier-2 baseline.** A baseline can only be produced inside the
+image that renders the comparison shot — fonts and rasterisation live in the
+image — so a new `screenshot_diff` starts with no file under `baselines/`. Run
+`luo e2e run --write-baselines` once: it captures the missing images, reports the
+scenario as **not passed** (nobody has looked at the rendering yet), and leaves it
+to you to review the file and commit it. Without that flag a declared-but-absent
+baseline is a configuration error naming the file, not a scenario failure — no
+comparison happened, so blaming the code would be a lie.
+
+A `baseline:` value must be a plain relative name **inside** `baselines/` — no
+absolute path, no `..`. Anything else is rejected at validation time: a path that
+escapes the directory would be compared against (and, under
+`--write-baselines`, written to) a file outside version control, quietly voiding
+the "the baseline is a committed asset" contract.
 
 #### Where the E2E step sits, and how failures route
 

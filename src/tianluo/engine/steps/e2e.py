@@ -15,6 +15,12 @@ routes the flow engine already knows:
   a missing container runtime appear, so routing it into the loop would dispatch
   the implementing agent at the operator's machine and burn the whole fix budget.
 
+Before running anything the step maintains ``tianluo/e2e/`` — generating it on
+first use and evolving it incrementally on every later flow (see
+:func:`_maintain_content`). The content is the flow's artefact exactly like test
+code is, so leaving it at whatever the first flow authored would let the suite
+report green over behaviour nothing covers.
+
 The step is only ever part of a sequence when ``e2e.enabled`` is true (see
 ``config.insert_e2e_step``); the disabled branch here is defensive, for a
 persisted flow whose sequence was derived while the switch was on.
@@ -33,7 +39,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ...i18n import t
 from ..models import FlowInstance, Step, StepStatus
@@ -74,7 +80,7 @@ def e2e_handler(step: Step, flow: FlowInstance) -> StepStatus:
     from ...e2e.session import run_e2e
 
     try:
-        bootstrap_note = _ensure_content(project_root, flow)
+        bootstrap_note = _maintain_content(project_root, step, flow)
         verdict = run_e2e(
             project_root,
             config=config,
@@ -118,11 +124,32 @@ def e2e_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.COMPLETED
 
     failed_names = [result.name for result in verdict.failed_scenarios]
-    step.error_message = t(
-        "e2e.step.scenarios_failed",
-        count=len(failed_names),
-        scenarios=", ".join(failed_names) or "-",
-    )
+    # A critical scenario that produced no result forces `passed=False` with an
+    # empty failed list, so composing the headline from the failed list alone
+    # would announce "0 e2e scenario(s) failed" as the reason for a revision —
+    # a self-contradiction wherever error_message is the only thing on screen
+    # (WebUI, history). Each cause states itself, and both can hold at once.
+    unverified = [
+        str(name) for name in (summary.get("critical_unverified") or [])
+    ]
+    reasons = []
+    if failed_names:
+        reasons.append(
+            t(
+                "e2e.step.scenarios_failed",
+                count=len(failed_names),
+                scenarios=", ".join(failed_names),
+            )
+        )
+    if unverified:
+        reasons.append(
+            t(
+                "e2e.step.critical_unverified",
+                count=len(unverified),
+                scenarios=", ".join(unverified),
+            )
+        )
+    step.error_message = " ".join(reasons) or t("e2e.step.not_passed")
     step.outputs["fix_needed"] = True
     step.outputs["fix_instructions"] = verdict.fix_instructions
     step.outputs["fix_context"] = _describe_issues(verdict.fix_context)
@@ -207,17 +234,47 @@ def _fail_config(step: Step, message: str) -> StepStatus:
     return StepStatus.FAILED
 
 
-def _ensure_content(project_root: Path, flow: FlowInstance) -> str:
-    """Make sure ``tianluo/e2e/`` exists before the session tries to read it.
+# Marker in the flow's shared context recording that this flow has already had
+# its one content-evolution pass. Lives in the persisted context (not in
+# ``step.outputs``) because the E2E step is re-executed from scratch on every fix
+# iteration, and the whole point of the guard is to survive exactly that.
+_EVOLVED_CONTEXT_KEY = "e2e_content_evolved"
 
-    First generation (the switch is on but the content directory does not exist
-    yet) and incremental evolution are the bootstrap module's job. Returns a short
-    note for the step summary, or an empty string when nothing was generated.
+# Enough changed paths for the model to see the shape of the task, far short of
+# pasting a large refactor's whole file list into the prompt.
+_MAX_HINT_FILES = 40
 
-    The import is guarded: the content directory is authored by the flow and, once
-    present, needs no generation at all, so an unavailable bootstrap module must
-    not stop a project whose content is already in place — the session then
-    reports a locating ``E2EConfigError`` if it really is missing.
+
+def _maintain_content(project_root: Path, step: Step, flow: FlowInstance) -> str:
+    """Bring ``tianluo/e2e/`` in step with the code this flow just changed.
+
+    The flow owns this directory the same way it owns test code, which means two
+    halves of one job — and only doing the first half is how an e2e suite quietly
+    rots:
+
+    * **first use** (the switch is on but the directory does not exist yet) →
+      ``ensure_content`` authors it against the current task;
+    * **every later flow** → ``evolve_content`` extends and revises it, so a task
+      that adds a user-visible behaviour also grows the scenario exercising it.
+      Without this half the suite freezes at whatever the very first flow wrote,
+      and each later run reports a green board for code that nothing covers —
+      the most expensive kind of green, because it looks verified.
+
+    Evolution happens BEFORE the scenarios run, so anything it adds is exercised
+    in this same flow and a failure it exposes routes into the ordinary fix loop.
+
+    INVARIANT: at most one evolution pass per flow, guarded by
+    ``_EVOLVED_CONTEXT_KEY``. Re-evolving on every fix iteration would (a) spend
+    an LLM call per iteration on a task whose code has barely moved, and (b) show
+    the model the very assertion currently failing while it is being asked to
+    revise scenarios — an open invitation to make the suite pass by weakening it,
+    which is precisely the bypass the charter forbids.
+
+    Returns a short note for the step summary, or ``""`` when nothing changed.
+    The bootstrap import is guarded: content that is already in place needs no
+    generation at all, so an unavailable bootstrap module must not stop a project
+    whose directory is complete — the session then reports a locating
+    ``E2EConfigError`` if it really is missing.
     """
     try:
         from ...e2e import bootstrap  # type: ignore[attr-defined]
@@ -226,21 +283,156 @@ def _ensure_content(project_root: Path, flow: FlowInstance) -> str:
         return ""
 
     ensure = getattr(bootstrap, "ensure_content", None)
-    if not callable(ensure):
+    if callable(ensure):
+        result = ensure(project_root, flow)
+        if result is not None and getattr(result, "created", False):
+            from ...e2e.content_config import content_relpath
+
+            # Freshly authored against this very task, so there is nothing for an
+            # evolution pass to add — and the guard is set so a later fix
+            # iteration does not mistake "generated this flow" for "never
+            # maintained".
+            _mark_evolved(flow)
+            return t(
+                "e2e.step.content_bootstrapped",
+                directory=str(content_relpath(project_root)),
+            )
+    else:
         logger.debug("e2e bootstrap module exposes no ensure_content; skipping")
+
+    return _evolve_content(project_root, step, flow, bootstrap)
+
+
+def _evolve_content(
+    project_root: Path, step: Step, flow: FlowInstance, bootstrap: Any
+) -> str:
+    """Run this flow's single incremental-evolution pass over existing content."""
+    evolve = getattr(bootstrap, "evolve_content", None)
+    if not callable(evolve):
+        logger.debug("e2e bootstrap module exposes no evolve_content; skipping")
+        return ""
+    if _already_evolved(flow):
         return ""
 
-    result = ensure(project_root, flow)
+    hints = _evolution_hints(step, flow)
+    if not hints:
+        # Nothing to say about what changed means nothing to aim an evolution at,
+        # and an unaimed pass is pure churn against a suite that already runs.
+        logger.debug("no e2e evolution hints available; leaving content as is")
+        return ""
+
+    # Marked before the call, not after: the guard means "this flow has had its
+    # attempt", so a proposal that fails must not be retried by the next fix
+    # iteration with a nearly identical prompt.
+    _mark_evolved(flow)
+    result = evolve(project_root, flow, hints)
     if result is None:
         return ""
-    if getattr(result, "created", False):
-        from ...e2e.content_config import content_relpath
 
-        return t(
-            "e2e.step.content_bootstrapped",
-            directory=str(content_relpath(project_root)),
+    errors = tuple(getattr(result, "errors", ()) or ())
+    if errors:
+        # Degrades on purpose: the content already on disk is valid and runnable,
+        # so a rejected proposal is reported, never fatal.
+        logger.warning("e2e content evolution produced nothing usable: %s", errors[0])
+    elif getattr(result, "changed", False):
+        logger.info(
+            "e2e content evolved: %s", ", ".join(getattr(result, "written", ()) or ())
         )
-    return str(getattr(result, "note", "") or "")
+    if errors or getattr(result, "changed", False):
+        return str(getattr(result, "note", "") or "")
+    return ""
+
+
+def _already_evolved(flow: FlowInstance) -> bool:
+    context = getattr(getattr(flow, "state", None), "context", None)
+    return bool(isinstance(context, dict) and context.get(_EVOLVED_CONTEXT_KEY))
+
+
+def _mark_evolved(flow: FlowInstance) -> None:
+    context = getattr(getattr(flow, "state", None), "context", None)
+    if isinstance(context, dict):
+        context[_EVOLVED_CONTEXT_KEY] = True
+
+
+def _evolution_hints(step: Step, flow: FlowInstance) -> List[str]:
+    """Describe what this task changed, for the evolution prompt to aim at.
+
+    Deliberately assembled from what the flow already carries (the task
+    description and the implement step's ``changes_made``) rather than by
+    diffing git: the step's declared inputs are the engine's own account of the
+    change, and they stay meaningful in worktree mode where the working tree has
+    already moved on.
+    """
+    inputs = step.inputs if isinstance(step.inputs, dict) else {}
+    hints: List[str] = []
+
+    task = str(getattr(flow, "task_description", "") or "").strip()
+    if task:
+        hints.append("Task implemented in this flow: " + task)
+
+    changes = inputs.get("changes_made")
+    if isinstance(changes, dict):
+        paths = _changed_paths(changes.get("files_changed"))
+        if paths:
+            hints.append("Files changed: " + ", ".join(paths[:_MAX_HINT_FILES]))
+        groups = _group_labels(changes.get("implemented_groups"))
+        if groups:
+            hints.append("Implemented groups: " + "; ".join(groups))
+
+    # Sibling input, not part of ``changes_made``: the state machine forwards the
+    # implement step's prose summary under its own key.
+    summary = str(inputs.get("implement_summary") or "").strip()
+    if not summary and isinstance(changes, dict):
+        summary = str(changes.get("summary") or "").strip()
+    if summary:
+        hints.append("Implementation summary: " + summary)
+
+    return hints
+
+
+def _changed_paths(files_changed: Any) -> List[str]:
+    """Normalize ``changes_made.files_changed``, which has two live shapes.
+
+    The implement step emits plain path strings; other producers emit
+    ``{"path": ..., "action": ...}`` mappings (see ``version_analyze``).
+    """
+    if not isinstance(files_changed, (list, tuple)):
+        return []
+    paths: List[str] = []
+    for entry in files_changed:
+        if isinstance(entry, str):
+            candidate = entry.strip()
+        elif isinstance(entry, dict):
+            candidate = str(entry.get("path") or "").strip()
+        else:
+            candidate = ""
+        if candidate and candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def _group_labels(implemented_groups: Any) -> List[str]:
+    """Normalize ``changes_made.implemented_groups``, which also has two shapes.
+
+    Group-by-group execution records bare group ids; the whole-plan path records
+    ``{"name": ..., "description": ...}`` mappings. The description is what tells
+    the model *what behaviour* appeared, so it is kept when present.
+    """
+    if not isinstance(implemented_groups, (list, tuple)):
+        return []
+    labels: List[str] = []
+    for entry in implemented_groups:
+        if isinstance(entry, str):
+            label = entry.strip()
+        elif isinstance(entry, dict):
+            name = str(entry.get("name") or entry.get("id") or "").strip()
+            description = str(entry.get("description") or "").strip()
+            label = ": ".join(part for part in (name, description) if part)
+        else:
+            label = ""
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:_MAX_HINT_FILES]
 
 
 def _artifacts_dir(project_root: Path, flow: FlowInstance) -> Path:

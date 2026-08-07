@@ -25,6 +25,7 @@ from tianluo.i18n import t
 __all__ = [
     "E2E_EXTRA",
     "E2EConfigError",
+    "E2EContentIncompleteError",
     "E2EDependencyMissingError",
     "E2EEnvironmentError",
     "E2EError",
@@ -50,6 +51,21 @@ class E2EConfigError(E2EError):
     or a bad ``tianluo/e2e/`` content file — including assertion-ladder
     violations (using a higher assertion tier without declaring it). Messages
     carry the offending file and the YAML path so the author can locate it.
+    """
+
+
+class E2EContentIncompleteError(E2EConfigError):
+    """``tianluo/e2e/`` exists but holds only half of what it needs.
+
+    An ``environment.yaml`` with no scenarios, or scenarios with no environment:
+    the shape an interrupted bootstrap leaves behind.
+
+    WHY a distinct class: this is the one content problem *generation* can
+    repair, so :func:`~tianluo.e2e.bootstrap.evolve_content` completes it instead
+    of failing. Every other content error — unparsable YAML, a schema violation —
+    must surface to the caller, and separating the two by matching on message
+    text would put that distinction one wording change away from silently
+    inverting, hiding a corrupted file behind a cheerful "unchanged".
     """
 
 

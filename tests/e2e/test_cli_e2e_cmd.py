@@ -131,6 +131,27 @@ def failing_verdict() -> E2EVerdict:
     )
 
 
+def _add_visual_scenario(project: Path) -> None:
+    """Add a tier-2 scenario whose baseline image has never been captured."""
+    (project / "tianluo" / "e2e" / "scenarios" / "home.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "name": "home",
+                "driver": "app",
+                "assertions": [
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": "home.png",
+                        "visual_regression": True,
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
 def stub_run(monkeypatch: pytest.MonkeyPatch, verdict: Any) -> Dict[str, Any]:
     """Replace ``session.run_e2e`` and record how the CLI called it."""
     recorded: Dict[str, Any] = {}
@@ -171,6 +192,54 @@ class TestRun:
 
         assert result.exit_code == EXIT_SCENARIO_FAILED
         assert "cli-smoke" in output_of(result)
+
+    def test_the_failed_scenario_line_is_localized(
+        self, project: Path, usable_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Console output goes through t() like every other line here.
+
+        The per-scenario line used to be ``ScenarioResult.summary_line()`` — a
+        hardcoded English string built for logs — so a zh-CN user got one English
+        row interleaved with localized output.
+        """
+        from tianluo import i18n
+
+        stub_run(monkeypatch, failing_verdict())
+        monkeypatch.setenv("SE3_LANG", "zh-CN")
+        i18n.reset_language()
+        i18n.set_language("zh-CN")
+        try:
+            result = runner.invoke(e2e_app, ["run", "-p", str(project)])
+        finally:
+            i18n.set_language("en-US")
+
+        text = output_of(result)
+        assert "cli-smoke" in text
+        assert "[PASS]" not in text and "[FAIL]" not in text
+        assert "assertions" not in text
+
+    def test_a_relative_project_root_reaches_the_session_absolute(
+        self,
+        project: Path,
+        usable_runtime: Any,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The root becomes the host side of every bind mount.
+
+        docker/podman reject a relative ``-v .:/workspace`` as an invalid volume
+        name, so `luo e2e run -p .` would fail to start a single container and
+        report it as a host environment problem — for input the CLI accepted
+        without complaint.
+        """
+        recorded = stub_run(monkeypatch, passing_verdict())
+        monkeypatch.chdir(project)
+
+        result = runner.invoke(e2e_app, ["run", "-p", "."])
+
+        assert result.exit_code == EXIT_OK
+        assert recorded["root"].is_absolute()
+        assert recorded["root"] == project.resolve()
+        assert recorded["content"].project_root.is_absolute()
 
     def test_a_preflight_failure_exits_with_the_environment_code(
         self, project: Path, monkeypatch: pytest.MonkeyPatch
@@ -267,6 +336,48 @@ class TestRun:
         assert result.exit_code == EXIT_OK
         assert recorded["keep_environment"] is True
         assert recorded["write_missing_baselines"] is True
+
+    def test_write_baselines_gets_past_a_not_yet_captured_baseline(
+        self, project: Path, usable_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The flag would be unreachable if loading rejected the absent image."""
+        _add_visual_scenario(project)
+        recorded = stub_run(monkeypatch, passing_verdict(["home"]))
+
+        result = runner.invoke(
+            e2e_app, ["run", "-p", str(project), "--write-baselines"]
+        )
+
+        assert result.exit_code == EXIT_OK, output_of(result)
+        assert recorded["write_missing_baselines"] is True
+        assert [s.name for s in recorded["content"].scenarios] == [
+            "cli-smoke",
+            "home",
+        ]
+
+    def test_without_the_flag_a_missing_baseline_is_a_configuration_error(
+        self, project: Path, usable_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _add_visual_scenario(project)
+        stub_run(monkeypatch, passing_verdict())
+
+        result = runner.invoke(e2e_app, ["run", "-p", str(project)])
+
+        assert result.exit_code == EXIT_CONFIG
+        assert "home.png" in output_of(result)
+
+    def test_a_kept_environment_prints_the_cleanup_commands(
+        self, project: Path, usable_runtime: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Logging is not an option here: `luo` installs no logging handler."""
+        verdict = passing_verdict()
+        verdict.notices.append("docker rm -f app && docker network rm tianluo-e2e")
+        stub_run(monkeypatch, verdict)
+
+        result = runner.invoke(e2e_app, ["run", "-p", str(project), "--keep"])
+
+        assert result.exit_code == EXIT_OK
+        assert "docker network rm tianluo-e2e" in output_of(result)
 
     def test_without_keep_the_configured_value_still_decides(
         self, project: Path, usable_runtime: Any, monkeypatch: pytest.MonkeyPatch

@@ -43,15 +43,21 @@ def environment(**overrides) -> dict:
                 "image": "python:3.12-slim",
                 "base_kind": "base",
                 "build": ["pip install -e ."],
-                "ports": ["8000:8000"],
+                "ports": ["18000:8000"],
                 "environment": {"APP_ENV": "test"},
-                "readiness": {"kind": "http", "url": "http://app:8000/healthz"},
+                # `http`/`tcp` probes are dialled from the host, so they name the
+                # published host port — see TestReadinessReachability.
+                "readiness": {
+                    "kind": "http",
+                    "url": "http://127.0.0.1:18000/healthz",
+                },
             },
             {
                 "name": "db",
                 "image": "postgres:16",
                 "mount_source": False,
-                "readiness": {"kind": "tcp", "port": 5432},
+                "ports": ["15432:5432"],
+                "readiness": {"kind": "tcp", "port": 15432},
             },
         ]
     }
@@ -110,8 +116,8 @@ class TestValidContent:
         "probe",
         [
             {"kind": "command", "command": ["true"]},
-            {"kind": "http", "url": "http://app:8000/"},
-            {"kind": "tcp", "port": 5432},
+            {"kind": "http", "url": "http://127.0.0.1:18000/"},
+            {"kind": "tcp", "port": 18000},
             {"kind": "log", "pattern": "listening on"},
         ],
     )
@@ -263,7 +269,7 @@ class TestEnvironmentRules:
     def test_readiness_budgets_must_be_positive(self, budget):
         env = environment()
         env["services"][0]["readiness"] = {
-            "kind": "http", "url": "http://app/", budget: 0
+            "kind": "http", "url": "http://127.0.0.1:18000/", budget: 0
         }
         errors, _ = validate_environment(env, ENV_SOURCE)
         assert located(errors, ENV_SOURCE, f"services[0].readiness.{budget}")
@@ -283,6 +289,152 @@ class TestEnvironmentRules:
 
     def test_readiness_kinds_are_exactly_the_documented_four(self):
         assert set(READINESS_KINDS) == {"command", "http", "tcp", "log"}
+
+
+class TestReadinessReachability:
+    """`http`/`tcp` probes are dialled from the host, so they must be dialable.
+
+    Both rejected shapes read as perfectly sensible YAML and fail identically at
+    run time: the probe polls an address that can never answer, spends its whole
+    budget, and reports a healthy service as an environment failure.
+    """
+
+    def probe_errors(self, probe, *, ports=None):
+        env = environment()
+        env["services"][0]["readiness"] = probe
+        if ports is not None:
+            env["services"][0]["ports"] = ports
+        errors, _ = validate_environment(env, ENV_SOURCE)
+        return located(errors, ENV_SOURCE, "services[0].readiness")
+
+    def test_http_probe_naming_an_in_network_service_is_rejected(self):
+        """`app:8000` resolves only inside the container network."""
+        assert self.probe_errors({"kind": "http", "url": "http://app:8000/health"})
+
+    def test_http_probe_on_an_unpublished_loopback_port_is_rejected(self):
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://localhost:8000/health"},
+            ports=["18000:8000"],
+        )
+
+    def test_http_probe_on_the_published_host_port_is_accepted(self):
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://127.0.0.1:18000/health"},
+            ports=["18000:8000"],
+        ) == []
+
+    def test_a_service_publishing_nothing_cannot_carry_an_http_probe(self):
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://localhost:8000/health"}, ports=[]
+        )
+
+    def test_command_probes_are_unconstrained_because_they_run_inside(self):
+        assert self.probe_errors(
+            {"kind": "command", "command": ["curl", "-fsS", "http://app:8000/health"]},
+            ports=[],
+        ) == []
+
+    def test_tcp_probe_defaults_to_loopback_and_needs_the_port_published(self):
+        assert self.probe_errors({"kind": "tcp", "port": 5432}, ports=["15432:5432"])
+        assert self.probe_errors({"kind": "tcp", "port": 15432}, ports=["15432:5432"]) == []
+
+    def test_an_ephemeral_host_port_mapping_is_not_second_guessed(self):
+        """`-p 8000` picks the host port at random; nothing can be asserted."""
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://127.0.0.1:8000/"}, ports=["8000"]
+        ) == []
+
+    def test_an_external_host_is_left_alone(self):
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://health.example.test/live"}, ports=[]
+        ) == []
+
+    def test_expected_http_status_is_accepted(self):
+        """A health route that answers 401 when up must still be probeable."""
+        assert self.probe_errors(
+            {"kind": "http", "url": "http://127.0.0.1:18000/", "status": 401},
+            ports=["18000:8000"],
+        ) == []
+
+    @pytest.mark.parametrize("status", [99, 600, "200", True])
+    def test_a_nonsensical_expected_status_is_rejected(self, status):
+        env = environment()
+        env["services"][0]["readiness"] = {
+            "kind": "http", "url": "http://127.0.0.1:18000/", "status": status,
+        }
+        errors, _ = validate_environment(env, ENV_SOURCE)
+        assert located(errors, ENV_SOURCE, "services[0].readiness.status")
+
+
+class TestReadinessFieldTypes:
+    """Presence is not enough: the conversion layer coerces these values.
+
+    ``ServiceDecl.to_spec`` runs ``int(port)`` and ``tuple(str(part) for ...)``
+    on whatever survived validation, so a malformed field that only had its
+    *name* checked would surface as a bare ValueError traceback out of the E2E
+    step instead of a located configuration error.
+    """
+
+    def field_errors(self, probe, path):
+        env = environment()
+        env["services"][0]["readiness"] = probe
+        env["services"][0]["ports"] = ["18000:8000", "15432:5432"]
+        errors, _ = validate_environment(env, ENV_SOURCE)
+        # Prefix match rather than `located`: a bad *item* of an argv list is
+        # reported at `...command[1]`, which is still the command field.
+        prefix = f"{ENV_SOURCE}: {path}"
+        return [message for message in errors if message.startswith(prefix)]
+
+    @pytest.mark.parametrize("port", ["abc", "15432", 0, 70000, True, 1.5])
+    def test_a_non_port_tcp_port_is_rejected(self, port):
+        assert self.field_errors(
+            {"kind": "tcp", "port": port}, "services[0].readiness.port"
+        )
+
+    @pytest.mark.parametrize("command", [5, {"run": "x"}, [], ["ok", 7]])
+    def test_a_malformed_command_is_rejected(self, command):
+        assert self.field_errors(
+            {"kind": "command", "command": command}, "services[0].readiness.command"
+        )
+
+    def test_a_well_formed_command_still_validates(self):
+        assert self.field_errors(
+            {"kind": "command", "command": ["pg_isready"]},
+            "services[0].readiness.command",
+        ) == []
+
+    @pytest.mark.parametrize("value", [5, ["http://x/"]])
+    def test_a_non_string_url_is_rejected(self, value):
+        assert self.field_errors(
+            {"kind": "http", "url": value}, "services[0].readiness.url"
+        )
+
+    @pytest.mark.parametrize("budget", ["timeout", "interval"])
+    @pytest.mark.parametrize("value", [float("inf"), float("nan")])
+    def test_a_non_finite_readiness_budget_is_rejected(self, budget, value):
+        """A NaN budget yields a deadline every comparison answers False to."""
+        probe = {"kind": "tcp", "port": 15432, budget: value}
+        assert self.field_errors(probe, f"services[0].readiness.{budget}")
+
+    def test_a_non_finite_scenario_timeout_never_reaches_the_loader(self, tmp_path):
+        """`timeout: .nan` must fail as located config, not as ValueError."""
+        write_content(
+            tmp_path,
+            env=environment(),
+            scenarios={"smoke.yaml": scenario(timeout=float("nan"))},
+        )
+
+        with pytest.raises(E2EConfigError):
+            load_content_config(tmp_path)
+
+    def test_a_malformed_probe_never_reaches_the_conversion_layer(self, tmp_path):
+        """The loader must raise E2EConfigError, not ValueError from int()."""
+        env = environment()
+        env["services"][0]["readiness"] = {"kind": "tcp", "port": "abc"}
+        write_content(tmp_path, env=env, scenarios={"smoke.yaml": scenario()})
+
+        with pytest.raises(E2EConfigError):
+            load_content_config(tmp_path)
 
 
 # --------------------------------------------------------------------------
@@ -328,6 +480,19 @@ class TestScenarioRules:
     def test_positive_timeout_accepted(self):
         assert self.validate(scenario(timeout=30)) == []
 
+    @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+    def test_non_finite_timeout_is_rejected(self, value):
+        """`.inf`/`.nan` survive a bare `<= 0` test and then crash the loader.
+
+        YAML admits both spellings, and the conversion layer runs
+        ``int(math.ceil(...))`` on whatever validation let through — inf raises
+        OverflowError, NaN raises ValueError, neither of which locates the
+        offending document.
+        """
+        assert located(
+            self.validate(scenario(timeout=value)), SCENARIO_SOURCE, "timeout"
+        )
+
     def test_assertions_required(self):
         data = scenario()
         del data["assertions"]
@@ -359,6 +524,104 @@ class TestScenarioRules:
     def test_assertion_needing_one_of_several_fields(self):
         errors = self.validate(scenario(assertions=[{"kind": "stdout"}]))
         assert located(errors, SCENARIO_SOURCE, "assertions[0]")
+
+    @pytest.mark.parametrize("value", ["true", 1, "no"])
+    def test_a_non_boolean_fail_fast_is_rejected(self, value):
+        """The parse layer reads flags by identity, so a string would be dropped.
+
+        Validating it here is what keeps the parsed scenario in agreement with
+        the document that was validated — the author's declaration is either
+        honoured or reported, never silently discarded.
+        """
+        assert located(
+            self.validate(scenario(fail_fast=value)), SCENARIO_SOURCE, "fail_fast"
+        )
+
+    def test_a_boolean_fail_fast_is_accepted(self):
+        assert self.validate(scenario(fail_fast=True)) == []
+
+    def test_a_dom_assertion_needs_a_playwright_driver(self):
+        """Statically knowable, so it must not cost an image build to discover.
+
+        The executor raises on this too, but only after every image is built and
+        every readiness probe awaited — and the raise discards the results of the
+        scenarios that already ran in the same round.
+        """
+        errors = self.validate(
+            scenario(assertions=[{"kind": "dom", "selector": "h1"}]),
+            service_kinds={"app": "base", "db": "base"},
+        )
+        assert located(errors, SCENARIO_SOURCE, "assertions[0]")
+
+    def test_a_browser_action_needs_a_playwright_driver(self):
+        errors = self.validate(
+            scenario(
+                actions=[{"action": "browser", "op": "goto", "url": "http://app:8000/"}]
+            ),
+            service_kinds={"app": "base", "db": "base"},
+        )
+        assert located(errors, SCENARIO_SOURCE, "actions[0]")
+
+    def test_a_playwright_driver_may_drive_the_browser(self):
+        assert self.validate(
+            scenario(
+                driver="browser",
+                actions=[{"action": "browser", "op": "goto", "url": "http://app:8000/"}],
+                assertions=[{"kind": "dom", "selector": "h1"}],
+            ),
+            services=("app", "browser"),
+            service_kinds={"app": "base", "browser": "playwright"},
+        ) == []
+
+    def test_capability_is_not_checked_without_the_base_kind_map(self):
+        """A caller validating a scenario alone only gets the name check."""
+        assert self.validate(
+            scenario(assertions=[{"kind": "dom", "selector": "h1"}])
+        ) == []
+
+    def test_a_bundle_rejects_a_dom_assertion_on_a_base_driver(self):
+        """The whole-bundle entry point is where the two documents meet."""
+        scenarios = {
+            SCENARIO_SOURCE: scenario(assertions=[{"kind": "dom", "selector": "h1"}])
+        }
+        errors = validate_content(bundle(scenarios=scenarios), "tianluo/e2e")
+        assert located(errors, SCENARIO_SOURCE, "assertions[0]")
+
+    def test_a_bundle_accepts_a_dom_assertion_on_a_playwright_driver(self):
+        env = environment()
+        env["services"].append(
+            {"name": "browser", "image": "mcr.microsoft.com/playwright:v1.47.0",
+             "base_kind": "playwright"}
+        )
+        scenarios = {
+            SCENARIO_SOURCE: scenario(
+                driver="browser", assertions=[{"kind": "dom", "selector": "h1"}]
+            )
+        }
+        assert validate_content(bundle(env, scenarios), "tianluo/e2e") == []
+
+    def test_a_non_browser_action_after_a_browser_one_is_rejected(self):
+        """Browser ops are batched last, so the declared order cannot hold."""
+        errors = self.validate(
+            scenario(
+                actions=[
+                    {"action": "browser", "op": "goto", "url": "http://app:8000/"},
+                    {"action": "exec", "command": ["seed"]},
+                ]
+            )
+        )
+        assert located(errors, SCENARIO_SOURCE, "actions[1]")
+
+    def test_non_browser_actions_declared_first_are_fine(self):
+        assert self.validate(
+            scenario(
+                actions=[
+                    {"action": "exec", "command": ["seed"]},
+                    {"action": "browser", "op": "goto", "url": "http://app:8000/"},
+                    {"action": "browser", "op": "click", "selector": "#go"},
+                ]
+            )
+        ) == []
 
 
 # --------------------------------------------------------------------------
@@ -485,6 +748,65 @@ class TestAssertionLadder:
         assert located(errors, SCENARIO_SOURCE, "assertions[0]")
         assert len(errors) == 1
 
+    # -- a flag is a declaration, not a truthy value -----------------------
+
+    @pytest.mark.parametrize("value", ["false", "no", 1, [], "true"])
+    def test_a_non_boolean_tier_flag_never_unlocks_a_tier(self, value):
+        """`visual_regression: "false"` must not read as a declared escalation.
+
+        Python truthiness would accept every non-empty string here — including
+        one whose author plainly meant the opposite — so the flag that is meant
+        to record a deliberate escalation would be satisfied by an accident.
+        """
+        errors = self.validate(
+            {
+                "kind": "screenshot_diff",
+                "baseline": "home.png",
+                "visual_regression": value,
+            }
+        )
+        assert errors  # either a type error, or "tier 2 undeclared", or both
+        assert not any("threshold" in error for error in errors)
+
+    def test_a_non_boolean_evidence_flag_does_not_satisfy_the_evidence_rule(self):
+        errors = self.validate(
+            {
+                "kind": "visual_semantic",
+                "question": "Is the chart readable?",
+                "semantic_visual": True,
+                "require_evidence": "no",
+            }
+        )
+        assert located(errors, SCENARIO_SOURCE, "assertions[0].require_evidence")
+        assert located(errors, SCENARIO_SOURCE, "assertions[0]")
+
+    # -- baseline shape ----------------------------------------------------
+
+    def test_a_non_string_baseline_is_rejected(self, tmp_path):
+        """Otherwise the baseline-existence rule is bypassable by any non-str."""
+        errors = validate_scenario(
+            scenario(
+                assertions=[
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": 123,
+                        "visual_regression": True,
+                    }
+                ]
+            ),
+            SCENARIO_SOURCE,
+            service_names=["app"],
+            environment_source=ENV_SOURCE,
+            baselines_dir=tmp_path / "baselines",
+        )
+        assert located(errors, SCENARIO_SOURCE, "assertions[0].baseline")
+
+    def test_an_empty_baseline_is_rejected(self):
+        errors = self.validate(
+            {"kind": "screenshot_diff", "baseline": "  ", "visual_regression": True}
+        )
+        assert located(errors, SCENARIO_SOURCE, "assertions[0].baseline")
+
     def test_semantic_flag_on_a_tier2_assertion_is_rejected(self):
         errors = self.validate(
             {
@@ -561,6 +883,67 @@ class TestBaselinesAndBundle:
         )
         assert errors == []
 
+    @pytest.mark.parametrize(
+        "baseline",
+        [
+            "/etc/hosts",
+            "../../../etc/hosts",
+            "sub/../../out.png",
+            "C:/Windows/out.png",
+            # Rooted but driveless: PureWindowsPath calls this *relative* (a
+            # Windows path is absolute only with drive *and* root), yet joining it
+            # keeps the drive and throws the baselines directory away — the shot
+            # lands at the drive root. Drive-relative "C:out.png" re-anchors on
+            # that drive's own cwd for the same reason.
+            "\\out.png",
+            "C:out.png",
+        ],
+    )
+    def test_a_baseline_outside_the_directory_is_rejected(self, tmp_path, baseline):
+        """Joining an anchored name onto the baselines dir discards the dir.
+
+        Without containment a scenario could compare against — and
+        ``--write-baselines`` could write — a file outside the git-tracked
+        baselines directory, silently voiding the "baseline asset in git"
+        contract. The check runs even when the file happens to exist.
+        """
+        errors = validate_scenario(
+            scenario(
+                assertions=[
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": baseline,
+                        "visual_regression": True,
+                    }
+                ]
+            ),
+            SCENARIO_SOURCE,
+            service_names=["app"],
+            environment_source=ENV_SOURCE,
+            baselines_dir=tmp_path,
+        )
+        assert located(errors, SCENARIO_SOURCE, "assertions[0].baseline")
+
+    def test_a_baseline_in_a_subdirectory_is_still_allowed(self, tmp_path):
+        (tmp_path / "web").mkdir()
+        (tmp_path / "web" / "home.png").write_bytes(b"x")
+        errors = validate_scenario(
+            scenario(
+                assertions=[
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": "web/home.png",
+                        "visual_regression": True,
+                    }
+                ]
+            ),
+            SCENARIO_SOURCE,
+            service_names=["app"],
+            environment_source=ENV_SOURCE,
+            baselines_dir=tmp_path,
+        )
+        assert errors == []
+
     def test_missing_baseline_file_is_reported(self, tmp_path):
         errors = validate_scenario(
             scenario(
@@ -580,6 +963,43 @@ class TestBaselinesAndBundle:
         anchored = located(errors, SCENARIO_SOURCE, "assertions[0].baseline")
         assert anchored
         assert "home.png" in anchored[0]
+
+    def test_first_capture_admits_a_baseline_that_is_not_there_yet(self, tmp_path):
+        """A baseline can only be produced by running the scenario once.
+
+        So the caller that has asked for that first capture must be able to get
+        past validation, while every *other* rule still applies.
+        """
+        errors = validate_scenario(
+            scenario(
+                assertions=[
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": "home.png",
+                        "visual_regression": True,
+                    }
+                ]
+            ),
+            SCENARIO_SOURCE,
+            service_names=["app"],
+            environment_source=ENV_SOURCE,
+            baselines_dir=tmp_path,
+            require_existing_baselines=False,
+        )
+        assert errors == []
+
+    def test_first_capture_does_not_relax_the_ladder(self, tmp_path):
+        errors = validate_scenario(
+            scenario(
+                assertions=[{"kind": "screenshot_diff", "baseline": "home.png"}]
+            ),
+            SCENARIO_SOURCE,
+            service_names=["app"],
+            environment_source=ENV_SOURCE,
+            baselines_dir=tmp_path,
+            require_existing_baselines=False,
+        )
+        assert any("visual_regression" in message for message in errors)
 
     def test_present_baseline_file_passes(self, tmp_path):
         (tmp_path / "home.png").write_bytes(b"\x89PNG")
@@ -650,7 +1070,9 @@ class TestBaselinesAndBundle:
                 imported.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
                 imported.add(node.module.split(".")[0])
-        assert imported <= {"re", "pathlib", "typing", "__future__", "tianluo"}
+        assert imported <= {
+            "math", "re", "pathlib", "typing", "urllib", "__future__", "tianluo",
+        }
 
 
 # --------------------------------------------------------------------------
@@ -701,6 +1123,29 @@ class TestContentLoader:
             load_content_config(tmp_path)
         assert "scenarios" in str(excinfo.value)
 
+    def test_only_the_half_present_shapes_are_marked_incomplete(self, tmp_path):
+        """Bootstrap completes a half-present directory and only that.
+
+        The distinction has to live in the exception type: a corrupted scenario
+        file must not be mistaken for "an interrupted bootstrap" and quietly
+        completed — it is content a person has to fix.
+        """
+        from tianluo.e2e.errors import E2EContentIncompleteError
+
+        write_content(tmp_path, env=environment())
+        with pytest.raises(E2EContentIncompleteError):
+            read_raw_content(tmp_path)
+
+        e2e_dir = write_content(
+            tmp_path, env=environment(), scenarios={"smoke.yaml": scenario()}
+        )
+        (e2e_dir / "scenarios" / "smoke.yaml").write_text(
+            "name: [unclosed\n", encoding="utf-8"
+        )
+        with pytest.raises(E2EConfigError) as excinfo:
+            read_raw_content(tmp_path)
+        assert not isinstance(excinfo.value, E2EContentIncompleteError)
+
     def test_malformed_yaml_is_located(self, tmp_path):
         e2e_dir = write_content(
             tmp_path, env=environment(), scenarios={"smoke.yaml": scenario()}
@@ -720,6 +1165,48 @@ class TestContentLoader:
         assert [s.name for s in content.scenarios] == ["smoke"]
         assert content.scenario("smoke").driver == "app"
         assert content.service("db").mount_source is False
+
+    def test_a_fractional_timeout_survives_parsing(self, tmp_path):
+        """Validation accepts any positive number; parsing must not lose it.
+
+        Truncating 0.5s to 0 makes the executor read "no budget declared" and
+        substitute the 300s config default — running a scenario the document
+        said to cut off in half a second.
+        """
+        write_content(
+            tmp_path,
+            env=environment(),
+            scenarios={"smoke.yaml": scenario(timeout=0.5)},
+        )
+        content = load_content_config(tmp_path)
+        assert content.scenario("smoke").timeout == 1
+
+    def test_declaration_flags_are_parsed_as_the_schema_validates_them(self, tmp_path):
+        """A parsed scenario must not claim a tier the document never declared."""
+        from tianluo.e2e.content_config import _build_scenario
+
+        parsed = _build_scenario(
+            {
+                "name": "smoke",
+                "driver": "app",
+                "assertions": [
+                    {
+                        "kind": "screenshot_diff",
+                        "baseline": "home.png",
+                        "visual_regression": "false",
+                    }
+                ],
+            },
+            SCENARIO_SOURCE,
+        )
+        assert parsed.assertions[0].visual_regression is False
+
+    def test_readiness_status_reaches_the_probe(self, tmp_path):
+        env = environment()
+        env["services"][0]["readiness"]["status"] = 401
+        write_content(tmp_path, env=env, scenarios={"smoke.yaml": scenario()})
+        content = load_content_config(tmp_path)
+        assert content.to_environment_spec().service("app").readiness.status == 401
 
     def test_scenario_name_defaults_to_the_filename(self, tmp_path):
         data = scenario()
@@ -753,6 +1240,9 @@ class TestContentLoader:
         )
         with pytest.raises(E2EConfigError):
             load_content_config(tmp_path)
+
+        # The escape hatch the first-capture path uses: same content, admitted.
+        assert load_content_config(tmp_path, require_baselines=False) is not None
 
         write_content(tmp_path, baselines={"home.png": b"\x89PNG"})
         assert load_content_config(tmp_path) is not None
@@ -804,7 +1294,58 @@ class TestConversionToBackendSpecs:
         assert db.template is None
         assert db.mounts == ()
         assert db.readiness.kind == "tcp"
-        assert db.readiness.port == 5432
+        assert db.readiness.port == 15432
+
+    def test_a_string_readiness_command_is_wrapped_in_a_shell(self, tmp_path):
+        """The schema admits a shell string; `backend.exec` runs argv directly.
+
+        Handing ``("pg_isready -U app",)`` to exec would look for a binary whose
+        name contains a space, fail every attempt, spend the probe's whole budget
+        and report a healthy service as an environment failure — so the string
+        must arrive shelled, exactly as the executor shells an action command.
+        """
+        env = environment(
+            services=[
+                {
+                    "name": "db",
+                    "image": "postgres:16",
+                    "mount_source": False,
+                    "readiness": {"kind": "command", "command": "pg_isready -U app"},
+                }
+            ]
+        )
+        write_content(
+            tmp_path, env=env, scenarios={"smoke.yaml": scenario(driver="db")}
+        )
+
+        content = load_content_config(tmp_path)
+        probe = content.to_environment_spec().service("db").readiness
+
+        assert probe.command == ("sh", "-lc", "pg_isready -U app")
+
+    def test_a_list_readiness_command_is_left_as_argv(self, tmp_path):
+        """A declared argv list must not gain a shell it did not ask for."""
+        env = environment(
+            services=[
+                {
+                    "name": "db",
+                    "image": "postgres:16",
+                    "mount_source": False,
+                    "readiness": {
+                        "kind": "command",
+                        "command": ["pg_isready", "-U", "app"],
+                    },
+                }
+            ]
+        )
+        write_content(
+            tmp_path, env=env, scenarios={"smoke.yaml": scenario(driver="db")}
+        )
+
+        content = load_content_config(tmp_path)
+        probe = content.to_environment_spec().service("db").readiness
+
+        assert probe.command == ("pg_isready", "-U", "app")
 
     def test_network_override(self, tmp_path):
         write_content(

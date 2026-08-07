@@ -38,18 +38,19 @@ from tianluo.engine.steps.e2e import e2e_handler
 
 @pytest.fixture(autouse=True)
 def no_content_generation(monkeypatch):
-    """Keep the bootstrap hook from reaching a real agent.
+    """Keep the content-maintenance hook from reaching a real agent.
 
     ``tmp_path`` never has a ``tianluo/e2e/`` directory, so with e2e enabled the
-    handler's bootstrap hook would legitimately try to *generate* one — which
-    means constructing an LLMCaller and calling an agent. These tests are about
-    the handler's routing, not about content generation (``tests/e2e/
-    test_bootstrap.py`` owns that), so the hook is neutralised here. The two
-    tests in :class:`TestBootstrapHook` install their own stand-ins on top.
+    handler would legitimately try to *generate* one and then to evolve it — both
+    of which mean constructing an LLMCaller and calling an agent. These tests are
+    about the handler's routing, not about content generation (``tests/e2e/
+    test_bootstrap.py`` owns that), so both halves are neutralised here. The
+    tests in :class:`TestContentMaintenance` install their own stand-ins on top.
     """
     from tianluo.e2e import bootstrap
 
     monkeypatch.setattr(bootstrap, "ensure_content", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "evolve_content", lambda *a, **k: None)
 
 
 def _write_config(project_root: Path, *, enabled: bool) -> None:
@@ -226,6 +227,45 @@ class TestScenarioFailure:
         # Not an environment problem — nothing for the operator to repair.
         assert "environment_error" not in step.outputs
 
+    def test_an_unverified_critical_scenario_says_so(self, tmp_path):
+        """The revision reason must not read '0 e2e scenario(s) failed'.
+
+        A critical scenario that produced no result forces ``passed=False`` with
+        an empty failed list; composing the headline from that list alone made
+        error_message contradict itself everywhere it is the only thing shown
+        (WebUI, history).
+        """
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        verdict = E2EVerdict(
+            passed=False,
+            fix_instructions="critical scenario 'login' never ran.",
+            fix_context={"reason": "e2e_failure", "issues": []},
+            summary={
+                "total": 0, "passed": 0, "failed": 0,
+                "scenarios_passed": [], "scenarios_failed": [],
+                "critical_unverified": ["login"],
+            },
+        )
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=verdict):
+            assert e2e_handler(step, flow) == StepStatus.REVISION_NEEDED
+
+        assert "0 " not in step.error_message
+        assert "login" in step.error_message
+
+    def test_both_causes_are_named_when_both_hold(self, tmp_path):
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        verdict = _failing_verdict()
+        verdict.summary["critical_unverified"] = ["checkout"]
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=verdict):
+            e2e_handler(step, flow)
+
+        assert "login" in step.error_message
+        assert "checkout" in step.error_message
+
     def test_failed_scenario_detail_survives_into_outputs(self, tmp_path):
         _write_config(tmp_path, enabled=True)
         step, flow = _step(), _flow(tmp_path)
@@ -298,7 +338,33 @@ class TestEnvironmentFailure:
         assert step.outputs["e2e_results"]["config_error"]
 
 
-class TestBootstrapHook:
+def _install_bootstrap(monkeypatch, **members):
+    """Put a stand-in ``tianluo.e2e.bootstrap`` in front of the real one."""
+    import sys
+    import types
+
+    import tianluo.e2e as e2e_pkg
+
+    module = types.ModuleType("tianluo.e2e.bootstrap")
+    for name, value in members.items():
+        setattr(module, name, value)
+    monkeypatch.setitem(sys.modules, "tianluo.e2e.bootstrap", module)
+    monkeypatch.setattr(e2e_pkg, "bootstrap", module, raising=False)
+    return module
+
+
+class _EvolveResult:
+    """Stand-in for ``BootstrapResult`` after a successful evolution."""
+
+    def __init__(self, changed=True, note="evolved", errors=()):
+        self.changed = changed
+        self.note = note
+        self.errors = tuple(errors)
+        self.written = ("tianluo/e2e/scenarios/health.yaml",) if changed else ()
+        self.created = False
+
+
+class TestContentMaintenance:
     def test_absent_bootstrap_module_does_not_block(self, tmp_path, monkeypatch):
         """Content already in place needs no generation, so a missing bootstrap
         module must not stop the run."""
@@ -319,25 +385,16 @@ class TestBootstrapHook:
             assert e2e_handler(step, flow) == StepStatus.COMPLETED
 
     def test_bootstrap_is_invoked_when_available(self, tmp_path, monkeypatch):
-        import sys
-        import types
-
-        import tianluo.e2e as e2e_pkg
-
         calls = []
 
         class _Result:
             created = True
 
-        module = types.ModuleType("tianluo.e2e.bootstrap")
-
         def ensure_content(project_root, flow):
             calls.append((Path(project_root), flow))
             return _Result()
 
-        module.ensure_content = ensure_content
-        monkeypatch.setitem(sys.modules, "tianluo.e2e.bootstrap", module)
-        monkeypatch.setattr(e2e_pkg, "bootstrap", module, raising=False)
+        _install_bootstrap(monkeypatch, ensure_content=ensure_content)
 
         _write_config(tmp_path, enabled=True)
         step, flow = _step(), _flow(tmp_path)
@@ -347,6 +404,207 @@ class TestBootstrapHook:
 
         assert calls and calls[0][0] == tmp_path
         assert step.outputs["e2e_results"]["bootstrap"]
+
+    def test_existing_content_is_evolved_not_left_alone(self, tmp_path, monkeypatch):
+        """The regression this class exists for.
+
+        With content already on disk ``ensure_content`` is a no-op, so a flow that
+        only ever called it would re-run a stale suite forever: the endpoint this
+        task added would never get a scenario, while the step still reported a
+        green board.
+        """
+        evolve_calls = []
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda root, flow, hints: evolve_calls.append(
+                (Path(root), flow, list(hints))
+            )
+            or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        step.inputs["changes_made"] = {"files_changed": ["src/app/routes.py"]}
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            assert e2e_handler(step, flow) == StepStatus.COMPLETED
+
+        assert len(evolve_calls) == 1
+        root, _, hints = evolve_calls[0]
+        assert root == tmp_path
+        joined = "\n".join(hints)
+        assert "Add a login form" in joined  # the task description
+        assert "src/app/routes.py" in joined  # what the implement step touched
+        assert step.outputs["e2e_results"]["bootstrap"] == "evolved"
+
+    def test_evolution_runs_before_the_scenarios(self, tmp_path, monkeypatch):
+        """A scenario added this flow must be exercised by this flow.
+
+        Evolving after the run would defer every new scenario by a whole flow, so
+        a failure it exposes would never reach this task's fix loop.
+        """
+        order = []
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda *a, **k: order.append("evolve") or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        step.inputs["changes_made"] = {"files_changed": ["src/app/routes.py"]}
+
+        def _run(*args, **kwargs):
+            order.append("run")
+            return _passing_verdict()
+
+        with patch("tianluo.e2e.session.run_e2e", side_effect=_run):
+            e2e_handler(step, flow)
+
+        assert order == ["evolve", "run"]
+
+    def test_evolution_happens_once_per_flow(self, tmp_path, monkeypatch):
+        """Fix-loop re-entry must not re-evolve.
+
+        Beyond the wasted call per iteration, showing the model the assertion that
+        is currently failing while asking it to revise scenarios invites making
+        the suite pass by weakening it — the bypass the charter forbids.
+        """
+        evolve_calls = []
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda *a, **k: evolve_calls.append(1) or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        flow = _flow(tmp_path)
+
+        for _ in range(3):
+            step = _step()
+            step.inputs["changes_made"] = {"files_changed": ["src/app/routes.py"]}
+            with patch("tianluo.e2e.session.run_e2e", return_value=_failing_verdict()):
+                assert e2e_handler(step, flow) == StepStatus.REVISION_NEEDED
+
+        assert len(evolve_calls) == 1
+
+    def test_first_generation_skips_evolution(self, tmp_path, monkeypatch):
+        """Content authored against this very task has nothing to evolve yet."""
+        evolve_calls = []
+
+        class _Created:
+            created = True
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: _Created(),
+            evolve_content=lambda *a, **k: evolve_calls.append(1) or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            assert e2e_handler(step, flow) == StepStatus.COMPLETED
+
+        assert evolve_calls == []
+        # And the guard is set, so the next fix iteration does not read "never
+        # maintained" and evolve content that is one step old.
+        assert flow.state.context["e2e_content_evolved"] is True
+
+    def test_rejected_evolution_does_not_break_the_run(self, tmp_path, monkeypatch):
+        """The suite on disk is valid and runnable, so a bad proposal degrades."""
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda *a, **k: _EvolveResult(
+                changed=False, note="proposal rejected", errors=("driver 'web' unknown",)
+            ),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        step.inputs["changes_made"] = {"files_changed": ["src/app/routes.py"]}
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            assert e2e_handler(step, flow) == StepStatus.COMPLETED
+
+        assert step.outputs["e2e_results"]["bootstrap"] == "proposal rejected"
+
+    def test_bootstrap_without_evolve_content_still_runs(self, tmp_path, monkeypatch):
+        """An older/partial bootstrap module must not stop a runnable suite."""
+        _install_bootstrap(monkeypatch, ensure_content=lambda *a, **k: None)
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        step.inputs["changes_made"] = {"files_changed": ["src/app/routes.py"]}
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            assert e2e_handler(step, flow) == StepStatus.COMPLETED
+
+    def test_hints_cover_every_live_input_shape(self, tmp_path, monkeypatch):
+        """The inputs the state machine actually forwards to this step.
+
+        ``files_changed`` and ``implemented_groups`` each arrive either as bare
+        strings (group-by-group execution) or as mappings (whole-plan execution),
+        and the prose summary is a *sibling* key rather than part of
+        ``changes_made`` — see ``_build_step_inputs``.
+        """
+        captured = []
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda root, flow, hints: captured.append(list(hints))
+            or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        step.inputs["changes_made"] = {
+            "files_changed": [
+                {"path": "src/app/routes.py", "action": "modified"},
+                "src/app/models.py",
+            ],
+            "implemented_groups": [
+                "G1",
+                {"name": "G2", "description": "expose GET /health"},
+            ],
+        }
+        step.inputs["implement_summary"] = "added GET /health"
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            e2e_handler(step, flow)
+
+        joined = "\n".join(captured[0])
+        assert "src/app/routes.py" in joined
+        assert "src/app/models.py" in joined
+        assert "G1" in joined
+        assert "expose GET /health" in joined
+        assert "added GET /health" in joined
+
+    def test_no_hints_means_no_evolution(self, tmp_path, monkeypatch):
+        """An unaimed evolution pass is churn against a suite that already runs."""
+        evolve_calls = []
+
+        _install_bootstrap(
+            monkeypatch,
+            ensure_content=lambda *a, **k: None,
+            evolve_content=lambda *a, **k: evolve_calls.append(1) or _EvolveResult(),
+        )
+
+        _write_config(tmp_path, enabled=True)
+        step, flow = _step(), _flow(tmp_path)
+        flow.task_description = ""
+
+        with patch("tianluo.e2e.session.run_e2e", return_value=_passing_verdict()):
+            assert e2e_handler(step, flow) == StepStatus.COMPLETED
+
+        assert evolve_calls == []
 
 
 class TestNoTopLevelSubsystemImport:

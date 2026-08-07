@@ -8,10 +8,16 @@ which is the part that actually differs between the two runtimes.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import struct
 import subprocess
+import tempfile
+import zlib
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
+
+import pytest
 
 from tianluo.e2e.backend import (
     BindMount,
@@ -158,16 +164,22 @@ class FakeBackend(IsolationBackend):
         self.started: List[EnvironmentHandle] = []
         self.destroyed = 0
         self.handle: Optional[EnvironmentHandle] = None
+        self._scratch_dir: Optional[Path] = None
 
     def create(self, spec):
-        if self.create_error is not None:
-            raise self.create_error
-        self.created.append(spec)
         handle = EnvironmentHandle(runtime="fake", spec=spec)
         # Containers are recorded so `destroy` has something to report and the
         # keep-environment hint has names to print, mirroring the real backend.
         for service in spec.services:
             handle.containers[service.name] = "fake-{}".format(service.name)
+        # Published before the failure, as the real backend does: a create that
+        # raises has usually already made the network and some images, and the
+        # handle it was filling in is the session's only record of them. A fake
+        # that raised before publishing would hide that leak from the suite.
+        self.last_handle = handle
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append(spec)
         self.handle = handle
         return handle
 
@@ -192,16 +204,35 @@ class FakeBackend(IsolationBackend):
         self.snapshot_calls.append((service, target, kind))
         if self.snapshot_error is not None:
             raise self.snapshot_error
-        path = Path(destination) if destination else Path("/tmp/tianluo-e2e-fake.log")
-        if destination is not None and self.screenshot_bytes is not None:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(self.screenshot_bytes)
+        if destination is not None:
+            path = Path(destination)
+            if self.screenshot_bytes is not None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(self.screenshot_bytes)
+        elif kind == "log":
+            # Mirrors the real backend: a destination-less log capture is
+            # delivered as text and writes nothing. A fixed host path here would
+            # make the code under test read whatever happens to sit at that path
+            # on the developer's machine.
+            path = None
+        else:
+            path = self._scratch() / "{}-{}".format(service, kind or "file")
         return Snapshot(
             kind=kind,
             path=path,
             service=service,
             metadata={"text": self.log_text},
         )
+
+    def _scratch(self) -> Path:
+        """Throwaway directory for artifacts the caller named no place for.
+
+        Created on first use only: most tests never reach a destination-less
+        artifact capture, and a fake must not touch the filesystem for them.
+        """
+        if self._scratch_dir is None:
+            self._scratch_dir = Path(tempfile.mkdtemp(prefix="tianluo-e2e-fake-"))
+        return self._scratch_dir
 
     def destroy(self, handle):
         self.destroyed += 1
@@ -291,16 +322,75 @@ def content(
     )
 
 
-def write_png(path: Path, *, size=(4, 4), color=(10, 20, 30), pixels=None) -> Path:
-    """Write a tiny PNG for the tier-2 comparison tests."""
-    from PIL import Image
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    body = tag + data
+    return (
+        struct.pack(">I", len(data))
+        + body
+        + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
+    )
 
+
+def write_png(path: Path, *, size=(4, 4), color=(10, 20, 30), pixels=None) -> Path:
+    """Write a tiny 8-bit RGB PNG for the tier-2 comparison tests.
+
+    WHY hand-rolled instead of ``PIL.Image.new``: Pillow is the entire content of
+    the optional ``tianluo[e2e]`` extra, and a core-only install is the supported
+    default. Building fixtures with it would make *every* test that merely needs
+    a PNG on disk — including the tier-3 and config-error cases that never touch
+    the image comparison — collapse into a collection-time ``ModuleNotFoundError``
+    there. Encoding the four bytes of a PNG by hand keeps the extra's absence
+    confined to the handful of tests that genuinely exercise Pillow.
+
+    ``pixels`` maps ``(x, y)`` to an RGB triple, mirroring ``Image.putpixel``.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    image = Image.new("RGB", size, color)
-    for coordinate, value in (pixels or {}).items():
-        image.putpixel(coordinate, value)
-    image.save(path, format="PNG")
+    path.write_bytes(png_bytes(size=size, color=color, pixels=pixels))
     return path
+
+
+def png_bytes(*, size=(4, 4), color=(10, 20, 30), pixels=None) -> bytes:
+    """The same tiny PNG as :func:`write_png`, for callers holding no path.
+
+    The backend stub writes screenshot bytes wherever the code under test asks
+    it to, so a first-baseline-capture test needs the encoded image rather than a
+    file it placed itself.
+    """
+    width, height = size
+    overrides = dict(pixels or {})
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)  # filter type 0 (None) — no prediction, byte-exact rows
+        for x in range(width):
+            raw.extend(overrides.get((x, y), color))
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def pillow_installed() -> bool:
+    """Whether the ``tianluo[e2e]`` extra is present in this interpreter.
+
+    Used to skip the tests that drive the real Pillow-backed pixel comparison.
+    The tests asserting Pillow's *absence* is reported actionably block the
+    import themselves and so must keep running either way.
+    """
+    try:
+        return importlib.util.find_spec("PIL") is not None
+    except ImportError:
+        # A meta-path hook simulating the missing extra raises rather than
+        # returning None; that is still "not installed" as far as callers care.
+        return False
+
+
+requires_pillow = pytest.mark.skipif(
+    not pillow_installed(),
+    reason="tier-2 pixel comparison needs the optional extra: pip install 'tianluo[e2e]'",
+)
 
 
 class FakeClock:
