@@ -3100,6 +3100,198 @@ class TestConfig:
         return [p for p in self.phases if p.get("in_fix_loop", True)]
 
 
+# Accepted values for ``e2e.runtime``. ``auto`` resolves by *probing* the
+# runtimes at session start (see tianluo.e2e.runtime_probe); the two explicit
+# values pin one and never fall back to the other.
+E2E_RUNTIME_CHOICES = ("auto", "docker", "podman")
+
+
+@dataclass
+class E2EConfig:
+    """e2e runtime settings loaded from the tianluo.yaml ``e2e:`` section.
+
+    WHY: this block carries *only* runtime settings — the master switch, which
+    container runtime to use, OCI runtime / timeout / scenario-selection knobs.
+    The *content* of e2e (the services topology, environment build steps,
+    scenario definitions and baseline screenshots) deliberately lives in a
+    separate ``tianluo/e2e/`` directory instead, for two reasons:
+
+    1. **Ownership.** ``enabled`` is the user's promise that Docker or Podman is
+       installed and that the fix loop may spend time running scenarios. The
+       flow never flips it — it may only *suggest* enabling e2e in its output.
+       Content, by contrast, is authored and incrementally evolved by the flow
+       just like test code.
+    2. **Mechanical enforceability.** Because the two live in different files,
+       "the flow never writes tianluo.yaml" is checkable by looking at which
+       paths were touched. Had the scenarios lived under this block, every
+       incremental evolution would have to rewrite the user's whole config file
+       — config loading here is whole-file-pick-one (``tianluo.local.yaml``
+       shadows ``tianluo.yaml``), not per-key merging, so a rewrite would also
+       risk the shadow file silently swallowing flow-generated content.
+
+    Every field follows the clamp-and-warn policy used by :class:`TestConfig`:
+    a malformed value is logged and replaced by its default rather than raising,
+    so a typo in one knob never makes the project unloadable.
+    """
+
+    # Master switch. Off unless the user explicitly turns it on: with e2e
+    # disabled the state machine never inserts the E2E step and behaves exactly
+    # as it did before this subsystem existed.
+    enabled: bool = False
+    runtime: str = "auto"
+    # Passed through to the container runtime's `--runtime` flag. Lets a user
+    # who has installed a VM-grade OCI runtime (Kata Containers and friends)
+    # get VM-boundary isolation by configuration alone, with no separate
+    # backend implementation.
+    oci_runtime: Optional[str] = None
+    # Image builds are the slow half of e2e (dependency installs on a cold
+    # layer cache), scenarios the fast half — hence two separate budgets.
+    build_timeout: int = 1800
+    scenario_timeout: int = 300
+    # The e2e counterpart of test.estimated_test_duration: lets a supervising
+    # runner tell "still running" apart from "hung".
+    estimated_e2e_duration: Optional[int] = None
+    # Scenario selection, mirroring test.critical_tests' precedent: `scenarios`
+    # empty means run everything, otherwise only the named ones — so a fix loop
+    # need not replay the full suite on every iteration.
+    scenarios: list[str] = field(default_factory=list)
+    critical_scenarios: list[str] = field(default_factory=list)
+    # Debugging aid: keep containers and network alive after the run so a human
+    # can attach and look around.
+    keep_environment: bool = False
+
+    @classmethod
+    def load(cls, project_root: Path) -> "E2EConfig":
+        """Load e2e runtime settings from the active project YAML."""
+        data, source_label = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        try:
+            e2e_data = data.get("e2e") or {}
+            if not isinstance(e2e_data, dict):
+                logger.warning(
+                    "e2e section in %s is not a mapping (got %s); using defaults",
+                    source_label, type(e2e_data).__name__,
+                )
+                return cls()
+            if not e2e_data:
+                return cls()
+
+            enabled = _coerce_bool(e2e_data.get("enabled", False), default=False)
+
+            raw_runtime = e2e_data.get("runtime", "auto")
+            runtime = str(raw_runtime).strip().lower() if raw_runtime is not None else ""
+            if runtime not in E2E_RUNTIME_CHOICES:
+                logger.warning(
+                    "Invalid e2e.runtime %r in %s (expected one of %s); using 'auto'",
+                    raw_runtime, source_label, ", ".join(E2E_RUNTIME_CHOICES),
+                )
+                runtime = "auto"
+
+            raw_oci = e2e_data.get("oci_runtime")
+            if raw_oci is None:
+                oci_runtime: Optional[str] = None
+            elif isinstance(raw_oci, str) and raw_oci.strip():
+                oci_runtime = raw_oci.strip()
+            else:
+                logger.warning(
+                    "Invalid e2e.oci_runtime %r in %s; ignoring (runtime default used)",
+                    raw_oci, source_label,
+                )
+                oci_runtime = None
+
+            build_timeout = _positive_int_field(
+                e2e_data.get("build_timeout", 1800),
+                default=1800, label="e2e.build_timeout", source=source_label,
+            )
+            scenario_timeout = _positive_int_field(
+                e2e_data.get("scenario_timeout", 300),
+                default=300, label="e2e.scenario_timeout", source=source_label,
+            )
+
+            raw_estimate = e2e_data.get("estimated_e2e_duration")
+            if raw_estimate is None:
+                estimated: Optional[int] = None
+            else:
+                estimated = _positive_int_field(
+                    raw_estimate, default=None,
+                    label="e2e.estimated_e2e_duration", source=source_label,
+                )
+
+            return cls(
+                enabled=enabled,
+                runtime=runtime,
+                oci_runtime=oci_runtime,
+                build_timeout=build_timeout,
+                scenario_timeout=scenario_timeout,
+                estimated_e2e_duration=estimated,
+                scenarios=_string_list_field(
+                    e2e_data.get("scenarios"), label="e2e.scenarios",
+                    source=source_label,
+                ),
+                critical_scenarios=_string_list_field(
+                    e2e_data.get("critical_scenarios"),
+                    label="e2e.critical_scenarios", source=source_label,
+                ),
+                keep_environment=_coerce_bool(
+                    e2e_data.get("keep_environment", False), default=False
+                ),
+            )
+        except Exception as e:
+            logger.warning(
+                "Failed to load E2EConfig from %s, using defaults: %s",
+                source_label, e,
+            )
+            return cls()
+
+    def selects(self, scenario_name: str) -> bool:
+        """Whether ``scenario_name`` is in scope for this run.
+
+        An empty ``scenarios`` list means "everything" rather than "nothing", so
+        the common case (no selection configured) runs the full suite.
+        """
+        if not self.scenarios:
+            return True
+        return scenario_name in self.scenarios
+
+
+def _positive_int_field(
+    value: Any, *, default: Optional[int], label: str, source: str
+) -> Optional[int]:
+    """Coerce a YAML scalar to a positive int, warning and defaulting otherwise.
+
+    Shared by :class:`E2EConfig`'s timeout knobs so "0", "-1" and "soon" all
+    degrade the same way instead of each growing its own branch.
+    """
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid %s %r in %s; using default %r", label, value, source, default
+        )
+        return default
+    if parsed < 1:
+        logger.warning(
+            "%s=%d in %s is not positive; using default %r",
+            label, parsed, source, default,
+        )
+        return default
+    return parsed
+
+
+def _string_list_field(value: Any, *, label: str, source: str) -> list[str]:
+    """Coerce a YAML value to a list of strings, warning on anything else."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    logger.warning(
+        "%s in %s is not a list (got %s); ignoring",
+        label, source, type(value).__name__,
+    )
+    return []
+
+
 _USE_WORKTREE_ENV_VAR = "SE3_IMPLEMENT_USE_WORKTREE"
 
 

@@ -42,6 +42,8 @@ CORE_MODULES = [
     "tianluo.e2e.errors",
     "tianluo.e2e.backend",
     "tianluo.e2e.runtime_probe",
+    "tianluo.e2e.config_schema",
+    "tianluo.e2e.content_config",
 ]
 
 # Source of the meta-path hook that simulates a machine where the e2e extra was

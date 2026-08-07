@@ -11,6 +11,16 @@ Layering (bottom-up)::
     errors          exception taxonomy (environment vs. scenario failure)
     backend         IsolationBackend narrow ABC + data contracts
     runtime_probe   execution-based docker/podman detection, doubles as preflight
+    config_schema   declarative rules for the content config, incl. the
+                    assertion ladder
+    content_config  parses the project's tianluo/e2e/ directory into typed
+                    declarations
+
+Runtime settings (the ``enabled`` switch, runtime selection, timeouts, scenario
+selection) live in ``tianluo.yaml`` and load through
+:class:`tianluo.config.E2EConfig`; the *content* above is a separate,
+flow-authored directory. See ``E2EConfig``'s docstring for why the split is
+physical rather than two keys in one file.
 
 WHY: this ``__init__`` deliberately declares the package and nothing else — it
 imports no submodule, no container backend, no assertion implementation, and
@@ -33,6 +43,8 @@ from __future__ import annotations
 
 __all__ = [
     "backend",
+    "config_schema",
+    "content_config",
     "errors",
     "runtime_probe",
 ]
