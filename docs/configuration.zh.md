@@ -25,6 +25,11 @@
    - [`workflow`](#workflow)
    - [`investigation`](#investigation)
    - [`test`](#test)
+   - [`e2e`](#e2e)
+     - [前置条件:一个你无需 sudo 就能跑的容器 runtime](#前置条件一个你无需-sudo-就能跑的容器-runtime)
+     - [Runtime 选择](#runtime-选择)
+     - [另一半:`tianluo/e2e/` 内容配置](#另一半tianluoe2e-内容配置)
+     - [E2E step 在流程中的位置,以及失败如何路由](#e2e-step-在流程中的位置以及失败如何路由)
    - [`implement`](#implement)
    - [`steps`](#steps)
    - [`version`](#version)
@@ -449,6 +454,178 @@ verbose 命令**,例如 `python -m pytest -v`。
 该列表默认为空 —— 这是一个显式的 opt-in,因此普通的平台 / 可选依赖类 skip 永远不会
 被惩罚。非列表的值只告警并禁用该闸口,不抛错。
 
+### `e2e`
+
+端到端测试:搭起一个真实的隔离环境(一个容器网络 + 一个或多个 service),在其中驱动
+被测项目,并对实际发生的事情做断言。加载进 `E2EConfig`。**默认关闭** —— `e2e.enabled`
+为 false 或整个块缺省时,状态机永远不会插入 `E2E` step,流程行为与该子系统存在之前
+完全一致。
+
+本块只承载**运行时设置**。e2e 的*内容* —— services、构建步骤、测试场景、基线截图 ——
+放在独立的 [`tianluo/e2e/` 目录](#另一半tianluoe2e-内容配置)。这个切分是刻意的:
+`enabled` 是**用户**的承诺(容器 runtime 已装好,且允许 fix loop 花时间跑场景),
+flow 永远不会替你翻转它 —— 至多在输出里提示这个项目看起来适合上 e2e。而内容恰恰相反,
+由 flow 像编写测试代码一样生成并持续演进。正因为两者物理分文件,『flow 从不写
+`tianluo.yaml`』这条规则只需看改动路径就能机械核实。
+
+| Key | 类型 | 默认值 | 含义 |
+|-----|------|--------|------|
+| `enabled` | bool | `false` | 总开关。为 false 时 `E2E` step 永远不会进入任何步骤序列。接受常见的布尔写法;无法识别的值只告警并保持 `false`。 |
+| `runtime` | `auto` \| `docker` \| `podman` | `auto` | 使用哪个容器 runtime。见 [Runtime 选择](#runtime-选择)。非法值告警并回落 `auto`。 |
+| `oci_runtime` | string 或 null | `null` | 透传给 runtime 的 `--runtime` 参数。指向 VM 级 OCI runtime(Kata Containers 之类)即可**仅凭配置**获得 VM 边界隔离,无需独立后端。`null` = 容器 runtime 自身的默认值。 |
+| `build_timeout` | int `>= 1`(秒) | `1800` | 构建一个 service 镜像的预算。与 `scenario_timeout` 分开,是因为镜像构建是慢的那一半(冷层缓存下装依赖),场景执行是快的那一半。 |
+| `scenario_timeout` | int `>= 1`(秒) | `300` | 每个场景的默认预算。单个场景可用自己的 `timeout:` 覆盖。 |
+| `estimated_e2e_duration` | int `>= 1`(秒)或 null | `null` | 对应 [`test`](#test) 中 `estimated_test_duration` 所起的作用:让监管方分得清『还在跑』与『卡死了』。 |
+| `scenarios` | list of strings | `[]` | 按名字做场景选择。**空表示『全部跑』**,而非『一个都不跑』。收窄它,使 fix loop 每轮不必重放整套 —— 与 `test.critical_tests` 是同一个先例。 |
+| `critical_scenarios` | list of strings | `[]` | 必须真正跑到、结果才算数的场景。 |
+| `keep_environment` | bool | `false` | 运行结束后保留容器与网络,便于 attach 进去查看。调试用;运行会打印出清理所需的 `rm -f` / `network rm` 命令原文。 |
+
+每个字段都遵循 [`test`](#test) 的 clamp-and-warn 策略:非法值只记日志并回落为默认值,
+不抛错 —— 一个旋钮上的拼写错误绝不会让整个项目加载不了。
+
+#### 前置条件:一个你无需 sudo 就能跑的容器 runtime
+
+e2e 需要 Docker 或 Podman,而这个**由你自行安装** —— 与你自行安装 `claude` / `codex`
+CLI 完全一样。pip 提供不了容器 runtime。
+
+tianluo 及其 e2e 子系统全程以你的普通用户身份运行,**任何代码路径都不调用 `sudo`、
+不要求 root**。因此前置条件精确表述为:*当前用户可以不带 sudo 直接执行 `docker` 或
+`podman`*。以下任意一条满足即可:
+
+- 你的用户属于 `docker` 用户组;
+- **rootless Docker**(Docker 自带 `dockerd-rootless-setuptool.sh install` 脚本);
+- **Podman**,它经 user namespaces 原生 rootless,无特权用户开箱可用。
+
+在 rootless runtime 下,bind mount 进去的源码目录会做 UID 映射(Podman 的
+`--userns=keep-id`),使容器写进你源码目录的产物文件归属**你自己** —— 绝不会留下
+root 所有、你自己清不掉的残留文件。
+
+启用之前先检查宿主机:
+
+```bash
+luo e2e doctor
+```
+
+第二层(基线截图 diff)的图像对比需要一个第三方 Python 包,经 optional extra 隔离:
+
+```bash
+pip install 'tianluo[e2e]'
+```
+
+框架代码与 Dockerfile 模板随**每一次**安装分发 —— extra 隔离的是*依赖*,不是 tianluo
+自己的代码。只装 core 时包仍可正常 import;项目启用了 e2e 却没装 extra、并执行到第二层
+断言时,得到的是可操作的『请安装 `tianluo[e2e]`』提示,而不是 `ModuleNotFoundError`。
+
+#### Runtime 选择
+
+`auto` 的探测方式是**执行** `docker info`、再执行 `podman info`,取第一个成功的。这里
+刻意不是查 `PATH`:最常见的故障恰恰是 runtime *装了、但当前用户用不了* —— 没加进
+`docker` 组、daemon 没起 —— 而查 PATH 会欣然选中它。执行一次 `info` 则一举验明:二进制
+存在、daemon/环境正常、当前用户有权限。同一份代码同时充当 preflight 检查,因此探测与
+preflight 不可能给出互相矛盾的结论。
+
+- **两者都可用 → 选 `docker`**,确定性优先序。BuildKit/buildx 生态更成熟,且在双装的
+  机器上 Docker 通常是用户刻意安装、日常使用的那一个。想优先 podman?显式写出来即可。
+- **显式指定 runtime 即关闭回退。** 配了 `runtime: docker` 而 Docker 不可用时,报错并给
+  修复指引 —— tianluo *不会*悄悄改用 podman。静默切换会在你背后改变镜像缓存、存储位置与
+  UID 映射行为,恰好制造出那种最难排查的『昨天还好好的』故障。
+- **探测结果在一次会话内固定。** 同一次 run 的全部容器操作使用同一 runtime,不中途混用。
+
+探测失败按**环境**问题上报,并附逐条修复指引(加入 `docker` 组 / 安装 podman / 配置
+rootless Docker),绝不当作代码缺陷 —— 见下文的失败路由。
+
+#### 另一半:`tianluo/e2e/` 内容配置
+
+内容配置有自己的目录,与 `charter.md`、`code-index.md`、`issues/` 同级,并**进 git**:
+
+```
+tianluo/e2e/
+├── environment.yaml     # services 拓扑:基底镜像、构建步骤、就绪探测
+├── scenarios/
+│   ├── cli-smoke.yaml   # 一文件一场景:driver + 操作序列 + 断言
+│   └── api-smoke.yaml
+└── baselines/           # 进 git 的基线截图,供第二层 diff 使用
+```
+
+镜像**不**进 git —— 它是可再生缓存,凭这份配置可从零重建。被测项目的源码是 *bind
+mount* 进容器的,而不是 `COPY` 进镜像,因此 fix loop 每轮迭代只需重启容器;仅当构建
+步骤本身变更时才触发镜像重建。
+
+开关已开但目录尚不存在时,flow 会在首次使用时生成它,此后按增量演进维护 —— 只新增与
+修订,不覆盖你的手工改动。你也可以手动驱动:
+
+```bash
+luo e2e bootstrap          # 生成 / 演进内容目录
+luo e2e list               # 列出已声明的场景
+luo e2e run                # 全部跑一遍
+luo e2e run -s api-smoke   # 只跑一个
+luo e2e run --keep         # 跑完保留环境供查看
+```
+
+`luo e2e run` 与流程内的 `E2E` step 共用同一套执行逻辑,因此手动调试与 flow 内行为完全
+一致。退出码:场景失败 `1`,环境问题 `3`,配置缺失/不合法 `4`。
+
+一个最小的单 service 示例 —— `tianluo/e2e/environment.yaml`:
+
+```yaml
+network: tianluo-e2e
+services:
+  - name: app
+    image: python:3.12-slim
+    base_kind: base            # base | playwright | gui-xvfb
+    build:
+      - pip install --no-cache-dir -e .
+    readiness:
+      kind: command            # command | http | tcp | log
+      command: ["python", "-c", "import myapp"]
+      timeout: 60
+```
+
+……以及 `tianluo/e2e/scenarios/cli-smoke.yaml`:
+
+```yaml
+name: cli-smoke
+driver: app                    # 必须指向上面已声明的某个 service
+actions:
+  - action: exec
+    command: ["python", "-m", "myapp", "--version"]
+assertions:
+  - kind: exit_code
+    equals: 0
+  - kind: stdout
+    contains: "myapp "
+```
+
+`base_kind` 决定在 `image` 之上叠哪一份内置 Dockerfile 模板:`base`(纯 CLI / web /
+API)、`playwright`(浏览器 driver —— 官方镜像固定了浏览器、系统依赖*与字体*,这正是
+第二层基线可复现的前提)、`gui-xvfb`(Xvfb + 轻量窗口管理器 + scrot + xdotool,使桌面
+应用无需物理显示器即可运行并被截图)。
+
+**断言升级阶梯由 schema 强制,而非仅仅建议。** 第一层是确定性断言(`exit_code`、
+`stdout`、`stderr`、`http_status`、`http_body`、`file_exists`、`file_content`、`dom`),
+是默认层,无需声明。第二层是与已提交基线做 `screenshot_diff`,断言上必须写
+`visual_regression: true`。第三层是 `visual_semantic` —— LLM 看图 —— 必须同时声明
+`semantic_visual: true` 与 `require_evidence: true`,因为 LLM 的结论只有连同可复核的
+证据描述一起才可采信。越过本可胜任的低层而升级到高层是**校验错误**:DOM 查询就能解决的
+地方改用截图对比,等于把确定性验证退化成概率性验证。驱动侧同理 —— 点击屏幕坐标
+(`visual_click`)只保留给没有任何程序化入口的 GUI。
+
+#### E2E step 在流程中的位置,以及失败如何路由
+
+`enabled` 为真时,`E2E` step 被插在 **`test` 紧后面**,因而位于 `self_check` 之前:e2e
+是单测套件的粗粒度对偶,所以它跑在已通过细粒度检查的代码上,而 review 层随后读到的是
+一份行为已被实际执行过的 diff。没有 `test` step 的序列(`review`、`survey`)原样返回 ——
+它们不产生代码变更,没有什么可供场景去执行。
+
+失败路由刻意一分为二:
+
+- **场景失败是代码缺陷。** 返回 `REVISION_NEEDED` 并进入常规 fix loop,受
+  [`workflow.max_fix_iterations`](#workflow) 约束,与单测失败完全同构;预算耗尽后经同一
+  条 fix-loop-exhaustion 通道建 issue。不存在丢弃、豁免或按 severity 分级放行。
+- **环境问题不是。** runtime 不可用、权限不足、preflight 失败 —— 这些让 step 失败并附上
+  修复指引,且**不**消耗 fix 迭代次数。派 LLM 去『修』一台没装 Docker 的宿主机,只会
+  白白烧光整个 fix 预算。
+
 ### `implement`
 
 | Key | 类型 | 默认值 | 含义 |
@@ -796,17 +973,19 @@ spec 文件体积的字节预算与一个执法档位。容错:非法值告警�
 
 ### 引擎已不再读取的配置块
 
-`tianluo.example.yaml` 里仍然带着下面三个块。**引擎不读其中任何一个** —— 已通过在
-`src/` 中 grep 每一个 key 名、以及 grep `get("human_call")` / `get("e2e")` / 顶层的
-`get("session")` 核实;`session` 唯一的命中是*嵌套的* `server.auth.session` 块,以及
-`engine/chat_history.py` 中一个无关的 JSON 字段。它们留在样例里只为历史延续性,配置
-它们没有任何效果。
+`tianluo.example.yaml` 里仍然带着下面两个块。**引擎两个都不读** —— 已通过在 `src/` 中
+grep 每一个 key 名、以及 grep `get("human_call")` / 顶层的 `get("session")` 核实;
+`session` 唯一的命中是*嵌套的* `server.auth.session` 块,以及 `engine/chat_history.py`
+中一个无关的 JSON 字段。它们留在样例里只为历史延续性,配置它们没有任何效果。
 
 | 配置块 | Key | 状态 |
 |--------|-----|------|
 | `human_call` | `timeout_days`、`directory` | 无读取方。human call 文件写到 `tianluo/calls/`,路径由运行时布局固定,与这个 key 无关。 |
 | `session` | `progress_file`、`max_progress_entries` | 无读取方。 |
-| `e2e` | `baseline_dir`、`diff_threshold`、`default_viewport`、`test_paths` | 无读取方。基于浏览器的验收测试改为经 [`test.critical_tests`](#test) 与 `tianluo[browser]` extra 接入。 |
+
+> 这张表里原本还有一个 `e2e` 块,带着 `baseline_dir`、`diff_threshold`、
+> `default_viewport`、`test_paths` 四个从来没有读取方的 key。这个名字此后被一个真实的
+> 子系统收回,其 schema 完全不同:见 [`e2e`](#e2e)。那四个遗留 key 不被它识别,会被忽略。
 
 ---
 

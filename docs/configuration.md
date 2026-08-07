@@ -26,6 +26,11 @@ wins.
    - [`workflow`](#workflow)
    - [`investigation`](#investigation)
    - [`test`](#test)
+   - [`e2e`](#e2e)
+     - [Prerequisite: a container runtime you can run without sudo](#prerequisite-a-container-runtime-you-can-run-without-sudo)
+     - [Runtime selection](#runtime-selection)
+     - [The other half: `tianluo/e2e/` content configuration](#the-other-half-tianluoe2e-content-configuration)
+     - [Where the E2E step sits, and how failures route](#where-the-e2e-step-sits-and-how-failures-route)
    - [`implement`](#implement)
    - [`steps`](#steps)
    - [`version`](#version)
@@ -498,6 +503,215 @@ The list is empty by default — this is an explicit opt-in, so ordinary
 platform / optional-dependency skips are never penalised. A non-list value warns
 and disables the gate rather than raising.
 
+### `e2e`
+
+End-to-end testing: build a real, isolated environment (one container network,
+one or more services), drive the project inside it, and assert on what actually
+happened. Loaded into `E2EConfig`. **Off by default** — with `e2e.enabled` false
+or the block absent, the state machine never inserts the `E2E` step and the flow
+behaves exactly as it did before the subsystem existed.
+
+This block carries **only runtime settings**. The *content* of e2e — services,
+build steps, scenarios, baseline images — lives in a separate
+[`tianluo/e2e/` directory](#the-other-half-tianluoe2e-content-configuration).
+The split is deliberate: `enabled` is the **user's** promise (that a container
+runtime is installed and that the fix loop may spend time on scenarios), and the
+flow never flips it — at most it prints a suggestion that the project looks like
+a good e2e candidate. Content, by contrast, is authored and evolved by the flow
+just like test code. Because the two live in different files, "the flow never
+writes `tianluo.yaml`" is checkable by looking at which paths were touched.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `enabled` | bool | `false` | Master switch. When false the `E2E` step is never inserted into any step sequence. Accepts the usual boolean spellings; an unrecognised value warns and stays `false`. |
+| `runtime` | `auto` \| `docker` \| `podman` | `auto` | Which container runtime to use. See [Runtime selection](#runtime-selection). An invalid value warns and falls back to `auto`. |
+| `oci_runtime` | string or null | `null` | Passed through to the runtime's `--runtime` flag. Point it at a VM-grade OCI runtime (Kata Containers and friends) to get VM-boundary isolation **by configuration alone**, with no separate backend. `null` = the container runtime's own default. |
+| `build_timeout` | int `>= 1` (seconds) | `1800` | Budget for building a service image. Separate from `scenario_timeout` because image builds are the slow half (dependency installs on a cold layer cache) and scenarios the fast half. |
+| `scenario_timeout` | int `>= 1` (seconds) | `300` | Default per-scenario budget. A scenario may override it with its own `timeout:`. |
+| `estimated_e2e_duration` | int `>= 1` (seconds) or null | `null` | The e2e counterpart of [`test.estimated_test_duration`](#test)'s role: lets a supervising runner tell "still running" apart from "hung". |
+| `scenarios` | list of strings | `[]` | Scenario selection by name. **Empty means "run everything"**, not "run nothing". Narrow it so a fix loop need not replay the full suite on every iteration — the same precedent as `test.critical_tests`. |
+| `critical_scenarios` | list of strings | `[]` | Scenarios that must genuinely run for the result to count. |
+| `keep_environment` | bool | `false` | Leave containers and the network alive after the run so you can attach and look around. Debugging aid; the run prints the exact `rm -f` / `network rm` commands to clean up. |
+
+Every field follows the clamp-and-warn policy used by [`test`](#test): a
+malformed value is logged and replaced by its default rather than raising, so a
+typo in one knob never makes the project unloadable.
+
+#### Prerequisite: a container runtime you can run without sudo
+
+e2e needs Docker or Podman, and **you install it yourself** — exactly as you
+installed the `claude` / `codex` CLIs. pip cannot provide a container runtime.
+
+tianluo and its e2e subsystem run entirely as your normal user. **No code path
+calls `sudo` or requires root.** The prerequisite is therefore precisely: *the
+current user can run `docker` or `podman` without sudo*. Any one of these
+satisfies it:
+
+- your user is a member of the `docker` group;
+- **rootless Docker** (`dockerd-rootless-setuptool.sh install` ships with Docker);
+- **Podman**, which is rootless natively via user namespaces and works out of the
+  box for an unprivileged user.
+
+Under a rootless runtime the bind-mounted source tree is UID-mapped (Podman's
+`--userns=keep-id`) so that files a container writes into your source directory
+end up owned by **you** — never as root-owned residue you cannot clean up.
+
+Check the host before enabling:
+
+```bash
+luo e2e doctor
+```
+
+The tier-2 (baseline screenshot diff) image comparison needs one third-party
+Python package, isolated behind an optional extra:
+
+```bash
+pip install 'tianluo[e2e]'
+```
+
+The framework code and the Dockerfile templates ship with **every** install —
+the extra isolates a *dependency*, not tianluo's own code. A core-only install
+stays importable; a project that enables e2e without the extra and reaches a
+tier-2 assertion gets an actionable "install `tianluo[e2e]`" message rather than
+a `ModuleNotFoundError`.
+
+#### Runtime selection
+
+`auto` probes by **executing** `docker info`, then `podman info`, and takes the
+first that succeeds. This is deliberately not a `PATH` lookup: the most common
+failure is a runtime that is *installed but unusable by the current user* — no
+`docker` group membership, daemon not running — and a `PATH` check would happily
+select it. Running `info` verifies in one shot that the binary exists, the
+daemon/environment is healthy, and the current user has permission. The same
+code is the preflight check, so probing and preflight can never disagree.
+
+- **Both usable → `docker`**, deterministically. BuildKit/buildx is the more
+  mature ecosystem, and on a machine with both installed Docker is usually the
+  one the user deliberately installed for daily use. Prefer podman? Say so
+  explicitly.
+- **Naming a runtime explicitly disables fallback.** With `runtime: docker`, an
+  unavailable Docker is an error with remediation — tianluo will *not* quietly
+  use podman instead. A silent switch changes the image cache, the storage
+  location and UID-mapping behaviour behind your back, producing exactly the
+  kind of "it worked yesterday" fault that is miserable to diagnose.
+- **The probe result is fixed for the session.** Every container operation in
+  one run uses the same runtime; there is no mid-run switching.
+
+A failed probe is reported as an **environment** problem with step-by-step
+remediation (join the `docker` group / install podman / set up rootless Docker).
+It is never treated as a code defect — see the failure routing below.
+
+#### The other half: `tianluo/e2e/` content configuration
+
+Content configuration lives in its own directory next to `charter.md`,
+`code-index.md` and `issues/`, and **is committed to git**:
+
+```
+tianluo/e2e/
+├── environment.yaml     # services topology: base images, build steps, readiness probes
+├── scenarios/
+│   ├── cli-smoke.yaml   # one scenario per file: driver + actions + assertions
+│   └── api-smoke.yaml
+└── baselines/           # git-tracked baseline screenshots for tier-2 diffs
+```
+
+Images are **not** committed — they are a regenerable cache, rebuildable from
+zero out of this configuration. The project's source tree is *bind-mounted* into
+the containers rather than `COPY`-ed into the images, so a fix-loop iteration
+only restarts containers; images rebuild only when the build steps themselves
+change.
+
+The flow generates this directory on first use (when `enabled` is true but the
+directory does not yet exist) and evolves it incrementally thereafter — it
+adds and revises, it does not overwrite your hand edits. You can also drive it
+manually:
+
+```bash
+luo e2e bootstrap          # generate / evolve the content directory
+luo e2e list               # list declared scenarios
+luo e2e run                # run them all
+luo e2e run -s api-smoke   # run one
+luo e2e run --keep         # leave the environment up for inspection
+```
+
+`luo e2e run` and the in-flow `E2E` step share one execution path, so manual
+debugging and the flow behave identically. It exits `1` on a scenario failure,
+`3` on an environment problem and `4` on missing/inadmissible configuration.
+
+A minimal single-service example — `tianluo/e2e/environment.yaml`:
+
+```yaml
+network: tianluo-e2e
+services:
+  - name: app
+    image: python:3.12-slim
+    base_kind: base            # base | playwright | gui-xvfb
+    build:
+      - pip install --no-cache-dir -e .
+    readiness:
+      kind: command            # command | http | tcp | log
+      command: ["python", "-c", "import myapp"]
+      timeout: 60
+```
+
+…and `tianluo/e2e/scenarios/cli-smoke.yaml`:
+
+```yaml
+name: cli-smoke
+driver: app                    # must name a service declared above
+actions:
+  - action: exec
+    command: ["python", "-m", "myapp", "--version"]
+assertions:
+  - kind: exit_code
+    equals: 0
+  - kind: stdout
+    contains: "myapp "
+```
+
+`base_kind` picks which bundled Dockerfile template is layered over `image`:
+`base` (plain CLI / web / API), `playwright` (a browser driver — the official
+image pins browsers, system libraries *and fonts*, which is what makes a tier-2
+baseline reproducible), or `gui-xvfb` (Xvfb + a light window manager + scrot +
+xdotool, so a desktop application can run and be screenshotted with no physical
+display).
+
+**The assertion ladder is enforced by the schema, not merely recommended.**
+Tier 1 is deterministic (`exit_code`, `stdout`, `stderr`, `http_status`,
+`http_body`, `file_exists`, `file_content`, `dom`) and is the default, needing no
+declaration. Tier 2 is `screenshot_diff` against a committed baseline and
+requires `visual_regression: true` on the assertion. Tier 3 is
+`visual_semantic` — an LLM looking at an image — and requires both
+`semantic_visual: true` and `require_evidence: true`, because an LLM verdict is
+admissible only alongside a reviewable description of what it saw. Escalating
+past a tier that could have done the job is a **validation error**: a screenshot
+comparison where a DOM query would do turns deterministic verification into
+probabilistic verification. The same rule governs *driving* — clicking screen
+coordinates (`visual_click`) is reserved for GUIs with no programmatic entry
+point.
+
+#### Where the E2E step sits, and how failures route
+
+When `enabled` is true, the `E2E` step is inserted **immediately after `test`**
+and therefore before `self_check`: e2e is the coarse-grained counterpart of the
+unit suite, so it runs on code that already passes the fine-grained one, and the
+review layer then reads a diff whose behaviour has been exercised. Sequences with
+no `test` step (`review`, `survey`) are left untouched — they produce no code
+change for a scenario to exercise.
+
+Failure routing is deliberately split in two:
+
+- **A failing scenario is a code defect.** It returns `REVISION_NEEDED` and
+  enters the ordinary fix loop under
+  [`workflow.max_fix_iterations`](#workflow), exactly like a failing unit test;
+  once the budget is exhausted the run files an issue through the same
+  fix-loop-exhaustion path. There is no discard, waiver, or severity-graded
+  pass-through.
+- **An environment problem is not.** An unusable runtime, missing permissions, a
+  failed preflight — these fail the step with remediation text and **do not**
+  consume a fix iteration. Sending an LLM to "fix" a host with no Docker
+  installed would burn the entire fix budget for nothing.
+
 ### `implement`
 
 | Key | Type | Default | Meaning |
@@ -881,18 +1095,23 @@ Setting this block changes nothing.
 
 ### Blocks the engine no longer reads
 
-`tianluo.example.yaml` still ships the three blocks below. **The engine does not
-read any of them** — verified by grepping `src/` for every key name and for
-`get("human_call")` / `get("e2e")` / a top-level `get("session")`; the only
-`session` hits are the *nested* `server.auth.session` block and an unrelated
-JSON field in `engine/chat_history.py`. They are retained in the sample for
-historical continuity; configuring them has no effect.
+`tianluo.example.yaml` still ships the two blocks below. **The engine does not
+read either of them** — verified by grepping `src/` for every key name and for
+`get("human_call")` / a top-level `get("session")`; the only `session` hits are
+the *nested* `server.auth.session` block and an unrelated JSON field in
+`engine/chat_history.py`. They are retained in the sample for historical
+continuity; configuring them has no effect.
 
 | Block | Keys | Status |
 |-------|------|--------|
 | `human_call` | `timeout_days`, `directory` | No reader. Human-call files are written to `tianluo/calls/` at a path the runtime layout fixes, not this key. |
 | `session` | `progress_file`, `max_progress_entries` | No reader. |
-| `e2e` | `baseline_dir`, `diff_threshold`, `default_viewport`, `test_paths` | No reader. Browser-based acceptance tests are wired through [`test.critical_tests`](#test) and the `tianluo[browser]` extra instead. |
+
+> An `e2e` block used to sit in this table too, carrying `baseline_dir`,
+> `diff_threshold`, `default_viewport` and `test_paths` — four keys nothing ever
+> read. The name has since been reclaimed by a real subsystem with an entirely
+> different schema: see [`e2e`](#e2e). Those four legacy keys are not recognised
+> by it and are ignored.
 
 ---
 

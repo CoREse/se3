@@ -99,13 +99,77 @@ language:
   # prompts). e.g. "zh-CN", "en-US". null = no restriction (LLM decides).
   spec_language: en-US
 
-# E2E / Visual regression testing (optional)
-# Requires Puppeteer MCP or similar browser automation tool
+# End-to-end testing (optional, off by default)
+#
+# This block carries ONLY runtime settings. The *content* of e2e — the services
+# topology, the declarative environment build steps, the scenario definitions and
+# the baseline screenshots — lives in a separate `tianluo/e2e/` directory
+# (alongside charter.md / code-index.md / issues/, committed to git), where the
+# flow generates it on first use and evolves it incrementally thereafter. The
+# flow never writes this file: `enabled` is your promise, not its decision.
+#
+#   tianluo/e2e/environment.yaml   services + base images + build steps + probes
+#   tianluo/e2e/scenarios/*.yaml   one scenario per file: driver/actions/assertions
+#   tianluo/e2e/baselines/         git-tracked baseline screenshots (tier-2 diffs)
+#
+# PREREQUISITE — enabling this means you have already installed a container
+# runtime yourself, exactly as you installed the claude/codex CLIs; pip cannot
+# provide one. tianluo runs entirely as your normal user and never calls sudo, so
+# the requirement is that YOU can run `docker` or `podman` without sudo. Any one
+# of these satisfies it:
+#   - your user is in the `docker` group;
+#   - rootless Docker;
+#   - Podman, which is rootless natively.
+# Run `luo e2e doctor` to check the host before enabling. A failing check is
+# reported as an environment problem with remediation — it never enters the fix
+# loop, because no amount of code editing installs Docker.
+#
+# The image-diff dependency for tier-2 visual assertions is an optional extra:
+# `pip install 'tianluo[e2e]'`. The framework code and Dockerfile templates ship
+# with every install; only that third-party dependency is isolated.
+#
 e2e:
-  baseline_dir: .e2e-baselines        # Where to store baseline screenshots
-  diff_threshold: 0.1                 # Pixel difference threshold (0-1)
-  default_viewport: "1280x720"        # Default browser viewport size
-  test_paths: []                      # URL paths to test (e.g., ["/", "/login"])
+  # Master switch, shown here at its default so the block stays inert until you
+  # deliberately opt in. False (or an absent `e2e:` block) = the state machine
+  # never inserts the E2E step and behaves exactly as it did before this
+  # subsystem existed. When true, E2E runs after `test` and before `self_check`;
+  # a failing scenario routes into the normal fix loop under
+  # workflow.max_fix_iterations, just like a failing unit test.
+  enabled: false
+
+  # auto | docker | podman. Default `auto`.
+  # `auto` probes by *executing* `docker info`, then `podman info`, and takes the
+  # first that succeeds — a runtime that is installed but unusable by the current
+  # user (no group membership, daemon down) counts as absent. With both usable it
+  # picks docker, deterministically; ask for podman explicitly if you prefer it.
+  # Naming a runtime explicitly disables fallback: if it is unavailable the run
+  # fails with remediation rather than silently switching, which would change
+  # image cache, storage location and UID mapping under you.
+  runtime: auto
+
+  # Passed through to the runtime's `--runtime` flag. Point it at a VM-grade OCI
+  # runtime (Kata Containers and friends) to get VM-boundary isolation by
+  # configuration alone. null = the runtime's own default.
+  oci_runtime: null
+
+  # Time budgets in seconds. Image builds are the slow half (cold layer cache),
+  # scenarios the fast half, hence two separate budgets.
+  build_timeout: 1800       # default 1800
+  scenario_timeout: 300     # default 300, overridable per scenario
+
+  # The e2e counterpart of test.estimated_test_duration: lets a supervising
+  # runner tell "still running" apart from "hung". null = unknown.
+  estimated_e2e_duration: null
+
+  # Scenario selection, mirroring test.critical_tests. Empty = run every scenario
+  # declared under tianluo/e2e/scenarios/. Narrow it so a fix loop need not
+  # replay the whole suite on every iteration.
+  scenarios: []
+  critical_scenarios: []
+
+  # Leave containers and the network alive after the run so you can attach and
+  # look around. Debugging aid; default false.
+  keep_environment: false
 
 # Test step configuration
 # `critical_tests` registers acceptance tests that MUST genuinely run during

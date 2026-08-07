@@ -139,11 +139,12 @@ packages = ["src/tianluo", "src/se3"]
 artifacts = [
     "src/tianluo/server/static/**",
     "src/tianluo/i18n/locales/*.json",
-    "src/tianluo/e2e/templates/*.tmpl",
-    # The example environment/scenario documents the bootstrap step injects into
-    # its generation prompt. Same reasoning as the Dockerfile templates: they are
-    # framework assets, not part of the optional extra.
-    "src/tianluo/e2e/templates/*.yaml",
+    # A whole-directory glob rather than per-extension patterns: the directory
+    # holds only framework assets (Dockerfile templates plus the example
+    # environment/scenario documents the bootstrap step injects into its
+    # generation prompt), and a future asset with a new extension must not be
+    # able to go missing from the wheel by silently matching no pattern.
+    "src/tianluo/e2e/templates/**",
 ]
 
 [tool.pytest.ini_options]
