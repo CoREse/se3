@@ -106,6 +106,7 @@ def _infer_fix_reason(trigger_step_type: str) -> str:
     reason_map = {
         "self_check": "self_check",
         "test": "test_failure",
+        "e2e": "e2e_failure",
         "verify_spec": "spec_compliance",
     }
     # For unknown trigger types, return the trigger type itself rather than
@@ -406,6 +407,15 @@ class StateMachine:
         # Append optional steps from tianluo.yaml (e.g. summarize)
         selected_steps = self._apply_step_config(selected_steps)
 
+        # Opt-in e2e: insert the E2E step after TEST when the project enabled it.
+        # Ordered here — after the configured appends, before the merge pair and
+        # the confirmation gates — because both of those anchor on positions in
+        # the sequence they are handed (the merge pair on COMMIT, a CONFIRM on the
+        # step it guards). Inserting later would place e2e on the wrong side of a
+        # confirmation gate. MUST stay mirrored in analyze._update_flow_steps,
+        # which re-derives the whole sequence from the default table.
+        selected_steps = self._insert_e2e_step(selected_steps)
+
         # For a worktree flow, the release point is the merge — extend the
         # sequence with the two merge-side steps (integrate then reconcile). This
         # happens BEFORE confirmation insertion so a configured per-step gate
@@ -560,6 +570,19 @@ class StateMachine:
         """
         from ..config import apply_step_config
         return apply_step_config(steps, self.project_root)
+
+    def _insert_e2e_step(self, steps: list[StepType]) -> list[StepType]:
+        """Insert the conditional ``E2E`` step (after ``TEST``) when e2e is enabled.
+
+        Delegates to the shared :func:`config.insert_e2e_step` so this and
+        ``analyze._update_flow_steps`` derive the same sequence — the analyze step
+        rebuilds the sequence from the default table on every flow, so an
+        insertion done only here would be silently dropped a moment later.
+        No-op (and idempotent) when ``e2e.enabled`` is off.
+        """
+        from ..config import insert_e2e_step
+
+        return insert_e2e_step(steps, self.project_root)
 
     def _insert_confirmation_steps(self, steps: list[StepType]) -> list[StepType]:
         """Insert CONFIRM steps after configured step types.
@@ -1200,16 +1223,25 @@ class StateMachine:
             )
             return None
 
-        # Handle the fix loop: TEST, SELF_CHECK, or INVARIANT_CHECK returning
+        # Handle the fix loop: TEST, E2E, SELF_CHECK, or INVARIANT_CHECK returning
         # REVISION_NEEDED (the anchored INVARIANT_CHECK replaces the retired
         # SPEC_GATE/verify_spec as the diff-vs-recorded-invariant gate). The
         # deprecated VERIFY_SPEC is retained in the set so a pre-refactor
         # persisted flow can still resume its fix loop. All share the same
         # global max_fix_iterations exhaustion bound and route back to the
         # implement fix loop.
+        #
+        # E2E joins this set rather than growing its own routing: a failed
+        # scenario is a code defect exactly like a failed unit test, so it must
+        # share the same iteration budget and the same exhaustion outcome (an
+        # issue via create_from_fix_loop_exhaustion). Its *environment* failures
+        # never arrive here — the handler maps those to FAILED with remediation
+        # guidance, because no code change makes a missing container runtime
+        # appear.
         if (
             current_step.step_type in (
                 StepType.TEST,
+                StepType.E2E,
                 StepType.SELF_CHECK,
                 StepType.INVARIANT_CHECK,
                 StepType.VERIFY_SPEC,
@@ -1364,7 +1396,7 @@ class StateMachine:
         # ``investigation.max_iterations`` (0 = unlimited).
         #
         # INVARIANT: this loop NEVER uses REVISION_NEEDED. The REVISION_NEEDED
-        # branch above is hardcoded to (TEST, SELF_CHECK, INVARIANT_CHECK,
+        # branch above is hardcoded to (TEST, E2E, SELF_CHECK, INVARIANT_CHECK,
         # VERIFY_SPEC); an INVESTIGATE returning REVISION_NEEDED would skip it,
         # fall through to the plain "advance to the next selected step" logic
         # below, and the loop would silently never happen — no error, no round 2.
@@ -2408,7 +2440,7 @@ class StateMachine:
         """Create the next round of the bounded investigation loop.
 
         INVARIANT: this loop must NEVER be expressed through REVISION_NEEDED.
-        ``transition_to_next`` only honours REVISION_NEEDED for TEST /
+        ``transition_to_next`` only honours REVISION_NEEDED for TEST / E2E /
         SELF_CHECK / INVARIANT_CHECK / VERIFY_SPEC; any other step type
         returning it falls straight through to the ordinary "advance to the
         next selected step" logic, so the loop would silently never run and

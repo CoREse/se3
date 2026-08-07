@@ -13,6 +13,7 @@ from .charter_freshness import charter_freshness_handler
 from .commit import commit_handler
 from .confirm import confirm_handler
 from .discovery import discovery_handler
+from .e2e import e2e_handler
 from .implement import implement_handler
 from .invariant_check import invariant_check_handler
 from .investigate import investigate_handler
@@ -80,6 +81,7 @@ STEP_HANDLERS = {
     StepType.CONFIRM: confirm_handler,
     StepType.IMPLEMENT: implement_handler,
     StepType.TEST: test_handler,
+    StepType.E2E: e2e_handler,  # conditional: only in the sequence when e2e.enabled
     StepType.SELF_CHECK: self_check_handler,
     StepType.ADJUDICATE: adjudicate_handler,
     StepType.INVARIANT_CHECK: invariant_check_handler,
@@ -104,6 +106,7 @@ __all__ = [
     "plan_tasks_handler",
     "implement_handler",
     "test_handler",
+    "e2e_handler",
     "self_check_handler",
     "invariant_check_handler",
     "charter_freshness_handler",

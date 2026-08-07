@@ -3428,6 +3428,47 @@ def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
     return result
 
 
+def insert_e2e_step(steps: list, project_root: Optional[Path] = None) -> list:
+    """Insert the ``E2E`` step after the first ``TEST`` — only when e2e is enabled.
+
+    WHY conditional insertion instead of a table entry: ``e2e.enabled`` defaults
+    to off, and a project that has not enabled e2e must keep the exact step
+    sequence it had before the subsystem existed (see the WHY note on
+    ``get_default_step_sequence``). A step present-but-skipped would still appear
+    in the step list, move the progress denominator, and make a ``--resume`` of an
+    older flow disagree with the newly derived sequence.
+
+    Placed right after ``TEST``: e2e is the coarse-grained counterpart of the unit
+    suite, so it runs on code that already passes the fine-grained one, and the
+    slot is naturally *before* ``SELF_CHECK`` — both are fix-loop-driving check
+    steps, and the review layer should read a diff whose behaviour has already
+    been exercised.
+
+    Sequences with no ``TEST`` (``review`` / ``survey``) are returned untouched:
+    they produce no code change, so there is nothing for a scenario to exercise.
+    Idempotent — a sequence that already carries ``E2E`` is returned as is.
+
+    Shared by ``StateMachine.create_flow`` and ``analyze._update_flow_steps`` for
+    the same reason as :func:`append_worktree_merge_steps`: the analyze-time
+    re-derivation must not silently drop it.
+    """
+    from .engine.models import StepType
+
+    result = list(steps)
+    if StepType.E2E in result:
+        return result
+
+    if not E2EConfig.load(project_root or Path.cwd()).enabled:
+        return result
+
+    try:
+        insert_at = result.index(StepType.TEST) + 1
+    except ValueError:
+        return result
+    result.insert(insert_at, StepType.E2E)
+    return result
+
+
 def append_worktree_merge_steps(steps: list) -> list:
     """Insert the two merge-side steps (integrate → reconcile) right after ``commit``.
 

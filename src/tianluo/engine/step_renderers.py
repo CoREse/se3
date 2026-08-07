@@ -44,6 +44,7 @@ STEP_TITLE_KEYS: Dict[StepType, str] = {
     StepType.CONFIRM: "cli.steprender.title.confirm",
     StepType.IMPLEMENT: "cli.steprender.title.implement",
     StepType.TEST: "cli.steprender.title.test",
+    StepType.E2E: "cli.steprender.title.e2e",
     StepType.SELF_CHECK: "cli.steprender.title.self_check",
     StepType.VERIFY_SPEC: "cli.steprender.title.verify_spec",
     StepType.UPDATE_SPEC: "cli.steprender.title.update_spec",
@@ -358,6 +359,173 @@ def _render_test(step: Step) -> None:
 
     lines = _build_test_summary_lines(test_results)
     render_full("\n".join(lines), title=t("cli.steprender.title.test"))
+
+
+# How much of one failed scenario is shown. e2e failures carry container logs and
+# every evaluated assertion; dumping them here would bury the one line that says
+# what broke. The full record stays in step.outputs (WebUI / history) and the
+# verbatim detail reaches the implementing agent through fix_instructions.
+E2E_MAX_FAILED_SCENARIOS = 5
+E2E_MAX_ASSERTIONS_PER_SCENARIO = 3
+E2E_MAX_VALUE_CHARS = 160
+
+
+def _e2e_clip(value: Any) -> str:
+    """One-line, length-capped rendering of an expected/actual value."""
+    text = str(value if value is not None else "").replace("\n", " ").strip()
+    if not text:
+        return "-"
+    if len(text) > E2E_MAX_VALUE_CHARS:
+        return text[:E2E_MAX_VALUE_CHARS] + "…"
+    return text
+
+
+@register_renderer(StepType.E2E)
+def _render_e2e(step: Step) -> None:
+    """Render the e2e step as a scenario-level summary.
+
+    Mirrors ``_render_test``'s summary-only presentation and falls back to the
+    generic renderer whenever ``e2e_results`` is absent or not a mapping — the
+    step can fail before it ever produces structured results (an unusable
+    container runtime), and a renderer that assumed the happy shape would replace
+    that diagnosis with a traceback.
+    """
+    outputs = step.outputs or {}
+    results = outputs.get("e2e_results")
+    if not isinstance(results, dict) or not results:
+        _default_render(step, t("cli.steprender.title.e2e"))
+        return
+
+    lines: list[str] = []
+
+    if results.get("skipped"):
+        lines.append(t("cli.steprender.e2e.skipped"))
+        render_full("\n".join(lines), title=t("cli.steprender.title.e2e"))
+        return
+
+    environment_error = results.get("environment_error") or outputs.get(
+        "environment_error"
+    )
+    config_error = results.get("config_error")
+    if environment_error or config_error:
+        if config_error:
+            lines.append(t("cli.steprender.e2e.config_error", message=config_error))
+        else:
+            lines.append(
+                t("cli.steprender.e2e.environment_error", message=environment_error)
+            )
+        remediation = results.get("remediation") or outputs.get("e2e_remediation")
+        if remediation:
+            lines.append("")
+            lines.append(str(remediation))
+        render_full("\n".join(lines), title=t("cli.steprender.title.e2e"))
+        return
+
+    total = results.get("total", 0) or 0
+    failed_count = results.get("failed", 0) or 0
+    passed_count = results.get("passed", 0) or 0
+
+    status = (
+        t("cli.steprender.e2e.failed")
+        if failed_count
+        else t("cli.steprender.e2e.passed")
+    )
+    lines.append(t("cli.steprender.e2e.status", status=status))
+    lines.append(
+        t(
+            "cli.steprender.e2e.counts",
+            passed=passed_count,
+            failed=failed_count,
+            total=total,
+        )
+    )
+
+    runtime = results.get("runtime") or ""
+    if runtime:
+        lines.append(t("cli.steprender.e2e.runtime", runtime=runtime))
+
+    duration = results.get("duration")
+    if isinstance(duration, (int, float)):
+        lines.append(t("cli.steprender.e2e.duration", seconds=f"{duration:.1f}"))
+
+    if not total:
+        lines.append(t("cli.steprender.e2e.no_scenarios"))
+
+    scenarios = results.get("scenarios")
+    scenarios = scenarios if isinstance(scenarios, list) else []
+    failed = [
+        scenario
+        for scenario in scenarios
+        if isinstance(scenario, dict) and not scenario.get("passed", False)
+    ]
+
+    if failed:
+        lines.append("")
+        lines.append(t("cli.steprender.e2e.failed_header"))
+        for scenario in failed[:E2E_MAX_FAILED_SCENARIOS]:
+            lines.append(
+                "  [red]✗[/red] {}".format(scenario.get("name", "?"))
+            )
+            if scenario.get("timed_out"):
+                lines.append(
+                    "    "
+                    + t(
+                        "cli.steprender.e2e.timed_out",
+                        seconds=_e2e_clip(scenario.get("duration")),
+                    )
+                )
+            if scenario.get("error"):
+                lines.append(
+                    "    "
+                    + t("cli.steprender.e2e.error", message=_e2e_clip(scenario["error"]))
+                )
+            assertions = scenario.get("assertions")
+            assertions = assertions if isinstance(assertions, list) else []
+            failed_assertions = [
+                assertion
+                for assertion in assertions
+                if isinstance(assertion, dict) and not assertion.get("passed", False)
+            ]
+            for assertion in failed_assertions[:E2E_MAX_ASSERTIONS_PER_SCENARIO]:
+                lines.append(
+                    "    "
+                    + t(
+                        "cli.steprender.e2e.assertion",
+                        kind=assertion.get("kind", "?"),
+                        tier=assertion.get("tier", "?"),
+                    )
+                )
+                lines.append(
+                    "      "
+                    + t(
+                        "cli.steprender.e2e.expected",
+                        value=_e2e_clip(assertion.get("expected")),
+                    )
+                )
+                lines.append(
+                    "      "
+                    + t(
+                        "cli.steprender.e2e.actual",
+                        value=_e2e_clip(assertion.get("actual")),
+                    )
+                )
+            remaining = len(failed_assertions) - E2E_MAX_ASSERTIONS_PER_SCENARIO
+            if remaining > 0:
+                lines.append(
+                    "    " + t("cli.steprender.e2e.more_assertions", count=remaining)
+                )
+        remaining_scenarios = len(failed) - E2E_MAX_FAILED_SCENARIOS
+        if remaining_scenarios > 0:
+            lines.append(
+                "  " + t("cli.steprender.e2e.more_scenarios", count=remaining_scenarios)
+            )
+
+    artifacts = results.get("artifacts")
+    if isinstance(artifacts, list) and artifacts:
+        lines.append("")
+        lines.append(t("cli.steprender.e2e.artifacts", count=len(artifacts)))
+
+    render_full("\n".join(lines), title=t("cli.steprender.title.e2e"))
 
 
 @register_renderer(StepType.SPEC_GATE)

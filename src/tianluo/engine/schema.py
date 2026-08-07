@@ -54,6 +54,7 @@ class StepTypeValue(str, Enum):
     INVESTIGATE = "investigate"
     IMPLEMENT = "implement"
     TEST = "test"
+    E2E = "e2e"  # conditionally inserted when e2e.enabled (see config.insert_e2e_step)
     SELF_CHECK = "self_check"
     ADJUDICATE = "adjudicate"
     INVARIANT_CHECK = "invariant_check"

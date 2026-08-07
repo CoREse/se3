@@ -54,6 +54,7 @@ class StepType(Enum):
     CONFIRM = "confirm"  # Review and confirm previous step output
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
+    E2E = "e2e"  # Run declarative e2e scenarios in a real isolated environment (opt-in via e2e.enabled)
     SELF_CHECK = "self_check"  # Code self-review: logic completeness and robustness
     ADJUDICATE = "adjudicate"  # Spec-contradiction adjudication: rule on task/plan contradictions that oscillate the fix loop
     INVARIANT_CHECK = "invariant_check"  # Anchored check: diff vs recorded binding invariants (charter + why-comments + task)
@@ -871,6 +872,38 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["changes_made"],
         "outputs": ["test_results"],
     },
+    StepType.E2E: {
+        "name": "e2e",
+        # WHY uses_llm is False: the scenario executor is *program*-driven end to
+        # end — it builds the environment, runs the declared action sequence and
+        # evaluates deterministic assertions in Python. The third assertion tier
+        # (an LLM looking at a screenshot) is an internal, opt-in call made from
+        # inside the executor for scenarios that explicitly declare a semantic
+        # visual assertion; it is not the step's mode of operation, so declaring
+        # uses_llm=True here would mislabel every ordinary e2e run (and mis-drive
+        # the agent-dispatch / read-only tooling that keys off this flag).
+        # read_only is False because the environment binds the source tree in and
+        # scenarios legitimately produce artefacts (screenshots, captured files).
+        "description": (
+            "Run the project's declarative e2e scenarios in a real isolated "
+            "environment (a container topology built by the configured runtime) "
+            "and evaluate them along the assertion ladder: deterministic first, "
+            "baseline screenshot diff only for visual regression, LLM vision "
+            "only where the scenario declares a semantic visual assertion. A "
+            "failing scenario is a code defect and enters the ordinary fix loop; "
+            "an unusable container runtime is an environment problem reported "
+            "with remediation guidance instead."
+        ),
+        "uses_llm": False,
+        "read_only": False,
+        "inputs": ["changes_made", "test_results"],
+        "outputs": [
+            "e2e_results",
+            "scenarios_passed",
+            "scenarios_failed",
+            "environment_error",
+        ],
+    },
     StepType.SELF_CHECK: {
         "name": "self_check",
         "description": "Code self-review: check logic completeness, robustness, and test coverage gaps",
@@ -1094,6 +1127,18 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
     #     VERSION_ANALYZE; it only surfaces an update prompt and never blocks.
     # The lightweight commit-only flow (small) gets CHARTER_FRESHNESS but not
     # INVARIANT_CHECK (it has no self_check/spec phase to extend).
+    #
+    # WHY StepType.E2E appears in NO sequence below: e2e is opt-in per project
+    # (``e2e.enabled`` in tianluo.yaml) and the guarantee it must keep is that a
+    # project which has NOT enabled it sees a byte-identical step sequence to the
+    # one it saw before the subsystem existed. Putting E2E in these tables and
+    # having the handler no-op when disabled would break that: the step would
+    # show up in every project's step list, shift the progress percentage, and
+    # make a ``--resume`` of an old flow disagree with the freshly derived
+    # sequence. So the step is *conditionally inserted* instead, by
+    # ``config.insert_e2e_step`` (right after the first TEST, hence before
+    # SELF_CHECK), from the two places that rebuild a sequence:
+    # ``StateMachine.create_flow`` and ``analyze._update_flow_steps``.
     sequences: Dict[str, List[StepType]] = {
         "feature": [
             StepType.ANALYZE,

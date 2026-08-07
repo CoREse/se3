@@ -37,6 +37,7 @@ from ...config import (
     append_worktree_merge_steps,
     apply_step_config,
     insert_confirmation_steps,
+    insert_e2e_step,
 )
 
 logger = logging.getLogger(__name__)
@@ -501,6 +502,15 @@ def _update_flow_steps(
     # dropped by the rebuild. apply_step_config dedups by step value, so this
     # never appends duplicates.
     selected_steps = apply_step_config(selected_steps, project_root)
+
+    # Opt-in e2e: insert the E2E step after TEST when the project enabled it.
+    # MUST stay mirrored with StateMachine.create_flow (same position in the
+    # chain: after the configured appends, before the merge pair and the
+    # confirmation gates). This rebuild starts from the raw default table, so
+    # without this call the E2E step create_flow inserted would be dropped the
+    # moment ANALYZE completes — and ANALYZE runs first in every sequence, so the
+    # step would never execute at all.
+    selected_steps = insert_e2e_step(selected_steps, project_root)
 
     # A worktree flow's release point is the merge: the two merge-side steps
     # appended by StateMachine.create_flow must survive this analyze-time
