@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+#
+# tianluo e2e — browser driver image for web scenarios.
+#
+# Built on Playwright's official image, which ships the browser builds, their
+# system libraries and a fixed font set already matched to each other.
+#
+# INVARIANT: visual baselines MUST be generated inside this very image. Glyph
+# rasterization depends on the installed font files and the fontconfig setup, so
+# a baseline captured on the host — or in an image with a different font set —
+# differs from the run-time screenshot by a few anti-aliased pixels on every
+# single character, and the tier-2 baseline diff degenerates into permanent
+# noise. Pin the tag rather than tracking `:latest` for the same reason.
+FROM $base_image
+
+# The project source is bind-mounted here at start time, never COPYed in — see
+# the note in base.Dockerfile.tmpl for why.
+WORKDIR $workdir
+
+# Declarative environment build steps, in declaration order.
+$build_steps

@@ -118,12 +118,15 @@ only-include = [
 # `python -m se3` onto the renamed `tianluo` package); dropped in 13.0.0.
 packages = ["src/tianluo", "src/se3"]
 # Non-Python resources that must survive packaging: the server's bundled static
-# frontend assets, and the CLI locale catalogs — tianluo.i18n loads the latter via
+# frontend assets, the CLI locale catalogs — tianluo.i18n loads the latter via
 # importlib.resources, so a wheel without them degrades every t() call to raw
-# keys instead of localized text.
+# keys instead of localized text — and the e2e Dockerfile templates, which are
+# framework code, not an optional extra: a project with e2e enabled must find
+# them in any install, whether or not `tianluo[e2e]` was requested.
 artifacts = [
     "src/tianluo/server/static/**",
     "src/tianluo/i18n/locales/*.json",
+    "src/tianluo/e2e/templates/*.tmpl",
 ]
 
 [tool.pytest.ini_options]

@@ -1,0 +1,21 @@
+# syntax=docker/dockerfile:1
+#
+# tianluo e2e — generic service image (CLI tools, web services, APIs).
+#
+# Rendered by tianluo.e2e.templates.render_dockerfile("base", ...). Do not edit
+# a rendered copy: the image is a regenerable cache, never committed, and is
+# rebuilt from the project's tianluo/e2e/ configuration whenever the environment
+# build steps change.
+FROM $base_image
+
+# INVARIANT: this image never COPYs the project source in. The source tree is
+# bind-mounted at $workdir when the container starts, because every fix-loop
+# iteration edits it — baking it into a layer would invalidate that layer and
+# everything after it on every single round, turning a seconds-long re-run into
+# a full rebuild. Only the *environment* (dependencies, fixtures, service
+# config) lives in the image.
+WORKDIR $workdir
+
+# Declarative environment build steps, expanded in declaration order so
+# BuildKit's positional layer cache stays warm across iterations.
+$build_steps

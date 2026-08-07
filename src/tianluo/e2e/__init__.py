@@ -8,9 +8,12 @@ Podman is installed and that the fix loop may spend time running scenarios.
 
 Layering (bottom-up)::
 
-    errors          exception taxonomy (environment vs. scenario failure)
-    backend         IsolationBackend narrow ABC + data contracts
-    runtime_probe   execution-based docker/podman detection, doubles as preflight
+    errors             exception taxonomy (environment vs. scenario failure)
+    backend            IsolationBackend narrow ABC + data contracts
+    runtime_probe      execution-based docker/podman detection, doubles as preflight
+    templates          Dockerfile templates (base / playwright / gui-xvfb) + renderer
+    readiness          command / http / tcp / log readiness probing
+    container_backend  the docker/podman IsolationBackend implementation
 
 WHY: this ``__init__`` deliberately declares the package and nothing else — it
 imports no submodule, no container backend, no assertion implementation, and
@@ -33,6 +36,9 @@ from __future__ import annotations
 
 __all__ = [
     "backend",
+    "container_backend",
     "errors",
+    "readiness",
     "runtime_probe",
+    "templates",
 ]

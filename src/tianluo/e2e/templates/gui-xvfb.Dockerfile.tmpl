@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1
+#
+# tianluo e2e — desktop GUI application image (headless X stack).
+#
+# WHY tianluo maintains this recipe itself: the ingredients are the well-known
+# headless-desktop set (the Anthropic computer-use container is the reference
+# for the shape), but depending on someone else's *image* would tie e2e's
+# reproducibility — and every visual baseline captured against it — to a tag
+# outside this project's control. The recipe is a handful of packages; owning it
+# costs little and keeps the base image a project decision.
+#
+# Assumes a Debian/Ubuntu-family base ($base_image) for apt-get. A project on a
+# different distribution supplies its own build steps instead of this template.
+FROM $base_image
+
+# The four pillars of headless GUI e2e:
+#   Xvfb    — an X server with no physical display to draw into
+#   openbox — a minimal window manager, so windows get mapped, focused and
+#             decorated the way the application expects (many toolkits misbehave
+#             with no WM at all)
+#   scrot   — screen capture, the tier-2 baseline-diff and tier-3 semantic
+#             assertion input
+#   xdotool — synthetic keyboard/mouse input for the cases with no programmatic
+#             entry point
+#
+# INVARIANT: xdotool is the *last resort* driver. The assertion ladder forbids
+# driving an interaction by coordinates when a CLI, an API or a DOM event can
+# do it, so this package exists for GUIs that expose nothing else — not as the
+# default way to operate the application.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        xvfb \
+        openbox \
+        scrot \
+        xdotool \
+        x11-utils \
+        xauth \
+    && rm -rf /var/lib/apt/lists/*
+
+$debug_tools_layer
+
+ENV DISPLAY=$display
+ENV TIANLUO_E2E_SCREEN=$screen
+
+# Entrypoint: bring up the virtual display and the window manager, then hand
+# control to the container's command. Written as a script rather than a chain of
+# `&&` so `docker exec` into the running container inherits a live DISPLAY.
+RUN set -eux; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'set -e' \
+        'Xvfb "$$DISPLAY" -screen 0 "$$TIANLUO_E2E_SCREEN" -nolisten tcp &' \
+        'for _ in $$(seq 1 50); do' \
+        '  xdpyinfo -display "$$DISPLAY" >/dev/null 2>&1 && break' \
+        '  sleep 0.2' \
+        'done' \
+        'openbox &' \
+        'exec "$$@"' \
+        > /usr/local/bin/tianluo-e2e-entrypoint; \
+    chmod +x /usr/local/bin/tianluo-e2e-entrypoint
+
+# The project source is bind-mounted here at start time, never COPYed in — see
+# the note in base.Dockerfile.tmpl for why.
+WORKDIR $workdir
+
+# Declarative environment build steps, in declaration order.
+$build_steps
+
+ENTRYPOINT ["/usr/local/bin/tianluo-e2e-entrypoint"]
+CMD ["sleep", "infinity"]
