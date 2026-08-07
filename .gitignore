@@ -44,6 +44,14 @@ prompts/
 # root-cause doc-sync fix could never be committed/shipped).
 !/src/tianluo/templates/prompts/
 e2e
+# The bare `e2e` rule above matches *any* path component named `e2e`, which
+# would swallow the e2e subsystem's source package and its tests wholesale —
+# they would never be committed, and the wheel would ship without the framework
+# code the extra is explicitly NOT supposed to gate. Whitelist the two real
+# source trees (same pattern as the preset-prompts exception above); the
+# original rule keeps covering runtime scratch directories.
+!/src/tianluo/e2e/
+!/tests/e2e/
 materials
 
 # tianluo runtime dir (post-rename layout): ignore runtime content,

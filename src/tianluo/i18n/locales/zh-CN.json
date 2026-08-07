@@ -912,5 +912,16 @@
   "merge.strategy.unknown": "未知的合并策略 {value}；必须是以下之一：{allowed}",
   "migrate.note.charter_llm_failed": "charter 的 LLM 组装失败；已写入一份标记为待审阅的回退版本，其中逐字保留了基础 spec —— 请审阅 tianluo/charter.md",
   "migrate.reason.file_not_found": "文件未找到",
-  "migrate.migrator.rename_to_tianluo.desc": "把存量项目布局从 se3/ + se3.yaml 一键搬到 tianluo/ + tianluo.yaml(git mv、.gitignore 重写;产出一条可 review、可 revert 的 commit)。"
+  "migrate.migrator.rename_to_tianluo.desc": "把存量项目布局从 se3/ + se3.yaml 一键搬到 tianluo/ + tianluo.yaml(git mv、.gitignore 重写;产出一条可 review、可 revert 的 commit)。",
+  "e2e.probe.not_installed": "容器 runtime '{runtime}' 未安装，或不在 PATH 中。",
+  "e2e.probe.timeout": "'{runtime} info' 在 {timeout} 秒内未响应，该 runtime 似乎不可用。",
+  "e2e.probe.launch_failed": "无法执行 '{runtime} info'：{detail}",
+  "e2e.probe.failed": "'{runtime} info' 执行失败，退出码 {code}：{detail}",
+  "e2e.probe.none_available": "未找到可用的容器 runtime。e2e 需要当前用户可直接执行 docker 或 podman。已尝试 — {tried}",
+  "e2e.probe.explicit_unavailable": "配置指定的 e2e runtime '{runtime}' 不可用：{detail} tianluo 不会静默回退到另一个 runtime，因为静默切换会隐性改变镜像缓存、存储位置与 UID 映射行为。",
+  "e2e.probe.invalid_preference": "无效的 e2e.runtime 取值 {value}：应为 'auto'、'docker' 或 'podman'。",
+  "e2e.probe.remediation": "修复方式（tianluo 全程不提权 — e2e 仅要求你能以普通用户身份执行 'docker info' 或 'podman info'）：\n  1. Docker：请管理员将你的用户加入 'docker' 用户组，然后重新登录使新组生效。\n  2. Podman：安装 podman —— 它原生 rootless，无特权用户开箱即用。\n  3. Rootless Docker：运行 Docker 自带的 'dockerd-rootless-setuptool.sh install' 脚本，配置用户级 daemon。",
+  "e2e.error.dependency_missing": "e2e 功能需要 '{dependency}' 包，但它尚未安装。",
+  "e2e.error.dependency_missing_for": "e2e {feature} 需要 '{dependency}' 包，但它尚未安装。",
+  "e2e.remediation.install_extra": "安装 e2e extra：\n    pip install '{extra}'"
 }

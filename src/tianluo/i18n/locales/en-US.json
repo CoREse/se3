@@ -913,5 +913,16 @@
   "merge.strategy.unknown": "Unknown merge strategy {value}; must be one of: {allowed}",
   "migrate.note.charter_llm_failed": "charter LLM assembly failed; wrote a review-flagged fallback that preserves the base spec verbatim — review tianluo/charter.md",
   "migrate.reason.file_not_found": "file not found",
-  "migrate.migrator.rename_to_tianluo.desc": "Rename an existing project's layout from se3/ + se3.yaml to tianluo/ + tianluo.yaml (git mv, .gitignore rewrite; one reviewable, revertable commit)."
+  "migrate.migrator.rename_to_tianluo.desc": "Rename an existing project's layout from se3/ + se3.yaml to tianluo/ + tianluo.yaml (git mv, .gitignore rewrite; one reviewable, revertable commit).",
+  "e2e.probe.not_installed": "Container runtime '{runtime}' is not installed, or is not on PATH.",
+  "e2e.probe.timeout": "'{runtime} info' did not answer within {timeout}s; the runtime looks unavailable.",
+  "e2e.probe.launch_failed": "Could not run '{runtime} info': {detail}",
+  "e2e.probe.failed": "'{runtime} info' failed with exit code {code}: {detail}",
+  "e2e.probe.none_available": "No usable container runtime found. e2e needs docker or podman runnable by the current user. Tried — {tried}",
+  "e2e.probe.explicit_unavailable": "The configured e2e runtime '{runtime}' is unavailable: {detail} tianluo does not silently fall back to the other runtime, because switching would change the image cache, storage location and UID mapping behind your back.",
+  "e2e.probe.invalid_preference": "Invalid e2e.runtime value {value}: expected 'auto', 'docker' or 'podman'.",
+  "e2e.probe.remediation": "How to fix (tianluo never escalates privileges — e2e only requires that you can run 'docker info' or 'podman info' as your normal user):\n  1. Docker: have an administrator add your user to the 'docker' group, then log out and back in so the new group takes effect.\n  2. Podman: install podman — it is rootless natively and works out of the box for an unprivileged user.\n  3. Rootless Docker: run the 'dockerd-rootless-setuptool.sh install' script shipped with Docker to set up a per-user daemon.",
+  "e2e.error.dependency_missing": "The e2e feature requires the '{dependency}' package, which is not installed.",
+  "e2e.error.dependency_missing_for": "e2e {feature} requires the '{dependency}' package, which is not installed.",
+  "e2e.remediation.install_extra": "Install the e2e extra:\n    pip install '{extra}'"
 }
