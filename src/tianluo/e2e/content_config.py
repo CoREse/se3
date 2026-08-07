@@ -191,6 +191,11 @@ class ScenarioDecl:
     timeout: Optional[int] = None
     tags: Tuple[str, ...] = ()
     visual_driving: bool = False
+    # Assertions are all evaluated by default so one expensive e2e round yields
+    # the complete failure surface. A scenario opts into stopping early only when
+    # a later assertion cannot be meaningfully evaluated once an earlier one has
+    # failed (a login that did not happen makes every following check noise).
+    fail_fast: bool = False
 
 
 @dataclass(frozen=True)
@@ -431,4 +436,5 @@ def _build_scenario(data: Mapping[str, Any], source: str) -> ScenarioDecl:
         timeout=int(raw_timeout) if raw_timeout is not None else None,
         tags=_as_tuple(data.get("tags")),
         visual_driving=bool(data.get("visual_driving", False)),
+        fail_fast=bool(data.get("fail_fast", False)),
     )

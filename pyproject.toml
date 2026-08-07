@@ -79,6 +79,19 @@ server = [
 browser = [
     "playwright>=1.40.0",
 ]
+# The e2e subsystem's only third-party requirement: image comparison for the
+# assertion ladder's tier 2 (baseline screenshot diff). Everything else e2e needs
+# is stdlib (subprocess/urllib) or already core (PyYAML), and the framework code
+# plus the Dockerfile templates ship unconditionally with the wheel — this extra
+# isolates a *dependency*, not tianluo's own code. tianluo.e2e.assertions imports
+# PIL inside the function that diffs, so a core-only install stays importable and
+# a project that enables e2e without the extra gets an actionable
+# "pip install 'tianluo[e2e]'" message instead of a ModuleNotFoundError.
+# The container runtime itself (docker or podman) is a user-installed
+# prerequisite, exactly like the claude/codex CLIs — pip cannot provide it.
+e2e = [
+    "Pillow>=9.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/CoREse/tianluo"

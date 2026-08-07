@@ -44,6 +44,12 @@ CORE_MODULES = [
     "tianluo.e2e.runtime_probe",
     "tianluo.e2e.config_schema",
     "tianluo.e2e.content_config",
+    # The assertion ladder owns the only PIL import in the subsystem, and the
+    # executor/session sit directly on top of it — if any of the three ever
+    # hoists that import to module scope, these are the modules that catch it.
+    "tianluo.e2e.assertions",
+    "tianluo.e2e.executor",
+    "tianluo.e2e.session",
 ]
 
 # Source of the meta-path hook that simulates a machine where the e2e extra was

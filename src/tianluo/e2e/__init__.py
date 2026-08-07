@@ -1,4 +1,3 @@
-```python
 """tianluo.e2e — the end-to-end testing subsystem.
 
 e2e is a *general* tianluo capability: it applies to every managed project
@@ -19,6 +18,11 @@ Layering (bottom-up)::
     templates          Dockerfile templates (base / playwright / gui-xvfb) + renderer
     readiness          command / http / tcp / log readiness probing
     container_backend  the docker/podman IsolationBackend implementation
+    assertions         the three-tier assertion ladder (tiers 2/3 import their
+                       dependencies lazily)
+    executor           drives one scenario inside its driver container
+    session            orchestrates a whole run: preflight -> environment ->
+                       scenarios -> teardown, yielding an E2EVerdict
 
 Runtime settings (the ``enabled`` switch, runtime selection, timeouts, scenario
 selection) live in ``tianluo.yaml`` and load through
@@ -46,13 +50,15 @@ wheel — the extra isolates *third-party dependencies*, not tianluo's own code.
 from __future__ import annotations
 
 __all__ = [
+    "assertions",
     "backend",
     "config_schema",
     "container_backend",
     "content_config",
     "errors",
+    "executor",
     "readiness",
     "runtime_probe",
+    "session",
     "templates",
 ]
-```

@@ -8,6 +8,7 @@ which is the part that actually differs between the two runtimes.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -122,43 +123,184 @@ def sample_spec(
 
 
 class FakeBackend(IsolationBackend):
-    """Minimal backend for testing layers above the container implementation."""
+    """In-memory :class:`IsolationBackend` shared by every test above the
+    container implementation (readiness, assertions, executor, session).
+
+    Three ways to script ``exec``, in precedence order: ``exec_handler`` (a
+    callable receiving ``(service, argv)``), ``exec_results`` (a queue popped in
+    order), and otherwise a plain success. ``exec_error`` makes the next call
+    raise, which is how the session's teardown-on-exception path is exercised.
+    """
 
     def __init__(
         self,
         *,
         exec_results: Optional[Sequence[ExecResult]] = None,
+        exec_handler: Optional[Callable[[str, List[str]], ExecResult]] = None,
+        exec_error: Optional[BaseException] = None,
+        create_error: Optional[BaseException] = None,
+        start_error: Optional[BaseException] = None,
+        snapshot_error: Optional[BaseException] = None,
         log_text: str = "",
+        screenshot_bytes: Optional[bytes] = None,
     ) -> None:
         self.exec_results = list(exec_results or [])
+        self.exec_handler = exec_handler
+        self.exec_error = exec_error
+        self.create_error = create_error
+        self.start_error = start_error
+        self.snapshot_error = snapshot_error
         self.log_text = log_text
+        self.screenshot_bytes = screenshot_bytes
         self.exec_calls: List[Any] = []
         self.snapshot_calls: List[Any] = []
+        self.created: List[EnvironmentSpec] = []
+        self.started: List[EnvironmentHandle] = []
         self.destroyed = 0
+        self.handle: Optional[EnvironmentHandle] = None
 
     def create(self, spec):
-        return EnvironmentHandle(runtime="fake", spec=spec)
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append(spec)
+        handle = EnvironmentHandle(runtime="fake", spec=spec)
+        # Containers are recorded so `destroy` has something to report and the
+        # keep-environment hint has names to print, mirroring the real backend.
+        for service in spec.services:
+            handle.containers[service.name] = "fake-{}".format(service.name)
+        self.handle = handle
+        return handle
 
     def start(self, handle):
+        if self.start_error is not None:
+            raise self.start_error
+        self.started.append(handle)
         handle.started = True
 
     def exec(self, handle, service, argv, **kwargs):
-        self.exec_calls.append((service, list(argv), kwargs))
+        argv = [str(part) for part in argv]
+        self.exec_calls.append((service, argv, kwargs))
+        if self.exec_error is not None:
+            raise self.exec_error
+        if self.exec_handler is not None:
+            return self.exec_handler(service, argv)
         if self.exec_results:
             return self.exec_results.pop(0)
         return ExecResult(exit_code=0)
 
     def snapshot(self, handle, service, target, *, kind="file", destination=None):
         self.snapshot_calls.append((service, target, kind))
+        if self.snapshot_error is not None:
+            raise self.snapshot_error
+        path = Path(destination) if destination else Path("/tmp/tianluo-e2e-fake.log")
+        if destination is not None and self.screenshot_bytes is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(self.screenshot_bytes)
         return Snapshot(
             kind=kind,
-            path=Path(destination or "/tmp/tianluo-e2e-fake.log"),
+            path=path,
             service=service,
             metadata={"text": self.log_text},
         )
 
     def destroy(self, handle):
         self.destroyed += 1
+
+    # -- convenience accessors -------------------------------------------
+
+    def argv_containing(self, needle: str) -> List[List[str]]:
+        """Every recorded argv containing ``needle`` as one of its parts."""
+        return [argv for _, argv, _ in self.exec_calls if needle in argv]
+
+
+def marked(payload: Dict[str, Any]) -> str:
+    """stdout as an in-container helper program writes it (marker + JSON)."""
+    from tianluo.e2e.assertions import RESULT_MARKER
+
+    return "some unrelated container noise\n{} {}\n".format(
+        RESULT_MARKER, json.dumps(payload)
+    )
+
+
+def assertion(kind: str, **params: Any):
+    """Build an :class:`AssertionDecl`, splitting out the tier-declaration flags."""
+    from tianluo.e2e.content_config import AssertionDecl
+
+    flags = {
+        name: bool(params.pop(name, False))
+        for name in ("visual_regression", "semantic_visual", "require_evidence")
+    }
+    return AssertionDecl(kind=kind, params=params, **flags)
+
+
+def action(kind: str, **params: Any):
+    """Build an :class:`ActionDecl`."""
+    from tianluo.e2e.content_config import ActionDecl
+
+    return ActionDecl(kind=kind, params=params)
+
+
+def scenario(
+    name: str = "smoke",
+    driver: str = "app",
+    *,
+    actions: Sequence[Any] = (),
+    assertions: Sequence[Any] = (),
+    source: str = "tianluo/e2e/scenarios/smoke.yaml",
+    **kwargs: Any,
+):
+    """Build a :class:`ScenarioDecl` without going through YAML."""
+    from tianluo.e2e.content_config import ScenarioDecl
+
+    return ScenarioDecl(
+        name=name,
+        driver=driver,
+        source=source,
+        actions=tuple(actions),
+        assertions=tuple(assertions),
+        **kwargs,
+    )
+
+
+def service_decl(name: str = "app", **kwargs: Any):
+    """Build a :class:`ServiceDecl` with a sane default image."""
+    from tianluo.e2e.content_config import ServiceDecl
+
+    kwargs.setdefault("image", "python:3.12-slim")
+    return ServiceDecl(name=name, **kwargs)
+
+
+def content(
+    project_root: Path,
+    *,
+    services: Optional[Sequence[Any]] = None,
+    scenarios: Optional[Sequence[Any]] = None,
+    network: str = "tianluo-e2e",
+):
+    """Build an :class:`E2EContent` directly, bypassing the YAML layer."""
+    from tianluo.e2e.content_config import E2EContent
+
+    root = Path(project_root)
+    return E2EContent(
+        project_root=root,
+        root=root / "tianluo" / "e2e",
+        network=network,
+        services=tuple(services if services is not None else (service_decl(),)),
+        scenarios=tuple(scenarios or ()),
+        baselines=root / "tianluo" / "e2e" / "baselines",
+    )
+
+
+def write_png(path: Path, *, size=(4, 4), color=(10, 20, 30), pixels=None) -> Path:
+    """Write a tiny PNG for the tier-2 comparison tests."""
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", size, color)
+    for coordinate, value in (pixels or {}).items():
+        image.putpixel(coordinate, value)
+    image.save(path, format="PNG")
+    return path
 
 
 class FakeClock:
