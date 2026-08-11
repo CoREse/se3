@@ -1,5 +1,12 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.4.1 - 2026-08-11
+
+- Change the default `self_check_defer_fix_threshold` from 3 to 0, so deferral is disabled out of the box and any self_check pass that finds issues enters the fix loop immediately.
+- Restore the historical fix-loop timing by default: expensive later check passes no longer run against code already known to need rework.
+- Update the `self_check_defer_fix_threshold` default column in the English and Chinese configuration reference tables to 0.
+- Update the commented `self_check_defer_fix_threshold` example and its stated default in `tianluo.example.yaml` to 0.
+- Leave the deferral feature, its validation (`>= 0`, `0`/`null` disables), and all self_check decision logic unchanged — explicitly setting the key keeps the previous behaviour.
 ## 12.4.0 - 2026-08-08
 
 - Add an opt-in end-to-end testing subsystem, enabled with `e2e.enabled: true` in `tianluo.yaml`; projects that leave it off see no behavior change and no new dependencies

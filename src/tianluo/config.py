@@ -2534,7 +2534,7 @@ DEFAULT_BASELINE_FIX_MAX_ATTEMPTS = 3
 # (or ``null``) disables deferral entirely (every pass that finds issues triggers
 # fix immediately — the historical behavior). Negative values are rejected
 # fail-fast at load.
-DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD = 3
+DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD = 0
 # Period (in fix iterations) of the adjudicate step's catch-all safety trigger:
 # even when no structural oscillation signal fires, every N fix iterations force
 # one adjudicate run to catch drift the structural triggers missed. ``0`` (or

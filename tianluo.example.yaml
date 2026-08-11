@@ -208,8 +208,8 @@ workflow:
   # severity, its fix is deferred and the remaining passes run first; their
   # findings are then merged (deduped) into one consolidated fix loop. Set to 0
   # (or null) to disable — every issue-finding pass triggers fix immediately
-  # (the historical behavior). Default: 3.
-  # self_check_defer_fix_threshold: 3
+  # (the historical behavior). Default: 0.
+  # self_check_defer_fix_threshold: 0
 
 # 调查步骤（investigate）配置
 # investigate 面向『症状已知、原因不明』的问题做探索式根因调查：允许临时日志 /

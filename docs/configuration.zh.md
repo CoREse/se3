@@ -366,7 +366,7 @@ fix loop 与 self_check 的行为。加载进 `WorkflowConfig`。
 | `self_check_passes_required` | int `>= 1` | `1` | 必须跑几遍 self_check。`< 1` → `ConfigError`。bool / 浮点 / 非整数会告警并回落到 `1`。与嵌套链路的相互作用见 [`llm_caller`](#self_check按-pass-的嵌套链路)。 |
 | `self_check_convergence_enabled` | bool | `false` | 除了满足遍数之外,self_check 的各遍是否还必须收敛(不再发现新问题)。接受 `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`;其余值告警并回落。 |
 | `baseline_fix_max_attempts` | int `>= 0` | `3` | 每个 flow 针对*继承而来*的(implement 之前的 baseline)测试失败所做循环的上限。刻意与 `max_fix_iterations` 独立 —— 后者可能是表示无限的哨兵值,而继承来的失败必须自己有界。**`0` 完全禁用 baseline 循环**(继承来的失败只上报,不循环)。负数 → `ConfigError`。 |
-| `self_check_defer_fix_threshold` | int `>= 0` | `3` | 用于嵌套 self_check 链路:当某个非最后一遍发现的问题*少于*此数量、且其中没有 critical / high 严重级时,推迟其修复,让剩余各遍先跑完;随后把各遍的发现去重合并进一次统一的 fix loop。**`0`(或 `null`)禁用推迟** —— 每一遍只要发现问题就立刻修(历史行为)。负数 → `ConfigError`。 |
+| `self_check_defer_fix_threshold` | int `>= 0` | `0` | 用于嵌套 self_check 链路:当某个非最后一遍发现的问题*少于*此数量、且其中没有 critical / high 严重级时,推迟其修复,让剩余各遍先跑完;随后把各遍的发现去重合并进一次统一的 fix loop。**`0`(或 `null`)禁用推迟** —— 每一遍只要发现问题就立刻修(历史行为)。负数 → `ConfigError`。 |
 | `adjudicate_period` | int `>= 0` | `10` | adjudicate step 那张兜底安全网的周期,单位是 fix 迭代次数:每 N 次 fix 迭代,即使没有任何结构性震荡信号触发,也强制跑一次 adjudicate。**`0`(或 `null`)禁用这张周期性的网**(adjudicate 此后只在结构性触发条件下运行:候选震荡 / 相互矛盾 / 反复复发)。与它的同类不同,这个 key 在**类型错误时快速失败**:bool、浮点或非数字字符串会抛 `ConfigError` 而非回落默认值 —— 因为悄悄回落等于启用了一个用户从未要求过的周期。能干净取整的字符串(`"7"`)仍会被强制转换。负数 → `ConfigError`。 |
 
 `WorkflowConfig` 还带着一个名为 `self_check_passes_required_explicit` 的字段。它

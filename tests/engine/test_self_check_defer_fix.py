@@ -137,10 +137,10 @@ def _run_handler(step, flow, issues):
 
 
 class TestDeferThresholdConfig:
-    def test_default_is_three(self):
+    def test_default_is_zero(self):
         cfg = WorkflowConfig.from_dict({"workflow": {}})
-        assert cfg.self_check_defer_fix_threshold == 3
-        assert DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD == 3
+        assert cfg.self_check_defer_fix_threshold == 0
+        assert DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD == 0
 
     def test_explicit_value(self):
         cfg = WorkflowConfig.from_dict(
@@ -167,7 +167,7 @@ class TestDeferThresholdConfig:
             cfg = WorkflowConfig.from_dict(
                 {"workflow": {"self_check_defer_fix_threshold": True}}
             )
-        assert cfg.self_check_defer_fix_threshold == 3
+        assert cfg.self_check_defer_fix_threshold == 0
         assert "self_check_defer_fix_threshold" in caplog.text
 
     def test_float_warns_and_falls_back(self, caplog):
@@ -177,7 +177,7 @@ class TestDeferThresholdConfig:
             cfg = WorkflowConfig.from_dict(
                 {"workflow": {"self_check_defer_fix_threshold": 2.5}}
             )
-        assert cfg.self_check_defer_fix_threshold == 3
+        assert cfg.self_check_defer_fix_threshold == 0
         assert "self_check_defer_fix_threshold" in caplog.text
 
     def test_negative_fails_fast(self):
