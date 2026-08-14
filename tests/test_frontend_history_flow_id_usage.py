@@ -11,7 +11,7 @@ data-model change):
   3. the history-detail header carries a session token-usage badge
      (``#history-usage-badge``) that reuses the running-flow view's
      ``.flow-usage-badge`` styling and the shared ``applyUsageBadge`` renderer
-     (``accumulateSessionUsage`` + ``formatTokenUsage`` + empty suppression).
+     (backend payload first, explicit unavailable state otherwise).
 
 The behavioural assertions for the DOM-stubbed render live in
 ``tests/frontend/history_flow_id.test.mjs`` and
@@ -83,7 +83,7 @@ def test_history_flow_id_node_suite_passes():
         "history detail shows the FULL flow_id even when a task_description exists",
         "closeHistory clears the flow_id line and hides the usage badge",
         "updateHistoryUsageBadge hides + clears the badge with no usage",
-        "updateHistoryUsageBadge shows + populates the badge once usage exists",
+        "updateHistoryUsageBadge shows explicit unavailable state once usage exists",
         "history + flow badges render an identical value for the same records (shared helper)",
     ):
         assert needle in combined, (

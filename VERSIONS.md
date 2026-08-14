@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.5.0 - 2026-08-14
+
+- Add `workflow.implementation_strategy` config and `--implementation-strategy` CLI/Web override (auto|direct|planned, default planned), with the effective strategy and its reason persisted per flow and honored across worktree, from-issue, preset, daemon spawn and resume paths.
+- Add a direct implementation path that drops PLAN and its CONFIRM while keeping INVESTIGATE, IMPLEMENT and all task-type quality gates; ClaudeCodeRunner prefixes the print-mode prompt with `/goal` and falls back to a plain prompt when `/goal` is unavailable before any tool use, while Codex and other runners use their existing autonomous interfaces.
+- Make the effective task description the sole requirement authority for SELF_CHECK: plan task_groups are no longer injected as a requirement source, `expectation_source.type = plan_task` is rejected for new findings, and legacy flows with plan_task findings still resume and display correctly.
+- Add diff-scoped SELF_CHECK with a persisted full/incremental `scope_mode`, an implementation review baseline captured before the first IMPLEMENT and a fix baseline before each FIX, so review focuses on this flow's own changes (including its own commits) and excludes pre-existing working-tree edits, degrading safely to a full round when a baseline is genuinely unreconstructible.
+- Require a full closure round before INVARIANT_CHECK and force a full round whenever the effective task description changes via ADJUDICATE or user interjection.
+- Close the loophole that let SELF_CHECK pass with open findings: remove the `self_check_convergence_enabled` COMPLETED shortcut (the old config key is still accepted, normalized to false with a one-time deprecation warning) and make deferred findings from multi-pass and `self_check_defer_fix_threshold` always reach the fix loop.
+- Add a provider-aware UsageRecord model with per-call usage status (available/partial/unavailable/legacy_ambiguous), shape-based Anthropic vs OpenAI/Codex token normalization, cache-class breakdown, full terminal-event scanning with stable-identity dedup, and cumulative session-cost snapshot handling — with legacy UsageTotals still read and projected.
+- Add a versioned built-in pricing table with `pricing.models.<canonical_model>` overrides (USD per million tokens per input/output/cache class) and a unified usage/cost view in `luo history show` (plus `--json`), the run session summary, daemon history payload and WebUI, reporting actual, estimated and unknown separately instead of a misleading $0.
 ## 12.4.1 - 2026-08-11
 
 - Change the default `self_check_defer_fix_threshold` from 3 to 0, so deferral is disabled out of the box and any self_check pass that finds issues enters the fix loop immediately.

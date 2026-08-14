@@ -43,9 +43,10 @@ def test_protocol_version_current():
     """END_SESSION was additive and did not itself bump PROTOCOL_VERSION; the
     version later advanced to "3" for the (unrelated) traffic-reduction
     messages, to "4" for the (also unrelated) presence signalling, to "5" for
-    the (likewise unrelated) upload channel and to "6" for its fetch
-    counterpart, so simply pin the current revision here."""
-    assert protocol.PROTOCOL_VERSION == "6"
+    the (likewise unrelated) upload channel, to "6" for its fetch counterpart
+    and to "7" for the (likewise unrelated) spawn-strategy field, so simply
+    pin the current revision here."""
+    assert protocol.PROTOCOL_VERSION == "7"
 
 
 def test_make_end_session_roundtrip():

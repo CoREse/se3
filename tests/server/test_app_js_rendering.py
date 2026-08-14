@@ -935,3 +935,75 @@ def test_incremental_loaders_guard_container_clear_behind_first_open():
         assert "mergeHistoryResponse" in body, (
             f"{fn} must fold the response through mergeHistoryResponse"
         )
+
+# ---------------------------------------------------------------------------
+# G10: implementation strategy / scope / backend usage summary wiring
+# ---------------------------------------------------------------------------
+def test_g10_strategy_selects_carry_project_default_first():
+    """Both strategy selects must default to the empty (project-default) value
+    so the submit path omits the field and the daemon resolves the project
+    configuration — an explicit empty override would silently change the
+    strategy resolution chain."""
+    html = _read_index_html()
+    for sel_id in ("nt-strategy", "issue-launch-strategy"):
+        idx = html.index(f'id="{sel_id}"')
+        block = html[idx:html.index("</select>", idx)]
+        first = block[block.index("<option"):block.index(">", block.index("<option")) + 1]
+        assert 'value=""' in first, (
+            f"{sel_id} must offer project default (value=\"\") first"
+        )
+        for strategy in ("auto", "direct", "planned"):
+            assert f'value="{strategy}"' in block, (
+                f"{sel_id} must offer the explicit {strategy} option"
+            )
+
+
+def test_g10_new_flow_body_omits_default_strategy_field():
+    """buildNewFlowBody must only set implementation_strategy for an explicit
+    value — the omission is what lets the daemon apply project configuration.
+    (The function body extractor trips on the destructuring parameter, so this
+    screens the assignment pattern in the surrounding source instead.)"""
+    src = _read_app_js()
+    assert "body.implementation_strategy = String(strategy);" in src, (
+        "buildNewFlowBody must assign the field"
+    )
+    assert "if (strategy)" in src, (
+        "an empty strategy must skip setting the field entirely"
+    )
+
+
+def test_g10_backend_summary_renderers_share_one_schema():
+    """history and live flow consume the same renderers — one payload schema,
+    no frontend re-summing of provider costs / cached tokens / pricing."""
+    src = _read_app_js()
+    body = _extract_js_function_body(src, "applyUsageBadge")
+    assert "usagePayloadSummary" in body, (
+        "the badge must consume the backend payload"
+    )
+    region = _extract_js_function_body(src, "renderHistoryUsageRegion")
+    assert "renderUsagePayloadRegion" in region, (
+        "the history region must reuse the shared payload renderer"
+    )
+    # The flow card / sidebar consume the same projection shape the daemon
+    # relays (implementation_strategy / review_scope / usage_summary).
+    sidebar = _extract_js_function_body(src, "renderFlowSidebar")
+    assert "appendStrategySection" in sidebar, (
+        "sidebar must render the strategy projection"
+    )
+    signature = _extract_js_function_body(src, "flowSidebarSignature")
+    for field in ("implementation_strategy", "review_scope", "usage_summary"):
+        assert field in signature, f"sidebar signature must carry {field}"
+
+
+def test_g10_scope_audit_fields_rendered():
+    """scope_mode / baseline id / changed paths / fix iteration / pass index
+    must all be displayed from the persisted round state."""
+    src = _read_app_js()
+    for field in ("scope_mode", "baseline_id", "fix_iteration", "pass_index"):
+        assert field in src, f"app.js must reference {field}"
+    html = _read_index_html()
+    assert 'id="history-meta"' in html, "history meta container missing"
+    assert 'id="history-usage-region"' in html, "history usage region missing"
+
+
+

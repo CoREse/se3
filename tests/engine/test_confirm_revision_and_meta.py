@@ -148,6 +148,49 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
         # Flow should not have hit max iterations (the old bug)
         assert flow.status != FlowStatus.FAILED, "Flow should not fail from infinite loop"
 
+    def test_revision_of_implement_captures_fresh_fix_baseline(self):
+        # A rejected CONFIRM that sends IMPLEMENT back for revision is a real
+        # code change: the next SELF_CHECK round must diff against the state
+        # immediately before that revision, not a stale earlier fix baseline.
+        flow = FlowInstance(
+            task_description="Test",
+            task_type="feature",
+        )
+        flow.state.selected_steps = [StepType.IMPLEMENT, StepType.CONFIRM]
+        implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            step_id="implement-001",
+            outputs={"completion_status": "complete"},
+        )
+        flow.state.add_step(implement_step)
+        confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.REVISION_NEEDED,
+            step_id="confirm-001",
+            outputs={
+                "review_result": {
+                    "approved": False,
+                    "feedback": "rework the adapter",
+                    "step_to_review_id": "implement-001",
+                    "step_to_review_type": "implement",
+                },
+                "revision_feedback": "rework the adapter",
+            },
+        )
+        flow.state.add_step(confirm_step)
+        flow.state.current_step_id = "confirm-001"
+        flow.state.current_step_index = 1
+
+        revised = self.sm.transition_to_next(flow)
+        assert revised is implement_step
+        assert implement_step.inputs["revision_feedback"] == "rework the adapter"
+
+        scope_context = flow.state.context.get("review_scope") or {}
+        baseline = scope_context.get("latest_fix_baseline")
+        assert isinstance(baseline, dict)
+        assert str(baseline.get("baseline_id", "")).startswith("fix-")
+
     def test_confirm_revision_calls_transition_to_next(self):
         """Verify that transition_to_next is called (not skipped) when
         CONFIRM returns REVISION_NEEDED."""

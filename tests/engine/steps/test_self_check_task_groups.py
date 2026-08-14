@@ -1,9 +1,4 @@
-"""Tests for self_check task_groups injection.
-
-Covers the `_format_task_groups` helper and the handler-level behavior of
-injecting the Plan Task Groups (Authoritative Task List — HARD AUDIT) section
-into the LLM prompt when `task_groups` is present in step.inputs.
-"""
+"""Regression coverage for task_groups' non-authoritative SELF_CHECK role."""
 
 from __future__ import annotations
 
@@ -14,304 +9,108 @@ import pytest
 
 from tianluo.engine.models import FlowInstance, FlowStatus, Step, StepStatus, StepType
 from tianluo.engine.steps.self_check import (
-    _TASK_GROUPS_SECTION_INTRO,
-    _build_task_groups_section,
-    _format_task_groups,
+    _build_source_pool,
+    _validate_and_filter_issues,
     self_check_handler,
 )
-from tianluo.engine.truncation import SELF_CHECK_TASK_GROUPS_MAX_CHARS
-
-
-# ---------------------------------------------------------------------------
-# _format_task_groups — branch coverage
-# ---------------------------------------------------------------------------
-
-
-class TestFormatTaskGroups:
-    def test_none_returns_empty(self):
-        assert _format_task_groups(None) == ""
-
-    def test_empty_list_returns_empty(self):
-        assert _format_task_groups([]) == ""
-
-    def test_non_list_returns_empty(self):
-        assert _format_task_groups({"not": "a list"}) == ""
-        assert _format_task_groups("string") == ""
-        assert _format_task_groups(42) == ""
-
-    def test_list_with_non_dict_entries_returns_empty(self):
-        assert _format_task_groups(["str", 1, None]) == ""
-
-    def test_typical_input_renders_markdown(self):
-        task_groups = [
-            {
-                "group_id": "G1",
-                "name": "Auth flow",
-                "tasks": [
-                    {
-                        "id": 1,
-                        "description": "Add login endpoint",
-                        "acceptance_criteria": [
-                            "Returns 200 on valid creds",
-                            "Returns 401 otherwise",
-                        ],
-                    },
-                    {
-                        "id": 2,
-                        "description": "Add session table",
-                        "acceptance_criteria": ["Migration applies cleanly"],
-                    },
-                ],
-            },
-        ]
-        out = _format_task_groups(task_groups)
-        assert "### G1 — Auth flow" in out
-        assert "- [1] Add login endpoint" in out
-        assert "  - AC: Returns 200 on valid creds" in out
-        assert "  - AC: Returns 401 otherwise" in out
-        assert "- [2] Add session table" in out
-        assert "  - AC: Migration applies cleanly" in out
-
-    def test_multiple_groups_all_rendered(self):
-        task_groups = [
-            {"group_id": "G1", "name": "First", "tasks": [{"id": 1, "description": "task one"}]},
-            {"group_id": "G2", "name": "Second", "tasks": [{"id": 2, "description": "task two"}]},
-        ]
-        out = _format_task_groups(task_groups)
-        assert "### G1 — First" in out
-        assert "### G2 — Second" in out
-        assert "- [1] task one" in out
-        assert "- [2] task two" in out
-
-    def test_group_without_tasks_shows_placeholder(self):
-        task_groups = [{"group_id": "G1", "name": "Empty", "tasks": []}]
-        out = _format_task_groups(task_groups)
-        assert "### G1 — Empty" in out
-        assert "_(no tasks)_" in out
-
-    def test_group_without_id_or_name(self):
-        task_groups = [{"tasks": [{"id": 1, "description": "orphan"}]}]
-        out = _format_task_groups(task_groups)
-        assert "(unnamed group)" in out
-        assert "- [1] orphan" in out
-
-    def test_task_without_description(self):
-        task_groups = [{"group_id": "G1", "name": "g", "tasks": [{"id": 5}]}]
-        out = _format_task_groups(task_groups)
-        assert "- [5] (no description)" in out
-
-    def test_task_without_id(self):
-        task_groups = [
-            {"group_id": "G1", "name": "g", "tasks": [{"description": "no id here"}]}
-        ]
-        out = _format_task_groups(task_groups)
-        assert "- no id here" in out
-
-    def test_acceptance_criteria_not_a_list_is_skipped(self):
-        task_groups = [
-            {
-                "group_id": "G1",
-                "name": "g",
-                "tasks": [{"id": 1, "description": "t", "acceptance_criteria": "not a list"}],
-            }
-        ]
-        out = _format_task_groups(task_groups)
-        assert "- [1] t" in out
-        assert "AC:" not in out
-
-    def test_empty_acceptance_criteria_entry_skipped(self):
-        task_groups = [
-            {
-                "group_id": "G1",
-                "name": "g",
-                "tasks": [
-                    {"id": 1, "description": "t", "acceptance_criteria": ["", "  ", "real one"]}
-                ],
-            }
-        ]
-        out = _format_task_groups(task_groups)
-        assert "- AC: real one" in out
-        assert out.count("AC:") == 1
-
-    def test_oversized_input_keeps_every_task_visible(self):
-        # A plan whose full render exceeds the cap must NOT silently drop later
-        # tasks (the old head-truncation bug): every task id must remain
-        # present so the per-task audit can check it, with a retrieval note.
-        big_desc = "x" * 500
-        tasks = [{"id": i, "description": big_desc} for i in range(50)]
-        task_groups = [{"group_id": "G1", "name": "big", "tasks": tasks}]
-        out = _format_task_groups(task_groups)
-        # Every task header survives (degrade detail, never drop a task).
-        for i in range(50):
-            assert f"[{i}]" in out
-        # An explicit retrieval mechanism is offered for the trimmed detail.
-        assert "trimmed" in out
-        assert "retrieve" in out.lower()
-        # The old silent head-truncation marker must be gone.
-        assert "… (truncated)" not in out
-
-    def test_ac_dropped_first_when_only_slightly_over_cap(self):
-        # When dropping acceptance_criteria alone brings the render under
-        # budget, full task descriptions are preserved (tier-2 degrade).
-        desc = "y" * 100
-        tasks = [
-            {"id": i, "description": desc, "acceptance_criteria": ["z" * 200]}
-            for i in range(12)
-        ]
-        task_groups = [{"group_id": "G1", "name": "g", "tasks": tasks}]
-        out = _format_task_groups(task_groups)
-        for i in range(12):
-            assert f"[{i}] {desc}" in out  # full description retained
-        assert "AC:" not in out  # criteria dropped to fit
-        assert "trimmed" in out
-
-    def test_no_truncation_note_when_under_cap(self):
-        task_groups = [
-            {"group_id": "G1", "name": "small", "tasks": [{"id": 1, "description": "tiny"}]}
-        ]
-        out = _format_task_groups(task_groups)
-        assert "… (truncated)" not in out
-        assert "trimmed" not in out
-
-    def test_non_dict_task_entries_skipped(self):
-        task_groups = [
-            {
-                "group_id": "G1",
-                "name": "g",
-                "tasks": ["not a dict", 123, {"id": 1, "description": "ok"}],
-            }
-        ]
-        out = _format_task_groups(task_groups)
-        assert "- [1] ok" in out
-
-
-# ---------------------------------------------------------------------------
-# _build_task_groups_section — wraps summary with intro or returns ""
-# ---------------------------------------------------------------------------
-
-
-class TestBuildTaskGroupsSection:
-    def test_empty_input_returns_empty(self):
-        assert _build_task_groups_section(None) == ""
-        assert _build_task_groups_section([]) == ""
-
-    def test_populated_input_includes_intro(self):
-        task_groups = [
-            {"group_id": "G1", "name": "X", "tasks": [{"id": 1, "description": "t"}]}
-        ]
-        out = _build_task_groups_section(task_groups)
-        assert "## Plan Task Groups (Authoritative Task List — HARD AUDIT)" in out
-        assert "hard audit" in out.lower()
-        assert "authoritative list" in out.lower()
-        assert "- [1] t" in out
-
-    def test_intro_matches_constant(self):
-        task_groups = [
-            {"group_id": "G1", "name": "X", "tasks": [{"id": 1, "description": "t"}]}
-        ]
-        out = _build_task_groups_section(task_groups)
-        assert _TASK_GROUPS_SECTION_INTRO in out
-
-
-# ---------------------------------------------------------------------------
-# self_check_handler — prompt content varies by task_groups presence
-# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
 def flow(tmp_path):
-    f = FlowInstance(
+    return FlowInstance(
         flow_id="test-flow-tg",
         task_description="Implement feature X",
         task_type="feature",
         status=FlowStatus.RUNNING,
         change_path=tmp_path / "changes" / "tg",
     )
-    f.state.selected_steps = [
-        StepType.IMPLEMENT,
-        StepType.TEST,
-        StepType.SELF_CHECK,
-        StepType.VERIFY_SPEC,
+
+
+def _groups():
+    return [
+        {
+            "group_id": "G1",
+            "name": "Historical schedule",
+            "tasks": [
+                {
+                    "id": 1,
+                    "description": "Plan-only requirement must never expand scope",
+                    "acceptance_criteria": ["Plan-only acceptance criterion"],
+                }
+            ],
+        }
     ]
-    return f
 
 
-def _make_step(task_groups=None):
-    inputs = {
-        "task_description": "Implement feature X",
-        "changes_made": {"files_changed": ["src/feature.py"]},
-        "test_results": {"passed": True, "returncode": 0, "stdout": "ok"},
-        "spec_content": {"base": "Base spec content"},
-    }
-    if task_groups is not None:
-        inputs["task_groups"] = task_groups
+def _step():
     return Step(
         step_type=StepType.SELF_CHECK,
         status=StepStatus.PENDING,
-        inputs=inputs,
+        inputs={
+            "task_description": "Implement feature X",
+            "task_description_base": "Implement feature X",
+            "changes_made": {"files_changed": ["src/feature.py"]},
+            "test_results": {"passed": True, "returncode": 0, "stdout": "ok"},
+            "task_groups": _groups(),
+            "implement_summary": "Implementation-only claim must not be authority",
+        },
     )
 
 
-def _call_handler_capture_prompt(step, flow):
-    """Run self_check_handler with a mocked LLM, return the prompt passed in."""
+def _capture_prompt(step, flow):
     response = json.dumps({"issues": [], "summary": "ok"})
     with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
-        mock_caller = Mock()
-        mock_caller.call.return_value = response
-        mock_cls.return_value = mock_caller
-        result = self_check_handler(step, flow)
-    assert result == StepStatus.COMPLETED
-    return mock_caller.call.call_args.kwargs["prompt"]
+        caller = Mock()
+        caller.call.return_value = response
+        mock_cls.return_value = caller
+        status = self_check_handler(step, flow)
+    assert status == StepStatus.COMPLETED
+    return caller.call.call_args.kwargs["prompt"]
 
 
-class TestHandlerPromptInjection:
-    def test_prompt_includes_section_when_task_groups_present(self, flow):
-        task_groups = [
-            {
-                "group_id": "G1",
-                "name": "Auth flow",
-                "tasks": [
-                    {
-                        "id": 1,
-                        "description": "Add login endpoint",
-                        "acceptance_criteria": ["Returns 200 on valid creds"],
-                    }
-                ],
-            }
-        ]
-        step = _make_step(task_groups=task_groups)
-        prompt = _call_handler_capture_prompt(step, flow)
+def test_task_groups_and_implementation_summary_are_absent_from_prompt(flow):
+    prompt = _capture_prompt(_step(), flow)
+    assert "## Plan Task Groups" not in prompt
+    assert "Plan-only requirement must never expand scope" not in prompt
+    assert "Plan-only acceptance criterion" not in prompt
+    assert "Implementation-only claim must not be authority" not in prompt
+    assert "only navigation clues" in prompt
 
-        assert "## Plan Task Groups (Authoritative Task List — HARD AUDIT)" in prompt
-        assert "Add login endpoint" in prompt
-        assert "AC: Returns 200 on valid creds" in prompt
-        assert "hard audit" in prompt.lower()
-        # Guard the load-bearing hard-audit phrasing: task_groups is the
-        # authoritative task list, audited strictly per task. These lines must
-        # reach the final prompt verbatim — future edits to
-        # _TASK_GROUPS_SECTION_INTRO that weaken the audit should fail here.
-        assert "authoritative list" in prompt.lower()
-        assert 'expectation_source.type = "plan_task"' in prompt
-        # The old soft-reference disclaimer must be gone.
-        assert "NOT a strict specification" not in prompt
-        assert "Reasonable deviations from the plan" not in prompt
-        assert "missing-plan-compliance" not in prompt
 
-    def test_prompt_omits_section_when_task_groups_absent(self, flow):
-        step = _make_step(task_groups=None)
-        prompt = _call_handler_capture_prompt(step, flow)
-        assert "## Plan Task Groups" not in prompt
+def test_task_groups_do_not_enter_requirement_source_pool():
+    inputs = _step().inputs
+    pool = _build_source_pool(inputs)
+    assert pool == ["Implement feature X"]
+    assert not any("Plan-only" in item for item in pool)
 
-    def test_prompt_omits_section_when_task_groups_empty_list(self, flow):
-        step = _make_step(task_groups=[])
-        prompt = _call_handler_capture_prompt(step, flow)
-        assert "## Plan Task Groups" not in prompt
 
-    def test_prompt_has_no_orphan_blank_lines_when_omitted(self, flow):
-        """Sanity: the absent-section path should not leave a dangling heading or giant gap."""
-        step = _make_step(task_groups=None)
-        prompt = _call_handler_capture_prompt(step, flow)
-        # Spec content section should flow directly into Fix Context without an orphan heading.
-        assert "## Plan Task Groups" not in prompt
-        # No 4+ consecutive blank lines produced by the conditional.
-        assert "\n\n\n\n" not in prompt
+def test_new_plan_task_finding_is_rejected_even_when_quote_matches_plan():
+    issue = {
+        "severity": "high",
+        "location": "src/feature.py:4",
+        "actual_behavior": "the plan-only behavior is absent",
+        "expected_behavior": "the plan-only behavior exists",
+        "divergence": "a plan-only input produces no result",
+        "expectation_source": {
+            "type": "plan_task",
+            "verbatim_quote": "Plan-only requirement must never expand scope",
+        },
+        "evidence_lines": ["src/feature.py:4"],
+        "missing_in": [],
+    }
+    kept, stats = _validate_and_filter_issues([issue], _step().inputs)
+    assert kept == []
+    assert stats["unsupported_source_type_count"] == 1
+
+
+def test_legacy_plan_task_finding_shape_remains_serializable_and_displayable():
+    issue = {
+        "severity": "medium",
+        "location": "src/legacy.py:8",
+        "description": "legacy finding",
+        "expectation_source": {"type": "plan_task", "verbatim_quote": "old task"},
+    }
+    encoded = json.dumps({"issues": [issue], "adjudicated_plan": _groups()})
+    restored = json.loads(encoded)
+    assert restored["issues"][0]["expectation_source"]["type"] == "plan_task"
+    assert restored["adjudicated_plan"] == _groups()

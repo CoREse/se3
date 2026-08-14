@@ -28,9 +28,10 @@ def test_protocol_version_current():
     # Revision 3 added the traffic-reduction messages (keepalive / index-delta /
     # detail); the bump is what lets each side detect a legacy peer and fall
     # back to full-frame semantics. Revision 4 later added the (unrelated)
-    # presence signalling, revision 5 the (likewise unrelated) upload channel
-    # and revision 6 its fetch counterpart; pin the current revision here.
-    assert protocol.PROTOCOL_VERSION == "6"
+    # presence signalling, revision 5 the (likewise unrelated) upload channel,
+    # revision 6 its fetch counterpart, and revision 7 the optional spawn
+    # implementation_strategy field; pin the current revision here.
+    assert protocol.PROTOCOL_VERSION == "7"
 
 
 def test_history_message_types_registered():
@@ -297,3 +298,67 @@ def test_make_spawn_flow_resume_flow_id_falsey_values_not_included():
     """Empty string resume_flow_id is not added to the payload."""
     msg = protocol.make_spawn_flow("task", resume_flow_id="")
     assert "resume_flow_id" not in msg.payload
+
+
+def test_make_history_data_usage_round_trip():
+    """Revision 7: a full HISTORY_DATA frame may carry the usage payload."""
+    usage = {
+        "calls": [],
+        "steps": {},
+        "summary": {"actual_cost_usd": 0.5, "completeness": "complete"},
+        "legacy": False,
+        "completeness": "complete",
+    }
+    msg = protocol.make_history_data(
+        "f1", protocol.HISTORY_MODE_FULL, [{"step_id": "s"}], usage=usage
+    )
+    decoded = decode(msg.to_json())
+    assert decoded.payload["usage"] == usage
+
+
+def test_make_history_data_omits_usage_by_default():
+    """Pre-revision-7 peers never see the usage key."""
+    msg = protocol.make_history_data(
+        "f1", protocol.HISTORY_MODE_FULL, [{"step_id": "s"}]
+    )
+    assert "usage" not in msg.payload
+    decoded = decode(msg.to_json())
+    assert "usage" not in decoded.payload
+
+
+def test_make_history_data_usage_catalog_round_trip():
+    """The serialized pricing catalog rides usage-bearing frames (full OR
+    append) so the server re-aggregates with the same table the daemon used."""
+    catalog = {"version": "2026-08-13", "entries": {"claude-opus-5": {}}}
+    msg = protocol.make_history_data(
+        "f1", protocol.HISTORY_MODE_APPEND, [{"step_id": "s"}],
+        usage_catalog=catalog,
+    )
+    decoded = decode(msg.to_json())
+    assert decoded.payload["usage_catalog"] == catalog
+    full = protocol.make_history_data(
+        "f1", protocol.HISTORY_MODE_FULL, [{"step_id": "s"}],
+        usage_catalog=catalog,
+    )
+    assert decode(full.to_json()).payload["usage_catalog"] == catalog
+
+
+def test_make_history_data_omits_usage_catalog_by_default():
+    """The catalog key is additive: frames without one stay byte-compatible."""
+    msg = protocol.make_history_data(
+        "f1", protocol.HISTORY_MODE_FULL, [{"step_id": "s"}]
+    )
+    assert "usage_catalog" not in msg.payload
+    decoded = decode(msg.to_json())
+    assert "usage_catalog" not in decoded.payload
+
+
+def test_make_spawn_flow_strategy_round_trip():
+    msg = protocol.make_spawn_flow(
+        "Build X", project_root="/p", implementation_strategy="direct"
+    )
+    decoded = decode(msg.to_json())
+    assert decoded.payload["implementation_strategy"] == "direct"
+    # Omitted when empty, so a plain spawn payload stays byte-compatible.
+    plain = protocol.make_spawn_flow("Build X", project_root="/p")
+    assert "implementation_strategy" not in plain.payload

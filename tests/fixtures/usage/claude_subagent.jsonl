@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","provider":"anthropic","session_id":"claude-session-subagent","model":"claude-opus-4-1-20250805"}
+{"type":"result","subtype":"success","session_id":"claude-session-subagent","result":"parent complete","subagents":[{"usage_event_id":"subagent-result-1","provider_session_id":"claude-subagent-a","usage":{"input_tokens":70,"output_tokens":20}},{"usage_event_id":"subagent-result-2","provider_session_id":"claude-subagent-b","usage":{"input_tokens":50,"output_tokens":10}}]}

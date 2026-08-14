@@ -19,6 +19,7 @@ from .display import (
     render_markdown,
     render_proposal,
     render_usage_block,
+    render_usage_summary_block,
 )
 from .models import Step, StepStatus, StepType
 
@@ -138,7 +139,17 @@ def render_step_usage(step: Step) -> None:
     interactive/special step types (confirm/discovery/plan) whose full report
     rendering it skips — keeping CLI per-step usage symmetric across all steps.
     """
-    usage = (step.outputs or {}).get("token_usage")
+    outputs = step.outputs or {}
+    summary = outputs.get("usage_summary")
+    if summary:
+        # WHY: the legacy five-field projection collapses "no provider cost
+        # reported" to 0.0, so a step whose calls report tokens but no cost
+        # printed a misleading "$0.0000" right above a flow summary that
+        # correctly said the actual cost is unknown. The shared UsageSummary is
+        # the one backend that keeps actual / estimated / unknown apart.
+        render_usage_summary_block(summary, title=t("cli.steprender.usage.title"))
+        return
+    usage = outputs.get("token_usage")
     if not usage:
         return
     render_usage_block(usage, title=t("cli.steprender.usage.title"))

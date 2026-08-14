@@ -23,7 +23,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from tianluo.agent_runner import AgentRunner, InfraErrorType
+from tianluo.agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
 from tianluo.codex_runner import (
     CodexEventConverter,
     CodexRunner,
@@ -295,23 +295,21 @@ class TestCodexEventConverterMapping:
         assert parsed["result"] == "Done!"
         assert parsed["usage"]["input_tokens"] == 100
         assert parsed["usage"]["output_tokens"] == 50
-        assert parsed["usage"]["cache_read_input_tokens"] == 20
-        assert parsed["usage"]["cache_creation_input_tokens"] == 0
+        # The OpenAI-shape subset marker is passed through unrenamed so the
+        # shared normalizer applies the subset rule instead of the additive one.
+        assert parsed["usage"]["cached_input_tokens"] == 20
+        assert "cache_creation_input_tokens" not in parsed["usage"]
         assert parsed["total_cost_usd"] == 0.001
 
-    def test_turn_completed_missing_usage_defaults_to_zero(self):
+    def test_turn_completed_missing_usage_is_omitted(self):
         conv = CodexEventConverter()
         event = {"type": "turn.completed", "data": {}}
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["usage"]["input_tokens"] == 0
-        assert parsed["usage"]["output_tokens"] == 0
-        assert parsed["usage"]["cache_creation_input_tokens"] == 0
-        assert parsed["usage"]["cache_read_input_tokens"] == 0
+        assert "usage" not in parsed
 
     def test_turn_completed_null_usage_does_not_crash(self):
-        """Explicit ``"usage": null`` must not raise AttributeError and must
-        still emit a ``type: result`` event with zeroed usage fields."""
+        """Explicit ``"usage": null`` must not synthesize zero usage."""
         conv = CodexEventConverter()
         # The key is present with a null value — data.get("usage", {}) returns
         # None (not the default), which previously crashed on .get().
@@ -320,10 +318,7 @@ class TestCodexEventConverterMapping:
         assert len(result) == 1
         parsed = json.loads(result[0])
         assert parsed["type"] == "result"
-        assert parsed["usage"]["input_tokens"] == 0
-        assert parsed["usage"]["output_tokens"] == 0
-        assert parsed["usage"]["cache_creation_input_tokens"] == 0
-        assert parsed["usage"]["cache_read_input_tokens"] == 0
+        assert "usage" not in parsed
 
     def test_turn_completed_null_usage_with_result_text_preserved(self):
         """When usage is null, the result text from accumulated agent messages
@@ -337,7 +332,7 @@ class TestCodexEventConverterMapping:
         parsed = json.loads(result[0])
         assert parsed["type"] == "result"
         assert "Hello from the agent" in parsed["result"]
-        assert parsed["usage"]["input_tokens"] == 0
+        assert "usage" not in parsed
 
     def test_turn_failed_produces_error_result(self):
         conv = CodexEventConverter()
@@ -550,6 +545,12 @@ class TestCodexRunnerIdentity:
         assert runner.command["cmd"] == "my-codex"
         assert runner.command["priority"] == 5
 
+    def test_startup_metadata_does_not_guess_wrapper_model(self):
+        runner = CodexRunner(command={"cmd": "company-wrapper", "priority": 0})
+        metadata = runner.get_startup_metadata()
+        assert metadata.provider == "openai"
+        assert metadata.model is None
+
     def test_construct_with_no_args_uses_default(self):
         runner = CodexRunner()
         assert runner.command["cmd"] == "codex"
@@ -575,6 +576,19 @@ class TestCodexBuildCallArgs:
         assert "--skip-git-repo-check" in args
         assert "-a" not in args
         assert "--dangerously-bypass-approvals-and-sandbox" not in args
+
+    def test_direct_intent_remains_plain_codex_exec(self):
+        runner = CodexRunner(command={"cmd": "codex", "priority": 0})
+        args = runner.build_call_args(
+            prompt="implement all requirements",
+            read_only=False,
+            invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+        )
+
+        assert args[:3] == ["exec", "--json", "--skip-git-repo-check"]
+        assert args[-1] == "implement all requirements"
+        assert "/goal" not in " ".join(args)
+        assert runner.supports_native_goal is False
 
     def test_writable_step_has_sandbox_flag(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
@@ -916,8 +930,7 @@ class TestConverterOutputContract:
             parsed = json.loads(line)  # Must not raise
             assert parsed["type"] in ("assistant", "user", "result")
 
-    def test_turn_completed_usage_four_fields(self):
-        """turn.completed result must have all four usage fields."""
+    def test_turn_completed_usage_preserves_only_reported_fields(self):
         conv = CodexEventConverter()
         all_lines = []
         for line in self.SAMPLE_EVENTS:
@@ -928,8 +941,8 @@ class TestConverterOutputContract:
         usage = parsed["usage"]
         assert "input_tokens" in usage
         assert "output_tokens" in usage
-        assert "cache_creation_input_tokens" in usage
-        assert "cache_read_input_tokens" in usage
+        assert "cache_creation_input_tokens" not in usage
+        assert "cache_read_input_tokens" not in usage
 
     def test_unknown_events_dont_crash_converter(self):
         """A stream with only unknown events should not crash."""
@@ -1189,7 +1202,7 @@ class TestConverterNDJSONConsumerIntegration:
         parsed = json.loads(result[0])
         assert parsed["usage"]["input_tokens"] == 500
         assert parsed["usage"]["output_tokens"] == 200
-        assert parsed["usage"]["cache_read_input_tokens"] == 50
+        assert parsed["usage"]["cached_input_tokens"] == 50
         # Also verify parse_usage_from_ndjson can read it
         from tianluo.engine.chat_history import parse_usage_from_ndjson
         usage = parse_usage_from_ndjson(result[0])
@@ -1727,9 +1740,9 @@ class TestTurnCompletedUsageMultiForm:
 
 
 class TestTurnCompletedCostMissing:
-    """When total_cost_usd is absent, cost stays 0 and tokens are preserved."""
+    """Missing actual cost stays absent while tokens are preserved."""
 
-    def test_no_cost_field_cost_is_zero(self):
+    def test_no_cost_field_is_omitted(self):
         conv = CodexEventConverter()
         event = {
             "type": "turn.completed",
@@ -1745,14 +1758,14 @@ class TestTurnCompletedCostMissing:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["total_cost_usd"] == 0
+        assert "total_cost_usd" not in parsed
         # Tokens are still fully preserved
         assert parsed["usage"]["input_tokens"] == 500
         assert parsed["usage"]["output_tokens"] == 200
         assert parsed["usage"]["cache_creation_input_tokens"] == 10
         assert parsed["usage"]["cache_read_input_tokens"] == 50
 
-    def test_cost_none_defaults_to_zero(self):
+    def test_cost_none_is_omitted(self):
         conv = CodexEventConverter()
         event = {
             "type": "turn.completed",
@@ -1763,10 +1776,10 @@ class TestTurnCompletedCostMissing:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["total_cost_usd"] == 0
+        assert "total_cost_usd" not in parsed
 
     def test_cost_missing_at_all_levels(self):
-        """total_cost_usd absent at data, turn, and message levels → 0."""
+        """Absent cost at every supported nesting level remains absent."""
         conv = CodexEventConverter()
         event = {
             "type": "turn.completed",
@@ -1779,15 +1792,19 @@ class TestTurnCompletedCostMissing:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["total_cost_usd"] == 0
+        assert "total_cost_usd" not in parsed
         assert parsed["usage"]["input_tokens"] == 100
 
 
 class TestTurnCompletedCachedInputTokensMapping:
-    """cached_input_tokens (Codex field name) must be mapped to
-    cache_read_input_tokens (Claude-compatible field name)."""
+    """cached_input_tokens (the OpenAI/Codex subset marker) is passed through.
 
-    def test_cached_input_tokens_mapped(self):
+    The shared normalizer decides input-vs-subset arithmetic from the token
+    field shape, so renaming the field to the Anthropic key would make an
+    OpenAI subset be normalized additively and double-billed.
+    """
+
+    def test_cached_input_tokens_passed_through_unrenamed(self):
         conv = CodexEventConverter()
         event = {
             "type": "turn.completed",
@@ -1801,13 +1818,19 @@ class TestTurnCompletedCachedInputTokensMapping:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["usage"]["cache_read_input_tokens"] == 30
-        # The raw Codex key must not leak through
-        assert "cached_input_tokens" not in parsed["usage"]
+        assert parsed["usage"]["cached_input_tokens"] == 30
+        # The shape marker must not be rewritten into the Anthropic key.
+        assert "cache_read_input_tokens" not in parsed["usage"]
 
-    def test_cache_read_input_tokens_takes_priority(self):
-        """When both cached_input_tokens and cache_read_input_tokens are
-        present, cached_input_tokens takes priority (existing behavior)."""
+        from tianluo.usage import parse_usage_record
+
+        record = parse_usage_record(result[0], call_id="codex", provider="openai")
+        assert record.logical_input_tokens == 100
+        assert record.uncached_input_tokens == 70
+        assert record.cache_read_input_tokens == 30
+
+    def test_both_cache_fields_are_preserved_verbatim(self):
+        """A payload declaring both keys keeps both; neither is synthesized."""
         conv = CodexEventConverter()
         event = {
             "type": "turn.completed",
@@ -1822,8 +1845,8 @@ class TestTurnCompletedCachedInputTokensMapping:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        # cached_input_tokens wins (it's checked first in the fallback)
-        assert parsed["usage"]["cache_read_input_tokens"] == 30
+        assert parsed["usage"]["cached_input_tokens"] == 30
+        assert parsed["usage"]["cache_read_input_tokens"] == 999
 
     def test_cache_creation_input_tokens_preserved(self):
         conv = CodexEventConverter()
@@ -1873,8 +1896,8 @@ class TestTurnFailedUsagePreserved:
         assert parsed["usage"]["cache_creation_input_tokens"] == 8
         assert parsed["usage"]["cache_read_input_tokens"] == 30
 
-    def test_turn_failed_without_usage_uses_zeros(self):
-        """When turn.failed has no usage, all fields default to zero."""
+    def test_turn_failed_without_usage_omits_usage(self):
+        """When turn.failed has no usage, no synthetic token report appears."""
         conv = CodexEventConverter()
         event = {
             "type": "turn.failed",
@@ -1883,10 +1906,7 @@ class TestTurnFailedUsagePreserved:
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
         assert parsed["is_error"] is True
-        assert parsed["usage"]["input_tokens"] == 0
-        assert parsed["usage"]["output_tokens"] == 0
-        assert parsed["usage"]["cache_creation_input_tokens"] == 0
-        assert parsed["usage"]["cache_read_input_tokens"] == 0
+        assert "usage" not in parsed
 
     def test_turn_failed_with_usage_at_message_level(self):
         """turn.failed usage at data.message.usage is also extracted."""
@@ -1928,9 +1948,8 @@ class TestTurnFailedUsagePreserved:
         assert parsed["usage"]["input_tokens"] == 350
         assert parsed["usage"]["output_tokens"] == 130
 
-    def test_turn_failed_cached_input_tokens_mapped(self):
-        """cached_input_tokens in turn.failed usage is mapped to
-        cache_read_input_tokens."""
+    def test_turn_failed_cached_input_tokens_preserved(self):
+        """cached_input_tokens in turn.failed usage keeps its OpenAI shape."""
         conv = CodexEventConverter()
         event = {
             "type": "turn.failed",
@@ -1945,8 +1964,8 @@ class TestTurnFailedUsagePreserved:
         }
         result = conv.convert_line(json.dumps(event))
         parsed = json.loads(result[0])
-        assert parsed["usage"]["cache_read_input_tokens"] == 20
-        assert "cached_input_tokens" not in parsed["usage"]
+        assert parsed["usage"]["cached_input_tokens"] == 20
+        assert "cache_read_input_tokens" not in parsed["usage"]
 
 
 # =============================================================================
@@ -1985,7 +2004,9 @@ class TestCostMissingEndToEnd:
         usage = parse_usage_from_ndjson(ndjson)
         # Must NOT be empty — tokens are nonzero
         assert usage, "parse_usage_from_ndjson returned empty dict despite nonzero tokens"
-        assert usage["input_tokens"] == 500
+        # Anthropic-shaped cache keys: input_tokens excludes them, so the
+        # logical input total is 500 + 50 read + 10 creation.
+        assert usage["input_tokens"] == 560
         assert usage["output_tokens"] == 200
         assert usage["cache_creation_input_tokens"] == 10
         assert usage["cache_read_input_tokens"] == 50
@@ -2056,10 +2077,71 @@ class TestCostMissingEndToEnd:
         ndjson = _run_full_codex_session(events)
         usage = parse_usage_from_ndjson(ndjson)
         assert usage, "parse_usage_from_ndjson returned empty dict for turn.failed with usage"
-        assert usage["input_tokens"] == 200
+        # Anthropic-shaped cache keys: 200 uncached + 15 read + 5 creation.
+        assert usage["input_tokens"] == 220
         assert usage["output_tokens"] == 80
         assert usage["cache_creation_input_tokens"] == 5
         assert usage["cache_read_input_tokens"] == 15
+
+
+class TestUsageSchemaFixtures:
+    @staticmethod
+    def _convert_fixture(name: str) -> str:
+        fixture = Path(__file__).parent / "fixtures" / "usage" / name
+        converter = CodexEventConverter()
+        output = []
+        for line in fixture.read_text(encoding="utf-8").splitlines():
+            output.extend(converter.convert_line(line))
+        output.extend(converter.finalize())
+        return "\n".join(output)
+
+    def test_codex_fixture_metadata_usage_and_live_tracker_match(self, capsys):
+        from tianluo.engine.llm_caller import StreamJSONTracker
+        from tianluo.usage import parse_usage_record
+
+        raw = self._convert_fixture("codex_exec.jsonl")
+        metadata = {
+            "call_id": "codex-fixture",
+            "attempt": 0,
+            "agent_name": "codex-agent",
+            "runner_type": "codex",
+            "provider": "openai",
+        }
+        parsed = parse_usage_record(raw, **metadata)
+        tracker = StreamJSONTracker(
+            call_id="codex-fixture",
+            usage_attempt=0,
+            agent_name="codex-agent",
+            runner_type="codex",
+            provider="openai",
+        )
+        for line in raw.splitlines():
+            tracker.process_line(line)
+        capsys.readouterr()
+
+        assert tracker.usage_record == parsed
+        assert parsed.provider_session_id == "codex-thread-1"
+        assert parsed.reported_model == "gpt-5-codex"
+        assert parsed.resolved_model_source == "provider"
+        assert parsed.logical_input_tokens == 300
+        assert parsed.uncached_input_tokens == 180
+        assert parsed.cache_read_input_tokens == 120
+        assert parsed.output_tokens == 60
+
+    def test_compat_proxy_fixture_preserves_reported_provider_and_model(self):
+        from tianluo.usage import parse_usage_record
+
+        raw = self._convert_fixture("compat_proxy.jsonl")
+        record = parse_usage_record(
+            raw,
+            call_id="compat-fixture",
+            runner_type="codex",
+            provider="openai",
+        )
+        assert record.provider == "azure-openai"
+        assert record.provider_session_id == "proxy-thread-1"
+        assert record.reported_model == "proxy-gpt-5-codex"
+        assert record.resolved_model == "proxy-gpt-5-codex"
 
     def test_add_call_usage_folds_cost_zero_tokens(self):
         """add_call_usage must fold token data into the step accumulator
@@ -2109,9 +2191,7 @@ class TestCostMissingEndToEnd:
         assert usage["cache_read_input_tokens"] == 25
         assert "cached_input_tokens" not in usage
 
-    def test_all_zero_usage_returns_empty_from_parse(self):
-        """When all tokens and cost are zero, parse_usage_from_ndjson
-        returns an empty dict (existing behavior preserved)."""
+    def test_all_zero_usage_remains_explicit_in_parse(self):
         from tianluo.engine.chat_history import parse_usage_from_ndjson
         events = [
             json.dumps({"type": "turn.started", "data": {}}),
@@ -2122,8 +2202,13 @@ class TestCostMissingEndToEnd:
         ]
         ndjson = _run_full_codex_session(events)
         usage = parse_usage_from_ndjson(ndjson)
-        # All zeros → empty dict
-        assert usage == {}
+        assert usage == {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
 
 
 # =============================================================================

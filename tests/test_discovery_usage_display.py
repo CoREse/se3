@@ -368,3 +368,125 @@ def test_discovery_missing_outputs_renders_nothing(captured_console):
     step.outputs = None
     _consume_discovery_completed(step)
     assert captured_console.export_text() == ""
+
+
+# ---------------------------------------------------------------------------
+# Session usage summary block (shared UsageSummary backend)
+# ---------------------------------------------------------------------------
+
+
+def _render_summary_block(summary):
+    """Render a UsageSummary through the real display path into a buffer."""
+    from io import StringIO
+
+    from rich.console import Console
+
+    from tianluo.engine import display
+    from tianluo.engine.display import render_usage_summary_block, set_console
+
+    saved = display._console
+    buf = StringIO()
+    try:
+        set_console(
+            Console(file=buf, width=100, force_terminal=True, highlight=False)
+        )
+        render_usage_summary_block(summary)
+    finally:
+        display._console = saved
+    return buf.getvalue()
+
+
+def _summary_record(**kwargs):
+    from tianluo.usage import UsageRecord, UsageStatus
+
+    defaults = dict(
+        call_id="call-1",
+        attempt=0,
+        usage_status=UsageStatus.AVAILABLE,
+        provider="anthropic",
+        resolved_model="claude-opus-5",
+    )
+    defaults.update(kwargs)
+    return UsageRecord(**defaults)
+
+
+def test_session_summary_block_renders_actual_and_estimated_separately():
+    from tianluo.i18n import t
+    from tianluo.pricing import PricingCatalog
+    from tianluo.usage import UsageSummary
+
+    records = [
+        _summary_record(
+            logical_input_tokens=100, uncached_input_tokens=100,
+            output_tokens=10, actual_cost_usd=0.001,
+        ),
+        _summary_record(
+            call_id="call-2",
+            logical_input_tokens=1000, uncached_input_tokens=1000,
+            output_tokens=100,
+        ),
+    ]
+    summary = UsageSummary.summarize(records, catalog=PricingCatalog.builtin())
+    text = _render_summary_block(summary)
+    assert t("cli.display.usage.actual_cost") in text
+    assert t("cli.display.usage.estimated_cost") in text
+    # Both values are visible and distinct: actual is billed, estimate is not.
+    assert "$0.0010" in text
+    assert "$0.0075" in text  # (1000 * 5 + 100 * 25) / 1e6
+
+
+def test_session_summary_block_unknown_cost_renders_unknown_not_zero():
+    from tianluo.i18n import t
+    from tianluo.usage import UsageSummary
+
+    record = _summary_record(
+        logical_input_tokens=100, uncached_input_tokens=100, output_tokens=10,
+    )
+    summary = UsageSummary.summarize([record], catalog=None)
+    assert summary.actual_cost_usd is None
+    text = _render_summary_block(summary)
+    assert t("cli.display.usage.unknown_cost") in text
+    assert "$0.0000" not in text
+    # The unknown-price call is surfaced, and completeness is not "complete".
+    assert t("cli.display.usage.unknown_price") in text
+    assert t("cli.display.usage.completeness_partial") in text
+
+
+def test_session_summary_block_renders_nothing_without_records():
+    from tianluo.usage import UsageSummary
+
+    assert _render_summary_block(UsageSummary()) == ""
+    assert _render_summary_block(None) == ""
+    assert _render_summary_block({}) == ""
+
+
+def test_session_summary_block_accepts_persisted_dict():
+    from tianluo.i18n import t
+    from tianluo.pricing import PricingCatalog
+    from tianluo.usage import UsageSummary
+
+    record = _summary_record(
+        logical_input_tokens=50, uncached_input_tokens=50, output_tokens=5,
+        actual_cost_usd=0.002,
+    )
+    summary = UsageSummary.summarize([record], catalog=PricingCatalog.builtin())
+    text = _render_summary_block(summary.to_dict())
+    assert t("cli.display.usage.actual_cost") in text
+    assert "$0.0020" in text
+
+
+def test_session_summary_block_unknown_counters_only_when_nonzero():
+    from tianluo.i18n import t
+    from tianluo.pricing import PricingCatalog
+    from tianluo.usage import UsageSummary
+
+    record = _summary_record(
+        logical_input_tokens=50, uncached_input_tokens=50, output_tokens=5,
+        actual_cost_usd=0.002,
+    )
+    summary = UsageSummary.summarize([record], catalog=PricingCatalog.builtin())
+    assert summary.completeness == "complete"
+    text = _render_summary_block(summary)
+    assert t("cli.display.usage.unknown_calls") not in text
+    assert t("cli.display.usage.unknown_model") not in text
+    assert t("cli.display.usage.completeness_complete") in text

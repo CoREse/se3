@@ -252,6 +252,14 @@ class FlowSnapshot:
     # ``isFlowResumable`` honour; an older daemon that omits it defaults to
     # ``False`` and the consumers fall back to their legacy status-based logic.
     resumable: bool = False
+    # Control-plane projections relayed verbatim from the daemon's aggregator
+    # (shared backends with the CLI history view — the server never re-derives
+    # them): the implementation-strategy view, the SELF_CHECK scope audit, and
+    # the compact records-free usage/cost summary. ``None`` = the daemon did
+    # not (or could not) supply it.
+    implementation_strategy: Optional[Dict[str, Any]] = None
+    review_scope: Optional[Dict[str, Any]] = None
+    usage_summary: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_payload(cls, data: Dict[str, Any]) -> "FlowSnapshot":
@@ -273,10 +281,25 @@ class FlowSnapshot:
             step_history=list(data.get("step_history") or []),
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
             resumable=bool(data.get("resumable", False)),
+            implementation_strategy=(
+                data.get("implementation_strategy")
+                if isinstance(data.get("implementation_strategy"), dict)
+                else None
+            ),
+            review_scope=(
+                data.get("review_scope")
+                if isinstance(data.get("review_scope"), dict)
+                else None
+            ),
+            usage_summary=(
+                data.get("usage_summary")
+                if isinstance(data.get("usage_summary"), dict)
+                else None
+            ),
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        data: Dict[str, Any] = {
             "flow_id": self.flow_id,
             "project_root": self.project_root,
             "task_description": self.task_description,
@@ -293,6 +316,15 @@ class FlowSnapshot:
             "waiting_for_lock": self.waiting_for_lock,
             "resumable": self.resumable,
         }
+        # Absent projections stay absent (unknown), never a fabricated empty
+        # dict that would read as a confirmed not_applicable / zero-usage.
+        if self.implementation_strategy is not None:
+            data["implementation_strategy"] = self.implementation_strategy
+        if self.review_scope is not None:
+            data["review_scope"] = self.review_scope
+        if self.usage_summary is not None:
+            data["usage_summary"] = self.usage_summary
+        return data
 
 
 @dataclass
@@ -1307,6 +1339,8 @@ class ServerState:
         cursor: Optional[Dict[str, Any]] = None,
         cursor_base: Optional[Dict[str, Any]] = None,
         machine_id: str = "",
+        usage: Optional[Dict[str, Any]] = None,
+        usage_catalog: Optional[Dict[str, Any]] = None,
     ) -> HistoryWriteOutcome:
         """Cache history *records* for *flow_id* and report what the write did.
 
@@ -1325,7 +1359,12 @@ class ServerState:
         verbatim for the next incremental pull. *cursor_base* is the frame's
         per-file coverage lower bound (the line the daemon's read started at);
         it is what makes the append continuity check exact, and is empty for a
-        version-skewed daemon that does not send one. Purely in-memory.
+        version-skewed daemon that does not send one. *usage* is the daemon's
+        whole-flow usage/cost payload (full snapshots only), stored verbatim;
+        *usage_catalog* is the serialized pricing catalog that priced it, and
+        is stored on the bundle so the append-time re-aggregation
+        (:meth:`_refresh_bundle_usage`) prices with the same table instead of
+        degrading to the built-in one. Purely in-memory.
 
         ``resolves_pull`` is ``True`` when the cache is left authoritative — it
         populated / extended the bundle, or it was a benign no-op on an already
@@ -1473,7 +1512,19 @@ class ServerState:
                     existing["cursor"] = dict(cursor)
                 if machine_id:
                     existing["machine_id"] = machine_id
+                if usage_catalog is not None:
+                    # The daemon rides the project catalog on usage-bearing
+                    # frames, so the append-time re-aggregation below prices
+                    # with the same table the stored daemon payload used.
+                    existing["usage_catalog"] = dict(usage_catalog)
                 existing["updated_at"] = time.time()
+                if self._records_carry_usage(new_records):
+                    # The daemon's usage payload rides full snapshots only, so
+                    # after a usage-bearing append the stored summary would
+                    # under-count the extended bundle. Refresh it from the
+                    # incremental source cache so every later REST/WS read sees
+                    # a summary derived from ALL cached records.
+                    self._refresh_bundle_usage(existing, new_records)
                 if flow_id in self._history_recovery_inflight:
                     # INFO-visible backfill CONVERGENCE signal: an append landed
                     # while a self-heal recovery is in flight for this flow, so
@@ -1662,6 +1713,17 @@ class ServerState:
                 ):
                     if cursor:
                         existing["cursor"] = dict(cursor)
+                    if usage is not None:
+                        # A re-pull that carries the whole-flow usage payload
+                        # refreshes the cached summary even when the records
+                        # are identical (usage can arrive later than the
+                        # records, or ride the first full after an upgrade).
+                        existing["usage"] = dict(usage)
+                    if usage_catalog is not None:
+                        # The pricing table can likewise arrive later than the
+                        # records (or change with the project config), so the
+                        # same re-pull refreshes it too.
+                        existing["usage_catalog"] = dict(usage_catalog)
                     existing["updated_at"] = time.time()
                     generation = self._ensure_generation(existing)
                     logger.debug(
@@ -1670,7 +1732,7 @@ class ServerState:
                         flow_id, len(new_records), generation,
                     )
                     return HistoryWriteOutcome(resolves_pull=True)
-                self._history_data[flow_id] = {
+                bundle: Dict[str, Any] = {
                     "flow_id": flow_id,
                     "machine_id": machine_id,
                     "mode": mode,
@@ -1679,6 +1741,11 @@ class ServerState:
                     "generation": self._next_generation(),
                     "updated_at": time.time(),
                 }
+                if usage is not None:
+                    bundle["usage"] = dict(usage)
+                if usage_catalog is not None:
+                    bundle["usage_catalog"] = dict(usage_catalog)
+                self._history_data[flow_id] = bundle
                 logger.debug(
                     "hist-diag append_history APPLIED-full flow=%s records=%d "
                     "(bundle replaced, requires_full cleared)",
@@ -2071,6 +2138,33 @@ class ServerState:
                 # the pending/unfillable line differently from one that polled.
                 "pending": {k: list(v) for k, v in pending.items()},
             }
+
+    async def get_history_usage(
+        self, flow_id: str, *, rebuild: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """Return the cached bundle's usage payload, or ``None``.
+
+        Mirrors :meth:`get_history_bundle_meta` for the WS push path: the frame
+        is read AFTER the frame's records were applied, so the payload describes
+        the same bundle state a REST snapshot would return at this instant —
+        one shared backend (:meth:`_bundle_usage`), never a second formula.
+
+        The daemon-computed payload (stored on the bundle) is returned whenever
+        present. A usage-bearing append refreshes that stored payload in place
+        (see :meth:`_refresh_bundle_usage`), so the payload always describes
+        the bundle's current records; the O(records) rebuild behind *rebuild*
+        is the fallback for bundles that never received a daemon payload.
+        """
+        async with self._lock:
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return None
+            stored = cached.get("usage")
+            if isinstance(stored, dict):
+                return stored
+            if not rebuild:
+                return None
+            return self._bundle_usage(cached)
 
     @staticmethod
     def _record_ordinal(record: Any) -> Optional[int]:
@@ -2570,7 +2664,188 @@ class ServerState:
                 # every honoured delta / not_modified / backfill.
                 "resync": resync,
                 "updated_at": cached.get("updated_at"),
+                # The flow's usage/cost payload. Prefers the daemon-computed
+                # payload (project pricing overrides applied on the owning
+                # machine); when no full HISTORY_DATA frame has carried one
+                # since connect, it is rebuilt from the cached records through
+                # the SAME shared backend (tianluo.usage.build_usage_payload)
+                # priced with the daemon-carried project catalog (built-in
+                # fallback, never no catalog) — never a server-side formula,
+                # and never a fabricated zero.
+                "usage": self._bundle_usage(cached),
             }
+
+    @staticmethod
+    def _catalog_for_bundle(cached: Dict[str, Any]) -> Any:
+        """The pricing catalog to re-aggregate *cached*'s records with.
+
+        The daemon's payload was priced with the project's effective catalog
+        (its ``pricing.models`` overrides merged onto the built-in table); the
+        serialized catalog rides the wire as the bundle's ``usage_catalog`` so
+        a rebuild prices the same records with the same table — the server
+        cannot reach the project's ``tianluo.yaml`` itself, which lives on the
+        owning machine. A version-skewed daemon that sends no catalog degrades
+        to the built-in table. Never ``None``: a catalog-less rebuild silently
+        turns priced estimates into unknown-price (``estimate_record_cost``
+        answers "no pricing catalog") and degrades completeness to partial,
+        making the WebUI disagree with the CLI history view for the same flow.
+        """
+        stored = cached.get("usage_catalog")
+        if isinstance(stored, dict):
+            from tianluo.pricing import PricingCatalog
+
+            try:
+                return PricingCatalog.from_dict(stored)
+            except Exception:
+                # A malformed catalog must not block history delivery; the
+                # built-in table still prices everything it can.
+                logger.warning(
+                    "hist-diag usage catalog for flow %s is malformed; "
+                    "falling back to the built-in price table",
+                    cached.get("flow_id"),
+                )
+        from tianluo.pricing import PricingCatalog
+
+        return PricingCatalog.builtin()
+
+    @staticmethod
+    def _bundle_usage(cached: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Return the bundle's usage payload, rebuilding it when absent.
+
+        The rebuild path is the shared-backend fallback: the daemon's payload
+        (computed with the project's pricing overrides) is authoritative when
+        it has arrived; otherwise the cached records — which carry each
+        message's ``usage_records`` / legacy ``token_usage`` — are aggregated
+        through :func:`tianluo.usage.build_usage_payload` exactly as the CLI
+        history view does, priced with the bundle's daemon-carried catalog
+        (built-in fallback — never no catalog). Returns ``None`` when the
+        bundle holds no usage at all, so the wire omits the field instead of a
+        misleading zero summary.
+        """
+        stored = cached.get("usage")
+        if isinstance(stored, dict):
+            return stored
+        sources = ServerState._usage_sources_from_records(
+            cached.get("records") or []
+        )
+        if not sources:
+            return None
+        from tianluo.usage import build_usage_payload
+
+        return build_usage_payload(
+            sources,
+            ServerState._catalog_for_bundle(cached),
+            call_id=str(cached.get("flow_id") or "flow"),
+        )
+
+    @staticmethod
+    def _records_carry_usage(records: List[Any]) -> bool:
+        """Whether any record carries per-call usage (modern or legacy shape)."""
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            raw_records = message.get("usage_records")
+            if isinstance(raw_records, list) and any(
+                isinstance(item, dict) for item in raw_records
+            ):
+                return True
+            if message.get("role") == "assistant" and isinstance(
+                message.get("token_usage"), dict
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _usage_sources_from_records(
+        records: List[Any],
+    ) -> "Dict[str, List[Any]]":
+        """Extract per-step usage records from history records.
+
+        The same recovery the CLI history view performs: each message's
+        ``usage_records`` list (modern per-call records) or legacy five-field
+        ``token_usage`` tally (adapted via the legacy adapter, flagged
+        legacy_ambiguous). Shared by :meth:`_bundle_usage` and
+        :meth:`_refresh_bundle_usage` so the rebuild and the incremental
+        append path can never disagree on extraction.
+        """
+        from tianluo.usage import UsageRecord, legacy_usage_record
+
+        sources: Dict[str, List[Any]] = {}
+        for position, record in enumerate(records):
+            if not isinstance(record, dict):
+                continue
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            step_id = str(record.get("step_id") or "")
+            raw_records = message.get("usage_records")
+            # Truthiness, not isinstance: an EMPTY usage_records list is not a
+            # measurement and must not swallow the legacy token_usage fallback
+            # (same rule as chat_history / daemon history — one shared result).
+            if raw_records:
+                step_records = sources.setdefault(step_id, [])
+                for raw in raw_records:
+                    if isinstance(raw, dict):
+                        step_records.append(UsageRecord.from_dict(raw))
+            elif message.get("role") == "assistant" and isinstance(
+                message.get("token_usage"), dict
+            ):
+                # The frame position backs a missing ordinal so two messages of
+                # one step cannot share a call id and collapse in dedup (same
+                # rule as the daemon's history extraction).
+                ordinal = record.get("ordinal")
+                marker = ordinal if ordinal is not None else f"pos{position}"
+                sources.setdefault(step_id, []).append(
+                    legacy_usage_record(
+                        message["token_usage"],
+                        call_id=f"legacy:{step_id}:{marker}",
+                    )
+                )
+        return sources
+
+    @classmethod
+    def _refresh_bundle_usage(
+        cls, bundle: Dict[str, Any], new_records: List[Any]
+    ) -> None:
+        """Refresh *bundle*'s stored usage payload for usage-bearing appends.
+
+        The daemon computes its payload only for full snapshots, so appending
+        records that carry usage would leave the stored summary describing the
+        pre-append bundle. The extracted sources are cached on the bundle
+        (``_usage_sources``, in-memory only — never serialized onto the wire),
+        so the refresh is incremental: the first usage-bearing append after a
+        full frame extracts once from the whole record set, every later one
+        extends the cache with just the new records and re-aggregates through
+        the SAME shared backend (:func:`tianluo.usage.build_usage_payload`) as
+        the full-frame payload — priced with the daemon-carried project
+        catalog (built-in fallback, never no catalog) so the estimates keep
+        the same prices the stored daemon payload used. An append that carries
+        no usage leaves the stored payload untouched.
+        """
+        sources = bundle.get("_usage_sources")
+        if not isinstance(sources, dict):
+            # Bundle predates the incremental cache (or was just replaced by a
+            # full frame): extract once from the current record set — which
+            # already includes *new_records* — then keep extending the cache.
+            sources = cls._usage_sources_from_records(bundle.get("records") or [])
+        else:
+            for step_id, records in cls._usage_sources_from_records(
+                new_records
+            ).items():
+                sources.setdefault(step_id, []).extend(records)
+        bundle["_usage_sources"] = sources
+        if not any(sources.values()):
+            return
+        from tianluo.usage import build_usage_payload
+
+        bundle["usage"] = build_usage_payload(
+            sources,
+            cls._catalog_for_bundle(bundle),
+            call_id=str(bundle.get("flow_id") or "flow"),
+        )
 
     async def find_machine_for_history_flow(
         self, flow_id: str, *, owner: Optional[str] = None

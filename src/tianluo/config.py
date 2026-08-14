@@ -1082,22 +1082,29 @@ class AgentDef:
     """Typed representation of an agent entry in the top-level registry.
 
     ``agents`` in the new schema is a dict ``{name: AgentDef}``; the key
-    is the name, and the value carries ``type`` / ``cmd`` / ``priority``.
+    is the name, and the value carries runner and provider identity metadata.
     """
 
     name: str
     type: str = "claude-code"
     cmd: str = ""
     priority: int = 0
+    provider: Optional[str] = None
+    model: Optional[str] = None
 
     def to_agent_dict(self) -> dict:
         """Return the legacy ``list[dict]`` shape consumed by LLMCaller."""
-        return {
+        data = {
             "name": self.name,
             "type": self.type,
             "cmd": self.cmd,
             "priority": self.priority,
         }
+        if self.provider is not None:
+            data["provider"] = self.provider
+        if self.model is not None:
+            data["model"] = self.model
+        return data
 
 
 # The agents luo is willing to pick up on its own when the user has
@@ -1109,8 +1116,10 @@ class AgentDef:
 # ``claude-interactive`` is deliberately absent: the PTY variant needs a
 # terminal and pexpect, so it is opt-in only and must never be auto-selected.
 _BUILTIN_DEFAULT_AGENTS: tuple[AgentDef, ...] = (
-    AgentDef(name="claude", type="claude-code", cmd="claude"),
-    AgentDef(name="codex", type="codex", cmd="codex"),
+    AgentDef(
+        name="claude", type="claude-code", cmd="claude", provider="anthropic"
+    ),
+    AgentDef(name="codex", type="codex", cmd="codex", provider="openai"),
 )
 
 # Agent types whose ``cmd`` is the Claude CLI, i.e. the only ones that can be
@@ -1147,6 +1156,8 @@ def _builtin_default_chain() -> list[dict]:
             type=candidate.type,
             cmd=candidate.cmd,
             priority=len(chain),
+            provider=candidate.provider,
+            model=candidate.model,
         )
         chain.append(agent.to_agent_dict())
     if chain:
@@ -1294,7 +1305,11 @@ def _migrate_claude_commands(
         base = _slugify_cmd(cmd)
         name = _unique_name(base, set(registry))
         registry[name] = AgentDef(
-            name=name, type="claude-code", cmd=cmd, priority=priority,
+            name=name,
+            type="claude-code",
+            cmd=cmd,
+            priority=priority,
+            provider="anthropic",
         )
         defaults.append(name)
 
@@ -1363,7 +1378,11 @@ def _agents_dict_from_source(
             continue
         if isinstance(entry, str):
             registry[name] = AgentDef(
-                name=name, type="claude-code", cmd=entry, priority=0,
+                name=name,
+                type="claude-code",
+                cmd=entry,
+                priority=0,
+                provider="anthropic",
             )
             continue
         if not isinstance(entry, dict):
@@ -1386,6 +1405,18 @@ def _agents_dict_from_source(
             type=entry.get("type", "claude-code"),
             cmd=cmd,
             priority=entry.get("priority", 0),
+            provider=(
+                entry.get("provider").strip()
+                if isinstance(entry.get("provider"), str)
+                and entry.get("provider").strip()
+                else None
+            ),
+            model=(
+                entry.get("model").strip()
+                if isinstance(entry.get("model"), str)
+                and entry.get("model").strip()
+                else None
+            ),
         )
 
     if saw_priority:
@@ -2522,6 +2553,8 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
 DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
+DEFAULT_IMPLEMENTATION_STRATEGY = "planned"
+VALID_IMPLEMENTATION_STRATEGIES = ("auto", "direct", "planned")
 # Per-flow attempt cap for looping on inherited (baseline) test failures
 # (mechanism B). Independent of ``max_fix_iterations`` (which may be the
 # unlimited sentinel 0); baseline failures must stay independently bounded.
@@ -2554,6 +2587,11 @@ DEFAULT_INVESTIGATION_MAX_ITERATIONS = 3
 # ambiguity. Tests use fresh tmp_path dirs (distinct keys), so each gets its line.
 _logged_workflow_source_for: set[str] = set()
 
+# Process-level one-shot guard for the self_check_convergence_enabled
+# deprecation warning: ``WorkflowConfig.from_dict`` runs on every config load
+# during a flow, but the deprecation needs to be surfaced only once.
+_convergence_deprecation_warned = False
+
 
 class ConfigError(ValueError):
     """Raised when project configuration is invalid.
@@ -2571,15 +2609,19 @@ class WorkflowConfig:
 
     max_fix_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
     self_check_passes_required: int = DEFAULT_SELF_CHECK_PASSES_REQUIRED
+    # Serialized compatibility projection for old callers; config loading
+    # always normalizes the deprecated key to False.
     self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
     baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
     self_check_defer_fix_threshold: int = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
     adjudicate_period: int = DEFAULT_ADJUDICATE_PERIOD
+    implementation_strategy: str = DEFAULT_IMPLEMENTATION_STRATEGY
     # Whether ``workflow.self_check_passes_required`` was set explicitly in
     # the YAML. When False and ``llm_caller.steps.self_check`` is a nested
     # per-pass chain, the effective pass count is derived from the number
     # of declared chains (see state_machine effective-pass resolution).
     self_check_passes_required_explicit: bool = False
+    implementation_strategy_explicit: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -2678,25 +2720,23 @@ class WorkflowConfig:
                 f"workflow.self_check_passes_required={passes!r} must be >= 1"
             )
 
-        raw_convergence = workflow_data.get("self_check_convergence_enabled")
-        convergence = _coerce_bool(
-            raw_convergence,
-            default=DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
-        )
-        if raw_convergence is not None and not isinstance(raw_convergence, (bool, int, float)):
-            if isinstance(raw_convergence, str):
-                if raw_convergence.strip().lower() not in (
-                    "true", "1", "yes", "on", "false", "0", "no", "off",
-                ):
-                    logger.warning(
-                        f"workflow.self_check_convergence_enabled={raw_convergence!r} is not a valid boolean; "
-                        f"falling back to default {DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED}"
-                    )
-            else:
-                logger.warning(
-                    f"workflow.self_check_convergence_enabled={raw_convergence!r} is not a valid boolean; "
-                    f"falling back to default {DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED}"
-                )
+        # The key remains parse-compatible for old project files, but the
+        # completed-with-findings behavior it enabled violated the check-step
+        # invariant. The configured value and even malformed legacy spellings
+        # all normalize to the only supported value, False. One warning per
+        # process is enough: workflow config is loaded repeatedly during a
+        # flow, and re-warning on every load just spams the log.
+        global _convergence_deprecation_warned
+        if (
+            "self_check_convergence_enabled" in workflow_data
+            and not _convergence_deprecation_warned
+        ):
+            _convergence_deprecation_warned = True
+            logger.warning(
+                "workflow.self_check_convergence_enabled is deprecated and "
+                "ignored; SELF_CHECK findings always enter the fix loop"
+            )
+        convergence = False
 
         # baseline_fix_max_attempts (mechanism B): per-flow cap on looping
         # inherited (baseline) failures, independent of max_fix_iterations.
@@ -2800,6 +2840,20 @@ class WorkflowConfig:
                 f"(use 0 or null to disable the periodic adjudicate safety net)"
             )
 
+        strategy_explicit = "implementation_strategy" in workflow_data
+        raw_strategy = workflow_data.get(
+            "implementation_strategy", DEFAULT_IMPLEMENTATION_STRATEGY
+        )
+        if (
+            not isinstance(raw_strategy, str)
+            or raw_strategy not in VALID_IMPLEMENTATION_STRATEGIES
+        ):
+            allowed = ", ".join(VALID_IMPLEMENTATION_STRATEGIES)
+            raise ConfigError(
+                f"workflow.implementation_strategy={raw_strategy!r} "
+                f"must be one of: {allowed}"
+            )
+
         return cls(
             max_fix_iterations=max_fix,
             self_check_passes_required=passes,
@@ -2807,8 +2861,34 @@ class WorkflowConfig:
             baseline_fix_max_attempts=baseline_attempts,
             self_check_defer_fix_threshold=defer_threshold,
             adjudicate_period=adjudicate_period,
+            implementation_strategy=raw_strategy,
             self_check_passes_required_explicit=passes_explicit,
+            implementation_strategy_explicit=strategy_explicit,
         )
+
+    def resolve_implementation_strategy(
+        self,
+        explicit_request: Optional[Any] = None,
+    ) -> str:
+        """Resolve explicit request > this project config > planned."""
+        from .engine.implementation_strategy import (
+            ImplementationStrategyError,
+            ImplementationStrategyResolver,
+        )
+
+        configured = self.implementation_strategy
+        if (
+            not self.implementation_strategy_explicit
+            and self.implementation_strategy == DEFAULT_IMPLEMENTATION_STRATEGY
+        ):
+            configured = None
+        try:
+            return ImplementationStrategyResolver.resolve_requested(
+                explicit_request=explicit_request,
+                configured_strategy=configured,
+            ).value
+        except ImplementationStrategyError as exc:
+            raise ConfigError(str(exc)) from exc
 
     @classmethod
     def load(cls, project_root: Path) -> "WorkflowConfig":
@@ -2865,6 +2945,86 @@ def load_workflow_config(project_root: Optional[Path] = None) -> WorkflowConfig:
     if project_root is None:
         project_root = Path.cwd()
     return WorkflowConfig.load(project_root)
+
+
+@dataclass
+class PricingConfig:
+    """Model pricing overrides loaded from the tianluo.yaml ``pricing:`` section.
+
+    Values are USD per million tokens keyed by (canonical) model, then by
+    category (``input``/``uncached_input``, ``output``, ``cache_read``,
+    ``cache_creation``/``cache_write``, ``cache_creation_5m``,
+    ``cache_creation_1h``). Invalid entries warn and are ignored rather than
+    failing the flow — pricing feeds display/estimation only, so a config typo
+    must not block a run, but it must also never silently become a wrong price.
+    """
+
+    overrides: Dict[str, Dict[str, float]] = field(default_factory=dict)
+
+    @classmethod
+    def load(cls, project_root: Path) -> "PricingConfig":
+        """Load and validate ``pricing:`` overrides from the active project YAML."""
+        data, source_label = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        raw_pricing = data.get("pricing", {})
+        if not raw_pricing:
+            return cls()
+        if not isinstance(raw_pricing, dict):
+            logger.warning(
+                "pricing section in %s is not a mapping (got %s); ignoring",
+                source_label, type(raw_pricing).__name__,
+            )
+            return cls()
+        raw_models = raw_pricing.get("models", {})
+        if raw_models is None:
+            return cls()
+        if not isinstance(raw_models, dict):
+            logger.warning(
+                "pricing.models in %s is not a mapping (got %s); ignoring",
+                source_label, type(raw_models).__name__,
+            )
+            return cls()
+
+        overrides: Dict[str, Dict[str, float]] = {}
+        for raw_model, raw_categories in raw_models.items():
+            if not isinstance(raw_categories, dict):
+                logger.warning(
+                    "pricing.models.%s in %s is not a mapping (got %s); ignoring",
+                    raw_model, source_label, type(raw_categories).__name__,
+                )
+                continue
+            overrides[str(raw_model)] = {
+                str(key): value for key, value in raw_categories.items()
+            }
+        return cls(overrides=overrides)
+
+    def build_catalog(self) -> "PricingCatalog":
+        """Merge the validated overrides onto the built-in price table.
+
+        Structural problems (negative / non-numeric price) drop only the
+        offending *model entry*, not the whole override set: cost display is
+        best-effort accounting, so one bad entry must neither kill the flow
+        nor invalidate correct overrides beside it.
+        """
+        from .pricing import PricingCatalog, PricingOverrideError
+
+        catalog = PricingCatalog.builtin()
+        for model, categories in self.overrides.items():
+            try:
+                catalog = catalog.with_overrides(
+                    {model: categories}, source="tianluo.yaml", warn=logger.warning
+                )
+            except PricingOverrideError as exc:
+                logger.warning("Ignoring invalid pricing override: %s", exc)
+        return catalog
+
+
+def load_pricing_catalog(project_root: Optional[Path] = None) -> "PricingCatalog":
+    """Load the effective model pricing catalog (built-in + project overrides)."""
+    if project_root is None:
+        project_root = Path.cwd()
+    return PricingConfig.load(project_root).build_catalog()
 
 
 @dataclass

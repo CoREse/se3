@@ -474,4 +474,39 @@ export function registerMobileResponsiveTests(ctx) {
     assert.ok(findOneG7(container, "step-type-implement"),
       "an implement record must carry the step-type-implement class");
   });
+
+  // -- (G10) strategy controls + usage region mobile behaviour --------------
+  // The new strategy selects reuse the modal form styles (full-width controls
+  // inside .modal-card), and the usage tables scroll horizontally instead of
+  // widening the history pane past the viewport.
+
+  check("G10 DOM: new-task and issue-launch strategy selects exist", () => {
+    for (const id of ["nt-strategy", "issue-launch-strategy"]) {
+      const node = document.getElementById(id);
+      assert.ok(node, `missing strategy select #${id}`);
+    }
+  });
+
+  check("G10 CSS: usage tables contain horizontal overflow, not layout growth", () => {
+    const sel = ".usage-table {";
+    const idx = CSS.indexOf(sel);
+    assert.notEqual(idx, -1, "missing .usage-table rule");
+    const body = CSS.slice(idx, CSS.indexOf("}", idx));
+    assert.ok(body.includes("overflow-x: auto"),
+      ".usage-table must scroll horizontally on narrow screens");
+    assert.ok(body.includes("white-space: nowrap"),
+      ".usage-table must keep one line per row so the scroll stays contained");
+  });
+
+  check("G10 CSS: history meta + usage region stay inside the detail pane", () => {
+    for (const sel of [".history-meta {", ".history-usage-region {"]) {
+      const idx = CSS.indexOf(sel);
+      assert.notEqual(idx, -1, `missing ${sel} rule`);
+    }
+    // The meta labels/values must wrap (not widen) on a phone-width pane.
+    const metaIdx = CSS.indexOf(".history-meta-block {");
+    const metaBody = CSS.slice(metaIdx, CSS.indexOf("}", metaIdx));
+    assert.ok(metaBody.includes("flex-wrap: wrap"),
+      ".history-meta-block must wrap on narrow screens");
+  });
 }

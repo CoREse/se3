@@ -170,6 +170,124 @@ def test_style_css_styles_the_language_switch():
 
 
 # ---------------------------------------------------------------------------
+# 4b. G10 strategy / scope / usage keys (completeness + translation)
+# ---------------------------------------------------------------------------
+G10_WEBUI_KEYS = [
+    "newTask.strategy",
+    "issueLaunch.strategy",
+    "strategy.label",
+    "strategy.reasonLabel",
+    "strategy.requestedLabel",
+    "strategy.inferredNote",
+    "strategy.option.projectDefault",
+    "strategy.option.auto",
+    "strategy.option.direct",
+    "strategy.option.planned",
+    "strategy.value.auto",
+    "strategy.value.direct",
+    "strategy.value.planned",
+    "strategy.value.not_applicable",
+    "strategy.value.unknown",
+    "scope.label",
+    "scope.mode.full",
+    "scope.mode.incremental",
+    "scope.round.line",
+    "scope.baseline",
+    "scope.changedPaths",
+    "scope.fullRounds",
+    "usage.title",
+    "usage.totalsLine",
+    "usage.status.available",
+    "usage.status.partial",
+    "usage.status.unavailable",
+    "usage.status.legacy_ambiguous",
+    "usage.completeness",
+    "usage.completeness.complete",
+    "usage.completeness.partial",
+    "usage.completeness.none",
+    "usage.actual",
+    "usage.estimated",
+    "usage.unknown",
+    "usage.unknownCalls",
+    "usage.unknownModel",
+    "usage.unknownPrice",
+    "usage.unknownCacheTtl",
+    "usage.flowHeader",
+    "usage.callsHeader",
+    "usage.stepsHeader",
+    "usage.col.call",
+    "usage.col.agent",
+    "usage.col.runner",
+    "usage.col.provider",
+    "usage.col.model",
+    "usage.col.status",
+    "usage.col.input",
+    "usage.col.output",
+    "usage.col.cacheRead",
+    "usage.col.cacheCreate",
+    "usage.col.actual",
+    "usage.col.estimate",
+    "usage.col.step",
+    "usage.col.calls",
+    "usage.col.completeness",
+    "usage.legacyNote",
+    "usage.partialNote",
+    "usage.noUsage",
+]
+
+
+def _webui_dicts():
+    import json
+
+    en = json.loads(EN_JSON.read_text(encoding="utf-8"))
+    zh = json.loads(ZH_JSON.read_text(encoding="utf-8"))
+    return en, zh
+
+
+def test_g10_webui_keys_exist_in_en_us():
+    en, _ = _webui_dicts()
+    missing = [k for k in G10_WEBUI_KEYS if k not in en]
+    assert not missing, f"en-US is missing G10 keys: {missing}"
+
+
+def test_g10_webui_keys_translated_in_zh_cn():
+    """zh-CN must provide semantic translations for the G10 keys (the en-US
+    values would otherwise be served via fallback, which is legal but leaves
+    the console half-translated)."""
+    en, zh = _webui_dicts()
+    missing = [k for k in G10_WEBUI_KEYS if k not in zh]
+    assert not missing, f"zh-CN is missing G10 keys: {missing}"
+    # Config tokens / product nouns may legitimately be identical across
+    # languages (auto/direct/planned are strategy values, full/incremental are
+    # scope-mode tokens, "Agent"/"Runner"/"Provider" are product nouns); prose
+    # labels must be genuinely translated.
+    token_keys = {
+        "strategy.value.auto",
+        "strategy.value.direct",
+        "strategy.value.planned",
+        "usage.totalsLine",
+        "usage.col.agent",
+        "usage.col.runner",
+        "usage.col.provider",
+    }
+    raw = [
+        k for k in G10_WEBUI_KEYS
+        if k not in token_keys and (zh[k] == k or zh[k] == en[k])
+    ]
+    assert not raw, f"zh-CN G10 prose keys must be translated, not copied: {raw}"
+
+
+def test_g10_webui_usage_status_keys_mirror_backend_values():
+    """The usage.status.* label keys must cover exactly the backend UsageStatus
+    values the payload can carry — a missing one renders the raw status token."""
+    en, _ = _webui_dicts()
+    for status in ("available", "partial", "unavailable", "legacy_ambiguous"):
+        assert en.get(f"usage.status.{status}"), (
+            f"missing usage.status.{status} label"
+        )
+
+
+# ---------------------------------------------------------------------------
 # 5. Node suite — the pure helpers actually run and pass
 # ---------------------------------------------------------------------------
 def test_i18n_node_module_present():

@@ -5,8 +5,29 @@ with a program-controlled state machine. Each state corresponds to a workflow
 step, and transitions are controlled by program logic, not LLM decisions.
 """
 
-from .models import Step, StepType, StepStatus, State, Transition, FlowInstance, FlowStatus
+from .models import (
+    EffectiveImplementationStrategy,
+    FlowInstance,
+    FlowStatus,
+    RequestedImplementationStrategy,
+    State,
+    Step,
+    StepStatus,
+    StepType,
+    Transition,
+)
+from .implementation_strategy import (
+    ImplementationStrategyError,
+    ImplementationStrategyResolver,
+    ImplementationStrategyView,
+)
 from .state_machine import StateMachine
+from .review_scope import (
+    ReviewBaseline,
+    ReviewScope,
+    ReviewScopeManager,
+    SelfCheckRoundController,
+)
 from .persistence import PersistenceManager
 from .llm_caller import LLMCaller, LLMCallError
 from .schema import FlowInstanceSchema, ContextSchema, build_context_from_flow
@@ -36,7 +57,16 @@ __all__ = [
     "Transition",
     "FlowInstance",
     "FlowStatus",
+    "RequestedImplementationStrategy",
+    "EffectiveImplementationStrategy",
+    "ImplementationStrategyError",
+    "ImplementationStrategyResolver",
+    "ImplementationStrategyView",
     "StateMachine",
+    "ReviewBaseline",
+    "ReviewScope",
+    "ReviewScopeManager",
+    "SelfCheckRoundController",
     "PersistenceManager",
     "LLMCaller",
     "LLMCallError",

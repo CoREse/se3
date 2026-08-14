@@ -1170,6 +1170,13 @@ class DaemonClient:
         task_type = str(payload.get("task_type") or "feature")
         discover = bool(payload.get("discover", False))
         worktree = bool(payload.get("worktree", False))
+        implementation_strategy = str(
+            payload.get("implementation_strategy") or ""
+        ).strip()
+        if implementation_strategy not in protocol.SPAWN_STRATEGY_VALUES:
+            # A malformed value (or an empty one) simply stays off the argv:
+            # the CLI then resolves project config / default. Never guess.
+            implementation_strategy = ""
         if self._spawn_handler is None:
             logger.warning("Received SPAWN_FLOW but no spawn handler is configured")
             return
@@ -1204,14 +1211,17 @@ class DaemonClient:
                 await _report_failure(f"project init failed: {error}")
                 return
         try:
-            # The from_issue_id 5th positional and the worktree keyword are
-            # passed only when present/true so legacy 4-argument spawn handlers
-            # stay backward compatible (a non-isolated fresh spawn keeps the
-            # exact 4-positional call shape).
+            # The from_issue_id 5th positional and the worktree /
+            # implementation_strategy keywords are passed only when
+            # present/true so legacy 4-argument spawn handlers stay backward
+            # compatible (a non-isolated fresh spawn keeps the exact
+            # 4-positional call shape).
             # The spawn handler registers the new flow, which reads engine.json
             # for its flow_id (size-guarded, but still disk I/O), and blocks on
             # a subprocess launch — run it off the event loop (issue #243 A3).
             spawn_kwargs = {"worktree": True} if worktree else {}
+            if implementation_strategy:
+                spawn_kwargs["implementation_strategy"] = implementation_strategy
             if from_issue_id:
                 await asyncio.to_thread(
                     self._spawn_handler,
@@ -2106,6 +2116,8 @@ class DaemonClient:
                             read.records,
                             cursor=read.cursor,
                             cursor_base=read.cursor_base,
+                            usage=read.usage,
+                            usage_catalog=read.usage_catalog,
                             seq=self._next_seq(),
                         ),
                     )
@@ -2608,6 +2620,8 @@ class DaemonClient:
                         read.records,
                         cursor=read.cursor,
                         cursor_base=read.cursor_base,
+                        usage=read.usage,
+                        usage_catalog=read.usage_catalog,
                         seq=self._next_seq(),
                     ),
                 )

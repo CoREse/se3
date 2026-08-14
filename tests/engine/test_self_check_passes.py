@@ -530,7 +530,7 @@ class TestInputsPassIndexAndFlagsPresent:
 
 
 class TestConvergenceGateDefaultOff:
-    """With convergence_enabled=False (default), _issues_converged is NOT called."""
+    """The compatibility field cannot change finding routing."""
 
     @pytest.fixture
     def sm(self, tmp_path):
@@ -595,8 +595,8 @@ class TestConvergenceGateDefaultOff:
 # ---------------------------------------------------------------------------
 
 
-class TestConvergenceGateEnabled:
-    """With convergence_enabled=True, identical issues across rounds trigger COMPLETED."""
+class TestDeprecatedConvergenceGateIgnored:
+    """The retired flag cannot let identical findings bypass the fix loop."""
 
     @pytest.fixture
     def sm(self, tmp_path):
@@ -605,13 +605,10 @@ class TestConvergenceGateEnabled:
             WorkflowConfig(self_check_convergence_enabled=True),
         )
 
-    def test_convergence_enabled_same_issues_returns_completed(self, sm, tmp_path):
+    def test_convergence_enabled_same_issues_returns_revision_needed(self, sm, tmp_path):
         from tianluo.engine.steps.self_check import self_check_handler
 
-        # Non-critical/high severity: the convergence shortcut is allowed to
-        # short-circuit only when no critical/high finding is present (a
-        # critical/high finding always enters the fix loop — see the dedicated
-        # test below).
+        # Severity does not affect whether a validated finding enters the fix loop.
         valid_issue = {
             "severity": "medium",
             "actual_behavior": "missing null check",
@@ -652,14 +649,12 @@ class TestConvergenceGateEnabled:
 
             result = self_check_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        assert step.outputs.get("converged") is True
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs["fix_needed"] is True
 
     def test_convergence_does_not_swallow_critical_high(self, sm, tmp_path):
-        """A converged pass that contains a critical/high finding MUST enter the
-        fix loop (REVISION_NEEDED) instead of taking the convergence shortcut,
-        even when convergence is enabled and the signature matches the prior
-        round."""
+        """A repeated critical/high finding also remains revision-needed."""
         from tianluo.engine.steps.self_check import self_check_handler
 
         critical_issue = {
@@ -703,7 +698,6 @@ class TestConvergenceGateEnabled:
 
             result = self_check_handler(step, flow)
 
-        # Critical/high bypasses the convergence shortcut → fix loop.
         assert result == StepStatus.REVISION_NEEDED
         assert step.outputs.get("converged") is not True
         assert step.outputs.get("fix_needed") is True
@@ -714,8 +708,8 @@ class TestConvergenceGateEnabled:
 # ---------------------------------------------------------------------------
 
 
-class TestIntraRoundNoPrevIssues:
-    """When convergence is enabled, prev_self_check_issues is only injected for pass_index==1."""
+class TestIntraRoundPreviousIssues:
+    """Previous issues remain round context without authorizing a bypass."""
 
     @pytest.fixture
     def sm(self, tmp_path):

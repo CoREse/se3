@@ -81,6 +81,32 @@ export function registerTokenUsageTests(ctx) {
     assert.equal(partial.includes("NaN"), false);
   });
 
+  check("formatTokenUsage defers the cost column to the shared UsageSummary", () => {
+    // A step whose calls report tokens but no provider actual cost must show
+    // "unknown", never a fabricated $0 from the legacy five-field projection.
+    const usage = {
+      input_tokens: 100,
+      output_tokens: 10,
+      cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
+      total_cost_usd: 0,
+    };
+    const withSummary = app.formatTokenUsage(usage, {
+      actual_cost_usd: null,
+      totals: { logical_input_tokens: 100, output_tokens: 10 },
+    });
+    assert.equal(withSummary.includes("$0.0000"), false);
+    assert.equal(withSummary.includes("unknown"), true);
+    // A summary that DOES carry an actual cost renders it.
+    const priced = app.formatTokenUsage(usage, {
+      actual_cost_usd: 0.0123,
+      totals: { logical_input_tokens: 100, output_tokens: 10 },
+    });
+    assert.equal(priced.includes("$0.0123"), true);
+    // No summary → unchanged legacy behaviour.
+    assert.equal(app.formatTokenUsage(usage).includes("$0.0000"), true);
+  });
+
   check("G4 formatCostUsd fixes 4 decimal places and tolerates junk", () => {
     assert.equal(app.formatCostUsd(0.5), "$0.5000");
     assert.equal(app.formatCostUsd(null), "$0.0000");
@@ -308,7 +334,7 @@ export function registerTokenUsageTests(ctx) {
     assert.equal(badge.textContent, "");
   });
 
-  check("G4 updateFlowUsageBadge shows + populates the badge once usage exists", () => {
+  check("G4 updateFlowUsageBadge shows explicit unavailable state without a backend payload", () => {
     const badge = document.getElementById("flow-usage-badge");
     app.updateFlowUsageBadge([
       stepEvent("01_analyze_a", USAGE()),
@@ -320,9 +346,12 @@ export function registerTokenUsageTests(ctx) {
     const value = findOne(badge, "flow-usage-badge__value");
     assert.ok(label && /session/i.test(label.textContent),
       "badge should carry a Session label");
-    // 1000 + 500 input tokens summed across the two steps.
-    assert.ok(value && value.textContent.startsWith("in 1,500"),
-      `badge should show the session total, got ${value && value.textContent}`);
+    // No backend summary: the frontend must NOT recompute a client-side total
+    // — it shows the explicit unavailable state instead.
+    assert.ok(value && /unavailable/i.test(value.textContent),
+      `badge must show the unavailable state, got ${value && value.textContent}`);
+    assert.ok(!/in 1,500/.test(value && value.textContent),
+      "client-side sums must not render when the backend payload is absent");
   });
 
   // ---- (f) discovery step cumulative usage footnote -------------------------
@@ -397,7 +426,7 @@ export function registerTokenUsageTests(ctx) {
   });
 
   // ---- (g) session badge includes discovery steps ---------------------------
-  check("G4 session badge includes discovery step cumulative in the total", () => {
+  check("G4 session badge shows unavailable state with discovery + analyze usage", () => {
     const badge = document.getElementById("flow-usage-badge");
     app.updateFlowUsageBadge([
       stepEvent("01_discovery_a", USAGE({ input_tokens: 3000, output_tokens: 800 }), "discovery"),
@@ -406,15 +435,13 @@ export function registerTokenUsageTests(ctx) {
     assert.equal(badge.classList.contains("hidden"), false,
       "badge must be visible with discovery + analyze usage");
     const value = findOne(badge, "flow-usage-badge__value");
-    // 3000 + 1000 = 4000 input tokens.
-    assert.ok(value && value.textContent.includes("in 4,000"),
-      `badge must sum discovery + analyze, got ${value && value.textContent}`);
-    // 800 + 200 = 1000 output tokens.
-    assert.ok(value && value.textContent.includes("out 1,000"),
-      `badge must sum output tokens, got ${value && value.textContent}`);
+    assert.ok(value && /unavailable/i.test(value.textContent),
+      `badge must show the unavailable state, got ${value && value.textContent}`);
+    assert.ok(!value.textContent.includes("4,000"),
+      "no client-side token sum may render without a backend payload");
   });
 
-  check("G4 session badge includes discovery cache and cost fields", () => {
+  check("G4 session badge shows unavailable state with cache/cost usage only", () => {
     const badge = document.getElementById("flow-usage-badge");
     app.updateFlowUsageBadge([
       stepEvent("01_discovery_a", USAGE({
@@ -424,9 +451,57 @@ export function registerTokenUsageTests(ctx) {
       }), "discovery"),
     ]);
     const value = findOne(badge, "flow-usage-badge__value");
-    assert.ok(value && value.textContent.includes("cache r/w 500/100"),
-      `badge must show cache tokens, got ${value && value.textContent}`);
-    assert.ok(value && value.textContent.includes("$0.0250"),
-      `badge must show cost, got ${value && value.textContent}`);
+    assert.ok(value && /unavailable/i.test(value.textContent),
+      `badge must show the unavailable state, got ${value && value.textContent}`);
+    assert.ok(!value.textContent.includes("500/100") && !value.textContent.includes("$0.0250"),
+      "no client-side cache/cost recompute may render without a backend payload");
+  });
+
+  // -- (G10) backend summary payload preference ------------------------------
+  // Since G10 the backend (engine → daemon → server) computes the one
+  // authoritative usage summary; the badge renders that payload and shows an
+  // explicit unavailable state for pre-payload daemons — never a client-side
+  // recomputed total.
+
+  const G10_COMPACT = {
+    totals: {
+      usage_status: "available", logical_input_tokens: 7777, output_tokens: 55,
+      cache_read_input_tokens: 44, cache_creation_input_tokens: 33,
+    },
+    actual_cost_usd: 0.1234,
+    estimated_cost_usd: 0.25,
+    unknown_call_count: 0,
+    unknown_model_count: 0,
+    unknown_price_count: 0,
+    unknown_cache_ttl_count: 0,
+    partial: false,
+    completeness: "complete",
+  };
+
+  check("G10 badge prefers the backend payload over client-side sums", () => {
+    const badge = document.getElementById("flow-usage-badge");
+    // Records sum to 1000 in; the backend payload says 7777 — the payload wins.
+    app.applyUsageBadge(badge, [
+      stepEvent("01_analyze_a", USAGE({ input_tokens: 1000 }), "analyze"),
+    ], G10_COMPACT);
+    const value = findOne(badge, "flow-usage-badge__value");
+    assert.ok(value && value.textContent.includes("7,777"),
+      `backend totals must win, got ${value && value.textContent}`);
+    const cost = findOne(badge, "flow-usage-badge__cost");
+    assert.ok(cost && cost.textContent.includes("$0.1234")
+      && cost.textContent.includes("$0.2500"),
+      "actual and estimated render as separate columns");
+  });
+
+  check("G10 badge shows explicit unavailable state when no payload exists", () => {
+    const badge = document.getElementById("flow-usage-badge");
+    app.applyUsageBadge(badge, [
+      stepEvent("01_analyze_a", USAGE({ input_tokens: 1000 }), "analyze"),
+    ], null);
+    const value = findOne(badge, "flow-usage-badge__value");
+    assert.ok(value && /unavailable/i.test(value.textContent),
+      `the badge must show the unavailable state, got ${value && value.textContent}`);
+    assert.ok(!value.textContent.includes("1,000"),
+      "legacy client-side recomputation must not drive the badge without a payload");
   });
 }

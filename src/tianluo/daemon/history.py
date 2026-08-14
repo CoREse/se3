@@ -387,10 +387,20 @@ class SessionMeta:
     # superseded paused/interrupted flow keeps its resume entry instead of
     # degrading to a non-resumable history-only row.
     resumable: bool = False
+    # Control-plane projections (shared with FlowSnapshot / the CLI history
+    # view). ``implementation_strategy`` is the strategy_view dict for
+    # state-backed flows (inferred for legacy ones, ``None`` for a history-only
+    # flow whose type is not determinable). ``usage_summary`` is the compact
+    # records-free UsageSummary — recoverable for active/archived/resumable
+    # flows from engine state; ``None`` for history-only flows, whose usage
+    # rides the on-demand HISTORY_DATA frame instead (parsing every jsonl on
+    # the index path would cost hundreds of MB per poll).
+    implementation_strategy: Optional[Dict[str, Any]] = None
+    usage_summary: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the JSON-friendly dict form of this metadata."""
-        return {
+        data: Dict[str, Any] = {
             "flow_id": self.flow_id,
             "project_root": self.project_root,
             "task_description": self.task_description,
@@ -404,6 +414,11 @@ class SessionMeta:
             "waiting_for_lock": self.waiting_for_lock,
             "resumable": self.resumable,
         }
+        if self.implementation_strategy is not None:
+            data["implementation_strategy"] = self.implementation_strategy
+        if self.usage_summary is not None:
+            data["usage_summary"] = self.usage_summary
+        return data
 
 
 #: Meta fields whose change *alone* (everything else identical) is treated as
@@ -494,6 +509,20 @@ class FlowRead:
     #: draining the remaining chunks in the same connection window instead of
     #: waiting out a possibly idle-geared tick (see ``_push_history``).
     truncated: bool = False
+    #: The flow's structured usage/cost payload, present only on a complete
+    #: (non-truncated) *full* snapshot — the only window that sees every
+    #: record, so the summary cannot under-count. Built with the shared
+    #: backend (``tianluo.usage.build_usage_payload`` + the project's pricing
+    #: catalog), which the server relays verbatim rather than re-pricing.
+    usage: Optional[Dict[str, Any]] = None
+    #: The serialized pricing catalog that priced :attr:`usage` — the
+    #: project's ``pricing.models`` overrides merged onto the built-in table.
+    #: Unlike ``usage`` it rides ANY frame whose records carry usage (full or
+    #: append, truncated or not): the server re-aggregates its cached records
+    #: on usage-bearing appends and must price them with the SAME table, and
+    #: the server cannot load the project's ``tianluo.yaml`` itself. ``None``
+    #: when the frame carries no usage at all.
+    usage_catalog: Optional[Dict[str, Any]] = None
 
 
 class DaemonHistoryReader:
@@ -1016,6 +1045,7 @@ class DaemonHistoryReader:
         flow_id = str(data.get("flow_id"))
         if resumable is None:
             resumable = source == "active" and _is_resumable_status(status)
+        strategy, usage = self._state_projections(root, data, flow_id)
         return SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
@@ -1039,7 +1069,44 @@ class DaemonHistoryReader:
                 and data.get("waiting_for_lock", False)
             ),
             resumable=bool(resumable),
+            implementation_strategy=strategy,
+            usage_summary=usage,
         )
+
+    @staticmethod
+    def _state_projections(
+        root: Path, data: Dict[str, Any], flow_id: str
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Compute (strategy view, usage summary) for an engine-shaped dict.
+
+        Same shared backends as :meth:`DaemonAggregator._projection_fields`
+        (strategy_view.py + usage.py) — the daemon never re-implements either
+        formula.  A degraded header read without ``state`` yields
+        ``(None, None)``.
+        """
+        from ..strategy_view import resolve_flow_context, strategy_view
+        from .usage_backend import flow_usage_summary
+
+        state = data.get("state")
+        if not isinstance(state, dict):
+            return None, None
+        context = resolve_flow_context(
+            state,
+            state_dir=runtime_dir(root) / "state",
+            flow_id=str(flow_id or ""),
+        )
+        strategy = strategy_view(
+            context,
+            task_type=str(data.get("task_type") or ""),
+            selected_steps=state.get("selected_steps") or [],
+        )
+        usage = flow_usage_summary(
+            state,
+            project_root=root,
+            call_id=flow_id or "flow",
+            flow_id=str(flow_id or ""),
+        )
+        return strategy, usage
 
     @staticmethod
     def _dir_signature(flow_dir: Path) -> Tuple[tuple, float]:
@@ -1099,17 +1166,37 @@ class DaemonHistoryReader:
             return cached[1]
         meta = read_json_cached(flow_dir / "_meta.json") or {}
         updated = datetime.fromtimestamp(latest).isoformat() if latest else ""
+        task_type = str(meta.get("type") or "")
+        # A history-only flow has no engine state, but the recorded step list
+        # is deterministically recoverable from the jsonl file names (the same
+        # scan ``_count_jsonl`` performs), so the strategy projection matches
+        # ``luo history show`` for the same flow. Usage is served on demand via
+        # HISTORY_DATA instead.
+        from ..strategy_view import strategy_view
+
+        step_types = sorted({
+            parsed
+            for f in _iter_history_jsonl(flow_dir)
+            for parsed in (parse_step_type_from_step_id(_logical_step_id(f.name)),)
+            if parsed
+        })
+        strategy = strategy_view(
+            {}, task_type=task_type, selected_steps=step_types
+        )
+        strategy = strategy if strategy.get("effective") else None
         result = SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
             task_description=_clip(_extract_history_summary(flow_dir)),
-            task_type=str(meta.get("type") or ""),
+            task_type=task_type,
             status="history",
             created_at=str(meta.get("created_at") or ""),
             updated_at=updated,
             active=False,
             source="history",
             step_count=_count_jsonl(flow_dir),
+            implementation_strategy=strategy,
+            usage_summary=None,
         )
         self._history_meta_cache[sig_key] = (sig, result)
         return result
@@ -2042,6 +2129,9 @@ class DaemonHistoryReader:
                 "flow %s (project_root=%s cursor=%s) but produced no records",
                 len(flow_dirs), flow_id, project_root or "<registry>", cursor,
             )
+        usage, usage_catalog = self._collect_read_usage(
+            flow_id, records, project_root, mode=mode, truncated=truncated
+        )
         return FlowRead(
             flow_id=flow_id,
             mode=mode,
@@ -2049,6 +2139,96 @@ class DaemonHistoryReader:
             cursor=new_cursor,
             cursor_base=base_cursor,
             truncated=truncated,
+            usage=usage,
+            usage_catalog=usage_catalog,
+        )
+
+    def _collect_read_usage(
+        self,
+        flow_id: str,
+        records: List[Dict[str, Any]],
+        project_root: Optional[str],
+        *,
+        mode: str,
+        truncated: bool,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+        """Build the usage payload and pricing catalog for one history read window.
+
+        Returns ``(usage, catalog)``.
+
+        *usage* — only a complete (non-truncated) *full* snapshot carries it:
+        an append delta covers an arbitrary slice of the flow, so summarizing
+        it alone would under-count; the server re-aggregates from its cached
+        records when no full snapshot has landed since connect.
+
+        *catalog* — the serialized pricing catalog (``PricingCatalog.to_dict()``)
+        that priced *usage*, i.e. the project's ``pricing.models`` overrides
+        merged onto the built-in table (or the plain built-in table when the
+        root is unknown / unconfigured). It rides ANY frame whose records
+        carry usage — full or append, truncated or not — because the server's
+        re-aggregation must price the same records with the same table, and
+        the server cannot reach the project's ``tianluo.yaml`` (it lives on
+        the owning machine). Without it the server would rebuild with no
+        catalog, silently turning priced estimates into unknown-price and
+        making the WebUI disagree with ``luo history show``. ``None`` when
+        the frame carries no usage at all.
+
+        Records are parsed from each message's ``usage_records`` (legacy
+        five-field ``token_usage`` tallies adapt through the legacy adapter,
+        flagged legacy_ambiguous) — the same recovery the CLI history view
+        performs.
+        """
+        from ..usage import (
+            UsageRecord,
+            build_usage_payload,
+            legacy_usage_record,
+        )
+        from .usage_backend import project_pricing_catalog
+
+        records_by_step: Dict[str, List[UsageRecord]] = {}
+        for position, record in enumerate(records):
+            message = record.get("message")
+            if not isinstance(message, dict):
+                continue
+            step_id = str(record.get("step_id") or "")
+            raw_records = message.get("usage_records")
+            # Truthiness, not isinstance: an EMPTY usage_records list carries no
+            # measurement, so it must not swallow the legacy token_usage
+            # fallback. chat_history.collect_usage_records_from_sessions applies
+            # the same rule — the two surfaces are required to present one
+            # shared aggregation of the same stored data.
+            if raw_records:
+                step_records = records_by_step.setdefault(step_id, [])
+                for raw in raw_records:
+                    if isinstance(raw, dict):
+                        step_records.append(UsageRecord.from_dict(raw))
+            elif message.get("role") == "assistant" and isinstance(
+                message.get("token_usage"), dict
+            ):
+                # WHY the frame position backs the ordinal: two transcript
+                # messages of one step whose ordinal is missing would share a
+                # call id, and identical ids collapse in dedup — silently
+                # deleting one message's reported usage.
+                ordinal = record.get("ordinal")
+                marker = ordinal if ordinal is not None else f"pos{position}"
+                records_by_step.setdefault(step_id, []).append(
+                    legacy_usage_record(
+                        message["token_usage"],
+                        call_id=f"legacy:{step_id}:{marker}",
+                    )
+                )
+        if not records_by_step:
+            return None, None
+        # ``project_pricing_catalog`` degrades to the built-in table for a
+        # missing / invalid root, so the catalog is never absent when usage
+        # exists — the server re-aggregation always has a price table.
+        catalog = project_pricing_catalog(project_root)
+        catalog_dict = catalog.to_dict()
+        if mode != HISTORY_MODE_FULL or truncated:
+            return None, catalog_dict
+        return (
+            build_usage_payload(records_by_step, catalog, call_id=flow_id),
+            catalog_dict,
         )
 
     def read_active_flows(

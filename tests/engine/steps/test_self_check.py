@@ -11,11 +11,12 @@ from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType, Flow
 from tianluo.engine.steps.self_check import (
     self_check_handler,
     _format_changes,
+    _format_review_scope,
     _format_test_results,
     _format_spec_content,
     _format_fix_context,
     _issue_signature,
-    _issues_converged,
+    _validate_and_filter_issues,
     SELF_CHECK_PROMPT,
 )
 
@@ -296,9 +297,9 @@ class TestSelfCheckHandler:
             assert call_kwargs["json_mode"] == "two_phase"
             assert "json_schema_hint" in call_kwargs
 
-    def test_prompt_excludes_spec_compliance(self):
-        assert "do NOT" in SELF_CHECK_PROMPT.lower() or "Do NOT" in SELF_CHECK_PROMPT
-        assert "spec compliance" in SELF_CHECK_PROMPT.lower()
+    def test_prompt_excludes_plan_as_requirement_authority(self):
+        assert "Never treat them as requirement sources" in SELF_CHECK_PROMPT
+        assert "plan_task" in SELF_CHECK_PROMPT
 
     def test_prompt_excludes_version_decisions(self):
         # Version bump decisions belong to the downstream version_analyze step;
@@ -308,10 +309,12 @@ class TestSelfCheckHandler:
         assert "version" in SELF_CHECK_PROMPT.lower()
 
     def test_prompt_includes_review_dimensions(self):
-        assert "Logic Completeness" in SELF_CHECK_PROMPT
-        assert "Code Robustness" in SELF_CHECK_PROMPT
-        assert "Functional Gaps" in SELF_CHECK_PROMPT
-        assert "Test Coverage Gaps" in SELF_CHECK_PROMPT
+        assert "Requirement Completeness" in SELF_CHECK_PROMPT
+        assert "Behavioral Correctness" in SELF_CHECK_PROMPT
+        assert "Cross-Module Integration" in SELF_CHECK_PROMPT
+        assert "Regression Safety" in SELF_CHECK_PROMPT
+        assert "Robustness" in SELF_CHECK_PROMPT
+        assert "Test Coverage" in SELF_CHECK_PROMPT
 
     def test_prompt_uses_severity_not_priority(self):
         assert '"severity":' in SELF_CHECK_PROMPT
@@ -513,8 +516,7 @@ class TestIssueSignature:
         assert sig == {("a.py:1", "x")}
 
     def test_ignores_severity(self):
-        """Severity is not part of the signature — re-reporting the same issue
-        with a different severity still counts as convergence."""
+        """Severity is not part of the mechanical duplicate identity."""
         a = _issue_signature([{"severity": "low", "location": "a", "description": "x"}])
         b = _issue_signature([{"severity": "high", "location": "a", "description": "x"}])
         assert a == b
@@ -528,83 +530,313 @@ class TestIssueSignature:
         assert sig == set()
 
 
-class TestIssuesConverged:
-    def test_empty_current_returns_false(self):
-        assert _issues_converged([], [{"location": "a", "description": "x"}]) is False
+class TestDiffScopedEvidence:
+    def _inputs(self):
+        return {
+            "task_description": "Preserve consumer behavior",
+            "task_description_base": "Preserve consumer behavior",
+            "changes_made": {"files_changed": ["src/cause.py"]},
+            "scope_changed_paths": ["src/cause.py"],
+            "scope_causal_anchors": {"src/cause.py": [[10, 12]]},
+        }
 
-    def test_empty_prev_returns_false(self):
-        assert _issues_converged([{"location": "a", "description": "x"}], []) is False
+    def test_causal_anchor_keeps_unchanged_impact_evidence(self):
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="src/cause.py", line=11,
+        )
+        issue["evidence_lines"].append("src/consumer.py:50")
 
-    def test_none_prev_returns_false(self):
-        assert _issues_converged([{"location": "a", "description": "x"}], None) is False
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
 
-    def test_identical_issues_converges(self):
-        issues = [{"severity": "low", "location": "a.py:1", "description": "x"}]
-        assert _issues_converged(issues, issues) is True
+        assert kept == [issue]
+        assert kept[0]["evidence_lines"][-1] == "src/consumer.py:50"
+        assert stats["kept_count"] == 1
 
-    def test_subset_converges(self):
-        """If current is a subset of prev (LLM only re-reports old issues), converged."""
-        prev = [
-            {"location": "a", "description": "x"},
-            {"location": "b", "description": "y"},
-        ]
-        current = [{"location": "a", "description": "x"}]
-        assert _issues_converged(current, prev) is True
+    def test_changed_path_outside_causal_hunk_is_rejected(self):
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="src/cause.py", line=9,
+        )
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
 
-    def test_new_issue_not_converged(self):
-        """A new issue not in prev means progress — not converged."""
-        prev = [{"location": "a", "description": "x"}]
-        current = [
-            {"location": "a", "description": "x"},
-            {"location": "new.py:42", "description": "new issue"},
-        ]
-        assert _issues_converged(current, prev) is False
+    def test_empty_causal_anchors_degrade_to_changed_path_grounding(self):
+        # Binary-only / rename-only / chmod-only diffs produce no hunk lines,
+        # so scope_causal_anchors is {} — the checker cannot satisfy the
+        # anchor requirement there. The path-in-changed rule must still
+        # accept the evidence instead of dropping the finding.
+        inputs = self._inputs()
+        inputs["scope_causal_anchors"] = {}
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="src/cause.py", line=1,
+        )
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
 
-    def test_paraphrased_description_same_location_converges(self):
-        """LLMs routinely paraphrase the same logical issue differently across
-        iterations. When the location is identical and descriptions share
-        the same tokens after normalization, convergence must still fire."""
-        prev = [
-            {"location": "src/foo.py:42",
-             "description": "Missing null check on user input"},
-        ]
-        current = [
-            {"location": "src/foo.py:42",
-             "description": "missing null check, on user input!"},
-        ]
-        assert _issues_converged(current, prev) is True
+    def test_empty_causal_anchors_regression_grounds_at_path_level(self):
+        # An anchor-less changed path (no current-side line exists by
+        # construction) grounds a regression at path level: the accompanying
+        # line number is ignored, and the finding must reach the fix loop.
+        inputs = self._inputs()
+        inputs["scope_causal_anchors"] = {}
+        issue = _valid_issue(path="src/cause.py", line=1)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
 
-    def test_location_only_convergence_when_descriptions_fully_differ(self):
-        """Location-only fallback catches heavier paraphrases: if every current
-        issue lives at a previously-flagged location, treat as converged even
-        when the free-text descriptions use entirely different wording."""
-        prev = [
-            {"location": "src/foo.py:42",
-             "description": "Missing null check on user input"},
-        ]
-        current = [
-            {"location": "src/foo.py:42",
-             "description": "User input not validated for None"},
-        ]
-        assert _issues_converged(current, prev) is True
+        # A path outside the current scope grounds nothing, anchors or not.
+        issue["evidence_lines"] = ["src/consumer.py:50"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
 
-    def test_new_location_defeats_location_only_convergence(self):
-        """If current introduces a location never seen in prev, even the
-        lenient location-only layer must report not-converged — a genuinely
-        new issue has been discovered."""
-        prev = [
-            {"location": "src/foo.py:42",
-             "description": "Missing null check"},
-        ]
-        current = [
-            {"location": "src/foo.py:42", "description": "Null check missing"},
-            {"location": "src/bar.py:10", "description": "Leaked handle"},
-        ]
-        assert _issues_converged(current, prev) is False
+    def test_regression_on_bare_gitlink_grounds_at_path_level(self):
+        # A fix that only moves a submodule's HEAD yields anchors keyed by the
+        # inner file (``vendor/inner.py``) while the bare gitlink path
+        # (``vendor``) has no line space of its own. It is anchor-less by
+        # construction, so citing it grounds the finding and the meaningless
+        # line number is ignored rather than used to reject it.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["vendor", "vendor/inner.py"]
+        inputs["scope_causal_anchors"] = {"vendor/inner.py": [[1, 2]]}
+        issue = _valid_issue(path="vendor", line=99999)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+        # The anchored inner path grounds it too, with or without a bare-path
+        # entry alongside.
+        issue["evidence_lines"] = ["vendor", "vendor/inner.py:2"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+        # The inner path DOES have anchors, so a line outside them is still
+        # rejected — anchor-bearing paths keep the exact-line requirement.
+        issue["evidence_lines"] = ["vendor/inner.py:9"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_anchor_less_path_accepts_bare_and_unusable_line_citations(self):
+        # Path-level grounding must not depend on the citation's shape: a bare
+        # path, a zero line and a non-numeric suffix all name the same
+        # anchor-less changed path.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["assets/icon.png"]
+        inputs["scope_causal_anchors"] = {}
+        for citation in ("assets/icon.png", "assets/icon.png:0", "assets/icon.png:n/a"):
+            issue = _valid_issue(quote="Preserve consumer behavior")
+            issue["evidence_lines"] = [citation]
+            kept, stats = _validate_and_filter_issues([issue], inputs)
+            assert kept == [issue], citation
+            assert stats["bad_evidence_count"] == 0, citation
+
+    def test_path_without_anchor_ranges_in_mixed_diff_degrades(self):
+        # One hunk-bearing text file plus one binary asset: evidence on the
+        # binary path has no anchor ranges but is a changed path.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/cause.py", "assets/icon.png"]
+        inputs["scope_causal_anchors"] = {"src/cause.py": [[10, 12]]}
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="assets/icon.png", line=1,
+        )
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_regression_requires_current_scope_causal_anchor(self):
+        issue = _valid_issue(path="src/cause.py", line=11)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, _ = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+
+        issue["evidence_lines"] = ["src/consumer.py:50"]
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_old_side_deletion_range_does_not_anchor_current_line(self):
+        # A fix deletes old lines 5-15 from the top of src/foo.py: current
+        # line 10 is unchanged code (it was old line 20). The deleted lines'
+        # old-side numbers live in the separate deletion space and must never
+        # validate a ``path:N`` citation, which names current-file lines.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/foo.py"]
+        inputs["scope_causal_anchors"] = {"src/foo.py": [[3, 3]]}
+        inputs["scope_deletion_anchors"] = {"src/foo.py": [[5, 15]]}
+        issue = _valid_issue(path="src/foo.py", line=10)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        # A citation on a real current-file anchor still grounds the finding.
+        issue["evidence_lines"] = ["src/foo.py:3"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_regression_on_fully_deleted_file_grounds_at_path_level(self):
+        # A fix deletes src/deleted.py entirely: the path is anchor-less by
+        # construction, so it grounds at path level and the old-side line
+        # number is ignored. Dropping the finding here would let an
+        # evidence-backed defect skip the fix loop entirely.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/deleted.py"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_deletion_anchors"] = {"src/deleted.py": [[1, 7]]}
+        issue = _valid_issue(path="src/deleted.py", line=7)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_non_regression_on_deleted_path_degrades_to_path_grounding(self):
+        # Same rule without the regression source type: a deletion-only path
+        # carries no current-side line, so the citation only has to name it.
+        # ``missing_in`` remains an equally valid channel (see
+        # test_requirement_omission_continues_to_use_missing_in).
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/deleted.py"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_deletion_anchors"] = {"src/deleted.py": [[1, 7]]}
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="src/deleted.py", line=7,
+        )
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_unusable_anchor_ranges_degrade_to_path_grounding(self):
+        # Ranges that cannot be compared against a line number give the path no
+        # hittable line space, so demanding an anchor there would drop the
+        # finding with no way for the checker to satisfy the requirement.
+        inputs = self._inputs()
+        inputs["scope_causal_anchors"] = {"src/cause.py": [["x", "y"], [3]]}
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path="src/cause.py", line=11,
+        )
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_requirement_omission_continues_to_use_missing_in(self):
+        issue = _valid_issue(quote="Preserve consumer behavior")
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/missing_adapter.py"]
+        kept, _ = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+
+    def test_incremental_prompt_and_history_carry_scope_audit(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="scope-history",
+            task_description="Preserve consumer behavior",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.context["project_root"] = str(tmp_path)
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            inputs={
+                **self._inputs(),
+                "scope_mode": "incremental",
+                "requested_scope_mode": "incremental",
+                "baseline_id": "fix-1-abcdef123456",
+                "scope_diff": (
+                    "diff --git a/src/cause.py b/src/cause.py\n"
+                    "@@ -10,1 +10,1 @@\n-old\n+new\n"
+                ),
+                "scope_diff_artifact": "tianluo/state/review.diff",
+                "self_check_round_id": "scr-abcdef123456",
+                "self_check_pass_index": 2,
+                "self_check_passes_required": 3,
+                "fix_iteration": 4,
+            },
+        )
+        response = json.dumps({"issues": [], "summary": "clean"})
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            caller = Mock()
+            caller.call.return_value = response
+            mock_cls.return_value = caller
+            assert self_check_handler(step, flow) == StepStatus.COMPLETED
+
+        prompt = caller.call.call_args.kwargs["prompt"]
+        assert "Incremental round" in prompt
+        assert "controls attention, never tool permissions" in prompt
+        assert "shared state, protocols, data formats" in prompt
+        assert "diff --git a/src/cause.py" in prompt
+        assert step.outputs["scope_mode"] == "incremental"
+        assert step.outputs["self_check_round_id"] == "scr-abcdef123456"
+        assert step.outputs["fix_iteration"] == 4
+
+        history_path = (
+            tmp_path / "tianluo" / "history" / flow.flow_id
+            / f"{step.step_id}.jsonl"
+        )
+        records = [json.loads(line) for line in history_path.read_text().splitlines()]
+        scope_record = next(r for r in records if r.get("type") == "self_check_scope")
+        assert scope_record["scope_mode"] == "incremental"
+        assert scope_record["baseline_id"] == "fix-1-abcdef123456"
+        assert scope_record["scope_changed_paths"] == ["src/cause.py"]
+        assert scope_record["fix_iteration"] == 4
+        assert scope_record["round_id"] == "scr-abcdef123456"
+        assert scope_record["pass_index"] == 2
+        assert "files_read" not in scope_record
 
 
-class TestSelfCheckConvergence:
-    """Tests that self_check short-circuits when the LLM re-reports the same issues."""
+class TestScopeDiffTruncation:
+    def test_large_diff_is_truncated_with_artifact_pointer(self):
+        from tianluo.engine.truncation import SELF_CHECK_SCOPE_DIFF_MAX_CHARS
+
+        diff = "x" * (SELF_CHECK_SCOPE_DIFF_MAX_CHARS + 5000) + "\nTAIL-SENTINEL-LINE\n"
+        scope = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["big.py"],
+            "scope_diff": diff,
+            "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
+            "scope_undecidable": False,
+        })
+        assert "TRUNCATED" in scope
+        assert "tianluo/state/review/diffs/abc.diff" in scope
+        assert "TAIL-SENTINEL-LINE" not in scope
+        assert len(scope) < len(diff) + 500
+
+    def test_small_diff_is_not_truncated(self):
+        scope = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["small.py"],
+            "scope_diff": "diff --git a/small.py b/small.py\n+new",
+            "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
+            "scope_undecidable": False,
+        })
+        assert "TRUNCATED" not in scope
+        assert "+new" in scope
+
+
+class TestRepeatedSelfCheckFindings:
+    """Repeated validated findings always remain in the fix loop."""
 
     @pytest.fixture
     def flow(self, tmp_path):
@@ -642,8 +874,8 @@ class TestSelfCheckConvergence:
         inp.update(extra)
         return inp
 
-    def test_converges_when_issues_repeat(self, flow):
-        # Both prev and current carry the same two issues — converged.
+    def test_repeated_issues_still_enter_fix(self, flow):
+        # Repetition is never a finding-discard channel.
         repeated = [
             _valid_issue(severity="low", quote="Fix bug",
                          path="a.py", line=1,
@@ -673,10 +905,10 @@ class TestSelfCheckConvergence:
 
             result = self_check_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        assert step.outputs.get("converged") is True
-        assert "convergence_reason" in step.outputs
-        assert step.outputs.get("unresolved_issues") == repeated
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs["issues"] == repeated
+        assert step.outputs["fix_needed"] is True
 
     def test_does_not_converge_on_first_iteration(self, flow):
         step = Step(
@@ -704,6 +936,154 @@ class TestSelfCheckConvergence:
 
         assert result == StepStatus.REVISION_NEEDED
         assert not step.outputs.get("converged")
+
+    def test_still_present_verdict_cannot_end_a_round_clean(self, flow):
+        # The reviewer says the previous issue survives but fails to re-ground
+        # the re-report in the (narrower) current scope. Returning COMPLETED
+        # would be a pass-with-finding contradicting the round's own
+        # resolutions record.
+        prev_issues = [
+            _valid_issue(severity="medium", quote="Fix bug",
+                         path="untouched.py", line=99,
+                         actual="leaks fd", expected="closed",
+                         divergence="OSError under load"),
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._make_inputs(prev_self_check_issues=prev_issues),
+        )
+        response = json.dumps({
+            "issues": [],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "leaks fd", "status": "still_present"},
+            ],
+            "summary": "nothing new",
+        })
+
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["issues"] == prev_issues
+        assert step.outputs["fix_needed"] is True
+
+    def test_still_present_verdict_survives_cardinality_drift(self, flow):
+        # Fewer resolutions than previous issues means positional pairing is
+        # untrustworthy — but a 'still_present' verdict must STILL reach the
+        # fix loop. Here the summary unambiguously names issue A, so A (only)
+        # is re-admitted.
+        issue_a = _valid_issue(severity="medium", quote="Fix bug",
+                               path="alpha.py", line=99,
+                               actual="leaks a file descriptor",
+                               expected="descriptor closed",
+                               divergence="OSError under sustained load")
+        issue_b = _valid_issue(severity="low", quote="Fix bug",
+                               path="beta.py", line=7,
+                               actual="renders timestamps in local time",
+                               expected="renders timestamps in UTC",
+                               divergence="log lines shift by the offset")
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._make_inputs(prev_self_check_issues=[issue_a, issue_b]),
+        )
+        response = json.dumps({
+            "issues": [],
+            "previous_issue_resolutions": [
+                {
+                    "prev_issue_summary": (
+                        "alpha.py still leaks a file descriptor, OSError "
+                        "under sustained load"
+                    ),
+                    "status": "still_present",
+                },
+            ],
+            "summary": "nothing new",
+        })
+
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["issues"] == [issue_a]
+        assert step.outputs["fix_needed"] is True
+
+    def test_unmatchable_still_present_verdict_fails_closed(self, flow):
+        # A zero-signal summary cannot identify WHICH previous issue survives,
+        # so the round fails closed: every unaccounted previous issue returns
+        # to the fix loop rather than the round closing clean.
+        issue_a = _valid_issue(severity="medium", quote="Fix bug",
+                               path="alpha.py", line=99,
+                               actual="leaks a file descriptor",
+                               expected="descriptor closed",
+                               divergence="OSError under sustained load")
+        issue_b = _valid_issue(severity="low", quote="Fix bug",
+                               path="beta.py", line=7,
+                               actual="renders timestamps in local time",
+                               expected="renders timestamps in UTC",
+                               divergence="log lines shift by the offset")
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._make_inputs(prev_self_check_issues=[issue_a, issue_b]),
+        )
+        response = json.dumps({
+            "issues": [],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "!!!", "status": "still_present"},
+            ],
+            "summary": "nothing new",
+        })
+
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["issues"] == [issue_a, issue_b]
+        assert step.outputs["fix_needed"] is True
+
+    def test_fixed_verdict_with_no_issues_still_passes(self, flow):
+        prev_issues = [
+            _valid_issue(severity="medium", quote="Fix bug",
+                         path="a.py", line=1,
+                         actual="leaks fd", expected="closed",
+                         divergence="OSError under load"),
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._make_inputs(prev_self_check_issues=prev_issues),
+        )
+        response = json.dumps({
+            "issues": [],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "leaks fd", "status": "fixed"},
+            ],
+            "summary": "clean",
+        })
+
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["issues"] == []
 
     def test_does_not_converge_when_new_issue_appears(self, flow):
         prev_issues = [
@@ -786,18 +1166,17 @@ class TestBuildSourcePool:
         pool = _build_source_pool({"task_description": "user wants X"})
         assert "user wants X" in pool
 
-    def test_includes_original_task_description(self):
+    def test_excludes_superseded_original_task_description(self):
         from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description": "refined: implement X",
             "original_task_description": "raw user input",
         })
         assert "refined: implement X" in pool
-        assert "raw user input" in pool
+        assert "raw user input" not in pool
 
-    def test_excludes_base_spec(self):
-        """``base`` spec content is too generic — any nit can hang off
-        it. Excluded from source pool."""
+    def test_excludes_legacy_spec_content(self):
+        """Legacy spec payloads are history, not requirement authority."""
         from tianluo.engine.steps.self_check import _build_source_pool
         pool = _build_source_pool({
             "task_description": "task X",
@@ -807,7 +1186,7 @@ class TestBuildSourcePool:
             },
         })
         assert "task X" in pool
-        assert "feature X spec details" in pool
+        assert "feature X spec details" not in pool
         assert "Code must be PEP 8 compliant" not in pool
 
     def test_empty_inputs_returns_empty_pool(self):

@@ -23,6 +23,10 @@
    - [`confirmation`](#confirmation)
    - [`language`](#language)
    - [`workflow`](#workflow)
+     - [实现策略(PLAN-to-IMPLEMENT 流程)](#实现策略plan-to-implement-流程)
+     - [Self-check 审查范围(full-incremental-closure)](#self-check-审查范围full-incremental-closure)
+   - [`pricing`](#pricing)
+     - [history 与 Web 控制台的用量与成本可见性](#history-与-web-控制台的用量与成本可见性)
    - [`investigation`](#investigation)
    - [`test`](#test)
    - [`e2e`](#e2e)
@@ -142,7 +146,7 @@ loader 全部回落到内置默认值。发生这种情况时 loader 会打印�
 | `confirmation.steps` | 是 | **条目级**,规则同 `agents`。 |
 | `language` | 是 | **字段级。**`language` / `spec_language` 各自独立:项目设了就取项目的,否则取全局的。 |
 | `server` | 是 | **整块。**项目的 `server:` 段整体替换全局的(不做深度合并)。 |
-| 其余全部 | 否 | 只读项目文件(`workflow`、`test`、`implement`、`steps`、`version`、`documentation`、`code_index`、`merge`、`conflict_resolver`、`claude_subprocess`、`spec_write_protection`、`investigation`、`presets` ……)。 |
+| 其余全部 | 否 | 只读项目文件(`workflow`、`test`、`implement`、`steps`、`version`、`documentation`、`code_index`、`merge`、`conflict_resolver`、`claude_subprocess`、`spec_write_protection`、`investigation`、`presets`、`pricing` ……)。 |
 
 ### 遗留的 `se3.yaml` / `se3.local.yaml`
 
@@ -197,6 +201,8 @@ agents:
 | *(mapping 的 key)* | string | —— | 该 agent 的 `name`。必须是非空字符串;否则该条目被跳过并告警。 |
 | `type` | string | `claude-code` | 由哪个 `AgentRunner` 适配器驱动这个 agent。见下表。 |
 | `cmd` | string | —— | 要调用的 CLI 命令。**必填** —— 没有可用 `cmd` 的条目会被跳过并告警。 |
+| `provider` | string | `""` | 该 agent 声明的 LLM provider(如 `anthropic`、`openai`)。当 runner 的流式输出没有上报 provider 时,用作用量记账的**声明式回落**;它永远不会覆盖供应商上报的值。 |
+| `model` | string | `""` | 该 agent 声明的模型。展开环境变量后进入规范 `resolved_model` 的回落链(供应商上报 → 展开后的 agent model → runner 启动元数据 → `unknown`);`$ANTHROPIC_MODEL` 这类未展开字面量绝不进入 `resolved_model` —— 原始值保留在 `reported_model` 供诊断。 |
 | `priority` | int | `0` | **已废弃且被忽略。**轮换顺序取决于 `llm_caller` 中名字列表的*书写顺序*,与这个数字无关。设置它会按来源各打印一次废弃告警。 |
 
 支持一种简写形式:`primary: claude` 等价于
@@ -364,10 +370,81 @@ fix loop 与 self_check 的行为。加载进 `WorkflowConfig`。
 |-----|------|--------|------|
 | `max_fix_iterations` | int `>= 0` | `100` | test→verify→fix 循环的上限。**`0`(或 `null`)表示无限。**负数 → `ConfigError`。浮点数(哪怕是 `0.0`)或 bool 会告警并回落到 `100` —— 表示无限的哨兵值必须是字面量 int `0` 或 `null`。 |
 | `self_check_passes_required` | int `>= 1` | `1` | 必须跑几遍 self_check。`< 1` → `ConfigError`。bool / 浮点 / 非整数会告警并回落到 `1`。与嵌套链路的相互作用见 [`llm_caller`](#self_check按-pass-的嵌套链路)。 |
-| `self_check_convergence_enabled` | bool | `false` | 除了满足遍数之外,self_check 的各遍是否还必须收敛(不再发现新问题)。接受 `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`;其余值告警并回落。 |
 | `baseline_fix_max_attempts` | int `>= 0` | `3` | 每个 flow 针对*继承而来*的(implement 之前的 baseline)测试失败所做循环的上限。刻意与 `max_fix_iterations` 独立 —— 后者可能是表示无限的哨兵值,而继承来的失败必须自己有界。**`0` 完全禁用 baseline 循环**(继承来的失败只上报,不循环)。负数 → `ConfigError`。 |
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | 用于嵌套 self_check 链路:当某个非最后一遍发现的问题*少于*此数量、且其中没有 critical / high 严重级时,推迟其修复,让剩余各遍先跑完;随后把各遍的发现去重合并进一次统一的 fix loop。**`0`(或 `null`)禁用推迟** —— 每一遍只要发现问题就立刻修(历史行为)。负数 → `ConfigError`。 |
 | `adjudicate_period` | int `>= 0` | `10` | adjudicate step 那张兜底安全网的周期,单位是 fix 迭代次数:每 N 次 fix 迭代,即使没有任何结构性震荡信号触发,也强制跑一次 adjudicate。**`0`(或 `null`)禁用这张周期性的网**(adjudicate 此后只在结构性触发条件下运行:候选震荡 / 相互矛盾 / 反复复发)。与它的同类不同,这个 key 在**类型错误时快速失败**:bool、浮点或非数字字符串会抛 `ConfigError` 而非回落默认值 —— 因为悄悄回落等于启用了一个用户从未要求过的周期。能干净取整的字符串(`"7"`)仍会被强制转换。负数 → `ConfigError`。 |
+| `implementation_strategy` | `auto` \| `direct` \| `planned` | `planned` | 新流程在具备 PLAN → IMPLEMENT 选择面时的默认实现策略(见下)。**其他任何取值都是快速失败**(它会静默改变一个 flow 实际执行的步骤)。 |
+
+已退役的 `workflow.self_check_convergence_enabled` 仅为旧配置兼容而继续
+接受；加载时始终归一化为 `false`，弃用警告**每进程只输出一次**(长驻的 daemon /
+server 反复加载配置时，只在首次加载记录一次)。任何通过验证的 finding 都会进入
+fix loop。
+
+#### 实现策略(PLAN-to-IMPLEMENT 流程)
+
+**task type 与实现策略是两个不同层级。**task type(`feature` / `bugfix` /
+`small` / `review` / `survey` / discovery)定义整条 flow 的步骤组合与质量关口;
+实现策略只控制默认序列中包含 PLAN → IMPLEMENT 区间的流程(`feature`、
+`bugfix`、discovery)的*实现阶段*:
+
+- **`planned`**(默认)—— 保留现有 PLAN step、`task_groups`、依赖 DAG、逐 group
+  的 worktree 调度和 PLAN confirm 关口。
+- **`direct`** —— 移除 PLAN 及其 confirm 关口;ANALYZE / INVESTIGATE / IMPLEMENT
+  以及原 task type 的其余质量关口全部保留。唯一的 IMPLEMENT step 承载完整有效
+  需求,把整个实现交给一次自主 caller 运行:caller 必须自行分析需求、完整实现、
+  运行针对性验证,并返回现有结构化 implementation summary。partial 结果或非空
+  `incomplete_tasks` 绝不会前进到 TEST —— flow 经现有 retry / resume 机制重入
+  IMPLEMENT(后继 caller 总是在现有工作区继续,且绝不自动切回 `planned`)。
+  `direct` 适用于**所有**可写 AgentRunner;runner 的原生 goal 循环(例如 Claude
+  Code print 模式下的 `/goal`)只是单次调用内的可选增强,既不是准入条件,也不是
+  flow 级权威状态。
+- **`auto`** —— ANALYZE step 请求一条结构化的 `direct|planned` 建议(综合任务规模、
+  模块耦合、依赖链、worktree 隔离价值、细粒度恢复价值与单次自主调用可行性),
+  并将其持久化为 flow 的有效策略。建议缺失或非法时确定性回落到 `planned`。
+
+新 flow 的取值优先级:显式 CLI(`--implementation-strategy`)/ Web 请求 →
+`workflow.implementation_strategy` → `planned`。请求值持久化进 flow context;
+有效值与理由在 ANALYZE 中**只决策一次**并持久化。resume 恢复已持久化的路径 ——
+之后的配置变化绝不改变正在执行的 flow。没有 PLAN → IMPLEMENT 选择面的 flow
+(`small`、`review`、`survey`)记录 `effective_implementation_strategy =
+not_applicable`,步骤序列完全不变;旧 flow 根据已持久化的 `selected_steps`
+只读推断策略(有 PLAN → `planned`,small 类无 PLAN flow → `not_applicable`),
+不改写历史。
+
+#### Self-check 审查范围(full-incremental-closure)
+
+SELF_CHECK 以**有效任务描述**为验收权威(原始任务或 discovery refined
+description、用户 interjection、adjudicated description),外加 charter 与
+`WHY:`/`INVARIANT:` 项目约束。PLAN、`task_groups`、implementation summary 与旧
+`adjudicated_plan` 只是调度 / 历史线索 —— 它们绝不能覆盖、缩窄或扩张需求。
+
+每一轮 review 都由一个可恢复的**基线**界定(存于 runtime state,不进 git;从基线
+到当前工作区的真实 diff 由之重建):
+
+1. 首次 IMPLEMENT 之前捕获 **implementation baseline**,使首轮审查覆盖本 flow 引入
+   的全部改动,并排除 flow 开始前已有的用户 working-tree 修改。flow 自身产生的提交
+   (例如 planned 多 group IMPLEMENT 的逐 group 合并)仍在 scope 内 —— 基线以内容
+   寻址,HEAD 前进不影响重建;只有当前历史已不含基线提交(rebase、amend、回退
+   reset)才判为不可判定。首个 SELF_CHECK round 为 `full`(完整有效需求 + 全量
+   diff);full round 干净后直接进入后续关口。
+2. 每次进入 FIX 之前捕获 **fix baseline**;修复后的 round 为 `incremental`(注意力
+   聚焦该次 fix 相对基线的精确 diff、改动文件与尚未关闭的 findings —— 但 checker
+   仍可读取全仓、charter、code-index、测试结果与未修改代码,并沿调用链、共享状态、
+   协议、数据格式、配置、并发与不变量追踪影响面)。
+3. incremental round 干净之后插入 **full closure round**;只有 closure round 全部
+   pass 干净才能进入 INVARIANT_CHECK。closure 发现 finding 时重新进入 FIX,
+   随后再次执行 incremental → closure,直至最新 full round 干净。
+4. 有效任务描述被改变(adjudication、interjection)或基线不可判定时,**强制 full
+   round** —— 绝不拿空 diff 冒充增量检查。
+5. **TEST 始终执行项目配置的完整测试命令** —— SELF_CHECK 的 scope 绝不挑选或缩小
+   测试范围。
+
+所有通过验证的 findings —— 推迟的、重复的、裁决过的 —— 一律进入 fix loop;不存在
+任何 convergence / severity / divergence 通道可以在保留 unresolved findings 的
+情况下让一个 round 整体通过。
+
+每个 SELF_CHECK step 都会持久化其 `scope_mode`、baseline id、变更路径、fix
+iteration 与 pass index,供 CLI history 与 Web 控制台的 scope audit 展示。
 
 `WorkflowConfig` 还带着一个名为 `self_check_passes_required_explicit` 的字段。它
 **不是配置 key** —— 它在加载时派生(记录 `self_check_passes_required` 是否在 YAML
@@ -381,6 +458,47 @@ fix loop 与 self_check 的行为。加载进 `WorkflowConfig`。
 加载时,解析出的 `max_fix_iterations` 及其胜出的来源文件会按配置路径各记录一次
 (`workflow config: max_fix_iterations=… (effective source: …)`),正是为了让
 `tianluo.local.yaml` 遮蔽掉已提交值这件事可见,而不是变成一桩悬案。
+
+### `pricing`
+
+会话用量/成本汇总的模型价格覆盖。加载进 `PricingConfig`,并合并到内置的版本化
+价格表上(每个内置条目都记录其价格表版本、来源 URL 与生效日期)。
+
+| Key | 类型 | 默认值 | 含义 |
+|-----|------|--------|------|
+| `pricing.models.<canonical_model>.<category>` | 数字 `>= 0` | 内置价格表 | 某模型某一价格类别的单价,单位为**每百万 tokens 美元**。类别:`input` / `uncached_input`、`output`、`cache_read`、`cache_creation` / `cache_write`、`cache_creation_5m`、`cache_creation_1h`。 |
+
+行为要点:
+
+- 模型 key 在合并前先做**别名归一化**(`Opus-5` → `claude-opus-5`)。既不是别名、
+  也不在内置表中的 key 会为该名称**定义一条新条目**。
+- 非数字、bool 或负数值会(带告警地)丢弃*出错的这条模型条目*,同一处其他合法的
+  覆盖仍然生效 —— 计价只是展示性记账,配置笔误不能打挂 flow,但也绝不能悄悄变成
+  一个错误的价格。
+- 供应商回报的 actual cost 永远优先。估算只覆盖『有 token 用量但没有 actual cost』
+  的调用,且仅当模型与所有非零 token 类别都有价格时才进行 —— **未知模型、未知价格
+  或缺少 cache TTL 价格时一律显示 unknown cost,绝不显示 `$0`**。
+- 无目录价的供应商(如按订阅计费的 Codex)只展示 tokens,成本标记为未知。
+
+#### history 与 Web 控制台的用量与成本可见性
+
+每个 LLM call/attempt 都记录为一条统一的 usage record(`usage_status`、agent、
+runner、provider、provider session、reported / resolved model、token 分类、
+供应商 actual cost)。该记录是最小记账单元;flow 会话汇总、`luo history show`、
+daemon history payload 与 Web 控制台渲染的都是**同一份后端聚合结果** —— 前端绝
+不自行重算 provider session、缓存 token 或计价。
+
+- 供应商上报的 **actual cost** 按计费 session / call 语义去重,是权威的 *actual*
+  列。**Estimated cost** 只覆盖『有 token 用量但没有 actual cost』的计费单元,
+  使用合并后的价格表。actual 与 estimated 始终分列展示 —— 绝不叠加成一个伪造的
+  『全 actual』总额。
+- 用量缺失、模型缺失、价格缺失或 cache TTL 未知时显示 **unknown / partial**,
+  绝不显示误导性的 `$0`。显式零用量与数据缺失保持可区分,旧五字段记录标记为
+  `legacy` 而不是被猜测。
+- `luo history show <flow_id>` 打印逐 call、逐 step 与 flow 合计(`--json` 输出
+  同一结构化 payload);Web 控制台的 history 视图与 live-flow 侧栏展示同样数字,
+  外加实现策略与 self-check scope audit。active、archived 与 history-only flow
+  均可恢复;早于统一记录的 flow 标记为不完整,而不是被改写。
 
 ### `investigation`
 
@@ -1092,4 +1210,3 @@ print(load_language_config(p))
    `implement.use_worktree`;在 CLI UI 文案上,`SE3_LANG` 压过 `language.language`。
 7. **你改的是 `tianluo.example.yaml`。**它是随包发布的样例,永远不会被读取。请先把它
    复制成 `tianluo.yaml`。
-

@@ -47,6 +47,7 @@ from tianluo.daemon.protocol import (
     make_viewers,
     supports_fetch,
     supports_presence,
+    supports_spawn_strategy,
     supports_traffic_reduction,
     supports_uploads,
 )
@@ -55,17 +56,20 @@ from tianluo.daemon.protocol import (
 # -- version bump ----------------------------------------------------------
 
 
-def test_protocol_version_bumped_to_6():
-    # Revision 5 added the upload channel and revision 6 the fetch channel that
-    # reads those files back. Each bump is what lets the server tell "this
-    # daemon can serve the frame" from "this daemon will ignore it", so a paste
-    # (or a thumbnail) against an old daemon fails immediately with an
-    # explainable error instead of waiting out a timeout.
-    assert protocol.PROTOCOL_VERSION == "6"
+def test_protocol_version_bumped_to_7():
+    # Revision 5 added the upload channel, revision 6 the fetch channel that
+    # reads those files back, and revision 7 the optional spawn
+    # ``implementation_strategy`` field. Each bump is what lets the server tell
+    # "this daemon can serve the frame" from "this daemon will ignore it", so a
+    # paste (or a thumbnail, or an explicit strategy) against an old daemon
+    # fails immediately with an explainable error instead of waiting out a
+    # timeout — or, for the strategy field, silently running a different
+    # strategy than the operator requested.
+    assert protocol.PROTOCOL_VERSION == "7"
 
 
-def test_revision_6_does_not_regress_earlier_gates():
-    # A revision-6 peer must still satisfy every older gate — a bump adds a
+def test_revision_7_does_not_regress_earlier_gates():
+    # A revision-7 peer must still satisfy every older gate — a bump adds a
     # capability, it never withdraws one.
     assert supports_traffic_reduction("6") is True
     assert supports_presence("6") is True
@@ -74,6 +78,7 @@ def test_revision_6_does_not_regress_earlier_gates():
     assert supports_presence(protocol.PROTOCOL_VERSION) is True
     assert supports_uploads(protocol.PROTOCOL_VERSION) is True
     assert supports_fetch(protocol.PROTOCOL_VERSION) is True
+    assert supports_spawn_strategy(protocol.PROTOCOL_VERSION) is True
 
 
 # -- supports_presence gate --------------------------------------------------
@@ -186,9 +191,10 @@ def test_project_management_did_not_bump_protocol_version():
     # The pair is additive the way MSG_END_SESSION was: an older peer that does
     # not know the type just ignores the frame, and nothing existing degrades —
     # so it rode on revision 4 without a bump of its own. The revision has since
-    # advanced to 5/6 for the (unrelated) upload and fetch channels, so pin only
-    # the fact that these types exist below the current revision.
-    assert protocol.PROTOCOL_VERSION == "6"
+    # advanced to 5/6/7 for the (unrelated) upload, fetch and spawn-strategy
+    # channels, so pin only the fact that these types exist below the current
+    # revision.
+    assert protocol.PROTOCOL_VERSION == "7"
     assert supports_presence(protocol.PROTOCOL_VERSION) is True
 
 

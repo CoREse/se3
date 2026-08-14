@@ -1,0 +1,4 @@
+{"type":"init","provider":"anthropic","provider_session_id":"failure-session","model":"claude-sonnet-4-5-20250929"}
+{"type":"result","subtype":"error","is_error":true,"usage_event_id":"failure-with-usage","provider_session_id":"failure-session","usage":{"input_tokens":25,"output_tokens":4},"total_cost_usd":0.001,"result":"quota exceeded"}
+{"type":"result","subtype":"error","is_error":true,"usage_event_id":"failure-missing-usage","provider_session_id":"failure-session","result":"transport closed"}
+{"type":"result","subtype":"error","is_error":true,"usage_event_id":"failure-explicit-zero","provider_session_id":"failure-session-2","usage":{"input_tokens":0,"output_tokens":0},"total_cost_usd":0,"result":"rejected before inference"}

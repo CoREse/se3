@@ -1,0 +1,3 @@
+{"type":"thread.started","data":{"thread_id":"proxy-thread-1","provider":"azure-openai","model":"proxy-gpt-5-codex"}}
+{"type":"item.completed","item":{"type":"agent_message","text":"proxy done"}}
+{"type":"turn.completed","data":{"turn":{"id":"proxy-turn-1"},"provider":"azure-openai","model":"proxy-gpt-5-codex","usage":{"input_tokens":80,"cached_input_tokens":20,"output_tokens":15}}}

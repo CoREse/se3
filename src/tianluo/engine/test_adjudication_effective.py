@@ -158,7 +158,7 @@ def test_build_step_inputs_no_adjudication_unchanged():
     assert inputs["task_groups"] == [{"group_id": "G1", "tasks": []}]
 
 
-def test_build_step_inputs_plan_override():
+def test_build_step_inputs_legacy_plan_override_is_history_only():
     sm = _sm()
     flow = _flow("original")
     _add(flow, _completed(StepType.PLAN, {
@@ -168,7 +168,7 @@ def test_build_step_inputs_plan_override():
     ruled_plan = [{"group_id": "G1", "name": "ruled", "tasks": [{"description": "new"}]}]
     _add(flow, _completed(StepType.ADJUDICATE, {"adjudicated_plan": ruled_plan}))
     inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
-    assert inputs["task_groups"] == ruled_plan
+    assert inputs["task_groups"] == [{"group_id": "G1", "tasks": []}]
 
 
 def test_build_step_inputs_self_check_signals_adjudication():
@@ -207,7 +207,7 @@ def test_source_pool_unchanged_without_adjudication():
     }
     pool = _build_source_pool(inputs)
     assert "refined base" in pool
-    assert "canonical original" in pool
+    assert "canonical original" not in pool
 
 
 def test_source_pool_drops_original_when_adjudicated():

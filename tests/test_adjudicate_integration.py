@@ -758,8 +758,8 @@ _PLAN_GROUPS = [
         ],
     }
 ]
-# The plan half of the SAME contradiction — patched in the same ruling ("rule in
-# full, in one go"), so no later ruling has to mirror today's decision into it.
+# A legacy plan override carried by the fixture to prove modern adjudication
+# ignores it while preserving compatibility with old serialized payloads.
 _ADJUDICATED_PLAN_GROUPS = [
     {
         "group_id": "G1",
@@ -935,10 +935,10 @@ class TestHomomorphicSurfaceSweep:
         adj = self._oscillate_cold_surface(sm, flow)
         assert _run_adjudicate(adj, flow, _SWEPT_RULING) == StepStatus.COMPLETED
 
-        # --- Ruled in full, in ONE go: description AND plan patched together, so
-        #     no later ruling has to mirror this one into the plan. ---
+        # --- The effective description is ruled in full.  A legacy plan patch
+        #     in the response is deliberately ignored by modern routing. ---
         assert adj.outputs["adjudicated_description"] == COLD_ADJUDICATED_TASK
-        assert adj.outputs["adjudicated_plan"] == _ADJUDICATED_PLAN_GROUPS
+        assert "adjudicated_plan" not in adj.outputs
 
         # --- The boundary clause's claimed reach is on the record (written
         #     unconditionally — adjudication auto-passes by default, so outputs are
@@ -960,9 +960,10 @@ class TestHomomorphicSurfaceSweep:
             sc3 = sm.transition_to_next(flow)
         assert sc3.step_type == StepType.SELF_CHECK
         assert sc3.inputs["self_check_pass_index"] == 1
-        # Both halves of the patch are in force for the re-review.
+        # The corrected description governs re-review.  The original plan stays
+        # available only as scheduling/history data and cannot widen requirements.
         assert sc3.inputs["adjudicated_description"] == COLD_ADJUDICATED_TASK
-        assert sc3.inputs["task_groups"] == _ADJUDICATED_PLAN_GROUPS
+        assert sc3.inputs["task_groups"] == _PLAN_GROUPS
 
         # --- The sister surface now speaks: TWO opposing issues on _context.json
         #     in one round — grounded, they would be an in-round contradiction and

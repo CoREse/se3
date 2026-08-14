@@ -84,3 +84,53 @@ def test_unknown_run_key_falls_back_to_en_us():
     rendered = i18n.t("cli.run.resume_hint")
     assert rendered == load_catalog("en-US")["cli.run.resume_hint"]
     assert rendered != "cli.run.resume_hint"
+
+# ---------------------------------------------------------------------------
+# G10: run-command strategy / usage-cost labels localize
+# ---------------------------------------------------------------------------
+class TestRunStrategyAndUsageLabels:
+    """The --implementation-strategy error and the session usage block labels
+    come from the catalog — the strategy tokens (auto/direct/planned) stay raw
+    config values, the surrounding prose localizes."""
+
+    def test_invalid_strategy_error_localizes(self, monkeypatch):
+        from tianluo.i18n.loader import load_catalog
+
+        i18n.set_language("zh-CN")
+        text = i18n.t(
+            "cli.run.invalid_implementation_strategy",
+            strategy="bogus",
+            valid_strategies="auto, direct, planned",
+        )
+        assert "bogus" in text
+        assert text != "cli.run.invalid_implementation_strategy"
+        # The zh-CN prose must not be the en-US sentence.
+        assert text != load_catalog("en-US")[
+            "cli.run.invalid_implementation_strategy"].format(
+            strategy="bogus", valid_strategies="auto, direct, planned")
+
+    def test_usage_cost_labels_exist_and_localize(self):
+        from tianluo.i18n.loader import load_catalog
+
+        en = load_catalog("en-US")
+        zh = load_catalog("zh-CN")
+        for key in ("cli.display.usage.actual_cost",
+                    "cli.display.usage.estimated_cost",
+                    "cli.display.usage.unknown_cost"):
+            assert zh[key] != en[key], f"zh-CN {key} must be translated"
+        i18n.set_language("zh-CN")
+        actual = i18n.t("cli.display.usage.actual_cost")
+        assert actual == zh["cli.display.usage.actual_cost"]
+        assert actual != "cli.display.usage.actual_cost"
+
+    def test_usage_status_labels_distinguish_statuses(self):
+        from tianluo.i18n.loader import load_catalog
+
+        en = load_catalog("en-US")
+        labels = {
+            s: en[f"usage.status.{s}"]
+            for s in ("available", "partial", "unavailable", "legacy_ambiguous")
+        }
+        assert len(set(labels.values())) == 4, (
+            "each usage status needs a distinct label")
+

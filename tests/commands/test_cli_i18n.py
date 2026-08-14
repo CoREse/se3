@@ -259,3 +259,186 @@ def test_history_tables_localize_status_values(monkeypatch):
     )
     assert "已完成" in out
     assert "completed" not in out
+
+
+def test_history_show_scope_round_localized(monkeypatch, tmp_path):
+    """The SELF_CHECK scope-audit row is a keyed template: under zh-CN it must
+    render translated text, never the hardcoded English '(fix N)'."""
+    from unittest.mock import patch
+
+    from tianluo.commands import history_cmd
+
+    detail = {
+        "flow_id": "f1",
+        "status": "completed",
+        "task_description": "t",
+        "task_type": "feature",
+        "progress": {"completed": 3, "total": 3},
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "chat_sessions": 1,
+        "steps": [],
+        "review_scope": {
+            "active_round": {
+                "round_id": "scr-x",
+                "scope_mode": "incremental",
+                "pass_index": 2,
+                "fix_iteration": 1,
+            },
+            "completed_full_rounds": 1,
+        },
+    }
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
+    runner = CliRunner()
+    with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
+         patch.object(history_cmd, "get_flow_detail", return_value=detail):
+        out = runner.invoke(history_cmd.app, ["show", "f1"]).output
+
+    # The scope_mode value itself is localized too (WebUI scope.mode.* parity).
+    assert "增量#2（修复 1）" in out
+    assert "(fix 1)" not in out
+    assert "incremental" not in out
+
+    # The en-US rendering keeps the historical format.
+    monkeypatch.setenv("SE3_LANG", "en-US")
+    i18n.reset_language()
+    with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
+         patch.object(history_cmd, "get_flow_detail", return_value=detail):
+        en_out = runner.invoke(history_cmd.app, ["show", "f1"]).output
+    assert "incremental#2 (fix 1)" in en_out
+
+def test_history_show_strategy_value_and_legacy_reason_localized(
+    monkeypatch, tmp_path,
+):
+    """Strategy enum values and the projection-authored legacy-inference
+    sentence are UI chrome: under zh-CN both must render translated, matching
+    the WebUI's ``strategy.value.*`` / ``strategy.reason.*`` treatment."""
+    from unittest.mock import patch
+
+    from tianluo.commands import history_cmd
+    from tianluo.strategy_view import LEGACY_INFER_REASON
+
+    detail = {
+        "flow_id": "f1",
+        "status": "completed",
+        "task_description": "t",
+        "task_type": "small",
+        "progress": {"completed": 3, "total": 3},
+        "created_at": "2026-01-01T00:00:00",
+        "updated_at": "2026-01-01T00:00:00",
+        "chat_sessions": 1,
+        "steps": [],
+        "implementation_strategy": {
+            "requested": "planned",
+            "effective": "not_applicable",
+            "reason": LEGACY_INFER_REASON,
+            "reason_key": "legacy_inference",
+            "inferred": True,
+        },
+    }
+    monkeypatch.setenv("SE3_LANG", "zh-CN")
+    i18n.reset_language()
+    runner = CliRunner()
+    with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
+         patch.object(history_cmd, "get_flow_detail", return_value=detail):
+        out = runner.invoke(history_cmd.app, ["show", "f1"]).output
+
+    assert "不适用" in out
+    assert "not_applicable" not in out
+    assert "Inferred from persisted legacy" not in out
+
+    # A persisted (engine-authored) reason stays verbatim: it is flow data.
+    detail["implementation_strategy"] = {
+        "requested": "auto",
+        "effective": "direct",
+        "reason": "ANALYZE recommended direct.",
+        "reason_key": "",
+        "inferred": False,
+    }
+    with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
+         patch.object(history_cmd, "get_flow_detail", return_value=detail):
+        out = runner.invoke(history_cmd.app, ["show", "f1"]).output
+    assert "ANALYZE recommended direct." in out
+
+
+# ---------------------------------------------------------------------------
+# G10: strategy / scope / usage-cost labels across both catalogs
+# ---------------------------------------------------------------------------
+G10_CLI_KEYS = [
+    "history.field.strategy",
+    "history.field.strategy_value",
+    "history.field.strategy_inferred",
+    "history.field.strategy_reason",
+    "history.field.scope",
+    "history.field.scope_round",
+    "history.field.scope_full_rounds",
+    "history.field.strategy_reason_legacy",
+    "history.strategy.value.auto",
+    "history.strategy.value.direct",
+    "history.strategy.value.planned",
+    "history.strategy.value.not_applicable",
+    "history.strategy.value.unknown",
+    "history.scope.mode.full",
+    "history.scope.mode.incremental",
+    "history.usage.header",
+    "history.usage.no_usage",
+    "history.usage.calls_header",
+    "history.usage.steps_header",
+    "history.usage.flow_header",
+    "history.usage.legacy_note",
+    "history.usage.col.actual",
+    "history.usage.col.estimate",
+    "history.usage.col.completeness",
+    "history.plan_artifacts.header",
+    "history.plan_artifacts.task_groups",
+    "history.plan_artifacts.adjudicated_plan",
+    "history.plan_artifacts.plan_task_finding",
+    "usage.status.available",
+    "usage.status.partial",
+    "usage.status.unavailable",
+    "usage.status.legacy_ambiguous",
+    "usage.completeness_complete",
+    "usage.completeness_partial",
+    "cli.display.usage.actual_cost",
+    "cli.display.usage.estimated_cost",
+    "cli.display.usage.unknown_cost",
+    "cli.display.usage.unknown_calls",
+    "cli.display.usage.unknown_model",
+    "cli.display.usage.model_unknown",
+    "cli.display.usage.unknown_price",
+    "cli.display.usage.unknown_cache_ttl",
+    "cli.display.usage.completeness",
+    "cli.display.usage.completeness_complete",
+    "cli.display.usage.completeness_partial",
+    "cli.run.invalid_implementation_strategy",
+    "cli.help.run.implementation_strategy",
+]
+
+
+def test_g10_cli_keys_exist_in_both_catalogs():
+    """The G10 strategy/scope/usage labels ship in both catalogs; a missing
+    zh-CN entry must fall back to en-US, not render the raw dotted key."""
+    from tianluo.i18n.loader import load_catalog
+
+    en = load_catalog("en-US")
+    zh = load_catalog("zh-CN")
+    missing_en = [k for k in G10_CLI_KEYS if k not in en]
+    missing_zh = [k for k in G10_CLI_KEYS if k not in zh]
+    assert not missing_en, f"en-US is missing G10 keys: {missing_en}"
+    assert not missing_zh, f"zh-CN is missing G10 keys: {missing_zh}"
+
+
+def test_g10_cli_prose_keys_are_translated():
+    """Prose G10 labels must be genuinely translated in zh-CN (token values such
+    as usage statuses may differ in kind but never be the raw key)."""
+    from tianluo.i18n.loader import load_catalog
+
+    en = load_catalog("en-US")
+    zh = load_catalog("zh-CN")
+    for key in ("history.field.strategy", "history.field.scope",
+                "history.usage.header", "cli.display.usage.actual_cost",
+                "cli.display.usage.estimated_cost"):
+        assert zh[key] != key, f"zh-CN {key} must be translated"
+        assert zh[key] != en[key], f"zh-CN {key} must not copy the en-US value"
+

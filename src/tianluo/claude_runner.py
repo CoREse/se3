@@ -10,6 +10,8 @@ this runner now only executes a single command.  The ``ClaudeRunner`` alias
 is kept for backward compatibility.
 """
 
+import collections
+import json
 import os
 import re
 import select
@@ -20,9 +22,9 @@ import time
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
-from .agent_runner import AgentRunner, InfraErrorType
+from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
 from .config import load_claude_commands, load_claude_subprocess_config
 
 # Platform-specific imports for process resource monitoring
@@ -72,16 +74,24 @@ def _spawn_stdin_writer(proc: subprocess.Popen, payload: str) -> threading.Threa
     return t
 
 
+# Maximum number of stderr lines retained in the bounded tail buffer.  The
+# runner exposes this tail on its result so callers (e.g. the /goal fallback
+# gate) can see CLI-level reports that never reach the NDJSON stdout stream.
+_STDERR_BUFFER_MAXLEN = 200
+
+
 def _spawn_stderr_reader(
     proc: subprocess.Popen,
     log_file: Optional[Path] = None,
+    stderr_buffer: Optional[Deque[str]] = None,
 ) -> threading.Thread:
     """Drain ``proc.stderr`` in a daemon thread so the pipe never fills.
 
     The child process's stderr is kept separate from stdout so that NDJSON
     on stdout stays clean.  Stderr lines are written to ``log_file`` when
-    provided, and also echoed to the parent's stderr for live visibility.
-    Failures are swallowed; they'll surface via the child's returncode.
+    provided, captured into ``stderr_buffer`` when provided, and also echoed
+    to the parent's stderr for live visibility.  Failures are swallowed;
+    they'll surface via the child's returncode.
     """
     def _reader() -> None:
         log_fh = None
@@ -94,6 +104,8 @@ def _spawn_stderr_reader(
         try:
             assert proc.stderr is not None
             for line in proc.stderr:
+                if stderr_buffer is not None:
+                    stderr_buffer.append(line)
                 if log_fh is not None:
                     try:
                         log_fh.write(line)
@@ -128,6 +140,76 @@ USAGE_LIMIT_KEYWORDS = [
     "hit your limit",
     "you've hit your limit",
 ]
+
+# Rejection phrases bound to the /goal command itself.  Each pattern requires
+# the phrase to be bound to ``/goal`` within one report segment (a single
+# event's text or the joined raw stderr), so prose that merely mentions a
+# marker substring elsewhere (a task description saying "the legacy endpoint
+# does not exist") cannot trip the plain-mode fallback. The bounded window
+# tolerates multi-line prose whose phrase and ``/goal`` land on different
+# lines; a genuinely unrelated mention stays outside it.
+_GOAL_REJECTION_PATTERNS = (
+    # The CLI names the command first: "/goal is not available" /
+    # "the /goal command does not exist" / "/goal is not a valid slash
+    # command" / "/goal is not a recognized command".
+    re.compile(
+        r"/goal['\"]?\s*(?:command\s*)?:?\s*(?:is\s+)?"
+        r"(?:not\s+(?:available|supported|recognized|found|known)"
+        r"|unavailable|unsupported|unrecognized|unknown"
+        r"|does\s+not\s+exist|doesn['’]?t\s+exist"
+        r"|not\s+found"
+        r"|not\s+a\s+(?:(?:valid|recognized|known)\s+)?"
+        r"(?:slash\s+)?command"
+        r"|command\s+not\s+found)",
+        re.IGNORECASE,
+    ),
+    # Or the CLI names the rejection first: "Unknown slash command: /goal".
+    re.compile(
+        r"\b(?:unknown|unrecognized|invalid|no\s+such|not\s+a\s+valid)\s+"
+        r"(?:slash\s+)?command\b.{0,200}?['\"]?/goal\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    # Or the model prose denies having the command: "I do not have a /goal
+    # command here" / "this build does not support /goal".
+    re.compile(
+        r"\b(?:do(?:es)?\s+not|don['’]?t|doesn['’]?t|cannot|can['’]?t|"
+        r"not\s+able\s+to)\s+"
+        r"(?:have|find|see|know(?:\s+of)?|support|recogni[sz]e|execute|run|use)\b"
+        r".{0,200}?['\"]?/goal\b",
+        re.IGNORECASE | re.DOTALL,
+    ),
+)
+
+
+def _ndjson_event_text(event: Dict[str, Any]) -> str:
+    """Best-effort prose text of one stream-json event, of any type.
+
+    Rejection reports arrive on different event shapes across CLI builds:
+    result/error events carry ``result``, system events a ``message`` string,
+    and user/assistant events a content list. Returns "" when the event
+    carries no readable text.
+    """
+    result = event.get("result")
+    if isinstance(result, str):
+        return result
+    for key in ("error", "message"):
+        value = event.get(key)
+        if isinstance(value, str):
+            return value
+    message = event.get("message")
+    if isinstance(message, dict):
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict):
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(parts)
+    return ""
 
 
 # --- CLI-subprocess confirmation-prompt capture -------------------------------
@@ -216,6 +298,10 @@ class ClaudeCodeRunner(AgentRunner):
     ``commands`` parameter (list of dicts); in that case, only the first
     command is used.
     """
+
+    native_goal_capability = True
+    supports_native_goal = True
+    startup_provider = "anthropic"
 
     def __init__(
         self,
@@ -410,6 +496,7 @@ class ClaudeCodeRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         spec_guard_plugin: Optional[Path] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Build Claude Code CLI arguments from intent-level parameters.
 
@@ -445,10 +532,14 @@ class ClaudeCodeRunner(AgentRunner):
             own ``--dangerously-skip-permissions`` / ``--setting-sources``
             flags, which are prepended by the execution methods).
         """
+        effective_prompt = prompt
+        if invocation_intent == AgentInvocationIntent.DIRECT_IMPLEMENTATION:
+            effective_prompt = f"/goal\n\n{prompt}"
+
         args: List[str] = [
             "--output-format", "stream-json",
             "--verbose",
-            "-p", prompt,
+            "-p", effective_prompt,
         ]
 
         if read_only:
@@ -469,6 +560,48 @@ class ClaudeCodeRunner(AgentRunner):
                     args.extend(["--file", str(f)])
 
         return args
+
+    @staticmethod
+    def detect_native_goal_unavailable(stdout: str, stderr: str) -> bool:
+        """Recognize an explicit report that ``/goal`` is absent.
+
+        Any stream event that names /goal as a rejected command counts —
+        result/error events, system messages, and model prose — matched per
+        text segment so a rejection phrase binds to /goal within one report
+        rather than across unrelated events. Marker substrings anywhere else
+        in the conversation (an echoed prompt, prose about a different
+        endpoint) never trip the fallback: a response that merely did no work
+        is not an unavailability report.
+        """
+        segments: List[str] = []
+        for line in (stdout or "").splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped.startswith("{"):
+                try:
+                    event = json.loads(stripped)
+                except (json.JSONDecodeError, TypeError):
+                    event = None
+                if isinstance(event, dict):
+                    text = _ndjson_event_text(event)
+                    if text:
+                        segments.append(text)
+                    continue
+            # Raw text (plain stdout prose beside the stream-json events).
+            segments.append(stripped)
+        if (stderr or "").strip():
+            # stderr is unstructured prose: join it so a rejection whose
+            # phrase and /goal land on different lines still counts.
+            segments.append((stderr or "").strip())
+        for segment in segments:
+            if "/goal" not in segment:
+                continue
+            if any(
+                pattern.search(segment) for pattern in _GOAL_REJECTION_PATTERNS
+            ):
+                return True
+        return False
 
     @staticmethod
     def detect_usage_limit(returncode: int, stdout: str, stderr: str) -> bool:
@@ -623,6 +756,7 @@ class ClaudeCodeRunner(AgentRunner):
                     cmd_index=0,
                     was_retry=False,
                     interrupted=True,
+                    stderr_tail=result.stderr_tail,
                 )
 
             if result.success:
@@ -637,6 +771,7 @@ class ClaudeCodeRunner(AgentRunner):
                 cmd_used=cmd_name,
                 cmd_index=0,
                 was_retry=False,
+                stderr_tail=result.stderr_tail,
             )
 
         except Exception as e:
@@ -670,6 +805,12 @@ class ClaudeCodeRunner(AgentRunner):
     ) -> "_SingleRunResult":
         """Run a single command with monitoring and enhanced hang detection."""
 
+        # Bounded tail of the child's stderr, filled by _spawn_stderr_reader
+        # and exposed on the result for CLI-level diagnostics.
+        stderr_buffer: Deque[str] = collections.deque(
+            maxlen=_STDERR_BUFFER_MAXLEN
+        )
+
         # Check if command exists
         import shutil
         if not shutil.which(full_cmd[0]):
@@ -683,6 +824,7 @@ class ClaudeCodeRunner(AgentRunner):
                 output=msg,
                 success=False,
                 should_retry=True,
+                stderr_tail="".join(stderr_buffer),
             )
 
         # If we need to feed a prompt via stdin (large-prompt path), open a
@@ -721,7 +863,19 @@ class ClaudeCodeRunner(AgentRunner):
         _stderr_log = None
         if log_file is not None:
             _stderr_log = log_file.parent / f"{log_file.name}.stderr"
-        _spawn_stderr_reader(proc, log_file=_stderr_log)
+        _stderr_thread = _spawn_stderr_reader(
+            proc, log_file=_stderr_log, stderr_buffer=stderr_buffer,
+        )
+
+        def _stderr_tail() -> str:
+            # The child has exited on every path reaching here; a bounded
+            # join lets the reader drain the last buffered lines before the
+            # tail is captured.
+            try:
+                _stderr_thread.join(timeout=5)
+            except Exception:
+                pass
+            return "".join(stderr_buffer)
 
         output_buffer = []
         last_activity = time.time()
@@ -750,6 +904,7 @@ class ClaudeCodeRunner(AgentRunner):
                         output="".join(output_buffer),
                         success=False,
                         should_retry=True,
+                        stderr_tail=_stderr_tail(),
                     )
 
                 # Check for output with timeout (handle EINTR from signals)
@@ -859,6 +1014,7 @@ class ClaudeCodeRunner(AgentRunner):
                                 output="".join(output_buffer),
                                 success=False,
                                 should_retry=True,
+                                stderr_tail=_stderr_tail(),
                             )
 
             # Process finished - read remaining output
@@ -884,6 +1040,7 @@ class ClaudeCodeRunner(AgentRunner):
                     output=output,
                     success=False,
                     should_retry=True,
+                    stderr_tail=_stderr_tail(),
                 )
 
             # Check if process terminated with unusual exit codes that might indicate a hang
@@ -895,6 +1052,7 @@ class ClaudeCodeRunner(AgentRunner):
                         output=output,
                         success=False,
                         should_retry=True,
+                        stderr_tail=_stderr_tail(),
                     )
 
             return _SingleRunResult(
@@ -902,6 +1060,7 @@ class ClaudeCodeRunner(AgentRunner):
                 output=output,
                 success=returncode == 0,
                 should_retry=False,
+                stderr_tail=_stderr_tail(),
             )
 
         except KeyboardInterrupt:
@@ -925,6 +1084,7 @@ class ClaudeCodeRunner(AgentRunner):
                 success=False,
                 should_retry=False,
                 interrupted=True,
+                stderr_tail=_stderr_tail(),
             )
 
         finally:
@@ -959,6 +1119,10 @@ class MonitoredResult:
     cmd_index: int
     was_retry: bool
     interrupted: bool = False  # True if stopped by KeyboardInterrupt
+    # Bounded tail of the child's stderr, for CLI-level diagnostics (such as
+    # a native /goal unavailability report) that never reach the NDJSON
+    # stdout stream.
+    stderr_tail: str = ""
 
     @property
     def success(self) -> bool:
@@ -974,6 +1138,7 @@ class _SingleRunResult:
     success: bool
     should_retry: bool
     interrupted: bool = False  # True if stopped by KeyboardInterrupt
+    stderr_tail: str = ""
 
 
 # Backward-compatibility alias

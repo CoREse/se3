@@ -524,6 +524,54 @@ class TestSpawner:
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
+    def test_spawn_appends_implementation_strategy(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "do a thing",
+            project_root=str(tmp_path),
+            implementation_strategy="direct",
+        )
+        idx = spawned.args.index("--implementation-strategy")
+        assert spawned.args[idx + 1] == "direct"
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_omits_implementation_strategy_by_default(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn("plain task", project_root=str(tmp_path))
+        # No option on the argv -> the CLI resolves project config / default.
+        assert "--implementation-strategy" not in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_from_issue_appends_implementation_strategy(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "",
+            project_root=str(tmp_path),
+            from_issue_id="13",
+            implementation_strategy="auto",
+        )
+        assert "--from-issue" in spawned.args
+        idx = spawned.args.index("--implementation-strategy")
+        assert spawned.args[idx + 1] == "auto"
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_strategy_with_worktree_combined(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "isolated direct",
+            project_root=str(tmp_path),
+            worktree=True,
+            implementation_strategy="planned",
+        )
+        assert "--worktree" in spawned.args
+        idx = spawned.args.index("--implementation-strategy")
+        assert spawned.args[idx + 1] == "planned"
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
     def test_iter_events_parses_ndjson(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn("task", project_root=str(tmp_path))
@@ -797,6 +845,29 @@ class TestDaemonLifecycle:
         proj.mkdir()
         spawned = daemon.request_spawn("task", project_root=str(proj))
         assert proj.resolve() in daemon.aggregator.project_roots
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_request_spawn_passes_implementation_strategy(self, fake_se3, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        spawned = daemon.request_spawn(
+            "task", project_root=str(proj), implementation_strategy="direct"
+        )
+        idx = spawned.args.index("--implementation-strategy")
+        assert spawned.args[idx + 1] == "direct"
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_request_spawn_omits_strategy_by_default(self, fake_se3, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        spawned = daemon.request_spawn("task", project_root=str(proj))
+        assert "--implementation-strategy" not in spawned.args
         daemon.spawner.wait(spawned.pid, timeout=10)
         daemon.spawner.reap()
 

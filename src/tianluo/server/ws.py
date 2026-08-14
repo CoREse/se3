@@ -1211,6 +1211,20 @@ async def _push_history_data(
         # the two faces read one bundle via one source. An older frontend ignores
         # the extra key.
         frame["pending"] = meta["pending"]
+    # Mirror the daemon-to-server leg: carry the post-frame backend usage
+    # payload (same shared backend the REST bundle delivers) so a WS-only
+    # history view never freezes at its connect-time usage snapshot and the
+    # frontend's ``msg.usage`` adoption path is live. Omitted (not ``null``)
+    # when the bundle holds no usage at all; an older frontend ignores it.
+    # A usage-bearing append refreshed the stored payload incrementally
+    # (see ServerState._refresh_bundle_usage), so this read reflects every
+    # record the frame adds; the O(records) rebuild fallback still runs on
+    # full frames when no daemon payload has ever arrived.
+    usage = await state.get_history_usage(
+        flow_id, rebuild=mode == protocol.HISTORY_MODE_FULL,
+    )
+    if usage is not None:
+        frame["usage"] = usage
     await hub.broadcast_owned(frame, owner)
 
 
@@ -1737,6 +1751,16 @@ async def _handle_message(
                     cursor_base if isinstance(cursor_base, dict) else {}
                 ),
                 machine_id=machine_id,
+                usage=(
+                    message.payload.get("usage")
+                    if isinstance(message.payload.get("usage"), dict)
+                    else None
+                ),
+                usage_catalog=(
+                    message.payload.get("usage_catalog")
+                    if isinstance(message.payload.get("usage_catalog"), dict)
+                    else None
+                ),
             )
             applied = outcome.resolves_pull
             # Resolve an on-demand pull waiter ONLY when this frame left the

@@ -174,6 +174,7 @@ def _read_multiline_input(
 # "discovery": that is a run *mode* reached only through ``--discover``, never a
 # classification the user asks analyze to honour.
 EXPLICIT_TASK_TYPES = ("feature", "bugfix", "review", "small", "survey")
+IMPLEMENTATION_STRATEGIES = ("auto", "direct", "planned")
 
 
 def _param_from_commandline(ctx: typer.Context, name: str) -> bool:
@@ -216,6 +217,11 @@ def run_cmd(
     output_format: str = typer.Option("cli", "--output-format", help=t("cli.help.run.output_format")),
     preset: Optional[str] = typer.Option(None, "--preset", help=t("cli.help.run.preset")),
     worktree: bool = typer.Option(False, "--worktree", help=t("cli.help.run.worktree")),
+    implementation_strategy: Optional[str] = typer.Option(
+        None,
+        "--implementation-strategy",
+        help=t("cli.help.run.implementation_strategy"),
+    ),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -265,6 +271,20 @@ def run_cmd(
                 "cli.run.invalid_task_type",
                 task_type=type,
                 valid_types=", ".join(EXPLICIT_TASK_TYPES),
+            ),
+            title=t("cli.common.error"),
+        )
+        raise typer.Exit(1)
+
+    if (
+        implementation_strategy is not None
+        and implementation_strategy not in IMPLEMENTATION_STRATEGIES
+    ):
+        render_full(
+            t(
+                "cli.run.invalid_implementation_strategy",
+                strategy=implementation_strategy,
+                valid_strategies=", ".join(IMPLEMENTATION_STRATEGIES),
             ),
             title=t("cli.common.error"),
         )
@@ -386,6 +406,7 @@ def run_cmd(
                 prompt_history=prompt_history,
                 source_issue_id=issue.id,
                 output_format=output_format,
+                implementation_strategy=implementation_strategy,
             )
         else:
             exit_code = run_flow(
@@ -396,6 +417,7 @@ def run_cmd(
                 prompt_history=prompt_history,
                 source_issue_id=issue.id,
                 output_format=output_format,
+                implementation_strategy=implementation_strategy,
             )
 
         # Issue finalization is NOT done here on exit_code: it is an unreliable
@@ -478,6 +500,7 @@ def run_cmd(
             change_name=change,
             prompt_history=prompt_history,
             output_format=output_format,
+            implementation_strategy=implementation_strategy,
         )
     else:
         exit_code = run_flow(
@@ -487,6 +510,7 @@ def run_cmd(
             change_name=change,
             prompt_history=prompt_history,
             output_format=output_format,
+            implementation_strategy=implementation_strategy,
         )
     raise typer.Exit(exit_code)
 

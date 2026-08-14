@@ -1242,18 +1242,13 @@ class TestUnlimitedAndConvergenceInteraction:
             "out_of_scope": False,
         }
 
-    def test_convergence_fires_under_unlimited_mode(self, tmp_path):
-        """End-to-end: unlimited cap + convergence enabled + LLM repeats the
-        previous self-check issues → COMPLETED (loop breaks). Without
-        convergence this would loop forever in unlimited mode.
-        """
+    def test_repeated_findings_enter_fix_under_unlimited_mode(self, tmp_path):
+        """Unlimited mode never turns repeated findings into a passing check."""
         from tianluo.engine.steps.self_check import self_check_handler
         import json
 
-        # Non-critical/high severities: the convergence shortcut may only fire
-        # when no critical/high finding is present (a critical/high finding
-        # always re-enters the fix loop). Using low/medium keeps this test's
-        # focus on the unlimited-mode loop-break contract.
+        # Low/medium findings have the same mandatory fix destination as high
+        # findings; severity does not decide whether a validated defect passes.
         prev_issues = [
             self._new_schema_issue("low", "a.py", 1,
                                    actual="x", divergence="x crashes"),
@@ -1268,7 +1263,7 @@ class TestUnlimitedAndConvergenceInteraction:
         assert sm._get_max_fix_iterations() == 0
         inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
         assert inputs["max_fix_iterations"] == 0
-        assert inputs["self_check_convergence_enabled"] is True
+        assert inputs["self_check_convergence_enabled"] is False
         assert inputs["prev_self_check_issues"] == prev_issues
         assert inputs["self_check_pass_index"] == 1
 
@@ -1282,27 +1277,18 @@ class TestUnlimitedAndConvergenceInteraction:
             mock_cls.return_value = mock_caller
             result = self_check_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED, (
-            "convergence MUST short-circuit the loop under unlimited mode; "
-            "otherwise repeated identical findings produce an infinite loop"
-        )
-        assert step.outputs.get("converged") is True
-        assert step.outputs.get("unresolved_issues") == prev_issues
-        # NOTE: ``max_fix_iterations`` is only written into outputs on the
-        # REVISION_NEEDED branch. The convergence path returns COMPLETED, so
-        # it lives in inputs (already asserted above) but not in outputs —
-        # that's intentional, COMPLETED steps don't carry a fix-loop counter.
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs["issues"] == prev_issues
+        assert step.outputs["fix_needed"] is True
+        assert step.outputs["max_fix_iterations"] == 0
 
     def test_no_convergence_when_disabled_under_unlimited(self, tmp_path):
-        """Companion contract: when convergence is OFF under unlimited mode,
-        the LLM repeating the same issues does NOT short-circuit — the loop
-        keeps going. This is the regression risk the previous test guards
-        against: convergence must be the explicit mechanism that breaks it.
+        """Repeated findings stay revision-needed under unlimited mode too.
 
-        Note: prev_self_check_issues is now injected unconditionally (the
-        ``convergence_enabled`` gate has been removed for the schema-rewrite
-        commit so the new ``previous_issue_resolutions`` schema works).
-        Convergence as a runtime *short-circuit* still requires the flag.
+        ``prev_self_check_issues`` remains available for the structured
+        ``previous_issue_resolutions`` contract, never as an authorization to
+        discard a validated finding.
         """
         from tianluo.engine.steps.self_check import self_check_handler
         import json
@@ -1322,8 +1308,7 @@ class TestUnlimitedAndConvergenceInteraction:
         inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
         assert inputs["max_fix_iterations"] == 0
         assert inputs["self_check_convergence_enabled"] is False
-        # prev_self_check_issues IS injected (gate dropped) — but
-        # convergence_enabled=False means the short-circuit won't fire.
+        # Previous findings remain available for resolution accounting.
         assert inputs["prev_self_check_issues"] == prev_issues
 
         step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
@@ -1336,9 +1321,7 @@ class TestUnlimitedAndConvergenceInteraction:
             mock_cls.return_value = mock_caller
             result = self_check_handler(step, flow)
 
-        # Without the convergence_enabled flag the short-circuit doesn't
-        # fire — handler reports REVISION_NEEDED. Under unlimited mode this
-        # would loop forever — exactly the regression this test is locking.
+        # Unlimited mode removes the iteration cap, not the obligation to fix.
         assert result == StepStatus.REVISION_NEEDED
         assert not step.outputs.get("converged")
 
@@ -1917,4 +1900,3 @@ class TestUnlimitedSentinelHighIterationDrive:
         # configuration would allow (default 100, common ceiling 50, etc.).
         assert flow.state.get_fix_iteration() == ITERATIONS
         assert flow.status == FlowStatus.RUNNING
-

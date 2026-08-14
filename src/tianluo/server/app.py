@@ -391,6 +391,14 @@ class NewFlowRequest(BaseModel):
     issue description becomes the task), and the daemon drives the issue
     lifecycle via the ``luo run --from-issue`` CLI path.  *task* is optional in
     that case, so it defaults to an empty string.
+
+    *implementation_strategy* (optional, protocol revision 7) is the explicit
+    ``auto``/``direct``/``planned`` strategy the published flow must use.
+    Omitted by older clients — the field stays legal and the daemon adds no
+    CLI option, so the project configuration / default resolves the strategy.
+    When supplied, the owning daemon must advertise revision 7 or newer;
+    otherwise the request is refused with an explicit capability error instead
+    of silently running a different strategy than requested.
     """
 
     machine_id: str = ""
@@ -400,6 +408,7 @@ class NewFlowRequest(BaseModel):
     discover: bool = False
     worktree: bool = False
     from_issue_id: str = ""
+    implementation_strategy: str = ""
 
 
 class RespondRequest(BaseModel):
@@ -1407,6 +1416,54 @@ def create_app(
         machine_id, flow = result
         return {"machine_id": machine_id, "flow": flow}
 
+    def _validated_strategy(req: NewFlowRequest) -> str:
+        """Validate the request's optional implementation strategy.
+
+        Returns the trimmed value (``""`` when omitted — the field stays off
+        the wire so the daemon/CLI resolve project configuration / default).
+        Raises ``HTTPException(422)`` for a non-empty value outside
+        ``auto``/``direct``/``planned``.
+        """
+        strategy = req.implementation_strategy.strip()
+        if not strategy:
+            return ""
+        if strategy not in protocol.SPAWN_STRATEGY_VALUES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"'implementation_strategy' must be one of "
+                    f"{sorted(protocol.SPAWN_STRATEGY_VALUES)}, got {strategy!r}"
+                ),
+            )
+        return strategy
+
+    # WHY: a plain nested function, NOT a @staticmethod — a staticmethod object
+    # is only directly callable from Python 3.10, and this package supports
+    # 3.8+. Decorating it would make the compatibility gate itself raise a
+    # TypeError (HTTP 500) exactly where it is supposed to explain the refusal.
+    def _strategy_unsupported(machine_id: str) -> JSONResponse:
+        """Refuse an explicit strategy for a pre-revision-7 daemon.
+
+        A silent drop of the field would downgrade the operator's explicit
+        choice to the project configuration / planned default — a behavioural
+        substitution, not a missing nicety — so it must surface as an
+        immediate capability error the UI can explain (mirroring the upload /
+        fetch refusal). The machine-readable ``reason`` lets the browser
+        localize the message.
+        """
+        return JSONResponse(
+            status_code=501,
+            content={
+                "detail": (
+                    f"daemon on '{machine_id}' does not support an explicit "
+                    "implementation strategy; upgrade it to a build speaking "
+                    f"protocol revision {protocol.MIN_SPAWN_STRATEGY_PROTOCOL_VERSION} "
+                    "or newer"
+                ),
+                "reason": "unsupported_daemon",
+            },
+        )
+
     async def _publish_flow_from_issue(
         req: NewFlowRequest,
         identity_: OwnerIdentity,
@@ -1453,6 +1510,19 @@ def create_app(
                 detail=f"machine '{machine_id}' owning issue '{from_issue_id}' "
                 "is not connected",
             )
+        strategy = _validated_strategy(req)
+        if strategy:
+            owned_issue_machine = await state.get_machine(
+                machine_id, owner=scope
+            )
+            # Fail CLOSED on a missing machine record: an unverifiable daemon
+            # cannot be assumed to speak revision 7, and dispatching anyway
+            # would let a pre-revision-7 daemon silently ignore the field and
+            # downgrade the operator's explicit strategy to project config.
+            if owned_issue_machine is None or not protocol.supports_spawn_strategy(
+                owned_issue_machine.get("protocol_version")
+            ):
+                return _strategy_unsupported(machine_id)
         message = protocol.make_spawn_flow(
             "",
             project_root=project_root,
@@ -1460,6 +1530,7 @@ def create_app(
             discover=req.discover,
             worktree=req.worktree,
             from_issue_id=from_issue_id,
+            implementation_strategy=strategy,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:
@@ -1516,12 +1587,18 @@ def create_app(
                 status_code=404,
                 detail=f"machine '{machine_id}' is not connected",
             )
+        strategy = _validated_strategy(req)
+        if strategy and not protocol.supports_spawn_strategy(
+            owned.get("protocol_version")
+        ):
+            return _strategy_unsupported(machine_id)
         message = protocol.make_spawn_flow(
             task,
             project_root=project_root,
             task_type=req.task_type,
             discover=req.discover,
             worktree=req.worktree,
+            implementation_strategy=strategy,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:

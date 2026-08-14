@@ -1,9 +1,10 @@
 """Tests for PARTIAL status handling in state machine.
 
 Tests that:
-1. transition_to_next() allows PARTIAL steps to flow forward
+1. transition_to_next() allows ordinary/planned PARTIAL steps to flow forward
 2. _build_step_inputs() forwards implement outputs when status is PARTIAL
-3. PARTIAL does NOT trigger fix loops or retries
+3. PARTIAL does not trigger fix loops; direct/small IMPLEMENT is the explicit
+   exception and re-enters until its whole-task contract is complete
 """
 
 from __future__ import annotations
@@ -126,6 +127,81 @@ class TestPartialTransition:
 
         assert next_step is None
         assert flow.status == FlowStatus.COMPLETED
+
+
+class TestHolisticPartialContinuation:
+    """Only direct/small partial implementation is forced to continue."""
+
+    @patch("tianluo.engine.state_machine.clear_phase1_cache")
+    def test_direct_partial_reenters_same_implement(
+        self, mock_clear_cache, state_machine,
+    ):
+        flow, impl_step = _make_flow_with_implement(
+            StepStatus.PARTIAL,
+            {
+                "files_changed": ["partial.py"],
+                "completion_status": "partial",
+                "incomplete_tasks": ["finish integration"],
+            },
+        )
+        flow.state.selected_steps = [StepType.IMPLEMENT, StepType.TEST]
+        flow.state.context["effective_implementation_strategy"] = "direct"
+
+        next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is impl_step
+        assert impl_step.status == StepStatus.PENDING
+        assert flow.state.current_step_id == impl_step.step_id
+        assert impl_step.inputs["resumed"] is True
+        assert impl_step.inputs["retry_count"] == 1
+        assert impl_step.inputs["previous_output"]["files_changed"] == [
+            "partial.py"
+        ]
+        mock_clear_cache.assert_called_once()
+
+    @patch("tianluo.engine.state_machine.clear_phase1_cache")
+    def test_complete_with_incomplete_tasks_still_reenters(
+        self, mock_clear_cache, state_machine,
+    ):
+        flow, impl_step = _make_flow_with_implement(
+            StepStatus.COMPLETED,
+            {
+                "completion_status": "complete",
+                "incomplete_tasks": ["still pending"],
+            },
+        )
+        flow.state.context["effective_implementation_strategy"] = "direct"
+
+        assert state_machine.transition_to_next(flow) is impl_step
+        assert impl_step.status == StepStatus.PENDING
+
+    def test_direct_complete_and_empty_advances_to_test(self, state_machine):
+        flow, _ = _make_flow_with_implement(
+            StepStatus.COMPLETED,
+            {"completion_status": "complete", "incomplete_tasks": []},
+        )
+        flow.state.selected_steps = [StepType.IMPLEMENT, StepType.TEST]
+        flow.state.context["effective_implementation_strategy"] = "direct"
+
+        next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None
+        assert next_step.step_type == StepType.TEST
+
+    @patch("tianluo.engine.state_machine.clear_phase1_cache")
+    def test_small_partial_uses_the_same_continuation_rule(
+        self, mock_clear_cache, state_machine,
+    ):
+        flow, impl_step = _make_flow_with_implement(
+            StepStatus.PARTIAL,
+            {"completion_status": "partial", "incomplete_tasks": ["rest"]},
+        )
+        flow.task_type = "small"
+        impl_step.inputs["task_type"] = "small"
+
+        assert state_machine.transition_to_next(flow) is impl_step
+        assert impl_step.status == StepStatus.PENDING
+        mock_clear_cache.assert_called_once()
 
 
 class TestPartialRunLoop:

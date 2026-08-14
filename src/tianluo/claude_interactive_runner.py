@@ -48,7 +48,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
-from .agent_runner import AgentRunner, InfraErrorType
+from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
 from .config import load_claude_commands, load_claude_subprocess_config
 
 # Keywords indicating usage/rate limit in Claude output (shared with the
@@ -114,15 +114,26 @@ _FEED_CHUNK_DELAY = 0.01
 _INPUT_READY_SETTLE = 0.4
 _INPUT_READY_TIMEOUT = 15.0
 
-# The four token-count fields carried on Claude ``usage`` payloads, in the order
-# the upstream usage accounting (``parse_usage_from_ndjson`` / ``UsageTotals``)
-# reads them.
+# The four flat token-count fields carried on Claude ``usage`` payloads, in the
+# order the upstream usage accounting (``parse_usage_from_ndjson`` /
+# ``UsageTotals``) reads them.
 USAGE_TOKEN_KEYS = (
     "input_tokens",
     "output_tokens",
     "cache_creation_input_tokens",
     "cache_read_input_tokens",
 )
+
+# The cache-creation TTL split. Preserved only when the provider reports it
+# (flat or inside the nested ``cache_creation`` breakdown) so the synthesized
+# result keeps the 5-minute vs 1-hour billing distinction for the unified
+# usage parser instead of collapsing both into generic cache creation.
+CACHE_CREATION_TTL_KEYS = (
+    "cache_creation_5m_input_tokens",
+    "cache_creation_1h_input_tokens",
+)
+
+_ALL_USAGE_KEYS = USAGE_TOKEN_KEYS + CACHE_CREATION_TTL_KEYS
 
 # Assistant ``stop_reason`` values that mark the end of a turn (no further
 # assistant output is coming).  ``"tool_use"`` is deliberately excluded — it
@@ -574,13 +585,36 @@ def to_stream_json_ndjson(record: dict) -> Optional[str]:
     return None
 
 
+def _read_cache_creation_ttl(
+    usage: dict, nested: Any, flat_names: tuple, nested_names: tuple
+) -> Optional[int]:
+    """Read one cache-creation TTL category (``None`` when unreported)."""
+    for name in flat_names:
+        if name in usage:
+            try:
+                return int(usage.get(name, 0) or 0)
+            except Exception:
+                return 0
+    if isinstance(nested, dict):
+        for name in nested_names:
+            if name in nested:
+                try:
+                    return int(nested.get(name, 0) or 0)
+                except Exception:
+                    return 0
+    return None
+
+
 def extract_usage_from_record(record: dict) -> Dict[str, int]:
-    """Read the four token counts from a record's ``usage`` payload.
+    """Read token counts (incl. the cache-creation TTL split) from usage.
 
     Prefers the nested ``message.usage`` shape (assistant transcript records)
-    and falls back to a flat top-level ``usage``.  Missing fields default to
-    ``0``; any parsing surprise is swallowed and yields all-zero counts, so
-    usage extraction never disturbs the main path.
+    and falls back to a flat top-level ``usage``.  The four flat fields always
+    default to ``0``; the 5-minute / 1-hour cache-creation fields appear only
+    when the provider reported them (flat, or inside the nested
+    ``cache_creation`` breakdown), so consumers of the legacy flat shape see
+    exactly the four fields. Any parsing surprise is swallowed and yields the
+    all-zero flat counts, so usage extraction never disturbs the main path.
     """
     zeros = {k: 0 for k in USAGE_TOKEN_KEYS}
     try:
@@ -600,14 +634,43 @@ def extract_usage_from_record(record: dict) -> Dict[str, int]:
                 out[k] = int(usage.get(k, 0) or 0)
             except Exception:
                 out[k] = 0
+        nested = usage.get("cache_creation")
+        five = _read_cache_creation_ttl(
+            usage,
+            nested,
+            (
+                "cache_creation_5m_input_tokens",
+                "cache_creation_5_minute_input_tokens",
+                "ephemeral_5m_input_tokens",
+            ),
+            ("ephemeral_5m_input_tokens", "5m_input_tokens"),
+        )
+        hour = _read_cache_creation_ttl(
+            usage,
+            nested,
+            (
+                "cache_creation_1h_input_tokens",
+                "cache_creation_1_hour_input_tokens",
+                "ephemeral_1h_input_tokens",
+            ),
+            ("ephemeral_1h_input_tokens", "1h_input_tokens"),
+        )
+        if five is not None:
+            out["cache_creation_5m_input_tokens"] = five
+        if hour is not None:
+            out["cache_creation_1h_input_tokens"] = hour
         return out
     except Exception:
         return zeros
 
 
 def synthesize_result_line(
-    usage: Dict[str, int],
-    total_cost_usd: float = 0.0,
+    usage: Optional[Dict[str, int]],
+    total_cost_usd: Optional[float] = None,
+    *,
+    provider_session_id: Optional[str] = None,
+    model: Optional[str] = None,
+    usage_event_id: Optional[str] = None,
 ) -> str:
     """Build a terminal ``type:"result"`` stream-json line from accumulated usage.
 
@@ -615,13 +678,31 @@ def synthesize_result_line(
     synthesized ``result`` line (that is a print-mode artifact).  We mint one so
     the tokens flow through the existing ``StreamJSONTracker._capture_usage`` →
     ``add_call_usage`` → ``parse_usage_from_ndjson`` accounting chain unchanged.
-    The cost is not reported by the transcript, so it defaults to ``0``.
+    Missing usage and cost stay absent so an unavailable report cannot be
+    confused with a provider's explicit zero values.
     """
-    payload: Dict[str, Any] = {
-        "type": "result",
-        "usage": {k: int(usage.get(k, 0) or 0) for k in USAGE_TOKEN_KEYS},
-        "total_cost_usd": float(total_cost_usd or 0.0),
-    }
+    payload: Dict[str, Any] = {"type": "result", "provider": "anthropic"}
+    if usage is not None:
+        payload["usage"] = {
+            k: int(usage.get(k, 0) or 0) for k in USAGE_TOKEN_KEYS
+        }
+        for ttl_key in CACHE_CREATION_TTL_KEYS:
+            value = int(usage.get(ttl_key, 0) or 0)
+            # Carry the TTL split only when reported: an always-present zero
+            # would blur the generic vs TTL billing distinction (and would
+            # silently change the legacy flat payload shape).
+            if ttl_key in usage or value:
+                payload["usage"][ttl_key] = value
+        payload["usage_semantics"] = "event_delta"
+    if total_cost_usd is not None:
+        payload["total_cost_usd"] = float(total_cost_usd)
+        payload["cost_semantics"] = "provider_session_cumulative"
+    if provider_session_id:
+        payload["provider_session_id"] = provider_session_id
+    if model:
+        payload["model"] = model
+    if usage_event_id:
+        payload["usage_event_id"] = usage_event_id
     return json.dumps(payload)
 
 
@@ -704,6 +785,14 @@ class SessionTranscriptWatcher:
         self.last_meaningful_record: Optional[dict] = None
         self._init_emitted = False
         self._usage: Dict[str, int] = {k: 0 for k in USAGE_TOKEN_KEYS}
+        self._usage_seen = False
+        # Running total already reported through emitted result records.
+        # Each result emission carries only the increment above this mark, so
+        # multi-result runs (a user replying before the turn-silence window
+        # closes) never re-report earlier turns' tokens as fresh deltas.
+        self._emitted_usage: Dict[str, int] = {k: 0 for k in _ALL_USAGE_KEYS}
+        self._model: Optional[str] = None
+        self._terminal_result_seen = False
         self._last_poll_activity = time.time()
 
     def snapshot(self) -> None:
@@ -750,17 +839,100 @@ class SessionTranscriptWatcher:
             self.last_record = rec
 
             if isinstance(rec, dict) and rec.get("type") == "assistant":
-                u = extract_usage_from_record(rec)
-                for k in USAGE_TOKEN_KEYS:
-                    self._usage[k] += u.get(k, 0)
+                msg = rec.get("message")
+                raw_usage = msg.get("usage") if isinstance(msg, dict) else None
+                if isinstance(raw_usage, dict):
+                    self._usage_seen = True
+                    u = extract_usage_from_record(rec)
+                    for k in _ALL_USAGE_KEYS:
+                        self._usage[k] = self._usage.get(k, 0) + u.get(k, 0)
                 if not self._init_emitted:
-                    msg = rec.get("message")
                     model = msg.get("model") if isinstance(msg, dict) else None
                     if isinstance(model, str) and model:
-                        lines.append(json.dumps({"type": "init", "model": model}))
+                        self._model = model
+                        init_event: Dict[str, Any] = {
+                            "type": "init",
+                            "provider": "anthropic",
+                            "model": model,
+                        }
+                        if self.session_id:
+                            init_event["provider_session_id"] = self.session_id
+                        lines.append(json.dumps(init_event))
                         self._init_emitted = True
 
-            nd = to_stream_json_ndjson(rec)
+            emit_record = rec
+            if isinstance(rec, dict) and rec.get("type") == "result":
+                self._terminal_result_seen = True
+                emit_record = dict(rec)
+                emit_record.setdefault("provider", "anthropic")
+                if self.session_id:
+                    emit_record.setdefault("provider_session_id", self.session_id)
+                if self._model:
+                    emit_record.setdefault("model", self._model)
+                if (
+                    not isinstance(emit_record.get("usage"), dict)
+                    and self._usage_seen
+                ):
+                    emit_record["usage"] = {
+                        k: max(
+                            self._usage.get(k, 0) - self._emitted_usage.get(k, 0),
+                            0,
+                        )
+                        for k in _ALL_USAGE_KEYS
+                    }
+                    self._emitted_usage = dict(self._usage)
+                elif isinstance(emit_record.get("usage"), dict):
+                    # The transcript already carried this result's own usage
+                    # report. That report is a *cumulative session snapshot*
+                    # (it covers the tokens accumulated so far), not an
+                    # increment — re-emitting it verbatim as an event delta
+                    # would double-count every turn before this one. Emit only
+                    # the increment beyond what earlier result records already
+                    # accounted for, exactly like the branch above.
+                    carried = extract_usage_from_record(emit_record)
+                    emit_record["usage"] = {
+                        k: max(carried.get(k, 0) - self._emitted_usage.get(k, 0), 0)
+                        for k in _ALL_USAGE_KEYS
+                    }
+                    # A snapshot that went backwards is an anomaly, not a
+                    # legal zero delta: mark the emitted record partial and
+                    # retain the diagnostic so the downstream aggregator flags
+                    # it instead of silently accepting the zero increment.
+                    if any(
+                        carried.get(k, 0) < self._emitted_usage.get(k, 0)
+                        for k in _ALL_USAGE_KEYS
+                    ):
+                        emit_record["partial"] = True
+                        diagnostics = emit_record.get("diagnostics")
+                        if not isinstance(diagnostics, list):
+                            diagnostics = []
+                            emit_record["diagnostics"] = diagnostics
+                        diagnostics.append(
+                            "non-monotonic cumulative usage snapshot; "
+                            "zero delta emitted"
+                        )
+                    # The snapshot is the authoritative cumulative position;
+                    # keep it monotonic so a later usage-less result (or a
+                    # regressed snapshot) never emits a negative delta.
+                    self._emitted_usage = {
+                        k: max(carried.get(k, 0), self._emitted_usage.get(k, 0))
+                        for k in _ALL_USAGE_KEYS
+                    }
+                if isinstance(emit_record.get("usage"), dict):
+                    emit_record.setdefault("usage_semantics", "event_delta")
+                if any(
+                    key in emit_record
+                    for key in ("total_cost_usd", "actual_cost_usd", "cost_usd")
+                ):
+                    emit_record.setdefault(
+                        "cost_semantics", "provider_session_cumulative"
+                    )
+                emit_record.setdefault(
+                    "usage_event_id",
+                    f"interactive:{self.session_id or 'unknown'}:{self.line_count}",
+                )
+
+            nd = to_stream_json_ndjson(emit_record)
             if nd is not None:
                 self.last_meaningful_record = rec
                 lines.append(nd)
@@ -786,9 +958,21 @@ class SessionTranscriptWatcher:
                 return m
         return self._last_poll_activity
 
-    def synthesize_result(self, total_cost_usd: float = 0.0) -> str:
+    def synthesize_result(
+        self, total_cost_usd: Optional[float] = None
+    ) -> Optional[str]:
         """Mint the terminal ``result`` line from accumulated usage."""
-        return synthesize_result_line(self._usage, total_cost_usd)
+        if self._terminal_result_seen:
+            return None
+        return synthesize_result_line(
+            self._usage if self._usage_seen else None,
+            total_cost_usd,
+            provider_session_id=self.session_id,
+            model=self._model,
+            usage_event_id=(
+                f"interactive:{self.session_id or 'unknown'}:{self.line_count}"
+            ),
+        )
 
 
 class ClaudeInteractiveRunner(AgentRunner):
@@ -800,6 +984,8 @@ class ClaudeInteractiveRunner(AgentRunner):
     :meth:`build_call_args` and fed into the PTY as simulated user input by
     :meth:`run_with_monitor`.
     """
+
+    startup_provider = "anthropic"
 
     def __init__(
         self,
@@ -869,6 +1055,7 @@ class ClaudeInteractiveRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         spec_guard_plugin: Optional[Path] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Translate call intent into interactive-mode launch CLI flags.
 
@@ -1653,7 +1840,9 @@ class ClaudeInteractiveRunner(AgentRunner):
             if ndjson_buffer:
                 if watcher is not None:
                     try:
-                        _emit_ndjson([watcher.synthesize_result()])
+                        synthesized = watcher.synthesize_result()
+                        if synthesized is not None:
+                            _emit_ndjson([synthesized])
                     except Exception:
                         pass
                 returncode = 0 if turn_done else self._exit_code(handle)

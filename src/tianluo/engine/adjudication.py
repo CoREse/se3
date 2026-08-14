@@ -638,29 +638,3 @@ def note_adjudication_ran(ctx: Dict[str, Any], fix_iteration: int) -> None:
     """
     ledger = _ensure_ledger(ctx)
     ledger["period_baseline"] = fix_iteration
-
-
-def should_suppress_convergence(
-    ctx: Dict[str, Any],
-    issues: List[Dict[str, Any]],
-    fix_iteration: int = 0,
-    period_n: int = 0,
-) -> bool:
-    """True when the convergence shortcut must yield to an adjudication.
-
-    Consumed by the self_check convergence guard: the convergence shortcut must
-    NOT be allowed to silently mark the flow COMPLETED "converged-but-diseased"
-    whenever an ADJUDICATE run is due. That is the case for any structural
-    oscillation trigger (a/b/c) AND for the periodic backstop: the backstop is
-    only ever evaluated in the state machine's REVISION_NEEDED branch, so a due
-    periodic sweep that convergence short-circuits to COMPLETED would silently
-    skip the safety net. Passing ``fix_iteration``/``period_n`` here lets the
-    guard also suppress convergence when the backstop is due, so the round
-    returns REVISION_NEEDED and the state machine can insert ADJUDICATE.
-    Defaults (``period_n=0``) keep only the signal triggers active for callers
-    that do not supply the period.
-    """
-    decision = evaluate_triggers(
-        ctx, issues, fix_iteration=fix_iteration, period_n=period_n,
-    )
-    return decision.triggered

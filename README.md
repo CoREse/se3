@@ -299,6 +299,40 @@ no confirm gate.
 `analyze` may still adjust the selected sequence; the table is the starting
 point, not a frozen contract.
 
+#### Implementation strategy: how the PLAN → IMPLEMENT phase runs
+
+On top of the task type, flows whose default sequence contains a PLAN →
+IMPLEMENT segment (`feature`, `bugfix`, discovery) pick an **implementation
+strategy** that shapes only that phase — `planned` (default: PLAN, task groups,
+the dependency DAG and per-group worktree scheduling), `direct` (skip PLAN and
+its confirm gate; one holistic autonomous IMPLEMENT call that analyses the full
+requirements, implements them completely and runs targeted verification), or
+`auto` (ANALYZE recommends `direct` or `planned` once and persists the choice).
+Choose it with `luo run --implementation-strategy auto|direct|planned` or the
+`workflow.implementation_strategy` config key; explicit request → project
+config → `planned`. The effective value and its reason are decided exactly once
+in ANALYZE and persisted — a resume always follows the persisted path, and
+`small` / `review` / `survey` record `not_applicable` without changing their
+sequences.
+
+`direct` works with every writable agent runner; a runner's native goal loop
+(e.g. Claude Code's `/goal` in print mode) is an optional per-call enhancement,
+not an entry requirement and never flow-authoritative state. A partial result
+or non-empty `incomplete_tasks` never advances to TEST — the flow re-enters
+IMPLEMENT through the normal retry/resume machinery and a later caller continues
+in the existing workspace.
+
+SELF_CHECK is judged against the **effective task description** (original task or
+discovery refinement, user interjections, adjudicated description) plus the
+charter and `WHY:`/`INVARIANT:` constraints — PLAN, task groups and the
+implementation summary are scheduling hints only. Reviews run scoped rounds
+built from a recoverable baseline: the first round is `full` over everything the
+flow changed, post-fix rounds are `incremental` over the fix's exact diff, and a
+clean incremental round is always followed by a `full` closure round before the
+flow advances; any change to the effective requirements forces `full` again.
+TEST always runs the project's complete configured tests — review scope never
+shrinks them — and every validated finding always enters the fix loop.
+
 ### Three operating modes
 
 - **`luo run --worktree`** — Run the **identical** flow inside its own git
@@ -422,6 +456,11 @@ sub-typers.
   `tianluo/issues/`, and write the outcome back to that issue when the flow
   finishes (a completed flow resolves it). This is the intended follow-up path
   after `luo salvage` files issues for unfinished work.
+- **`--implementation-strategy auto|direct|planned`** — The explicit
+  implementation-strategy request for a new flow (see the implementation
+  strategy section above). Omitted, it falls back to the project config and
+  then to `planned`; on a resume it is ignored and the persisted strategy is
+  restored.
 
 ### `luo code-index` — the structure map
 
@@ -442,6 +481,16 @@ sub-typers.
 | `luo history show <flow_id>` | Show structured step-by-step details. Flags: `--detailed` (LLM call breakdown), `--verbose` (full tool-call stream), `--json`. |
 | `luo history restore <flow_id>` | Resume a specific flow by ID (delegates to `luo run --resume --flow-id`). `--dry-run` prints the command without executing. |
 | `luo history archived` | List only archived flows. `--json` for machine-readable output. |
+
+`luo history show <flow_id>` also prints a dedicated **usage / cost** region —
+per LLM call/attempt, per step and flow totals (input / output / cache tokens,
+provider actual cost, estimated cost, unknown counters and completeness), plus
+the flow's implementation strategy and the self-check scope audit. Provider
+actual cost stays authoritative and separate from the estimate column; missing
+usage, models or prices show as `unknown`/partial, never a misleading `$0`.
+`--json` emits the same structured summary. The web console's history view and
+live-flow sidebar show the same backend figures.
+
 
 ### `luo issue` — project issues
 

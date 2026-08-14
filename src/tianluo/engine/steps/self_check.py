@@ -1,12 +1,14 @@
 """Self Check step handler.
 
-LLM-based code review after tests pass. Checks logic completeness,
-robustness, and test coverage gaps — explicitly excludes spec compliance
-(that's verify_spec's job).
+LLM-based code review after tests pass. Checks the complete effective task
+description for requirement coverage, behavior, integration, regressions,
+robustness, and test coverage while treating recorded project invariants as
+implementation constraints.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import unicodedata
@@ -21,7 +23,7 @@ from ..prompt_markers import inject_boundary
 from ..truncation import (
     PHASE_STDERR_TAIL_CHARS,
     PHASE_STDOUT_TAIL_CHARS,
-    SELF_CHECK_TASK_GROUPS_MAX_CHARS,
+    SELF_CHECK_SCOPE_DIFF_MAX_CHARS,
 )
 from ..utils.json_parser import parse_json_response
 from ...config import DEFAULT_MAX_FIX_ITERATIONS
@@ -43,8 +45,8 @@ logger = logging.getLogger(__name__)
 # The new schema requires each issue to carry:
 #   - actual_behavior / expected_behavior / divergence (concrete, non-empty)
 #   - expectation_source.verbatim_quote — a literal substring of the
-#     project's task_description / non-base spec_content / a plan task's
-#     description or acceptance criterion (type=="plan_task"). The handler
+#     effective task description, user interjection, or recorded project
+#     constraint (charter / WHY:/INVARIANT: comment). The handler
 #     normalizes both sides identically (unicode NFKC, smart-quote
 #     replacement, whitespace collapse, literal ``\n`` → real newline)
 #     before comparison so the LLM cannot rely on cosmetic drift. The one
@@ -76,7 +78,91 @@ logger = logging.getLogger(__name__)
 # ``validation_stats`` (also surfaced via outputs and a single log line)
 # for post-hoc inspection of LLM behavior.
 
-_EVIDENCE_LINE_RE = re.compile(r"^[\w/.\-]+:\d+$")
+# Counters that record what was KEPT (or how), not why something was dropped;
+# listing them among the rejection reasons would misreport the drop tally.
+_NON_REJECTION_STAT_KEYS = frozenset(
+    {
+        "input_count",
+        "kept_count",
+        "undecidable_scope_kept_count",
+        "readmitted_still_present_count",
+    }
+)
+
+
+# A citation's trailing ``:<digits>`` segment — the line-number space, not part
+# of the path. Used to keep line-bearing text out of PATH sets.
+_LINE_SUFFIX_RE = re.compile(r":\d+$")
+
+
+def _parse_evidence_line(entry: str) -> tuple[str, int] | None:
+    """Split one ``path:N`` citation at its TRAILING line number.
+
+    The path is parsed on the path text itself: a file name may legally
+    contain spaces, ``+``, ``@``, ``~``, ``#``, parentheses or commas, so a
+    character whitelist would reject valid citations. The path part must be
+    non-empty and the trailing segment a positive integer.
+    """
+    if not isinstance(entry, str):
+        return None
+    path, sep, raw_line = entry.rpartition(":")
+    if not sep or not path:
+        return None
+    try:
+        line_number = int(raw_line)
+    except ValueError:
+        return None
+    if line_number <= 0:
+        return None
+    return path, line_number
+
+
+def _usable_anchor_ranges(ranges: Any) -> list[tuple[int, int]]:
+    """The ``[start, end]`` pairs of one path that can actually be compared.
+
+    WHY: a path counts as anchor-bearing only when a citation *can* hit one of
+    its ranges. Malformed entries carry no line space to hit, so leaving them
+    in would make the path demand an impossible anchor and silently drop the
+    finding; they are dropped instead, degrading the path to anchor-less.
+    """
+    out: list[tuple[int, int]] = []
+    if not isinstance(ranges, list):
+        return out
+    for bounds in ranges:
+        if not isinstance(bounds, list) or len(bounds) != 2:
+            continue
+        try:
+            out.append((int(bounds[0]), int(bounds[1])))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _evidence_path_candidates(entry: str) -> list[tuple[str, int | None]]:
+    """Readings of one evidence citation as ``(path, line_or_None)`` pairs.
+
+    WHY: an anchor-less changed path (binary, mode-only, rename-only,
+    deletion-only, bare submodule gitlink) grounds evidence at PATH level, so
+    a citation there may legitimately carry no line number, or one that names
+    nothing citable. Such a line is ignored as an invalid line number rather
+    than making the whole citation unparseable. Both readings are returned so
+    an anchor-BEARING path still has to validate on its real line.
+    """
+    text = entry.strip()
+    if not text:
+        return []
+    out: list[tuple[str, int | None]] = []
+    parsed = _parse_evidence_line(text)
+    if parsed is not None:
+        out.append((parsed[0], parsed[1]))
+    else:
+        # ``path:0`` / ``path:abc`` — drop the unusable suffix and keep the
+        # path so path-level grounding can still be decided on it.
+        prefix, sep, _suffix = text.rpartition(":")
+        if sep and prefix:
+            out.append((prefix, None))
+    out.append((text, None))
+    return out
 
 
 def _normalize_for_quote_match(s: str) -> str:
@@ -109,36 +195,22 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
        canonical), populated by ``state_machine._build_step_inputs`` for
        SELF_CHECK steps. Falls back to ``task_description`` for legacy callers
        that don't set the base separately.
-    2. ``original_task_description`` — the canonical pre-discovery user
-       input, when discovery produced a refined override. EXCLUDED when an
-       adjudication ruling is in effect (see ``adjudicated_description``
-       below): the covering patch abolished the contradictory clause, so the
-       superseded original/refined text must leave the pool — otherwise a new
-       issue re-quoting the abolished clause would substring-match it and slip
-       past validation. The base entry (#1) already carries the adjudicated
-       text, so dropping the original is all that's needed.
-    3. Each entry of ``user_interjections`` — its ``text`` field added
+       The effective base is exactly one of adjudicated_description,
+       discovery refined_description, or the original task. Superseded
+       generations are deliberately excluded.
+    2. Each entry of ``user_interjections`` — its ``text`` field added
        individually, so an LLM that wants to cite a specific Ctrl-C
        instruction can substring-match against the bare interjection
        text (NOT against our ``## Additional Instructions`` boilerplate
        header which would otherwise be a free-pass quote).
-    4. Project-specific spec_content entries — excluding ``base`` (its
-       content is generic project boilerplate like PEP 8 conventions
-       that any nit can hang off of).
-    5. ``task_groups`` — each plan task's ``description`` and every
-       ``acceptance_criteria`` entry, added individually so a
-       ``plan_task`` expectation can substring-match the specific task
-       text it audits (the Per-Task Correctness dimension). Without this,
-       plan-grounded correctness issues would have no source-pool entry
-       and be silently dropped.
+    3. ``project_constraints`` — full charter text and harvested colocated
+       WHY:/INVARIANT: comments. These constrain implementation but do not add
+       functional requirements beyond the effective task description.
+
+    PLAN/task_groups and implementation summaries never enter this pool: they
+    are derived history and cannot override, narrow, or expand requirements.
     """
     pool: list[str] = []
-
-    # An adjudication ruling replaces the effective task_description with a
-    # covering patch; when in effect the pre-ruling original/refined text still
-    # carries the abolished clause and must NOT stay in the pool.
-    adjudicated = step_inputs.get("adjudicated_description")
-    adjudication_in_effect = isinstance(adjudicated, str) and bool(adjudicated)
 
     # Prefer the clean base; fall back to the composed task_description
     # for older inputs (e.g. unit tests or pre-upgrade resumes). The base is
@@ -150,12 +222,6 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
     if isinstance(base, str) and base:
         pool.append(base)
 
-    # Skip the superseded original once adjudicated: its clause was ruled out.
-    if not adjudication_in_effect:
-        orig = step_inputs.get("original_task_description")
-        if isinstance(orig, str) and orig:
-            pool.append(orig)
-
     interjections = step_inputs.get("user_interjections") or []
     if isinstance(interjections, list):
         for entry in interjections:
@@ -164,63 +230,37 @@ def _build_source_pool(step_inputs: dict) -> list[str]:
             text = entry.get("text")
             if isinstance(text, str) and text.strip():
                 pool.append(text)
-
-    spec_content = step_inputs.get("spec_content") or {}
-    if isinstance(spec_content, dict):
-        for spec_name, content in spec_content.items():
-            if spec_name == "base":
-                continue
+    constraints = step_inputs.get("project_constraints") or {}
+    if isinstance(constraints, dict):
+        for content in constraints.values():
             if isinstance(content, str) and content:
                 pool.append(content)
-
-    # When a ruling is in effect, an abolished clause must leave EVERY source-pool
-    # path, not just the (already-dropped) original description: a plan task
-    # commonly restates a spec clause verbatim, so a description-only ruling that
-    # reconciled clause C could still leave C quotable via ``plan_task`` and let
-    # the oscillation continue. Drop any plan-task entry that restates an
-    # abolished clause so a new issue re-quoting it is dropped by validation too.
-    abolished_norm: list[str] = []
-    if adjudication_in_effect:
-        for q in step_inputs.get("abolished_clause_quotes") or []:
-            if isinstance(q, str) and q.strip():
-                abolished_norm.append(_normalize_for_quote_match(q))
-        abolished_norm = [q for q in abolished_norm if q]
-
-    def _restates_abolished(text: str) -> bool:
-        if not abolished_norm:
-            return False
-        norm = _normalize_for_quote_match(text)
-        return any(q in norm for q in abolished_norm)
-
-    # Plan task text: each task's description + acceptance_criteria, added
-    # individually so a ``plan_task`` quote can pin down the one task it audits.
-    task_groups = step_inputs.get("task_groups") or []
-    if isinstance(task_groups, list):
-        for group in task_groups:
-            if not isinstance(group, dict):
-                continue
-            tasks = group.get("tasks") or []
-            if not isinstance(tasks, list):
-                continue
-            for task in tasks:
-                if not isinstance(task, dict):
-                    continue
-                desc = task.get("description")
-                if isinstance(desc, str) and desc.strip() and not _restates_abolished(desc):
-                    pool.append(desc)
-                criteria = task.get("acceptance_criteria") or []
-                if isinstance(criteria, list):
-                    for c in criteria:
-                        if isinstance(c, str) and c.strip() and not _restates_abolished(c):
-                            pool.append(c)
     return pool
 
 
 def _changed_paths(step_inputs: dict) -> set[str]:
     """Set of paths from ``changes_made.files_changed`` for evidence_lines
     validation. Returns an empty set if the field is missing or malformed.
+
+    WHY: with a decidable scope the reconstructed diff IS the changed set and
+    replaces the implement step's self-reported list. When the baseline is
+    undecidable the reconstructed set is not authoritative (it may be empty or
+    truncated), so both sources are UNIONED into a best-effort hint rather than
+    one silently overriding the other — and the hint only widens what grounds,
+    never narrows it (see ``_validate_evidence``'s ``scope_undecidable`` rule).
     """
-    out: set[str] = set()
+    scoped = step_inputs.get("scope_changed_paths")
+    undecidable = bool(step_inputs.get("scope_undecidable"))
+    scoped_paths: set[str] = set()
+    if isinstance(scoped, list):
+        scoped_paths = {
+            str(path) for path in scoped
+            if isinstance(path, str) and path.strip()
+        }
+        if not undecidable:
+            return scoped_paths
+
+    out: set[str] = set(scoped_paths)
     changes = step_inputs.get("changes_made") or {}
     if not isinstance(changes, dict):
         return out
@@ -237,40 +277,175 @@ def _changed_paths(step_inputs: dict) -> set[str]:
     return out
 
 
-def _validate_evidence(
-    issue: dict, changed: set[str], *, require_changed_line: bool = False
-) -> bool:
-    """Return True when the issue carries usable evidence — at least one
-    well-formed ``path:N`` entry whose path is in ``changed``, OR at
-    least one non-empty ``missing_in`` entry. ``missing_in`` covers
-    "the implementation should have edited X but didn't" cases that
-    naturally cannot point at a changed line.
+def _prior_finding_paths(step_inputs: dict) -> set[str]:
+    """Changed-path set widening contributed by still-open previous findings.
 
-    When ``require_changed_line`` is set the ``missing_in`` fallback is
-    disabled: only a real changed-line entry counts. Regression issues use
-    this — a regression claims a change BROKE existing behavior, so it must
-    point at the changed line(s) responsible; a ``missing_in`` (a file that
-    was never edited) is self-contradictory grounding for a regression and
-    would leave the implement step with no concrete location to fix.
+    WHY: an incremental round's changed-path set is only the latest fix delta,
+    so a still-open finding that the fix did not touch has no anchor inside it.
+    The prompt requires such a finding to be re-listed under ``issues``; without
+    treating its recorded location as in-scope the re-report is dropped as bad
+    evidence and the round completes clean while its own
+    ``previous_issue_resolutions`` say the defect is still present.
+
+    INVARIANT: a prior finding widens the PATH set only — it never contributes
+    line anchors. A prior round's line number is not a current-side causal
+    anchor: on a path the current scope left anchor-less it must not fabricate
+    anchor-bearing status (which would then reject the bare-path re-report the
+    prompt prescribes), and on an anchor-bearing path it must not extend the
+    accepted range set with stale context lines or old-side numbers of a file
+    this scope deleted. A path reached only through this widening carries no
+    entry in ``scope_causal_anchors``, so it grounds at path level — exactly
+    what a re-report of an unrelocated finding needs.
+
+    INVARIANT: the citation FORM never decides whether a prior finding widens.
+    An anchor-less path is cited as a bare ``path`` (the form the prompt
+    mandates there), so requiring a trailing ``:N`` would harvest nothing from
+    exactly the findings that need the widening most, and their bare-path
+    re-report would be dropped as bad evidence. Line-bearing readings are
+    stripped back to their path instead of being added verbatim: keeping a
+    ``path:N`` string in the path set would let a later citation of that same
+    text ground at "path" level on an anchor-BEARING path and bypass its
+    causal-anchor check.
+    """
+    paths: set[str] = set()
+    prev = step_inputs.get("prev_self_check_issues")
+    if not isinstance(prev, list):
+        return paths
+
+    def _widen(entry: Any) -> None:
+        if not isinstance(entry, str):
+            return
+        for path, _line in _evidence_path_candidates(entry):
+            if not path or _LINE_SUFFIX_RE.search(path):
+                continue
+            paths.add(path)
+
+    for issue in prev:
+        if not isinstance(issue, dict):
+            continue
+        lines = issue.get("evidence_lines")
+        if isinstance(lines, list):
+            for entry in lines:
+                _widen(entry)
+        _widen(issue.get("location"))
+        missing_in = issue.get("missing_in")
+        if isinstance(missing_in, list):
+            for entry in missing_in:
+                _widen(entry)
+    return paths
+
+
+def _validate_evidence(
+    issue: dict,
+    changed: set[str],
+    *,
+    require_changed_line: bool = False,
+    causal_anchors: Any = None,
+    scope_undecidable: bool = False,
+) -> bool:
+    """Return True when the issue carries usable evidence — one citation that
+    grounds in the current review scope, OR at least one non-empty
+    ``missing_in`` entry. ``missing_in`` covers "the implementation should
+    have edited X but didn't" cases that naturally cannot point at a changed
+    line.
+
+    INVARIANT: grounding of a citation is decided by whether its changed path
+    is anchor-BEARING or anchor-LESS, and by nothing else:
+
+    * anchor-bearing (``causal_anchors`` holds reconstructable current-side
+      added/modified ranges for the path): the cited line MUST fall inside one
+      of those ranges. Deletion-side old line numbers are never consulted —
+      they name a numbering space that no longer exists in the workspace.
+    * anchor-less (binary, mode-only, rename-only, deletion-only, or a bare
+      submodule gitlink whose inner files carry the anchors — a changed path
+      that BY CONSTRUCTION has no current-side line): grounding stands at path
+      level. The citation only has to name the changed path; any accompanying
+      line number is ignored as invalid rather than used for judgment. Such a
+      finding must never be discarded for lacking a line anchor, and the
+      checker must never be pushed to fabricate one.
+
+    An empty anchor set caused by an undecidable baseline is NOT an anchor-less
+    path: that case degrades the whole round to ``full`` upstream and arrives
+    here with ``causal_anchors=None``, where path-in-changed grounding applies.
+    ``scope_undecidable`` goes one step further — see below.
+
+    When ``require_changed_line`` is set the ``missing_in`` fallback narrows —
+    a regression claims a change BROKE existing behavior, so it must point into
+    the change that caused it rather than at a file nobody edited. The
+    anchor-bearing / anchor-less rule above is identical for regressions: an
+    anchor-less changed path grounds a regression under ``missing_in`` exactly
+    as it does under ``evidence_lines``, so the citation form the reviewer picks
+    never decides the outcome.
+
+    ``scope_undecidable`` marks the degraded state where no baseline could be
+    reconstructed. There the changed-path set is a hint (the implement step's
+    self-reported list at best), not ground truth, so it cannot decide evidence:
+    a finding on a genuinely flow-changed file the summary forgot to list would
+    be dropped, silently losing an evidence-valid finding in exactly the state
+    the mechanism exists to keep safe. Grounding therefore stands on naming a
+    path at all, and the caller tallies the relaxation so the degradation is
+    visible rather than silent.
     """
     evidence = issue.get("evidence_lines") or []
     if isinstance(evidence, list):
         for ev in evidence:
             if not isinstance(ev, str):
                 continue
-            ev = ev.strip()
-            if not _EVIDENCE_LINE_RE.match(ev):
-                continue
-            path = ev.rsplit(":", 1)[0]
-            if path in changed:
-                return True
-    if require_changed_line:
-        return False
+            for path, line_number in _evidence_path_candidates(ev):
+                if scope_undecidable:
+                    if path:
+                        return True
+                    continue
+                if not isinstance(causal_anchors, dict):
+                    if path in changed:
+                        return True
+                    continue
+                ranges = _usable_anchor_ranges(causal_anchors.get(path))
+                if not ranges:
+                    if path in changed:
+                        # Anchor-less changed path: path-level grounding.
+                        return True
+                    continue
+                if line_number is None:
+                    continue
+                for start, end in ranges:
+                    if start <= line_number <= end:
+                        # Other evidence_lines may point into unchanged
+                        # affected files. One exact current-scope causal anchor
+                        # grounds the finding; the rest describe its impact
+                        # surface.
+                        return True
     missing_in = issue.get("missing_in") or []
-    if isinstance(missing_in, list):
+    if not isinstance(missing_in, list):
+        missing_in = []
+    if require_changed_line:
+        # A regression must still point INTO the current scope, so the
+        # ``missing_in`` channel opens only for an anchor-less changed path —
+        # the same paths that ground at path level above, reached here when the
+        # reviewer named the path under ``missing_in`` instead of
+        # ``evidence_lines``. Where a causal line does exist, the citation
+        # requirement stands.
         for mp in missing_in:
-            if isinstance(mp, str) and mp.strip():
+            if not isinstance(mp, str) or not mp.strip():
+                continue
+            path = mp.strip()
+            if scope_undecidable:
+                # Degraded scope: under ``evidence_lines`` ANY named path
+                # grounds here, so the ``missing_in`` channel must not be the
+                # narrower one — that asymmetry would drop a finding purely on
+                # the citation form the reviewer chose, in the state where the
+                # mechanism most needs to keep findings.
                 return True
+            if not isinstance(causal_anchors, dict):
+                continue
+            if path in changed and not _usable_anchor_ranges(
+                causal_anchors.get(path)
+            ):
+                return True
+        return False
+    for mp in missing_in:
+        if isinstance(mp, str) and mp.strip():
+            return True
     return False
 
 
@@ -322,8 +497,8 @@ def _validate_and_filter_issues(
     behavior outside the task's textual scope, which by definition has no entry
     in the source pool; grounding it on a quote would be impossible. Instead the
     evidence grounding (3) is mandatory — the issue must point at the changed
-    line(s) responsible. ``plan_task`` issues use the ordinary quote path: the
-    source pool now includes task_groups text, so their quote matches there.
+    line(s) responsible. New ``plan_task`` findings are rejected explicitly:
+    task groups are derived scheduling data, not an acceptance authority.
     """
     stats = {
         "input_count": 0,
@@ -332,7 +507,9 @@ def _validate_and_filter_issues(
         "quote_not_in_source_count": 0,
         "bad_evidence_count": 0,
         "empty_field_count": 0,
+        "unsupported_source_type_count": 0,
         "non_dict_count": 0,
+        "undecidable_scope_kept_count": 0,
     }
     kept: list[dict] = []
 
@@ -342,6 +519,22 @@ def _validate_and_filter_issues(
     pool_normalized = [_normalize_for_quote_match(s) for s in _build_source_pool(step_inputs)]
     pool_normalized = [p for p in pool_normalized if p]
     changed = _changed_paths(step_inputs)
+    scope_undecidable = bool(step_inputs.get("scope_undecidable"))
+    causal_anchors = (
+        step_inputs.get("scope_causal_anchors")
+        if "scope_causal_anchors" in step_inputs and not scope_undecidable
+        else None
+    )
+    # WHY: ``scope_deletion_anchors`` is deliberately NOT consulted for
+    # grounding. Old-side line numbers name a numbering space the workspace no
+    # longer has, so they can neither validate nor invalidate a citation: a
+    # deletion-only path is simply anchor-less and grounds at path level.
+    #
+    # Still-open prior findings widen the changed-path set and NOTHING else:
+    # their recorded line numbers belong to an earlier round's numbering space
+    # and are never merged into ``causal_anchors`` (see
+    # ``_prior_finding_paths``).
+    changed = changed | _prior_finding_paths(step_inputs)
 
     for issue in raw_issues:
         stats["input_count"] += 1
@@ -354,6 +547,17 @@ def _validate_and_filter_issues(
             source.get("verbatim_quote", "")
             if isinstance(source, dict) else ""
         )
+
+        allowed_source_types = {
+            "task_description",
+            "user_interjection",
+            "charter",
+            "why_comment",
+            "regression",
+        }
+        if src_type not in allowed_source_types:
+            stats["unsupported_source_type_count"] += 1
+            continue
 
         # Regression issues protect pre-existing, out-of-scope behavior that has
         # no entry in the verbatim source pool — so they bypass the quote checks
@@ -373,9 +577,27 @@ def _validate_and_filter_issues(
                 stats["quote_not_in_source_count"] += 1
                 continue
 
-        if not _validate_evidence(
-            issue, changed, require_changed_line=(src_type == "regression")
-        ):
+        grounded = _validate_evidence(
+            issue,
+            changed,
+            require_changed_line=(src_type == "regression"),
+            causal_anchors=causal_anchors,
+        )
+        if not grounded and scope_undecidable:
+            # Degraded state: the changed-path hint could not be proven, so it
+            # must not be the reason an evidence-bearing finding disappears.
+            # Keeping it (and tallying the relaxation) is the safe direction —
+            # the fix loop can judge it, a silent drop cannot.
+            grounded = _validate_evidence(
+                issue,
+                changed,
+                require_changed_line=(src_type == "regression"),
+                causal_anchors=causal_anchors,
+                scope_undecidable=True,
+            )
+            if grounded:
+                stats["undecidable_scope_kept_count"] += 1
+        if not grounded:
             stats["bad_evidence_count"] += 1
             continue
 
@@ -390,10 +612,18 @@ def _validate_and_filter_issues(
     return kept, stats
 
 
-SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementation for logic completeness, robustness, and potential issues that tests may not have caught.
+SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementation against the complete effective requirements and recorded project constraints.
 
 ## Task Description
 {task_description}
+
+This is the functional-requirement authority for this review: the effective
+base task description (original, discovery-refined, or adjudicated) plus all
+effective user interjections. No plan, task group, or implementation summary may
+override, narrow, or expand it.
+
+## Review Scope
+{review_scope}
 
 ## Changes Made
 {changes_made}
@@ -401,22 +631,44 @@ SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementatio
 ## Test Results
 {test_results}
 
-## Specifications (for context only)
-{spec_content}
-{task_groups_section}
+## Recorded Project Constraints
+{project_constraints}
+
+The full Project Charter is injected below. Charter clauses, colocated
+WHY:/INVARIANT: comments, and invariants demonstrable from the existing code are
+constraints on how the requirements may be implemented. They are not a derived
+plan and do not replace the functional requirements above.
+
 ## Fix Context
 {fix_context}
 
 ## Review Dimensions
 
-Focus your review on these dimensions. Do NOT check spec compliance — that is handled by a separate verification step.
+The review scope controls attention, never tool permissions. Read any changed
+or unchanged repository code, the Charter, code-index, and test results needed
+to trace effects. Follow calls, shared state, protocols, data formats,
+configuration, concurrency, and invariants beyond the changed paths. In every
+pass, check all six dimensions directly from the effective Task Description:
 
-1. **Per-Task Correctness (HARD AUDIT)**: Using the **Plan Task Groups** section below as the authoritative task list, audit EACH planned task one by one against the actual implementation. The **Changes Made** section above lists only the changed *paths*, not the line-level edits — that file list alone is NOT sufficient to judge correctness. Therefore, BEFORE you judge any task, you MUST obtain the actual diff yourself via your worktree tools (run `git diff`, and read the changed files as needed); base every correctness verdict on the real diff/file contents, not on the path list. For every task, infer from that diff which changes are meant to implement it, then verify it was implemented *correctly* — the described behavior is present, the acceptance_criteria are satisfied, and the logic is right. A task that is missing, only partially implemented, or implemented with wrong logic IS an issue — file it with `expectation_source.type = "plan_task"`, quoting the task description or an acceptance criterion. Grounding rule for this dimension (the handler drops issues that violate it, so it is mandatory): for a task that is partially or incorrectly implemented, point `evidence_lines` at the relevant changed line(s); for a task that is ENTIRELY unimplemented there are no changed lines to cite, so you MUST instead list the file(s) / integration point(s) that should have been created or edited for that task under `missing_in` (leaving `evidence_lines` empty is fine in that case). Do NOT drop a wholly-missing task just because it has no diff line — `missing_in` is exactly how a "task not implemented at all" finding is grounded. This is a strict per-task audit, not a loose sanity check; do NOT excuse a real gap as an acceptable deviation.
-2. **Regression / Unintended Side Effects**: Verify the change did NOT break or alter existing behavior OUTSIDE the scope of the planned tasks. Look for: existing functions whose contract or return value changed, shared helpers whose behavior shifted for their other callers, removed/renamed symbols still referenced elsewhere, altered defaults, or side effects leaking beyond the task boundary. A behavioral change to out-of-scope existing behavior IS an issue — file it with `expectation_source.type = "regression"` and ground it in `evidence_lines` pointing at the changed line(s) responsible. This dimension is orthogonal to Per-Task Correctness above.
-3. **Logic Completeness**: Are there unhandled boundary conditions, missing error paths, or incomplete control flow? Look for edge cases the implementation should handle but doesn't.
-4. **Code Robustness**: Is exception handling adequate? Are resources properly managed (files, connections, locks)? Are there concurrency safety issues?
-5. **Functional Gaps**: Are there related modules that should have been modified but weren't? Are there integration points that were missed?
-6. **Test Coverage Gaps**: Based on the test results, which logic paths are NOT exercised by existing tests? Are there critical paths that lack test coverage?
+1. **Requirement Completeness**: Is every effective requirement implemented,
+   including user interjections? For a wholly missing requirement, use
+   `missing_in` to name the files or integration points that should carry it.
+2. **Behavioral Correctness**: Does the implementation produce the required
+   observable behavior for normal, boundary, and failure cases?
+3. **Cross-Module Integration**: Follow calls, shared state, protocols, data
+   formats, configuration, concurrency, and other affected integration points.
+4. **Regression Safety**: Did a changed line break pre-existing behavior outside
+   the requested change? Use `expectation_source.type = "regression"` and anchor
+   the finding to the changed line that causes the regression.
+5. **Robustness**: Check error handling, cleanup, resource ownership, retries,
+   malformed inputs, partial failures, and concurrency hazards.
+6. **Test Coverage**: Do tests exercise the requirements and important logic,
+   integration, regression, and failure paths? A concrete missing critical test
+   path is a finding; a generic request for more tests is not.
+
+PLAN/task_groups and implementation summaries, if encountered in history, are
+only navigation clues. Never treat them as requirement sources and never emit a
+new finding with `expectation_source.type = "plan_task"`.
 
 ## What NOT to check
 - **Spec compliance** — this is handled by the verify_spec step, do NOT duplicate that check.
@@ -424,7 +676,7 @@ Focus your review on these dimensions. Do NOT check spec compliance — that is 
 - **Performance optimization suggestions** — only flag if there's a clear correctness issue.
 - **Anything a dedicated downstream step owns** — as a fix-loop checker you MUST NOT report concerns that a later specialized step decides; that creates standoffs where implement cannot resolve them. In particular, the version number and version files (e.g. the `version` field in `pyproject.toml`) — whether and how to bump them — are decided by the downstream `version_analyze` step against the pre-session baseline; do NOT report "version not bumped" or "version number is wrong" as an issue.
 
-## Severity Levels
+## Severity Levels (all validated severities enter the fix loop)
 - **critical**: Logic error that will cause incorrect behavior, data corruption, or crashes in normal usage paths.
 - **high**: Missing error handling or boundary condition that will cause failures in reasonably common scenarios.
 - **medium**: Defensive improvement that would prevent issues in edge cases, or a minor gap in test coverage.
@@ -435,17 +687,21 @@ Focus your review on these dimensions. Do NOT check spec compliance — that is 
 Each issue MUST be a JSON object with these fields:
 
 - `severity`: one of "critical" / "high" / "medium" / "low"
+- `location`: concise primary `path:N` location, or the primary missing integration point
 - `actual_behavior`: what the code in `changes_made` currently does (concrete, observable; non-empty)
 - `expected_behavior`: what the code SHOULD do (non-empty)
 - `divergence`: under what specific input / sequence / state does `actual_behavior` produce a wrong result (concrete failure scenario; non-empty)
 - `expectation_source`: where "should do" comes from. Must be:
-    {{ "type": "task_description" | "spec" | "user_interjection" | "plan_task" | "regression",
+    {{ "type": "task_description" | "user_interjection" | "charter" | "why_comment" | "regression",
        "verbatim_quote": "<a literal substring of the grounding text — see rules below>" }}
   Grounding rules by type (the handler enforces these and drops violators):
-    - `task_description` / `spec` / `user_interjection` / `plan_task`: `verbatim_quote` MUST be a literal substring of the project's task_description, a non-base spec, a user interjection, or — for `plan_task` — a **Plan Task Groups** task description / acceptance criterion above. The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops any issue whose normalized quote is not a substring of any normalized source-pool entry. Quote a substantive phrase, NOT a single generic noun.
-    - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in `evidence_lines` pointing at the changed line(s) that broke the behavior.
-- `evidence_lines`: array of `"path:N"` strings, where `path` MUST appear in `changes_made.files_changed` (the handler verifies). At least one entry required UNLESS `missing_in` is non-empty.
-- `missing_in`: array of file paths that should have been edited/created but were not. Use this for any issue that cannot point at a changed line — "missed integration point" issues AND a planned `plan_task` that is ENTIRELY unimplemented (list the file(s) that should have carried it).
+    - `task_description` / `user_interjection` / `charter` / `why_comment`: `verbatim_quote` MUST be a literal substring of the effective task, one interjection, the Charter, or a harvested WHY:/INVARIANT: comment. The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops a finding whose normalized quote is absent. Quote a substantive rule, not a generic noun.
+    - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in the change that caused it: `evidence_lines` pointing at the causal changed line, or — where that changed path has no current-side line at all (see below) — naming the changed path itself, in `evidence_lines` or in `missing_in`.
+- `evidence_lines`: array of `"path:N"` strings (or a bare `"path"`, see below). At least one entry MUST ground in the current review-scope diff (the handler verifies), as follows:
+    - Changed path WITH current-side added/modified lines: cite one of them. `N` MUST be the line number in the CURRENT file (the `+`-side number shown in the diff) — an old-side number of a deleted line never anchors, since it names no line that exists now.
+    - Changed path with NO current-side line by construction (binary, mode-only, rename-only, deletion-only — including a wholly deleted file — or a bare submodule gitlink): cite the path itself. Grounding is at path level there; write the bare `"path"` (a trailing line number is ignored). Do NOT invent a line number and do NOT drop a real finding just because the path has no line to cite.
+  Once that causal anchor is present, additional entries MAY point into unchanged files whose behavior is affected. At least one causal entry is required UNLESS `missing_in` is non-empty.
+- `missing_in`: array of file paths that should have been edited/created but were not. Use this for a requirement omission or missed integration point that has no changed causal line.
 
 ## Previous Issue Resolutions (HARD requirement when prev_issues are listed)
 
@@ -459,10 +715,13 @@ If the Fix Context above includes "Previously Reported Issues", you MUST emit a 
 
 Report ONLY real defects you can back with evidence. There is no "observation only" escape hatch and no severity low enough to be ignored: every issue you list that passes validation goes straight into a fix loop and WILL be changed in the code on the spot. So do NOT report pure preferences, style opinions, speculative "might be nice" hardening, or observations you would not want someone to act on. If you cannot state a concrete wrong result under a concrete input, it is not an issue — leave it out.
 
-## Soft guidance (handler does not enforce, but this is the team's preference)
+## Concision without loss of evidence
 
-- Avoid tentative phrasing in `actual_behavior` / `expected_behavior` / `divergence` ("could fail", "may not handle", "consider", "observation only"). State the failure as a concrete fact ("returns 0 instead of None when X", "raises KeyError when Y", "silently overwrites Z").
-- A `verbatim_quote` of one or two generic words is unlikely to ground a real issue. Quote a substantive phrase that pins down what the user actually asked for.
+Keep each finding concise and local. Do not repeat the task, charter, project
+background, or the same explanation across fields. Concision never relaxes the
+required location, concrete actual behavior, expected behavior, divergence,
+source quote, or evidence. Avoid tentative phrasing; state the wrong result as a
+fact under a concrete input/sequence/state.
 
 Respond in JSON format:
 ```json
@@ -470,6 +729,7 @@ Respond in JSON format:
     "issues": [
         {{
             "severity": "critical|high|medium|low",
+            "location": "src/foo.py:42",
             "actual_behavior": "...",
             "expected_behavior": "...",
             "divergence": "...",
@@ -492,172 +752,116 @@ If the implementation is solid with no issues found, return an empty issues arra
 """
 
 # Two-segment marker only: USER_CONTENT region is empty.
-# self_check consumes upstream artifacts (changes_made / test_results /
-# task_groups / spec_content); no user-literal field is appended here. The
+# self_check consumes upstream artifacts (effective task / changes / tests /
+# recorded constraints); no user-literal field is appended here. The
 # web console renders the whole post-BEGIN tail inside the collapsed
 # system-prompt chip.
 SELF_CHECK_PROMPT = inject_boundary(SELF_CHECK_PROMPT, "## Task Description\n")
 
 
-_TASK_GROUPS_SECTION_INTRO = (
-    "## Plan Task Groups (Authoritative Task List — HARD AUDIT)\n\n"
-    "The following is the plan's task breakdown (task_groups). Treat it as the "
-    "**authoritative list of what this change was required to implement**, and "
-    "audit it STRICTLY (this drives the **Per-Task Correctness** dimension):\n"
-    "- Go through EACH task below one by one. Infer from the changed files / diff "
-    "which changes are meant to implement that task, then verify it was implemented "
-    "**correctly**: the described behavior is present, its acceptance_criteria are "
-    "satisfied, and the logic is right.\n"
-    "- A task that is missing, only partially implemented, or implemented with wrong "
-    "logic IS an issue. File it with `expectation_source.type = \"plan_task\"`, "
-    "quoting the task description or an acceptance criterion verbatim.\n"
-    "- Grounding (mandatory — the handler drops ungrounded issues): for a partially "
-    "or incorrectly implemented task, point `evidence_lines` at the relevant changed "
-    "line(s). For a task that is ENTIRELY unimplemented there are no changed lines to "
-    "cite, so you MUST instead list the file(s) / integration point(s) that should "
-    "have been created or edited under `missing_in` (an empty `evidence_lines` is "
-    "fine in that case). A wholly-missing task is grounded via `missing_in`, never "
-    "dropped for lack of a diff line.\n"
-    "- Do NOT excuse an unrealized or incorrectly-realized task as an acceptable "
-    "deviation. If a planned task is not correctly implemented, report it.\n\n"
-)
+def _format_project_constraints(sources: dict[str, str]) -> str:
+    """Render the non-duplicated constraint context for the review prompt."""
+    lines = ["- Project Charter: injected in full below."]
+    why_comments = sources.get("why_comments", "")
+    if why_comments:
+        lines.extend(
+            [
+                "- Colocated WHY:/INVARIANT: comments from touched code:",
+                why_comments,
+            ]
+        )
+    else:
+        lines.append("- Colocated WHY:/INVARIANT: comments: none harvested.")
+    return "\n".join(lines)
 
 
-# Appended when the full task_groups render overflows the budget and detail
-# had to be trimmed. The per-task audit needs every planned task to be visible;
-# this tells the reviewer that detail (not whole tasks) was dropped and exactly
-# how to recover the untruncated list, so a large plan can never pass the audit
-# with tasks silently hidden.
-_TASK_GROUPS_TRIM_NOTE = (
-    "\n\n> NOTE: per-task detail was trimmed to fit the prompt budget, but "
-    "EVERY planned task above is still listed (by id/description). Before "
-    "concluding the per-task audit, retrieve the full, untruncated task_groups "
-    "(complete descriptions + acceptance_criteria) via your worktree tools "
-    "(e.g. read the plan output, or `luo history show <flow_id>`)."
-)
+def _format_review_scope(step_inputs: dict) -> str:
+    """Render the persisted review scope without implying a read whitelist."""
+    mode = str(step_inputs.get("scope_mode", "full") or "full")
+    baseline_id = str(step_inputs.get("baseline_id", "") or "<unavailable>")
+    changed_paths = step_inputs.get("scope_changed_paths") or []
+    if not isinstance(changed_paths, list):
+        changed_paths = []
+    diff_text = step_inputs.get("scope_diff")
+    if not isinstance(diff_text, str):
+        diff_text = ""
+    undecidable = bool(step_inputs.get("scope_undecidable"))
+    diagnostic = str(step_inputs.get("scope_diagnostic", "") or "")
 
+    if mode == "incremental":
+        purpose = (
+            "Incremental round: focus first on the exact delta made by this fix "
+            "relative to its persisted fix baseline, while still validating the "
+            "complete effective requirements and tracing impact across the repository."
+        )
+    else:
+        purpose = (
+            "Full round: review the complete effective requirements and every code "
+            "change introduced since the persisted implementation baseline."
+        )
 
-def _count_tasks(task_groups: list) -> int:
-    """Count well-formed (dict) tasks across all groups, for budget sharing."""
-    n = 0
-    for group in task_groups:
-        if not isinstance(group, dict):
-            continue
-        tasks = group.get("tasks") or []
-        if isinstance(tasks, list):
-            n += sum(1 for t in tasks if isinstance(t, dict))
-    return n
+    lines = [
+        f"- scope_mode: {mode}",
+        f"- baseline_id: {baseline_id}",
+        f"- changed_paths: {', '.join(str(p) for p in changed_paths) if changed_paths else '(none)' }",
+        f"- purpose: {purpose}",
+    ]
+    if step_inputs.get("scope_fallback_from_incremental"):
+        lines.append(
+            "- fallback: the incremental baseline was not trustworthy, so this is "
+            "a full review; do not treat an unavailable incremental diff as empty."
+        )
+    if undecidable:
+        lines.extend([
+            f"- baseline diagnostic: {diagnostic or 'scope reconstruction unavailable'}",
+            "- safety rule: the diff below is unavailable, not empty. Inspect git, "
+            "history, and repository state directly; never claim clean merely because "
+            "this section has no diff hunks.",
+            "- evidence rule: ground each finding on the real path you verified it "
+            "in. In this state the changed_paths list above is an unproven hint, "
+            "not a filter — a finding on a file it omits is still kept.",
+        ])
 
+    unresolved = []
+    for key in ("prev_self_check_issues", "self_check_deferred_issues"):
+        value = step_inputs.get(key) or []
+        if isinstance(value, list):
+            unresolved.extend(item for item in value if isinstance(item, dict))
+    if unresolved:
+        lines.append("- unresolved_findings:")
+        lines.append(json.dumps(unresolved, ensure_ascii=False, default=str))
+    else:
+        lines.append("- unresolved_findings: []")
 
-def _render_task_groups(
-    task_groups: list, *, include_ac: bool, desc_cap: int | None = None
-) -> str:
-    """Render task_groups as a Markdown summary at a chosen detail level.
-
-    ``include_ac`` controls whether acceptance_criteria bullets are emitted;
-    ``desc_cap`` (when set) truncates each task description to that many chars
-    with a trailing ellipsis. Used by ``_format_task_groups`` to degrade detail
-    under budget pressure WITHOUT dropping any task.
-    """
-    lines: list[str] = []
-    for group in task_groups:
-        if not isinstance(group, dict):
-            continue
-        group_id = group.get("group_id") or ""
-        group_name = group.get("name") or ""
-        header_bits = [b for b in (group_id, group_name) if b]
-        header = " — ".join(header_bits) if header_bits else "(unnamed group)"
-        lines.append(f"### {header}")
-
-        tasks = group.get("tasks") or []
-        if not isinstance(tasks, list) or not tasks:
-            lines.append("_(no tasks)_")
-            lines.append("")
-            continue
-
-        for task in tasks:
-            if not isinstance(task, dict):
-                continue
-            task_id = task.get("id")
-            desc = (task.get("description") or "").strip()
-            if desc_cap is not None and len(desc) > desc_cap:
-                desc = desc[:desc_cap].rstrip() + "…"
-            id_prefix = f"[{task_id}] " if task_id is not None else ""
-            lines.append(f"- {id_prefix}{desc}" if desc else f"- {id_prefix}(no description)")
-
-            if include_ac:
-                criteria = task.get("acceptance_criteria") or []
-                if isinstance(criteria, list) and criteria:
-                    for c in criteria:
-                        c_text = str(c).strip()
-                        if c_text:
-                            lines.append(f"  - AC: {c_text}")
-        lines.append("")
-
-    return "\n".join(lines).rstrip()
-
-
-def _format_task_groups(task_groups: Any) -> str:
-    """Render plan task_groups as a Markdown summary for self_check.
-
-    Returns an empty string when input is missing, None, empty, or not a list —
-    the caller omits the whole prompt section in that case.
-
-    The Per-Task Correctness HARD AUDIT requires EVERY planned task to be
-    visible to the reviewer: head-truncating the rendered text (the old
-    behavior) silently hid later tasks and let the audit pass without checking
-    them. Instead, when the full render exceeds
-    SELF_CHECK_TASK_GROUPS_MAX_CHARS, detail is degraded — never whole tasks:
-    first acceptance_criteria are dropped, then each description is capped to an
-    equal share of the budget — so all task headers survive, and a retrieval
-    note tells the reviewer how to pull the untruncated list.
-    """
-    if not task_groups or not isinstance(task_groups, list):
-        return ""
-
-    full = _render_task_groups(task_groups, include_ac=True)
-    if not full:
-        return ""
-    if len(full) <= SELF_CHECK_TASK_GROUPS_MAX_CHARS:
-        return full
-
-    budget = SELF_CHECK_TASK_GROUPS_MAX_CHARS - len(_TASK_GROUPS_TRIM_NOTE)
-
-    # Tier 2: drop acceptance_criteria but keep full task descriptions.
-    no_ac = _render_task_groups(task_groups, include_ac=False)
-    if len(no_ac) <= budget:
-        return no_ac + _TASK_GROUPS_TRIM_NOTE
-
-    # Tier 3: still over budget — give each task an equal share of the budget
-    # for its (capped) description so every task header still appears. A small
-    # floor keeps each line readable even when the task count is large; this may
-    # exceed the soft budget slightly, which is the deliberate trade — never
-    # hide a task that the audit must check.
-    n_tasks = _count_tasks(task_groups) or 1
-    per_task_desc = max(80, budget // n_tasks)
-    capped = _render_task_groups(
-        task_groups, include_ac=False, desc_cap=per_task_desc
-    )
-    return capped + _TASK_GROUPS_TRIM_NOTE
-
-
-def _build_task_groups_section(task_groups: Any) -> str:
-    """Build the full `## Plan Task Groups` prompt section, or empty string.
-
-    When task_groups is absent/empty, returns "" so the caller can inline it
-    without producing an orphan heading or blank lines in the prompt.
-    """
-    summary = _format_task_groups(task_groups)
-    if not summary:
-        return ""
-    return "\n" + _TASK_GROUPS_SECTION_INTRO + summary + "\n"
+    lines.append("\n### Exact Baseline-to-Current Diff")
+    artifact = str(step_inputs.get("scope_diff_artifact", "") or "")
+    if diff_text:
+        if len(diff_text) > SELF_CHECK_SCOPE_DIFF_MAX_CHARS:
+            diff_text = diff_text[:SELF_CHECK_SCOPE_DIFF_MAX_CHARS]
+            lines.append(
+                f"(TRUNCATED: shown diff is limited to the first "
+                f"{SELF_CHECK_SCOPE_DIFF_MAX_CHARS} chars. The complete "
+                f"baseline-to-current diff is persisted at {artifact} — read "
+                "that artifact for the full change set before judging coverage.)"
+                if artifact
+                else
+                f"(TRUNCATED: shown diff is limited to the first "
+                f"{SELF_CHECK_SCOPE_DIFF_MAX_CHARS} chars; the persisted diff "
+                "artifact is unavailable.)"
+            )
+        lines.append(f"```diff\n{diff_text}\n```")
+    elif undecidable:
+        lines.append("(unavailable)")
+    else:
+        lines.append("(empty)")
+    return "\n".join(lines)
 
 
 def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the self_check step.
 
-    Performs LLM-based code review checking logic completeness,
-    robustness, and test coverage gaps. Does NOT check spec compliance.
+    Performs LLM-based review across the six required quality dimensions using
+    the effective task description as the functional-requirement authority.
 
     Returns COMPLETED when no issues are found.
     Returns REVISION_NEEDED when issues exist (regardless of iteration count),
@@ -666,8 +870,6 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
-    spec_content = step.inputs.get("spec_content", {})
-    task_groups = step.inputs.get("task_groups")
 
     fix_iteration = step.inputs.get("fix_iteration", 0)
     # Honor an explicit 0 from inputs (the unlimited sentinel); fall back to
@@ -676,7 +878,6 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     max_iterations = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else DEFAULT_MAX_FIX_ITERATIONS
     prev_issues = step.inputs.get("prev_self_check_issues", [])
     fix_history = step.inputs.get("fix_history", [])
-    convergence_enabled = step.inputs.get("self_check_convergence_enabled", False)
     pass_index = step.inputs.get("self_check_pass_index", 1)
     passes_required = step.inputs.get("self_check_passes_required", 1)
 
@@ -700,11 +901,38 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Write back so history renderers can read the pass position
     step.outputs["self_check_pass_index"] = pass_index
     step.outputs["self_check_passes_required"] = passes_required
+    for key in (
+        "scope_mode",
+        "requested_scope_mode",
+        "baseline_id",
+        "scope_changed_paths",
+        "scope_causal_anchors",
+        "scope_deletion_anchors",
+        "scope_diff_artifact",
+        "scope_undecidable",
+        "scope_diagnostic",
+        "scope_fallback_from_incremental",
+        "self_check_round_id",
+        "self_check_round_reason",
+        "requirement_fingerprint",
+    ):
+        if key in step.inputs:
+            step.outputs[key] = step.inputs[key]
+    step.outputs["fix_iteration"] = fix_iteration
+
+    project_root = resolve_flow_project_root(flow)
+    from ..context_builder import get_self_check_constraint_sources
+
+    constraint_sources = get_self_check_constraint_sources(
+        project_root,
+        changes_made,
+        getattr(flow, "baseline_commit", None),
+    )
+    validation_inputs = dict(step.inputs)
+    validation_inputs["project_constraints"] = constraint_sources
 
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
-    spec_text = _format_spec_content(spec_content)
-    task_groups_section = _build_task_groups_section(task_groups)
     fix_context_text = _format_fix_context(
         fix_iteration, max_iterations,
         prev_issues=prev_issues,
@@ -713,14 +941,12 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     prompt = SELF_CHECK_PROMPT.format(
         task_description=task_description,
+        review_scope=_format_review_scope(step.inputs),
         changes_made=changes_text,
         test_results=test_text,
-        spec_content=spec_text,
-        task_groups_section=task_groups_section,
+        project_constraints=_format_project_constraints(constraint_sources),
         fix_context=fix_context_text,
     )
-
-    project_root = resolve_flow_project_root(flow)
 
     # Inject the project charter (full text) + the code-index top map, replacing
     # the retired spec-name list.
@@ -742,11 +968,32 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt += runtime_env
 
     logger.info(
-        f"Running self-check code review "
-        f"#{pass_index}/{passes_required} (fix iteration: {fix_iteration})..."
+        "Running self-check code review #%s/%s (fix iteration: %s, scope: %s)...",
+        pass_index,
+        passes_required,
+        fix_iteration,
+        step.inputs.get("scope_mode", "full"),
     )
 
     try:
+        from ..chat_history import record_self_check_scope
+
+        record_self_check_scope(
+            project_root=project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type=step.step_type.value,
+            scope_metadata={
+                "scope_mode": step.inputs.get("scope_mode", "full"),
+                "baseline_id": step.inputs.get("baseline_id", ""),
+                "scope_changed_paths": step.inputs.get("scope_changed_paths", []),
+                "fix_iteration": fix_iteration,
+                "round_id": step.inputs.get("self_check_round_id", ""),
+                "pass_index": pass_index,
+                "scope_undecidable": bool(step.inputs.get("scope_undecidable")),
+                "scope_diff_artifact": step.inputs.get("scope_diff_artifact", ""),
+            },
+        )
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(
             project_root,
@@ -768,7 +1015,8 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 '{"issues": [{"severity": "critical|high|medium|low", '
                 '"actual_behavior": "...", "expected_behavior": "...", '
                 '"divergence": "...", '
-                '"expectation_source": {"type": "task_description|spec|user_interjection|plan_task|regression", "verbatim_quote": "..."}, '
+                '"location": "path:N", '
+                '"expectation_source": {"type": "task_description|user_interjection|charter|why_comment|regression", "verbatim_quote": "..."}, '
                 '"evidence_lines": ["path:N"], "missing_in": []}], '
                 '"previous_issue_resolutions": [{"prev_issue_summary": "...", "status": "fixed|still_present"}], '
                 '"summary": "..."}'
@@ -787,8 +1035,31 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Run structural validation; drop issues that fail any check.
         kept_issues, validation_stats = _validate_and_filter_issues(
-            raw_issues, step.inputs,
+            raw_issues, validation_inputs,
         )
+
+        # WHY: a "still_present" verdict IS an unresolved-finding declaration.
+        # Returning clean while the round's own resolutions record says a
+        # previously validated finding survives would be a pass-with-finding —
+        # the one outcome the charter forbids. The previous issue already
+        # passed structural validation when it was first reported, so it is
+        # re-admitted verbatim rather than re-validated against the newer
+        # (possibly narrower) scope.
+        still_present = _still_present_prev_issues(
+            prev_issue_resolutions, prev_issues,
+        )
+        if still_present:
+            before = len(kept_issues)
+            kept_issues = _merge_dedup_issues(kept_issues, still_present)
+            readmitted = len(kept_issues) - before
+            if readmitted:
+                validation_stats["readmitted_still_present_count"] = readmitted
+                validation_stats["kept_count"] += readmitted
+                logger.info(
+                    "Self-check re-admitted %s still-present previous "
+                    "issue(s) the reviewer did not re-ground in scope",
+                    readmitted,
+                )
 
         # Single-line observability log so on-call can see at a glance how
         # many issues the LLM proposed vs how many survived validation, and
@@ -797,8 +1068,8 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if dropped > 0:
             reasons = ", ".join(
                 f"{k}={v}" for k, v in validation_stats.items()
-                if k.endswith("_count") and v > 0 and k != "kept_count"
-                and k != "input_count"
+                if k.endswith("_count") and v > 0
+                and k not in _NON_REJECTION_STAT_KEYS
             )
             logger.info(
                 f"Self-check validation: {validation_stats['input_count']} raw → "
@@ -818,7 +1089,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Adjudication ledger accounting (fix-loop 警察). Record this round into
         # the cross-round ledger on ``flow.state.context`` BEFORE any early
-        # return, so every SELF_CHECK execution — clean, converged, deferred, or
+        # return, so every SELF_CHECK execution — clean, deferred, or
         # fix-bound — contributes its issues. Resolutions are recorded BEFORE the
         # issues, sharing one ``round_id``: ``record_fix_resolutions`` relies on
         # ``record_self_check_round`` to register the round_id for --resume
@@ -855,7 +1126,11 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             # Chain-tail flush (item 1): this pass found nothing, but earlier
             # passes deferred issues. On the LAST pass, flush the accumulated
             # stash into one consolidated fix loop instead of advancing clean.
-            if defer_enabled and deferred_issues and is_last_pass:
+            # Deliberately NOT gated on this pass's ``defer_enabled``: the
+            # threshold is re-read from tianluo.yaml per pass, and a hot-edit
+            # to 0 must not let the chain end with a stash that the next
+            # round's pass-1 reset would then wipe unconsumed.
+            if deferred_issues and is_last_pass:
                 logger.info(
                     f"Self-check #{pass_index}/{passes_required} clean but flushing "
                     f"{len(deferred_issues)} deferred issue(s) accumulated from earlier passes"
@@ -865,94 +1140,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     pass_index, passes_required,
                 )
             # Non-terminal clean pass: carry the stash forward unchanged so the
-            # next pass keeps accumulating.
-            if defer_enabled and deferred_issues:
+            # next pass keeps accumulating (and the last pass flushes it).
+            if deferred_issues:
                 step.outputs["self_check_deferred_issues"] = deferred_issues
                 step.outputs["self_check_deferred"] = True
             return StepStatus.COMPLETED
 
         issues = kept_issues  # alias for the rest of the function
-
-        # NOTE: When convergence_enabled=True and N>1, pass #1 may return
-        # COMPLETED via the convergence shortcut. Pass #2+ deliberately strips
-        # prev_self_check_issues (no intra-round comparison), so if pass #2
-        # finds the same issues it returns REVISION_NEEDED, triggering another
-        # fix loop. This is intentional: convergence breaks stalled fix loops
-        # across rounds, not within a single N-pass round.
-        #
-        # Severity guard (item 1): the convergence shortcut MUST NOT swallow a
-        # pass that contains critical/high findings, even when the signatures
-        # match the previous round. A critical/high issue is never "safe to stop
-        # on" — it must merge the accumulated findings and enter the fix loop
-        # immediately. So a converged-but-critical/high pass falls through to the
-        # defer-fix decision below, which (because critical/high is present) does
-        # NOT defer and instead merges + returns REVISION_NEEDED.
-        #
-        # Defer subordination (item 1): the convergence shortcut MUST NOT discard
-        # findings that the defer/fix arbitration is obligated to accumulate or
-        # fix. When deferral is enabled (``self_check_defer_fix_threshold > 0``),
-        # EVERY issue this pass found is mandatorily handled by the arbitration
-        # below — it is either deferred (a non-terminal below-threshold
-        # non-critical pass stashes its issues for a later consolidated fix) or
-        # it enters the fix loop now (threshold reached, critical/high present,
-        # the last pass, or an existing stash to flush/merge). A convergence
-        # early-exit returns COMPLETED and would silently drop those issues,
-        # violating the defer contract — so convergence is blocked outright
-        # whenever deferral is enabled and any issue is present (and ``issues``
-        # is guaranteed non-empty here, past the ``if not kept_issues`` guard).
-        # In particular a simple below-threshold pass with no pending stash is
-        # NOT exempt: with later passes it must be deferred, and at the chain
-        # tail it must be fixed. Convergence is preserved unchanged only when
-        # deferral is disabled (threshold 0/null, the default).
-        convergence_blocked_by_defer = defer_enabled
-
-        # Oscillation guard for the convergence shortcut. When a structural
-        # oscillation trigger (a/b/c) would fire on this round, convergence MUST
-        # NOT be allowed to silently mark the flow COMPLETED "converged-but-
-        # diseased": a spec contradiction re-flagged in opposite directions looks
-        # like convergence (same signatures round over round) but must instead be
-        # routed to the adjudicator. The ledger already reflects this round (it
-        # was recorded above), so ``should_suppress_convergence`` sees full
-        # history.
-        # Pass the periodic-backstop params too: a due periodic sweep is only
-        # ever evaluated by the state machine in the REVISION_NEEDED branch, so
-        # convergence must yield to it here or the every-N-iteration safety net
-        # would be silently skipped whenever a round converges.
-        adjudicate_period = step.inputs.get("adjudicate_period", 0)
-        try:
-            adjudicate_period = int(adjudicate_period)
-        except (TypeError, ValueError):
-            adjudicate_period = 0
-        try:
-            suppress_convergence = adjudication.should_suppress_convergence(
-                flow.state.context, issues,
-                fix_iteration=fix_iteration, period_n=adjudicate_period,
-            )
-        except Exception:
-            logger.warning(
-                "Adjudication convergence-suppression check failed", exc_info=True
-            )
-            suppress_convergence = False
-
-        if (
-            convergence_enabled
-            and not convergence_blocked_by_defer
-            and not suppress_convergence
-            and not _has_critical_or_high(issues)
-            and _issues_converged(issues, prev_issues)
-        ):
-            logger.warning(
-                f"Self-check #{pass_index}/{passes_required} converged: "
-                f"{len(issues)} issue(s) match previous iteration's signatures "
-                f"— stopping fix loop to avoid re-flagging already-fixed or "
-                f"not-real issues"
-            )
-            step.outputs["converged"] = True
-            step.outputs["convergence_reason"] = (
-                f"Same {len(issues)} issue signature(s) reported in consecutive iterations"
-            )
-            step.outputs["unresolved_issues"] = list(issues)
-            return StepStatus.COMPLETED
 
         # Defer-fix decision (item 1). Defer only when ALL hold:
         #  - deferral is enabled (threshold > 0),
@@ -979,6 +1173,12 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 )
                 return StepStatus.COMPLETED
             issues = _merge_dedup_issues(deferred_issues, issues)
+        elif deferred_issues:
+            # Deferral was hot-disabled for THIS pass, but a stash accumulated
+            # by earlier passes must still join the fix loop — merging it here
+            # (the ``defer_enabled`` block is skipped) is what keeps a
+            # threshold hot-edit from orphaning the stash.
+            issues = _merge_dedup_issues(deferred_issues, issues)
 
         return _build_fix_outputs(
             step, issues, fix_iteration, max_iterations,
@@ -1002,12 +1202,12 @@ _DESC_PUNCT_RE = re.compile(r"[^\w\s]+")
 
 
 def _normalize_description(text: str) -> str:
-    """Normalize free-text issue descriptions for fuzzy convergence comparison.
+    """Normalize free-text issue descriptions for mechanical deduplication.
 
     Lowercases, strips punctuation, drops common English stopwords, and sorts
     the remaining tokens. This makes minor LLM paraphrasing (different word
     order, inserted punctuation, added articles) compare equal, so the
-    convergence check isn't defeated by trivial wording changes.
+    the deduplication key is not defeated by trivial wording changes.
     """
     lower = text.lower()
     cleaned = _DESC_PUNCT_RE.sub(" ", lower)
@@ -1017,7 +1217,7 @@ def _normalize_description(text: str) -> str:
 
 
 def _issue_signature(issues: list) -> set:
-    """Compute a set of (location, normalized_description) tuples for convergence detection.
+    """Compute ``(location, normalized_description)`` issue identities.
 
     Location is stripped and lowercased. Description is token-normalized via
     _normalize_description so LLM paraphrasing of the same logical issue still
@@ -1087,6 +1287,89 @@ def _merge_dedup_issues(existing: list, incoming: list) -> list:
         result.append(issue)
         seen |= sigs
     return result
+
+
+def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> list:
+    """Previous issues the reviewer verdicted as ``still_present``.
+
+    INVARIANT: a ``still_present`` verdict ALWAYS puts its previous finding
+    back into the fix loop — a round must never close clean while its own
+    resolutions record declares a finding unresolved (charter: a check step's
+    findings have exactly one destination, the fix loop).
+
+    Positional pairing (``_pair_resolutions_with_prev``) is the precise path,
+    but it deliberately declines to pair on cardinality drift or a mismatched
+    summary. An unpaired ``still_present`` verdict is therefore resolved by
+    content — the unambiguously best-matching previous issue — and, when even
+    that is indecisive, the round fails CLOSED: every previous issue no
+    resolution confidently accounted for is re-admitted. Re-checking an
+    already-fixed finding costs one round; dropping a live one loses it.
+    """
+    prev = [item for item in (prev_issues or []) if isinstance(item, dict) and item]
+    paired = [res for res in _pair_resolutions_with_prev(resolutions, prev_issues)
+              if isinstance(res, dict)]
+
+    def is_still_present(res: dict) -> bool:
+        return str(res.get("status", "")).strip().lower() == "still_present"
+
+    out: list = []
+    claimed: set = set()
+    unpaired: list = []
+    # Confidently paired verdicts are settled FIRST — whatever their status,
+    # they account for their previous issue, so a later content match can
+    # neither steal one nor let the fail-closed sweep re-admit it.
+    for res in paired:
+        issue = res.get("issue")
+        if isinstance(issue, dict) and issue:
+            claimed.add(id(issue))
+            if is_still_present(res):
+                out.append(issue)
+        elif is_still_present(res):
+            unpaired.append(res)
+
+    unresolved_verdict = False
+    for res in unpaired:
+        match = _match_resolution_by_content(res, prev, claimed)
+        if match is not None:
+            claimed.add(id(match))
+            out.append(match)
+        else:
+            unresolved_verdict = True
+    if unresolved_verdict:
+        for issue in prev:
+            if id(issue) not in claimed:
+                out.append(issue)
+    # The caller merges this into the round's kept issues with the shared
+    # signature dedup, so no second dedup rule is introduced here.
+    return out
+
+
+def _match_resolution_by_content(
+    resolution: dict, prev_issues: list, claimed: set
+) -> dict | None:
+    """The one previous issue a resolution's summary unambiguously describes.
+
+    Returns ``None`` for a zero-signal or tied summary: guessing there would
+    push the wrong finding into the fix loop, and the caller's fail-closed
+    sweep covers that case without a guess.
+    """
+    tokens = _identity_tokens(resolution.get("prev_issue_summary", ""))
+    if not tokens:
+        return None
+    best: dict | None = None
+    best_score = 0
+    tied = False
+    for issue in prev_issues:
+        if id(issue) in claimed:
+            continue
+        score = len(tokens & _issue_identity_tokens(issue))
+        if score > best_score:
+            best, best_score, tied = issue, score, False
+        elif score == best_score and score > 0:
+            tied = True
+    if best is None or best_score <= 0 or tied:
+        return None
+    return best
 
 
 def _has_critical_or_high(issues: list) -> bool:
@@ -1243,38 +1526,6 @@ def _pair_resolutions_with_prev(
                 entry["issue"] = prev[i]
         paired.append(entry)
     return paired
-
-
-def _issues_converged(current_issues: list, prev_issues: list | None) -> bool:
-    """Return True if the current issues appear to repeat the previous set.
-
-    Signals the LLM is re-reporting the same issues after a fix attempt, meaning
-    the fix loop has stalled. Requires at least one issue on each side.
-
-    Detection is deliberately lenient — subset (not equality) semantics are
-    intentional: when prev=[A,B,C] and current=[A], issue A has survived a
-    full fix attempt and further iterations are unlikely to resolve it, so we
-    stop. step.outputs["issues"] still carries the remaining issue list so
-    downstream steps can react.
-
-    A location-only second layer catches paraphrase-heavy convergence: if every
-    current issue lives at a location already flagged by prev (regardless of
-    wording), treat as converged. LLMs routinely rewrite descriptions for the
-    same underlying problem.
-    """
-    if not prev_issues or not current_issues:
-        return False
-    current_sig = _issue_signature(current_issues)
-    prev_sig = _issue_signature(prev_issues)
-    if not current_sig or not prev_sig:
-        return False
-    if current_sig.issubset(prev_sig):
-        return True
-    current_locs = {loc for loc, _ in current_sig if loc}
-    prev_locs = {loc for loc, _ in prev_sig if loc}
-    if current_locs and prev_locs and current_locs.issubset(prev_locs):
-        return True
-    return False
 
 
 def _format_changes(changes_made: dict[str, Any]) -> str:

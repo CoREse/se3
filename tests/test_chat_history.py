@@ -16,6 +16,7 @@ from tianluo.engine.chat_history import (
     _fold_spec_subsections,
     _format_size,
     _match_in_code_fence,
+    collect_usage_records_from_sessions,
     extract_assistant_text,
     fold_spec_content,
     format_history_for_retry,
@@ -29,6 +30,12 @@ from tianluo.engine.chat_history import (
     render_session_detailed,
     render_session_text,
     segment_prompt,
+)
+from tianluo.usage import (
+    UsageRecord,
+    UsageStatus,
+    build_usage_payload,
+    parse_usage_record,
 )
 
 
@@ -463,6 +470,37 @@ class TestRecordAndRetrieve:
         # raw_json is now a list[dict], not a string
         assert session.messages[0].raw_json == [ndjson_dict]
 
+    def test_tool_events_remain_raw_without_fabricated_files_read(self, tmp_project):
+        tool_event = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "read-1",
+                        "name": "Read",
+                        "input": {"file_path": "src/example.py"},
+                    }
+                ]
+            },
+        }
+        result_event = {
+            "type": "tool_result",
+            "result": {"toolUseId": "read-1", "content": "contents"},
+        }
+        record_response(
+            tmp_project,
+            "flow-audit",
+            "step-audit",
+            "self_check",
+            json.dumps(tool_event) + "\n" + json.dumps(result_event),
+            0,
+        )
+        session = get_step_history(tmp_project, "flow-audit", "step-audit")
+        assert session is not None
+        assert session.messages[0].raw_json == [tool_event, result_event]
+        assert "files_read" not in session.messages[0].to_dict()
+
     def test_full_conversation(self, tmp_project):
         record_prompt(tmp_project, "flow1", "step1", "analyze", "Analyze this", 0)
         ndjson = json.dumps({
@@ -597,8 +635,10 @@ class TestParseUsageFromNdjson:
             }),
         ])
         usage = parse_usage_from_ndjson(raw)
+        # Anthropic-shaped usage: the provider's input_tokens EXCLUDES the
+        # cache categories, so the logical input total is their sum.
         assert usage == {
-            "input_tokens": 100,
+            "input_tokens": 115,
             "output_tokens": 50,
             "cache_creation_input_tokens": 10,
             "cache_read_input_tokens": 5,
@@ -648,14 +688,19 @@ class TestParseUsageFromNdjson:
         assert parse_usage_from_ndjson(None) == {}  # type: ignore[arg-type]
         assert parse_usage_from_ndjson([]) == {}
 
-    def test_all_zero_usage_returns_empty(self):
-        """A result line with zero usage and zero cost is treated as empty."""
+    def test_all_zero_usage_remains_distinct_from_missing(self):
         raw = json.dumps({
             "type": "result",
             "total_cost_usd": 0.0,
             "message": {"usage": {"input_tokens": 0, "output_tokens": 0}},
         })
-        assert parse_usage_from_ndjson(raw) == {}
+        assert parse_usage_from_ndjson(raw) == {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
 
     def test_malformed_lines_do_not_raise(self):
         """Garbage lines are skipped; a valid result is still found."""
@@ -717,29 +762,122 @@ class TestRecordResponseUsage:
         assert session is not None
         msg = session.messages[0]
         assert msg.token_usage is not None
-        assert msg.token_usage["input_tokens"] == 200
+        # Anthropic-shaped usage: input_tokens EXCLUDES the cache categories,
+        # so the logical input total is 200 + 34 read + 12 creation.
+        assert msg.token_usage["input_tokens"] == 246
         assert msg.token_usage["output_tokens"] == 80
         assert msg.token_usage["cache_creation_input_tokens"] == 12
         assert msg.token_usage["cache_read_input_tokens"] == 34
         assert msg.token_usage["total_cost_usd"] == 0.0099
+        assert msg.usage_records is not None
+        assert msg.usage_records[0]["usage_status"] == "available"
+        assert msg.usage_records[0]["actual_cost_usd"] == 0.0099
+
+    def test_record_response_persists_same_normalized_identity_record(
+        self, tmp_project
+    ):
+        raw = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "init",
+                        "provider": "openai",
+                        "session_id": "history-session",
+                        "model": "GPT-5-Codex",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "result",
+                        "usage_event_id": "history-event",
+                        "usage": {"input_tokens": 10, "output_tokens": 2},
+                        "result": "done",
+                    }
+                ),
+            ]
+        )
+        record = parse_usage_record(
+            raw,
+            call_id="history-call",
+            attempt=3,
+            agent_name="configured-codex",
+            runner_type="codex",
+            provider="openai",
+            configured_model="configured-model",
+            runner_startup_model="startup-model",
+        )
+        record_response(
+            tmp_project,
+            "flow1",
+            "step1",
+            "implement",
+            raw,
+            3,
+            agent_name="configured-codex",
+            usage_record=record,
+        )
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        message = session.messages[0]
+        assert message.usage_records == [record.to_dict()]
+        assert message.model_name == "GPT-5-Codex"
 
     def test_record_response_without_usage_omits_field(self, tmp_project):
-        """No result line → field stays None and is absent from the jsonl."""
+        """No result line → both usage fields stay None and are absent from
+        the jsonl: a response that reported neither usage nor cost is not an
+        LLM measurement and must not persist an UNAVAILABLE record (that
+        would surface a spurious unknown call in history summaries)."""
         ndjson = json.dumps({
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "no usage"}]},
         })
         record_response(tmp_project, "flow1", "step1", "analyze", ndjson, 0)
 
-        # In-memory record carries None.
+        # In-memory record carries None for both usage fields.
         session = get_step_history(tmp_project, "flow1", "step1")
         assert session is not None
         assert session.messages[0].token_usage is None
+        assert session.messages[0].usage_records is None
 
-        # On-disk line does NOT carry the key (backward-compatible schema).
+        # On-disk line does NOT carry the keys (backward-compatible schema).
         path = tmp_project / "tianluo" / "history" / "flow1" / "step1.jsonl"
         line = path.read_text(encoding="utf-8").strip().splitlines()[0]
         assert "token_usage" not in json.loads(line)
+        assert "usage_records" not in json.loads(line)
+
+    def test_crashed_llm_attempt_persists_its_unavailable_record(self, tmp_project):
+        """A real subprocess attempt that produced no usage IS an unknown call.
+
+        LLMCaller adds the UNAVAILABLE attempt record to the live session
+        ledger unconditionally, so history must persist it too — otherwise a
+        history-only reconstruction reports fewer calls and a better
+        completeness than the flow actually had.
+        """
+        record = UsageRecord(
+            call_id="crashed-call",
+            attempt=0,
+            usage_status=UsageStatus.UNAVAILABLE,
+            agent_name="claude",
+            runner_type="claude-code",
+            provider="anthropic",
+        )
+        record_response(
+            tmp_project,
+            "flow1",
+            "step1",
+            "implement",
+            "",
+            0,
+            agent_name="claude",
+            usage_record=record,
+        )
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].usage_records == [record.to_dict()]
+
+        collected = collect_usage_records_from_sessions([session])["step1"]
+        assert len(collected) == 1
+        assert collected[0].usage_status == UsageStatus.UNAVAILABLE
 
     def test_user_prompt_record_omits_token_usage(self, tmp_project):
         """record_prompt never writes a token_usage key."""
@@ -2731,3 +2869,147 @@ class TestSegmentPromptIndentedCodeBlock:
         titles = [s["title"] for s in segments]
         assert "Instructions" in titles
         assert "Purpose" not in titles
+
+
+class TestCollectUsageRecordsFromSessions:
+    """Legacy-adapted per-message usage must never collapse in dedup."""
+
+    @staticmethod
+    def _legacy_message(input_tokens, output_tokens, cost, attempt=0):
+        return ChatMessage(
+            role="assistant",
+            content="ok",
+            raw_json=[],
+            timestamp="2026-08-14T00:00:00",
+            step_type="implement",
+            attempt=attempt,
+            token_usage={
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "total_cost_usd": cost,
+            },
+        )
+
+    def test_same_attempt_messages_keep_distinct_records(self):
+        # A failed attempt and its retry record (or multi-round discovery
+        # calls) share an external attempt number; each assistant message is
+        # a distinct measurement and must contribute to the totals.
+        session = ChatSession(
+            flow_id="f",
+            step_id="implement",
+            step_type="implement",
+            messages=[
+                self._legacy_message(100, 10, 0.01, attempt=0),
+                self._legacy_message(50, 5, 0.02, attempt=0),
+            ],
+        )
+        records = collect_usage_records_from_sessions([session])["implement"]
+        assert len(records) == 2
+        assert {record.call_id for record in records} == {
+            "legacy:implement:0",
+            "legacy:implement:1",
+        }
+        payload = build_usage_payload({"implement": records}, None, call_id="f")
+        totals = payload["summary"]["totals"]
+        assert totals["logical_input_tokens"] == 150
+        assert totals["output_tokens"] == 15
+        assert payload["summary"]["actual_cost_usd"] == 0.03
+        assert len(payload["calls"]) == 2
+        assert payload["legacy"] is True
+
+    def test_recollecting_the_same_session_still_deduplicates(self):
+        # The position-based discriminator is stable across re-reads of the
+        # same jsonl, so a double collection collapses instead of doubling.
+        session = ChatSession(
+            flow_id="f",
+            step_id="implement",
+            step_type="implement",
+            messages=[
+                self._legacy_message(100, 10, 0.01, attempt=0),
+                self._legacy_message(50, 5, 0.02, attempt=0),
+            ],
+        )
+        records = list(
+            collect_usage_records_from_sessions([session, session])["implement"]
+        )
+        payload = build_usage_payload({"implement": records}, None, call_id="f")
+        totals = payload["summary"]["totals"]
+        assert totals["logical_input_tokens"] == 150
+        assert totals["output_tokens"] == 15
+        assert payload["summary"]["actual_cost_usd"] == 0.03
+
+    def test_modern_usage_records_path_is_unchanged(self):
+        message = ChatMessage(
+            role="assistant",
+            content="ok",
+            raw_json=[],
+            timestamp="2026-08-14T00:00:00",
+            step_type="implement",
+            attempt=0,
+            usage_records=[
+                {
+                    "schema_version": 2,
+                    "call_id": "real-call",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "logical_input_tokens": 7,
+                    "uncached_input_tokens": 7,
+                    "output_tokens": 3,
+                }
+            ],
+        )
+        session = ChatSession(
+            flow_id="f",
+            step_id="implement",
+            step_type="implement",
+            messages=[message],
+        )
+        records = collect_usage_records_from_sessions([session])["implement"]
+        assert [record.call_id for record in records] == ["real-call"]
+
+    def test_unavailable_records_are_kept_for_surface_parity(self):
+        # UNAVAILABLE records are deliberate accounting units (one per
+        # attempt without usage). The daemon/server surfaces count them as
+        # unknown-usage calls; the CLI history recovery must keep them too,
+        # or the two surfaces disagree on the same flow.
+        message = ChatMessage(
+            role="assistant",
+            content="ok",
+            raw_json=[],
+            timestamp="2026-08-14T00:00:00",
+            step_type="implement",
+            attempt=0,
+            usage_records=[
+                {
+                    "schema_version": 2,
+                    "call_id": "measured-call",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "logical_input_tokens": 7,
+                    "uncached_input_tokens": 7,
+                    "output_tokens": 3,
+                },
+                {
+                    "schema_version": 2,
+                    "call_id": "unmeasured-call",
+                    "attempt": 1,
+                    "usage_status": "unavailable",
+                },
+            ],
+        )
+        session = ChatSession(
+            flow_id="f",
+            step_id="implement",
+            step_type="implement",
+            messages=[message],
+        )
+        records = collect_usage_records_from_sessions([session])["implement"]
+        assert [record.call_id for record in records] == [
+            "measured-call",
+            "unmeasured-call",
+        ]
+        payload = build_usage_payload({"implement": records}, None, call_id="f")
+        assert payload["summary"]["unknown_call_count"] == 1
+        assert payload["completeness"] == "partial"

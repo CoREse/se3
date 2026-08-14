@@ -25,6 +25,18 @@ class InfraErrorType(Enum):
     STARTUP_FAILURE = "startup_failure"
 
 
+class AgentInvocationIntent(str, Enum):
+    """Vendor-neutral intent for one runner invocation.
+
+    The outer flow owns implementation strategy and recovery.  This value only
+    lets a runner enhance one call when it has a real native adapter for that
+    intent; runners without such an adapter keep using their ordinary command.
+    """
+
+    DEFAULT = "default"
+    DIRECT_IMPLEMENTATION = "direct_implementation"
+
+
 @dataclass
 class RunResult:
     """Result from an agent runner execution.
@@ -42,6 +54,15 @@ class RunResult:
     infra_error_type: InfraErrorType = InfraErrorType.NONE
 
 
+@dataclass(frozen=True)
+class RunnerStartupMetadata:
+    """Provider identity a runner can verify before stream metadata arrives."""
+
+    provider: Optional[str] = None
+    model: Optional[str] = None
+    provider_session_id: Optional[str] = None
+
+
 class AgentRunner(ABC):
     """Abstract base class for all agent runners.
 
@@ -49,6 +70,20 @@ class AgentRunner(ABC):
     implementations. Each runner wraps a specific agent type (e.g.,
     Claude Code CLI, API-based agents).
     """
+
+    native_goal_capability = False
+    supports_native_goal = False
+    startup_provider: Optional[str] = None
+    startup_model: Optional[str] = None
+
+    def get_startup_metadata(
+        self, env: Optional[Dict[str, str]] = None
+    ) -> RunnerStartupMetadata:
+        """Return verified launch metadata without guessing from command names."""
+        return RunnerStartupMetadata(
+            provider=self.startup_provider,
+            model=self.startup_model,
+        )
 
     @abstractmethod
     def run(
@@ -109,6 +144,7 @@ class AgentRunner(ABC):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         spec_guard_plugin: Optional[Path] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Build CLI arguments from intent-level parameters.
 
@@ -132,6 +168,10 @@ class AgentRunner(ABC):
                 ``ClaudeCodeRunner`` honors it (via ``--plugin-dir``); other
                 runners ignore the intent (their sandboxing is handled
                 separately).
+            invocation_intent: Semantic purpose of this invocation. Runners
+                may translate it into a native feature only when
+                ``native_goal_capability`` is true; otherwise they execute the
+                prompt through their normal autonomous interface.
 
         Returns:
             A list of CLI arguments to pass *after* the runner's base
@@ -140,6 +180,15 @@ class AgentRunner(ABC):
             as ``--file`` pairs or equivalent.
         """
         ...
+
+    def detect_native_goal_unavailable(self, stdout: str, stderr: str) -> bool:
+        """Return whether a native-goal launch failed before doing work.
+
+        The default is deliberately false.  Only a runner with a real native
+        goal adapter can recognize its own protocol's unavailable response.
+        Workspace and tool-side-effect checks remain the caller's job.
+        """
+        return False
 
     @abstractmethod
     def detect_infra_error(

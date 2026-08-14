@@ -312,6 +312,59 @@ def test_make_spawn_flow_omits_worktree_key_when_false():
     assert msg2.payload["worktree"] is True
 
 
+def test_dispatch_spawn_flow_threads_implementation_strategy():
+    received = []
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d, *, implementation_strategy="": received.append(
+            (t, p, ty, d, implementation_strategy)
+        )
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Direct it", implementation_strategy="direct"),
+        )
+
+    asyncio.run(scenario())
+    assert received == [("Direct it", "", "feature", False, "direct")]
+
+
+def test_dispatch_spawn_flow_omits_strategy_keyword_when_absent():
+    """A strategy-less spawn keeps the legacy handler call shape."""
+    received = []
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d: received.append((t, p, ty, d))
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Plain", project_root="/p"),
+        )
+
+    asyncio.run(scenario())
+    assert received == [("Plain", "/p", "feature", False)]
+
+
+def test_dispatch_spawn_flow_ignores_strategy_on_resume():
+    """A resume SPAWN_FLOW never forwards a strategy decision."""
+    received = []
+    client = _make_client(
+        resume_handler=lambda f, p: received.append((f, p))
+    )
+
+    async def scenario():
+        # Even a hand-crafted payload carrying the field is ignored on the
+        # resume path — the persisted flow strategy is authoritative.
+        message = protocol.make_spawn_flow("", resume_flow_id="f9")
+        message.payload["implementation_strategy"] = "direct"
+        await client._dispatch(_FakeWS(), message)
+
+    asyncio.run(scenario())
+    assert received == [("f9", "")]
+
+
 def test_dispatch_spawn_flow_runs_ensure_handler_first():
     """ensure_handler is called before the spawn_handler with project_root."""
     ensure_calls = []

@@ -9,11 +9,23 @@ import logging
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from ..agent_runner import AgentRunner, InfraErrorType
+from ..agent_runner import (
+    AgentInvocationIntent,
+    AgentRunner,
+    InfraErrorType,
+    RunnerStartupMetadata,
+)
 from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
+from ..usage import (
+    UsageEventAggregator,
+    UsageRecord,
+    expand_configured_model,
+    parse_usage_record,
+)
 from .prompt_dedup import deduplicate_prompt_lines
 from .retry_context import (
     POST_DEDUP_SAFETY_LIMIT,
@@ -268,7 +280,16 @@ class StreamJSONTracker:
         step_id: Optional[str] = None,
         step_type: str = '',
         attempt: int = 0,
+        usage_attempt: Optional[int] = None,
         agent_name: Optional[str] = None,
+        runner_type: Optional[str] = None,
+        provider: Optional[str] = None,
+        provider_session_id: Optional[str] = None,
+        reported_model: Optional[str] = None,
+        configured_model: Optional[str] = None,
+        runner_startup_model: Optional[str] = None,
+        resolved_model: Optional[str] = None,
+        call_id: Optional[str] = None,
         on_agent_change: Optional[Callable[[str, Optional[str]], None]] = None,
     ):
         self.stream_prefix = stream_prefix
@@ -315,11 +336,18 @@ class StreamJSONTracker:
         # Pending coalesced text/thinking awaiting a flush.
         self._progress_text_buf: List[str] = []
         self._progress_text_len = 0
-        # Token / cost usage captured from the type:"result" message. Stays an
-        # empty tally until a result line carrying usage is seen; exposed via
-        # the read-only ``usage`` property for the caller to fold into the
-        # current step accumulator.
-        self._usage = UsageTotals()
+        self._usage_aggregator = UsageEventAggregator(
+            call_id=call_id,
+            attempt=attempt if usage_attempt is None else usage_attempt,
+            agent_name=agent_name,
+            runner_type=runner_type,
+            provider=provider,
+            provider_session_id=provider_session_id,
+            reported_model=reported_model,
+            configured_model=configured_model,
+            runner_startup_model=runner_startup_model,
+            resolved_model=resolved_model,
+        )
 
     @property
     def _progress_enabled(self) -> bool:
@@ -540,6 +568,7 @@ class StreamJSONTracker:
         try:
             data = json.loads(line)
             msg_type = data.get('type', '')
+            self._usage_aggregator.add_event(data)
 
             # Best-effort parse the actual model name from this line's
             # init/system metadata. The first match is cached so subsequent
@@ -689,53 +718,28 @@ class StreamJSONTracker:
                 self._last_ended_with_newline = True
 
             elif msg_type == 'result':
-                # The terminal result line carries the call's token usage and
-                # cost. Capture them silently — this does NOT touch stdout or the
-                # stream_progress channel, so the human-readable terminal stream
-                # and the web/jsonl bytes are unchanged.
-                self._capture_usage(data)
+                pass
 
         except json.JSONDecodeError:
             # Not valid JSON, might be a partial line
             pass
 
     def _capture_usage(self, data: Dict[str, Any]) -> None:
-        """Capture token usage + cost from a type:"result" NDJSON message.
-
-        Reads the four token counts from ``message.usage`` (nested form) or a
-        top-level ``usage`` (flat form), plus the top-level ``total_cost_usd``.
-        Missing fields count as 0 and any structural surprise is swallowed, so a
-        malformed or partial result line never disrupts the stream.
-        """
+        """Compatibility entry point for callers feeding parsed result events."""
         try:
-            usage_obj = None
-            message = data.get("message")
-            if isinstance(message, dict):
-                usage_obj = message.get("usage")
-            if not isinstance(usage_obj, dict):
-                top_usage = data.get("usage")
-                if isinstance(top_usage, dict):
-                    usage_obj = top_usage
-            captured = UsageTotals.from_dict(usage_obj if isinstance(usage_obj, dict) else None)
-            # total_cost_usd lives at the top level of the result message, not
-            # inside usage; from_dict on usage_obj leaves it at 0.0, so fill it
-            # here.
-            if "total_cost_usd" in data:
-                captured.total_cost_usd = UsageTotals.from_dict(
-                    {"total_cost_usd": data.get("total_cost_usd")}
-                ).total_cost_usd
-            self._usage = captured
+            self._usage_aggregator.add_event(data)
         except Exception:  # pragma: no cover - defensive; never break the stream
             logger.debug("Failed to capture usage from result message", exc_info=True)
 
     @property
     def usage(self) -> UsageTotals:
-        """Token / cost usage captured from this stream's result message.
+        """Legacy projection of all usage events seen in this attempt."""
+        return UsageTotals.from_usage_record(self.usage_record)
 
-        An empty :class:`UsageTotals` until a ``type:"result"`` line carrying
-        usage has been processed.
-        """
-        return self._usage
+    @property
+    def usage_record(self) -> UsageRecord:
+        """Authoritative usage record, including unavailable attempts."""
+        return self._usage_aggregator.to_record()
 
     def _record_touched_path(self, path: str) -> None:
         """Record a file path touched by a tool, normalized to project-relative."""
@@ -908,7 +912,11 @@ class LLMCaller:
             from tianluo.codex_runner import CodexRunner
             return CodexRunner(
                 project_root=self.project_root,
-                command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
+                command={
+                    "cmd": agent_config["cmd"],
+                    "priority": agent_config.get("priority", 0),
+                    "provider": agent_config.get("provider"),
+                },
             )
         if agent_type == "claude-interactive":
             # PTY-driven interactive Claude Code runner.  Lazily imported so the
@@ -990,6 +998,7 @@ class LLMCaller:
         two_phase_json: bool = False,
         json_schema_hint: Optional[str] = None,
         required_keys: Optional[List[str]] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
         **kwargs,
     ) -> str:
         """Call LLM with prompt and return output text.
@@ -1023,6 +1032,10 @@ class LLMCaller:
             json_schema_hint: Optional hint about expected JSON schema for extraction
             required_keys: Optional list of keys that must be present in the parsed JSON.
                           Used by TWO_PHASE and EXTRACT modes to validate the fast path result.
+            invocation_intent: Vendor-neutral purpose of the primary agent
+                invocation. JSON extraction phases always use the default
+                intent, so an implementation enhancement cannot leak into a
+                schema-only follow-up call.
             **kwargs: Ignored (accepts model, max_tokens, temperature
                       for forward-compatibility but they don't apply
                       to claude -p subprocess calls)
@@ -1033,6 +1046,9 @@ class LLMCaller:
         Raises:
             LLMCallError: If all retries exhausted or extraction fails
         """
+        if not isinstance(invocation_intent, AgentInvocationIntent):
+            invocation_intent = AgentInvocationIntent(invocation_intent)
+
         # Resolve JSON mode from various parameter combinations
         mode = self._resolve_json_mode(json_mode, require_json, two_phase_json)
 
@@ -1081,6 +1097,7 @@ class LLMCaller:
                 on_output=on_output,
                 json_schema_hint=json_schema_hint,
                 required_keys=required_keys,
+                invocation_intent=invocation_intent,
             )
         elif mode == "extract":
             return self._call_extract(
@@ -1090,6 +1107,7 @@ class LLMCaller:
                 on_output=on_output,
                 json_schema_hint=json_schema_hint,
                 required_keys=required_keys,
+                invocation_intent=invocation_intent,
             )
         elif mode == "strict":
             return self._call_strict(
@@ -1097,6 +1115,7 @@ class LLMCaller:
                 timeout=timeout,
                 context_files=context_files,
                 on_output=on_output,
+                invocation_intent=invocation_intent,
             )
         else:  # mode == "off"
             return self._call_with_retry(
@@ -1106,6 +1125,7 @@ class LLMCaller:
                 on_output=on_output,
                 require_json=False,
                 json_retry_count=0,
+                invocation_intent=invocation_intent,
             )
 
     @staticmethod
@@ -1143,6 +1163,7 @@ class LLMCaller:
         timeout: Optional[int],
         context_files: Optional[List[Path]],
         on_output: Optional[Callable[[str], None]],
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> str:
         """Mode 1: STRICT - Force JSON with retry on failure."""
         # Wrap prompt with strict JSON constraints
@@ -1160,6 +1181,7 @@ class LLMCaller:
             on_output=on_output,
             require_json=True,
             json_retry_count=0,
+            invocation_intent=invocation_intent,
         )
 
     def _call_extract(
@@ -1170,6 +1192,7 @@ class LLMCaller:
         on_output: Optional[Callable[[str], None]],
         json_schema_hint: Optional[str],
         required_keys: Optional[List[str]] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> str:
         """Mode 2: EXTRACT - Request JSON, extract with LLM on failure.
 
@@ -1197,6 +1220,7 @@ class LLMCaller:
             on_output=on_output,
             require_json=False,  # Don't retry on JSON error
             json_retry_count=0,
+            invocation_intent=invocation_intent,
         )
 
         # Fast path: lenient parse (dict with required_keys, or list when no required_keys)
@@ -1394,6 +1418,7 @@ class LLMCaller:
         on_output: Optional[Callable[[str], None]],
         json_schema_hint: Optional[str],
         required_keys: Optional[List[str]] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> str:
         """Mode 3: TWO_PHASE - Natural generation + LLM extraction.
 
@@ -1434,6 +1459,7 @@ class LLMCaller:
                 on_output=on_output,
                 require_json=False,  # No strict JSON constraint
                 json_retry_count=0,
+                invocation_intent=invocation_intent,
             )
 
             # Persist Phase 1 output so retries can skip it
@@ -1626,7 +1652,13 @@ class LLMCaller:
         except Exception as e:
             logger.debug(f"Failed to record prompt to history: {e}")
 
-    def _record_response(self, raw_ndjson: str, attempt: int, agent_name: Optional[str] = None) -> None:
+    def _record_response(
+        self,
+        raw_ndjson: str,
+        attempt: int,
+        agent_name: Optional[str] = None,
+        usage_record: Optional[UsageRecord] = None,
+    ) -> None:
         """Record an LLM response to chat history if flow context is available.
 
         ``agent_name`` (default None) records the configuration name of the
@@ -1643,6 +1675,7 @@ class LLMCaller:
                 self.step_type, raw_ndjson, attempt,
                 fix_iteration=self.fix_iteration,
                 agent_name=agent_name,
+                usage_record=usage_record,
             )
         except Exception as e:
             logger.debug(f"Failed to record response to history: {e}")
@@ -1672,6 +1705,7 @@ class LLMCaller:
         json_retry_count: int,
         max_json_retries: int = 2,
         inject_retry_context: bool = True,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> str:
         """Internal method to call LLM with retry and agent rotation logic.
 
@@ -1737,6 +1771,7 @@ class LLMCaller:
         # the final LLMCallError said only "failed after N attempts: ".
         # Recording before the rotation branch keeps every attempt accounted for.
         attempt_errors: List[str] = []
+        sequence_call_id = uuid.uuid4().hex
 
         for internal_attempt in range(self.max_retries):
             # ``is_retry`` gates retry-context injection AND dedup. Phase-2
@@ -1752,6 +1787,20 @@ class LLMCaller:
             # during this attempt's failure path, so both prompt and response
             # records for this attempt carry the same agent attribution.
             attempt_agent_name = self._agents[self._current_agent_index].get("name", "?")
+            attempt_agent = self._agents[self._current_agent_index]
+            attempt_runner_type = str(attempt_agent.get("type", "claude-code"))
+            attempt_provider = attempt_agent.get("provider")
+            attempt_model = attempt_agent.get("model")
+            configured_model = expand_configured_model(attempt_model, env)
+            attempt_call_id = f"{sequence_call_id}:attempt:{internal_attempt}"
+            active_tracker: Optional[StreamJSONTracker] = None
+            active_call_id = attempt_call_id
+            active_usage_recorded = False
+            active_response_recorded = False
+            active_output = ""
+            startup_metadata = RunnerStartupMetadata()
+            startup_model: Optional[str] = None
+            effective_provider = attempt_provider
 
             # Announce this attempt's agent (model not yet known) so a consumer
             # — e.g. the DAG-parallel implement group closure — can show the
@@ -1809,6 +1858,50 @@ class LLMCaller:
             try:
                 current_runner = self._get_current_runner()
                 current_agent_name = self._agents[self._current_agent_index].get("name", "?")
+                try:
+                    startup_metadata = current_runner.get_startup_metadata(env)
+                except Exception:
+                    logger.debug(
+                        "Runner startup metadata unavailable for %s",
+                        attempt_agent_name,
+                        exc_info=True,
+                    )
+                    startup_metadata = RunnerStartupMetadata()
+                if not isinstance(startup_metadata, RunnerStartupMetadata):
+                    startup_metadata = RunnerStartupMetadata()
+                effective_provider = attempt_provider or startup_metadata.provider
+                startup_model = expand_configured_model(startup_metadata.model, env)
+
+                import inspect
+
+                try:
+                    build_params = inspect.signature(
+                        current_runner.build_call_args
+                    ).parameters.values()
+                    accepts_intent = any(
+                        p.name == "invocation_intent"
+                        or p.kind == inspect.Parameter.VAR_KEYWORD
+                        for p in build_params
+                    )
+                except (TypeError, ValueError):
+                    accepts_intent = False
+
+                native_goal_started = (
+                    invocation_intent
+                    == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+                    and accepts_intent
+                    and bool(
+                        getattr(current_runner, "supports_native_goal", False)
+                        or getattr(
+                            current_runner, "native_goal_capability", False
+                        )
+                    )
+                )
+                native_goal_before = None
+                if native_goal_started and on_output is None:
+                    from .workspace_snapshot import snapshot_workspace
+
+                    native_goal_before = snapshot_workspace(self.project_root)
 
                 # Delegate CLI argument construction to the runner.  Each
                 # runner translates the caller's intent (prompt, read-only
@@ -1819,12 +1912,20 @@ class LLMCaller:
                 # sub-call read-only, so the runner emits its --disallowedTools
                 # tool-level lock. Never the reverse — a read-only step cannot be
                 # forced writable here.
-                args = current_runner.build_call_args(
+                build_kwargs = dict(
                     prompt=effective_prompt,
                     read_only=is_step_read_only(self.step_type) or self.force_read_only,
                     context_files=context_files,
                     spec_guard_plugin=self._resolve_spec_guard_settings(),
                 )
+                if invocation_intent != AgentInvocationIntent.DEFAULT:
+                    # Third-party runners compiled against the pre-intent
+                    # interface remain valid ordinary direct executors. A
+                    # runner that wants native enhancement opts in by accepting
+                    # the new keyword (or **kwargs) and declaring capability.
+                    if accepts_intent:
+                        build_kwargs["invocation_intent"] = invocation_intent
+                args = current_runner.build_call_args(**build_kwargs)
                 logger.debug(
                     f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "
                     f"external_attempt {self.external_attempt}, agent '{current_agent_name}'"
@@ -1843,6 +1944,7 @@ class LLMCaller:
                     step_id=self.step_id,
                 )
 
+                stream_tracker = None
                 if on_output:
                     result = current_runner.run_with_monitor(
                         args=args,
@@ -1865,23 +1967,31 @@ class LLMCaller:
                     # on_output!=None branch above is unchanged: no current step
                     # routes through it.
                     stream_tracker = StreamJSONTracker(
+                        call_id=attempt_call_id,
                         stream_prefix=self.stream_prefix,
                         project_root=self.project_root,
                         flow_id=self.flow_id,
                         step_id=self.step_id,
                         step_type=self.step_type,
                         attempt=self.external_attempt,
+                        usage_attempt=internal_attempt,
                         # Same agent name used for this attempt's prompt/response
                         # records, so the streamed progress lines, the prompt,
                         # and the response all agree on the agent that actually
                         # ran — and a rotation/retry's fresh tracker carries the
                         # new agent rather than the stale one.
                         agent_name=attempt_agent_name,
+                        runner_type=attempt_runner_type,
+                        provider=effective_provider,
+                        provider_session_id=startup_metadata.provider_session_id,
+                        configured_model=configured_model,
+                        runner_startup_model=startup_model,
                         # Let the tracker upgrade the consumer's label to
                         # "agent · model" once the model name is parsed from
                         # the stream's init/system metadata.
                         on_agent_change=self._notify_agent_change,
                     )
+                    active_tracker = stream_tracker
 
                     # Seed the accumulating bubble with an identity-only record
                     # so the current reply area shows the real agent the moment
@@ -1904,6 +2014,7 @@ class LLMCaller:
                         on_confirm=on_confirm,
                     )
 
+                    active_output = result.output or ""
                     if result.success:
                         stream_tracker.print_summary()
                         self._last_touched_files = stream_tracker.touched_files
@@ -1916,10 +2027,155 @@ class LLMCaller:
                     # against the step total; covered by add_call_usage's own
                     # no-op-when-out-of-scope + swallow-all contract, so this
                     # never disrupts the LLM call regardless of flow context.
-                    add_call_usage(stream_tracker.usage)
+                active_output = result.output or ""
+                if stream_tracker is not None:
+                    attempt_usage = stream_tracker.usage_record
+                else:
+                    attempt_usage = parse_usage_record(
+                        result.output or "",
+                        call_id=attempt_call_id,
+                        attempt=internal_attempt,
+                        agent_name=attempt_agent_name,
+                        runner_type=attempt_runner_type,
+                        provider=effective_provider,
+                        provider_session_id=startup_metadata.provider_session_id,
+                        configured_model=configured_model,
+                        runner_startup_model=startup_model,
+                    )
+                active_output = result.output or ""
+                add_call_usage(attempt_usage)
+                active_usage_recorded = True
 
                 # Record the response (whether success, failure, or interrupted)
-                self._record_response(result.output or "", self.external_attempt, agent_name=attempt_agent_name)
+                self._record_response(
+                    result.output or "",
+                    self.external_attempt,
+                    agent_name=attempt_agent_name,
+                    usage_record=attempt_usage,
+                )
+                active_response_recorded = True
+
+                # Claude Code's native /goal is an optional enhancement, not a
+                # prerequisite for direct implementation. Retry once through
+                # the same runner's ordinary print mode only when the native
+                # command explicitly says it is unavailable and both the tool
+                # stream and a before/after workspace comparison prove that no
+                # work began. An unavailable snapshot is deliberately not
+                # treated as clean. An interrupted attempt never falls back:
+                # the user's Ctrl+C must end the attempt (the re-raise below
+                # surfaces it), not spawn a second long-running subprocess.
+                result_interrupted = (
+                    isinstance(getattr(result, "interrupted", False), bool)
+                    and result.interrupted
+                )
+                should_try_plain_fallback = False
+                if (
+                    native_goal_started
+                    and not result_interrupted
+                    and stream_tracker is not None
+                    and native_goal_before is not None
+                    and current_runner.detect_native_goal_unavailable(
+                        result.output or "",
+                        getattr(result, "stderr_tail", "") or "",
+                    )
+                    and not stream_tracker.tool_calls
+                ):
+                    from .workspace_snapshot import (
+                        compare_snapshots,
+                        snapshot_workspace,
+                    )
+
+                    native_goal_delta = compare_snapshots(
+                        native_goal_before,
+                        snapshot_workspace(self.project_root),
+                    )
+                    should_try_plain_fallback = (
+                        not native_goal_delta.undecidable
+                        and native_goal_delta.is_clean
+                    )
+
+                if should_try_plain_fallback:
+                    logger.info(
+                        "Native /goal unavailable before side effects; retrying "
+                        "the same direct attempt in ordinary print mode"
+                    )
+                    # A second prompt/response pair makes the fallback a real
+                    # invocation in history. It intentionally keeps the same
+                    # configured caller and effective retry context, but is
+                    # recorded under a distinct sub-attempt number (mirroring
+                    # the JSON-retry precedent below) so each attempt group in
+                    # ``format_history_for_retry`` holds one prompt + one
+                    # response — the /goal failure text stays in its own
+                    # group instead of the fallback prompt being appended to
+                    # the /goal attempt's group.
+                    fallback_attempt = self.external_attempt * 100 + 99
+                    self._record_prompt(
+                        original_prompt,
+                        fallback_attempt,
+                        agent_name=attempt_agent_name,
+                    )
+                    fallback_args = current_runner.build_call_args(
+                        prompt=effective_prompt,
+                        read_only=(
+                            is_step_read_only(self.step_type)
+                            or self.force_read_only
+                        ),
+                        context_files=context_files,
+                        spec_guard_plugin=self._resolve_spec_guard_settings(),
+                    )
+                    fallback_tracker = StreamJSONTracker(
+                        call_id=f"{attempt_call_id}:plain-fallback",
+                        stream_prefix=self.stream_prefix,
+                        project_root=self.project_root,
+                        flow_id=self.flow_id,
+                        step_id=self.step_id,
+                        step_type=self.step_type,
+                        attempt=self.external_attempt,
+                        usage_attempt=internal_attempt,
+                        agent_name=attempt_agent_name,
+                        runner_type=attempt_runner_type,
+                        provider=effective_provider,
+                        provider_session_id=startup_metadata.provider_session_id,
+                        configured_model=configured_model,
+                        runner_startup_model=startup_model,
+                        on_agent_change=self._notify_agent_change,
+                    )
+                    active_tracker = fallback_tracker
+                    active_call_id = f"{attempt_call_id}:plain-fallback"
+                    active_usage_recorded = False
+                    active_response_recorded = False
+                    active_output = ""
+                    fallback_tracker.emit_agent_identity()
+
+                    def on_fallback_output(line: str) -> None:
+                        fallback_tracker.process_line(line)
+
+                    fallback_result = current_runner.run_with_monitor(
+                        args=fallback_args,
+                        wall_timeout=None,
+                        inactivity_timeout=1800,
+                        cwd=self.project_root,
+                        env=env,
+                        on_output=on_fallback_output,
+                        on_confirm=on_confirm,
+                    )
+                    if fallback_result.success:
+                        fallback_tracker.print_summary()
+                        self._last_touched_files = fallback_tracker.touched_files
+                    else:
+                        self._last_touched_files = set()
+                    fallback_usage = fallback_tracker.usage_record
+                    active_output = fallback_result.output or ""
+                    add_call_usage(fallback_usage)
+                    active_usage_recorded = True
+                    self._record_response(
+                        fallback_result.output or "",
+                        fallback_attempt,
+                        agent_name=attempt_agent_name,
+                        usage_record=fallback_usage,
+                    )
+                    active_response_recorded = True
+                    result = fallback_result
 
                 # Extract the type: "result" message's text for callers that
                 # need the full LLM output (e.g. discovery multi-turn context)
@@ -1965,6 +2221,7 @@ class LLMCaller:
                                 require_json=require_json,
                                 json_retry_count=json_retry_count + 1,
                                 max_json_retries=max_json_retries,
+                                invocation_intent=AgentInvocationIntent.DEFAULT,
                             )
 
                     duration_s = time.time() - start_time
@@ -1974,8 +2231,9 @@ class LLMCaller:
                 # --- Failure path: always attempt agent rotation ---
                 # detect_infra_error is retained for diagnostic labeling only;
                 # USAGE_LIMIT / TIMEOUT / OTHER all trigger rotation identically.
-                # Pass stderr_tail when available (CodexRunner populates it;
-                # ClaudeCodeRunner has no such field so getattr defaults to "").
+                # Pass stderr_tail when available (CodexRunner and
+                # ClaudeCodeRunner populate it; other result shapes fall back
+                # to "" via getattr).
                 infra_error = current_runner.detect_infra_error(
                     result.returncode,
                     result.output or "",
@@ -2007,6 +2265,33 @@ class LLMCaller:
                 )
 
             except Exception as e:
+                if not active_usage_recorded:
+                    if active_tracker is not None:
+                        failed_usage = active_tracker.usage_record
+                    else:
+                        failed_usage = parse_usage_record(
+                            active_output,
+                            call_id=active_call_id,
+                            attempt=internal_attempt,
+                            agent_name=attempt_agent_name,
+                            runner_type=attempt_runner_type,
+                            provider=effective_provider,
+                            provider_session_id=(
+                                startup_metadata.provider_session_id
+                            ),
+                            configured_model=configured_model,
+                            runner_startup_model=startup_model,
+                        )
+                    add_call_usage(failed_usage)
+                    active_usage_recorded = True
+                    if not active_response_recorded:
+                        self._record_response(
+                            active_output,
+                            self.external_attempt,
+                            agent_name=attempt_agent_name,
+                            usage_record=failed_usage,
+                        )
+                        active_response_recorded = True
                 attempt_errors.append(
                     f"attempt {internal_attempt + 1}: agent '{attempt_agent_name}' "
                     f"raised {type(e).__name__}: {e}"

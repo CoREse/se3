@@ -77,9 +77,10 @@ async def _setup(owner_id: str = "owner-A"):
     return state, hub, ui, HistoryRequestRegistry()
 
 
-def _msg(mode, records, cursor=None, cursor_base=None):
+def _msg(mode, records, cursor=None, cursor_base=None, usage=None):
     return protocol.make_history_data(
-        "f1", mode, records, cursor=cursor or {}, cursor_base=cursor_base or {}
+        "f1", mode, records, cursor=cursor or {}, cursor_base=cursor_base or {},
+        usage=usage,
     )
 
 
@@ -143,6 +144,200 @@ def test_append_frame_carries_cursor_after_the_append():
     assert frames[0]["records"] == [TAIL]
     assert frames[0]["cursor"] == {CURSOR_KEY: 2}
     assert frames[0]["signature"] == snapshot["signature"]
+
+
+# --------------------------------------------------------------------------
+# history_data frames carry the backend usage payload
+# --------------------------------------------------------------------------
+
+USAGE_PAYLOAD = {
+    "summary": {"totals": {"logical_input_tokens": 10, "output_tokens": 1}},
+    "completeness": "complete",
+}
+
+
+def test_full_frame_relays_the_backend_usage_payload():
+    """The WS push carries the SAME usage payload the REST bundle delivers."""
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_FULL,
+                [HEAD, TAIL],
+                {CURSOR_KEY: 2},
+                usage=USAGE_PAYLOAD,
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        snapshot = await state.get_history_snapshot("f1")
+        return ui.frames("history_data"), snapshot
+
+    frames, snapshot = asyncio.run(scenario())
+    assert len(frames) == 1
+    assert frames[0]["usage"] == USAGE_PAYLOAD
+    assert frames[0]["usage"] == snapshot["usage"]
+
+
+def test_frame_without_usage_omits_the_key():
+    """No bundle usage at all → the key is omitted, never a null/fake zero."""
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _msg(protocol.HISTORY_MODE_FULL, [HEAD, TAIL], {CURSOR_KEY: 2}),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        return ui.frames("history_data")
+
+    frames = asyncio.run(scenario())
+    assert len(frames) == 1
+    assert "usage" not in frames[0]
+
+
+def test_append_frame_relays_the_stored_usage_payload():
+    """Once a full frame carried usage, a usage-free append relays the same
+    stored backend payload — no rebuild on the hot append path."""
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_FULL,
+                [HEAD],
+                {CURSOR_KEY: 1},
+                usage=USAGE_PAYLOAD,
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_APPEND,
+                [TAIL],
+                {CURSOR_KEY: 2},
+                cursor_base={CURSOR_KEY: 1},
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        return ui.frames("history_data")
+
+    frames = asyncio.run(scenario())
+    assert len(frames) == 2
+    assert frames[0]["usage"] == USAGE_PAYLOAD
+    assert frames[1]["mode"] == protocol.HISTORY_MODE_APPEND
+    assert frames[1]["usage"] == USAGE_PAYLOAD
+
+
+def _usage_rec(ordinal=2):
+    rec = _rec(ordinal, "assistant", "hello")
+    rec["message"]["usage_records"] = [{
+        "schema_version": 2,
+        "call_id": "call-2",
+        "attempt": 0,
+        "usage_status": "available",
+        "provider": "anthropic",
+        "resolved_model": "claude-opus-5",
+        "logical_input_tokens": 30,
+        "uncached_input_tokens": 30,
+        "output_tokens": 3,
+    }]
+    return rec
+
+
+def test_usage_bearing_append_refreshes_the_stored_summary():
+    """An append that carries new usage must not keep relaying the stale
+    full-frame snapshot: the pushed frame (and the REST bundle) carries a
+    backend summary derived from ALL cached records."""
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_FULL,
+                [HEAD],
+                {CURSOR_KEY: 1},
+                usage=USAGE_PAYLOAD,
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_APPEND,
+                [_usage_rec()],
+                {CURSOR_KEY: 2},
+                cursor_base={CURSOR_KEY: 1},
+            ),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        snapshot = await state.get_history_snapshot("f1")
+        return ui.frames("history_data"), snapshot
+
+    frames, snapshot = asyncio.run(scenario())
+    assert len(frames) == 2
+    assert frames[0]["usage"] == USAGE_PAYLOAD
+    assert frames[1]["mode"] == protocol.HISTORY_MODE_APPEND
+    # The appended record's call now shows up in the refreshed payload.
+    assert frames[1]["usage"] != USAGE_PAYLOAD
+    call_ids = [c["call_id"] for c in frames[1]["usage"]["calls"]]
+    assert "call-2" in call_ids
+    totals = frames[1]["usage"]["summary"]["totals"]
+    assert totals["logical_input_tokens"] == 30
+    assert totals["output_tokens"] == 3
+    # The REST snapshot serves the same refreshed payload.
+    assert snapshot["usage"] == frames[1]["usage"]
+
+
+def test_full_frame_without_usage_rebuilds_from_records():
+    """A daemon that never sends a usage payload (legacy) still gets the
+    shared-backend rebuild on full frames — same as the REST path."""
+
+    def _usage_rec():
+        rec = _rec(0, "assistant", "hello")
+        rec["message"]["usage_records"] = [{
+            "schema_version": 2,
+            "call_id": "call-1",
+            "attempt": 0,
+            "usage_status": "available",
+            "logical_input_tokens": 10,
+            "uncached_input_tokens": 10,
+            "output_tokens": 1,
+        }]
+        return rec
+
+    async def scenario():
+        state, hub, ui, registry = await _setup()
+        await _handle_message(
+            _msg(protocol.HISTORY_MODE_FULL, [_usage_rec()], {CURSOR_KEY: 1}),
+            state,
+            "m1",
+            hub,
+            registry,
+        )
+        snapshot = await state.get_history_snapshot("f1")
+        return ui.frames("history_data"), snapshot
+
+    frames, snapshot = asyncio.run(scenario())
+    assert len(frames) == 1
+    assert frames[0]["usage"] == snapshot["usage"]
+    assert frames[0]["usage"]["summary"]["totals"]["logical_input_tokens"] == 10
 
 
 # --------------------------------------------------------------------------

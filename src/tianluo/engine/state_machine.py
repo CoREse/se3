@@ -10,10 +10,11 @@ import json
 import logging
 import subprocess
 import sys
+import uuid
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from .models import (
     FlowInstance,
@@ -25,17 +26,28 @@ from .models import (
     get_default_step_sequence,
     get_step_info,
 )
+from .implementation_strategy import (
+    ImplementationStrategyError,
+    ImplementationStrategyResolver,
+)
 from . import adjudication
 from ..i18n import t
 from .chat_history import _history_dir
 from .llm_caller import clear_phase1_cache
+from .review_scope import (
+    ReviewBaseline,
+    ReviewScopeManager,
+    SelfCheckRoundController,
+)
 from .token_usage import accumulate_step_usage, UsageTotals
+from ..usage import UsageRecord, UsageSummary, deduplicate_usage_records
 from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
 from ..config import (
     ConfigError,
     insert_confirmation_steps,
+    load_pricing_catalog,
     resolve_confirm_inputs,
     WorkflowConfig,
 )
@@ -73,6 +85,17 @@ class MergeCheckoutResolutionError(StateMachineError):
     """
 
     pass
+
+
+# Cap on automatic PARTIAL → re-run continuations for a holistic IMPLEMENT
+# step (small task type, or feature with --implementation-strategy direct).
+# Each continuation is a fresh paid LLM call and a partial result never
+# reaches the FAILED decision path on its own, so without this bound a caller
+# that keeps reporting "partial" would loop forever. Past the limit the step
+# is persisted as FAILED and run.py routes it into its Retry/Skip/Abort
+# decision path — further attempts then require an explicit user choice. The
+# budget is sticky across resume so an automated resume loop cannot extend it.
+_HOLISTIC_CONTINUATION_LIMIT = 3
 
 
 def _reset_retry_counter_for_new_call(step: "Step") -> None:
@@ -132,10 +155,10 @@ def _latest_adjudicated_output(
     of against the ruling's own unapproved rewrite (which, being at the tail, is
     otherwise what the newest-wins walk would surface).
 
-    Shared by the effective-text layer (``_effective_task_description_base``)
-    and the plan-override in ``_build_step_inputs`` so both call points pick up
-    ``adjudicated_description`` / ``adjudicated_plan`` with the same
-    latest-wins semantics.
+    Modern routing consumes this helper only for the effective-description
+    chain. Passing ``key="adjudicated_plan"`` remains supported for old flow
+    display/recovery code, but a legacy plan override no longer changes modern
+    IMPLEMENT or SELF_CHECK inputs.
     """
     if not (flow.state and flow.state.step_history):
         return None
@@ -266,6 +289,30 @@ _PREVIOUS_OUTPUT_MAX_BYTES = 20_000
 _FIX_HISTORY_ISSUES_CAP = 10
 
 
+def _declared_changed_paths(inputs: Mapping[str, Any]) -> List[str]:
+    """Paths the implement step self-reported under ``changes_made``.
+
+    Only used to admit git-ignored files into the review scope (the baseline
+    enumerates with ``--exclude-standard`` and can never hold them); the
+    reconstructed diff stays authoritative for everything git can see.
+    """
+    changes = inputs.get("changes_made") or {}
+    if not isinstance(changes, dict):
+        return []
+    files_changed = changes.get("files_changed") or []
+    if not isinstance(files_changed, list):
+        return []
+    out: List[str] = []
+    for entry in files_changed:
+        if isinstance(entry, str) and entry.strip():
+            out.append(entry.strip())
+        elif isinstance(entry, dict):
+            path = entry.get("path") or entry.get("file_path")
+            if isinstance(path, str) and path.strip():
+                out.append(path.strip())
+    return out
+
+
 def _cap_issue_list(value: Any) -> list:
     """Return a capped list of issue dicts. Tolerates non-list input (e.g. bool,
     None, a single dict) so fix_history stays well-formed regardless of what a
@@ -376,6 +423,7 @@ class StateMachine:
         task_type: str = "feature",
         change_name: Optional[str] = None,
         is_worktree_mode: bool = False,
+        implementation_strategy: Optional[str] = None,
     ) -> FlowInstance:
         """Create a new flow instance.
 
@@ -385,6 +433,9 @@ class StateMachine:
             change_name: Optional associated change name
             is_worktree_mode: Whether this flow runs in worktree isolation mode
                 (``luo run --worktree``)
+            implementation_strategy: Optional explicit auto/direct/planned
+                request. When absent, project configuration and then the
+                planned default are used.
 
         Returns:
             New flow instance
@@ -423,9 +474,6 @@ class StateMachine:
         if is_worktree_mode:
             selected_steps = self._append_worktree_merge_steps(selected_steps)
 
-        # Insert confirmation steps based on config
-        selected_steps = self._insert_confirmation_steps(selected_steps)
-
         flow = FlowInstance(
             task_description=task_description,
             task_type=task_type,
@@ -440,6 +488,35 @@ class StateMachine:
         flow.state.context["task_description"] = task_description
         flow.state.context["task_type"] = task_type
         flow.state.context["project_root"] = str(self.project_root)
+        configured_strategy = (
+            workflow_cfg.implementation_strategy
+            if (
+                workflow_cfg.implementation_strategy_explicit
+                or workflow_cfg.implementation_strategy != "planned"
+            )
+            else None
+        )
+        try:
+            strategy = ImplementationStrategyResolver.initialize_context(
+                flow.state.context,
+                task_type=task_type,
+                selected_steps=selected_steps,
+                explicit_request=implementation_strategy,
+                configured_strategy=configured_strategy,
+            )
+        except ImplementationStrategyError as exc:
+            raise ConfigError(str(exc)) from exc
+
+        # Strategy rewriting is intentionally the final sequence transform
+        # before confirmation insertion.  INVESTIGATE, optional E2E and the
+        # worktree merge tail therefore survive direct mode, while PLAN cannot
+        # acquire an orphaned confirmation gate.
+        selected_steps = ImplementationStrategyResolver.apply_to_steps(
+            selected_steps,
+            strategy.effective,
+        )
+        selected_steps = self._insert_confirmation_steps(selected_steps)
+        flow.state.selected_steps = selected_steps
         # Stash the main checkout the merge-side steps must run in, resolved once
         # at flow creation from the (possibly worktree) project_root. Read back by
         # ``_merge_step_cwd`` when a merge step is instantiated — kept stable here
@@ -900,6 +977,14 @@ class StateMachine:
         # introduced ones. Idempotent across fix-loop re-entries into implement.
         if step.step_type == StepType.IMPLEMENT:
             self._ensure_baseline_ready(flow)
+            self._ensure_implementation_review_baseline(flow, step)
+
+        # An interjection can mutate the effective requirements while a
+        # SELF_CHECK step is pending or being retried. Refresh here, immediately
+        # before persistence and the LLM call, so such a mutation invalidates an
+        # incremental round even when no step-construction boundary occurred.
+        if step.step_type == StepType.SELF_CHECK:
+            self._refresh_self_check_scope(flow, step)
 
         # INVESTIGATE writes probes into the very tree the background baseline
         # suite is running against, so the two must never overlap. Settled here
@@ -1088,12 +1173,13 @@ class StateMachine:
             # Aggregate this step's token usage before persisting. Best-effort:
             # a fault here must never break the step / flow.
             #
-            # Two consumers read this:
-            #  * the CLI session total — flow.state.session_token_usage — which
-            #    folds EVERY run_step's usage (this is the authoritative total);
-            #  * the web session badge — which re-derives the session total by
-            #    summing token_usage off the *emitted* terminal step_completed
-            #    records (one per COMPLETED/PARTIAL/FAILED run; see run.py).
+            # Consumers read this as:
+            #  * the CLI session summary — built from
+            #    flow.state.session_usage_records, the authoritative per-call
+            #    ledger, with session_token_usage as its legacy projection;
+            #  * the web session badge — which renders the backend
+            #    UsageSummary payload (never a client-side re-sum of emitted
+            #    records; see applyUsageBadge in app.js).
             #
             # Both terminal and non-terminal runs publish `token_usage` so that
             # CLI renderers (`render_step_usage`) and WebUI report cards
@@ -1104,29 +1190,92 @@ class StateMachine:
             # confirm steps returning REVISION_NEEDED left no usage visible to
             # any consumer reading `outputs.token_usage`.
             #
-            # To keep the web session badge (which re-derives the total by
-            # summing token_usage off emitted terminal records) in agreement
-            # with the CLI authoritative total (session_token_usage, which
-            # folds EVERY run_step's step_usage), a non-terminal run also
-            # carries the combined total forward in `carried_token_usage` so
-            # the next emitted terminal record's token_usage includes all prior
-            # non-emitting rounds. The session total still adds only the
-            # current run's step_usage — not the combined total — so there is
-            # no double-counting.
+            # A non-terminal run also carries the combined total forward in
+            # `carried_token_usage` so the next run's `token_usage` includes
+            # all prior non-emitting rounds, keeping the step-level display
+            # complete across PAUSED/REVISION_NEEDED runs. The session records
+            # still add only the current run's step_usage — not the combined
+            # total — so there is no double-counting.
+            #
+            # `usage_records` / `usage_summary` publish the same per-step
+            # records through the shared UsageSummary backend (billing-unit
+            # de-duplicated actual cost + estimated/unknown classification),
+            # and the per-step ledger accumulates across re-executions (FIX
+            # iterations, retries, resumes), so step and session views can
+            # never diverge by construction.
             try:
-                if step_usage is not None and not step_usage.is_empty():
-                    flow.state.session_token_usage.add(step_usage)
+                # A run-unique discriminator keeps the legacy-record synthesis
+                # (step_usage without embedded UsageRecords) from colliding
+                # with the same step's earlier rounds in session-level dedup —
+                # each round is genuinely new usage.
+                run_discriminator = str(uuid.uuid4())[:8]
+                current_records: List[UsageRecord] = []
+                if step_usage is not None and (
+                    step_usage.has_usage_records or not step_usage.is_empty()
+                ):
+                    current_records = step_usage.to_usage_records(
+                        call_id=f"step:{step.step_id}:{run_discriminator}"
+                    )
+                    for record in current_records:
+                        flow.state.add_session_usage_record(record)
                 # Combine this run's usage with usage carried from prior
                 # non-terminal (PAUSED / REVISION_NEEDED) runs of this step.
-                combined = UsageTotals.from_dict(
+                carried = UsageTotals.from_dict(
                     step.outputs.get("carried_token_usage")
                 )
-                if step_usage is not None:
-                    combined.add(step_usage)
+                carried_records = (
+                    carried.to_usage_records(
+                        call_id=f"step:{step.step_id}:carried"
+                    )
+                    if carried.has_usage_records or not carried.is_empty()
+                    else []
+                )
+                # Prior completed executions' records stay on the step ledger:
+                # the per-step summary must cover every call/attempt the step
+                # ran across initial implementation, FIX iterations, retries
+                # and resumes — not just the most recent execution. The
+                # dedup below collapses the carried overlap (carried embeds
+                # these same records) and any replayed copies.
+                prior_outputs = step.outputs.get("usage_records")
+                prior_records = (
+                    [
+                        UsageRecord.from_dict(item)
+                        for item in prior_outputs
+                        if isinstance(item, dict)
+                    ]
+                    if isinstance(prior_outputs, list)
+                    else []
+                )
+                combined_records = deduplicate_usage_records(
+                    prior_records + carried_records + current_records
+                )[0]
+                combined = UsageTotals.from_usage_records(combined_records)
                 # Publish `token_usage` for both terminal and non-terminal
                 # runs so step-level renderers can display it.
-                if not combined.is_empty():
+                if combined.has_usage_records or not combined.is_empty():
                     step.outputs["token_usage"] = combined.to_dict()
+                if combined_records:
+                    step.outputs["usage_records"] = [
+                        record.to_dict() for record in combined_records
+                    ]
+                    # Records are already persisted above, so the summary keeps
+                    # the records-free shape — but it must still carry its
+                    # aggregate token totals and completeness, otherwise a
+                    # consumer reading step.outputs.usage_summary directly
+                    # reconstructs a zero-token, unavailable summary.
+                    #
+                    # Model-provenance marking is skipped here: this compact
+                    # summary travels without the per-call rows that an
+                    # unknown-model count annotates, so a legacy-adapted
+                    # record's missing model would only degrade the
+                    # completeness label beside pure totals. The flow-level
+                    # payloads (history CLI / daemon / WebUI) keep the marking
+                    # and surface the unknown-model row there.
+                    step.outputs["usage_summary"] = UsageSummary.summarize(
+                        combined_records,
+                        catalog=load_pricing_catalog(self.project_root),
+                        mark_unknown_models=False,
+                    ).to_dict_for_wire()
                 if step.status in (
                     StepStatus.COMPLETED,
                     StepStatus.PARTIAL,
@@ -1139,7 +1288,7 @@ class StateMachine:
                 else:
                     # Non-terminal: also carry the combined total forward so
                     # the next run of this step can accumulate into it.
-                    if not combined.is_empty():
+                    if combined.has_usage_records or not combined.is_empty():
                         step.outputs["carried_token_usage"] = combined.to_dict()
             except Exception:
                 logger.debug("Failed to record step token usage", exc_info=True)
@@ -1162,7 +1311,22 @@ class StateMachine:
 
         return step.status
 
-    def transition_to_next(self, flow: FlowInstance) -> Optional[Step]:
+    @staticmethod
+    def _is_holistic_implement_step(flow: FlowInstance, step: Step) -> bool:
+        """Identify persisted direct and small whole-task IMPLEMENT paths."""
+        task_type = step.inputs.get("task_type") or flow.task_type
+        if task_type == "small":
+            return True
+        effective = step.inputs.get("effective_implementation_strategy")
+        if effective is None:
+            effective = flow.state.context.get(
+                "effective_implementation_strategy"
+            )
+        return effective == "direct"
+
+    def transition_to_next(
+        self, flow: FlowInstance,
+    ) -> Optional[Step]:
         """Transition to the next step based on current state.
 
         Handles normal progression and review loop (going back to previous step).
@@ -1222,6 +1386,79 @@ class StateMachine:
                 f"Cannot transition from {current_step.status.value} step"
             )
             return None
+
+        # A whole-task IMPLEMENT is complete only when its structured result
+        # says complete and carries no unfinished work. Keep the same Step and
+        # workspace live for another autonomous call; planned group execution
+        # retains its historical PARTIAL-forwarding semantics. The gate must
+        # not fire when the transition itself IS the user's Skip decision —
+        # re-capturing there would either resurrect the identical failure
+        # prompt (budget exhausted) or convert the Skip into an unrequested
+        # paid re-run (budget not exhausted). run.py marks the step with a
+        # one-shot ``holistic_skip_forced`` input flag for that choice; every
+        # other path (normal completion, crash-resume) keeps the automatic
+        # loop. The flag lives on the step rather than a call parameter so
+        # the intent is persisted flow state and the public transition
+        # signature stays ``transition_to_next(flow)`` for all callers.
+        skip_forced = bool(current_step.inputs.pop("holistic_skip_forced", False))
+        if (
+            not skip_forced
+            and current_step.step_type == StepType.IMPLEMENT
+            and self._is_holistic_implement_step(flow, current_step)
+            and (
+                current_step.status == StepStatus.PARTIAL
+                or bool(current_step.outputs.get("incomplete_tasks"))
+                or str(
+                    current_step.outputs.get("completion_status", "complete")
+                ).strip().lower() != "complete"
+            )
+        ):
+            previous_output = {
+                key: copy.deepcopy(current_step.outputs.get(key))
+                for key in (
+                    "files_changed",
+                    "tests_added",
+                    "test_mapping",
+                    "summary",
+                    "completion_status",
+                    "incomplete_tasks",
+                )
+                if key in current_step.outputs
+            }
+            current_step.inputs["previous_output"] = previous_output
+            current_step.inputs["resumed"] = True
+            current_step.inputs["retry_count"] = (
+                current_step.inputs.get("retry_count", 0) + 1
+            )
+            continuations = (
+                current_step.inputs.get("holistic_continuations", 0) + 1
+            )
+            current_step.inputs["holistic_continuations"] = continuations
+            # Bound the automatic continuation loop: past the limit, persist
+            # FAILED so run.py routes into its Retry/Skip/Abort decision path
+            # instead of silently paying for another agent call. run_step has
+            # no FAILED-status guard, so returning the step here would just
+            # re-invoke the handler — the persisted FAILED is what stops it.
+            if continuations > _HOLISTIC_CONTINUATION_LIMIT:
+                current_step.status = StepStatus.FAILED
+                current_step.error_message = t(
+                    "engine.implement.holistic_partial_exhausted",
+                    limit=_HOLISTIC_CONTINUATION_LIMIT,
+                )
+                current_step.error_details = None
+                self.persistence.save_flow(flow)
+                return None
+            current_step.status = StepStatus.PENDING
+            current_step.error_message = None
+            current_step.error_details = None
+            # A partial summary is a completed Phase 1 result, not a schema-
+            # extraction retry. The continuation must call the implementation
+            # agent again while history supplies its retry context.
+            clear_phase1_cache(
+                self.project_root, flow.flow_id, current_step.step_id,
+            )
+            self.persistence.save_flow(flow)
+            return current_step
 
         # Handle the fix loop: TEST, E2E, SELF_CHECK, or INVARIANT_CHECK returning
         # REVISION_NEEDED (the anchored INVARIANT_CHECK replaces the retired
@@ -1284,6 +1521,7 @@ class StateMachine:
                 # guard above (so the global bound still caps a flow that keeps
                 # adjudicating without converging).
                 if current_step.step_type == StepType.SELF_CHECK:
+                    self._self_check_round_controller(flow).mark_findings()
                     adjudicate_step = self._maybe_transition_to_adjudicate(
                         flow, current_step, current_iteration,
                     )
@@ -1365,7 +1603,13 @@ class StateMachine:
                     return revision_step
                 # If transition failed, continue to normal flow (will likely fail later)
 
-        # Handle N-pass self_check: if SELF_CHECK completed, check if we need more passes
+        requirement_reflow = self._maybe_reflow_self_check_for_requirements(
+            flow, current_step
+        )
+        if requirement_reflow is not None:
+            return requirement_reflow
+
+        # Handle N-pass self_check and the incremental -> full-closure boundary.
         if (
             current_step.step_type == StepType.SELF_CHECK
             and current_step.status == StepStatus.COMPLETED
@@ -1378,18 +1622,153 @@ class StateMachine:
                 flow.state.context["self_check_deferred_issues"] = copy.deepcopy(
                     current_step.outputs["self_check_deferred_issues"]
                 )
-            passes_required = self._get_self_check_passes_required()
-            consecutive_passes = self._count_consecutive_self_check_completed(flow)
+            if current_step.inputs.get("self_check_round_id"):
+                controller = self._self_check_round_controller(flow)
+                effective_description = _compose_effective_task_description(flow)
+                if controller.requirements_changed(effective_description):
+                    controller.force_full("effective_requirements_changed")
+                    logger.info(
+                        "Effective requirements changed during SELF_CHECK; "
+                        "discarding the active scope and restarting at full pass #1"
+                    )
+                    # The mutation ends the pass chain, but a deferred stash
+                    # accumulated by earlier passes must still reach the fix
+                    # loop. ``_build_step_inputs`` resets the stash at pass #1,
+                    # so capture it here and re-inject it into the new full
+                    # round's inputs — the new round funnels it into the fix
+                    # loop exactly as a mid-chain pass would have.
+                    deferred_before_reset = copy.deepcopy(
+                        flow.state.context.get("self_check_deferred_issues") or []
+                    )
+                    repeat_step = self._create_self_check_repeat_step(
+                        flow, advance_pass=False,
+                    )
+                    if deferred_before_reset:
+                        flow.state.context["self_check_deferred_issues"] = (
+                            deferred_before_reset
+                        )
+                        repeat_step.inputs["self_check_deferred_issues"] = (
+                            copy.deepcopy(deferred_before_reset)
+                        )
+                        self.persistence.save_flow(flow)
+                    return repeat_step
 
-            if consecutive_passes < passes_required:
-                next_pass_index = consecutive_passes + 1
-                logger.info(
-                    f"Self-check pass {consecutive_passes}/{passes_required} completed; "
-                    f"creating repeat pass #{next_pass_index}/{passes_required}"
+                passes_required = int(
+                    current_step.inputs.get("self_check_passes_required", 1) or 1
                 )
-                repeat_step = self._create_self_check_repeat_step(flow)
-                return repeat_step
-            # else: all N passes completed — fall through to normal progression
+                pass_index = int(
+                    current_step.inputs.get("self_check_pass_index", 1) or 1
+                )
+                if pass_index < passes_required:
+                    logger.info(
+                        "Self-check pass %d/%d completed; creating repeat pass #%d/%d",
+                        pass_index, passes_required, pass_index + 1, passes_required,
+                    )
+                    return self._create_self_check_repeat_step(flow)
+
+                unflushed = self._unflushed_deferred_issues(flow, current_step)
+                round_key = self._deferred_flush_round_key(current_step)
+                attempted = flow.state.context.get(
+                    "self_check_deferred_flush_attempted"
+                )
+                already_attempted = (
+                    isinstance(attempted, str)
+                    and attempted
+                    and attempted == round_key
+                )
+                stash = flow.state.context.get("self_check_deferred_issues") or []
+                stash = list(stash) if isinstance(stash, list) else []
+                rescue_skipped = (
+                    already_attempted
+                    and bool(stash)
+                    and not current_step.outputs.get("fix_needed")
+                    and "self_check_deferred_issues" not in (
+                        current_step.outputs or {}
+                    )
+                )
+                if rescue_skipped:
+                    # The rescue pass for this round already ran (or was
+                    # itself skipped) and the stash is still unconsumed.
+                    # Routing another rescue pass would loop a
+                    # repeatedly-skipped pass; the validated findings must
+                    # instead go to the fix loop NOW — the one destination
+                    # the check-step contract permits.
+                    logger.warning(
+                        "SELF_CHECK deferred-issue rescue for round %s was "
+                        "attempted but left %d validated finding(s) "
+                        "unflushed; routing them into the fix loop",
+                        round_key, len(stash),
+                    )
+                    self._route_deferred_into_fix_loop(
+                        flow, current_step, stash
+                    )
+                    # Mirror the normal finding-bearing path: close the
+                    # round with findings and honor the same adjudication
+                    # routing before entering the fix loop.
+                    self._self_check_round_controller(flow).mark_findings()
+                    adjudicate_step = self._maybe_transition_to_adjudicate(
+                        flow, current_step, flow.state.get_fix_iteration(),
+                    )
+                    if adjudicate_step:
+                        return adjudicate_step
+                    fix_step = self._transition_to_fix(flow, current_step)
+                    if fix_step:
+                        return fix_step
+                if unflushed:
+                    # The pass chain is ending with validated findings still in
+                    # the stash — the final pass never ran its own flush (a
+                    # FAILED pass force-completed via the Skip gate produces no
+                    # outputs). Closing the round here would silently discard
+                    # them, the one outcome the check-step contract forbids, so
+                    # re-run the terminal pass with the stash re-injected; its
+                    # chain-tail flush funnels them into the fix loop.
+                    logger.warning(
+                        "SELF_CHECK pass chain ended with %d deferred issue(s) "
+                        "never flushed; re-running the terminal pass to route "
+                        "them into the fix loop",
+                        len(unflushed),
+                    )
+                    flow.state.context["self_check_deferred_flush_attempted"] = (
+                        round_key
+                    )
+                    repeat_step = self._create_self_check_repeat_step(
+                        flow, advance_pass=False,
+                    )
+                    flow.state.context["self_check_deferred_issues"] = copy.deepcopy(
+                        unflushed
+                    )
+                    repeat_step.inputs["self_check_deferred_issues"] = copy.deepcopy(
+                        unflushed
+                    )
+                    self.persistence.save_flow(flow)
+                    return repeat_step
+
+                if controller.complete_clean():
+                    logger.info(
+                        "Incremental SELF_CHECK round completed cleanly; "
+                        "scheduling the required full closure round"
+                    )
+                    return self._create_self_check_repeat_step(
+                        flow, advance_pass=False,
+                    )
+                # A clean full round (initial, forced, or closure) is the sole
+                # route to the next selected quality gate.
+            else:
+                # Legacy persisted rounds have no scope metadata. Preserve their
+                # historical N-pass behavior instead of rewriting a path that
+                # was already underway before diff-scoped review existed.
+                passes_required = self._get_self_check_passes_required()
+                consecutive_passes = self._count_consecutive_self_check_completed(flow)
+                if consecutive_passes < passes_required:
+                    next_pass_index = consecutive_passes + 1
+                    logger.info(
+                        f"Self-check pass {consecutive_passes}/{passes_required} completed; "
+                        f"creating repeat pass #{next_pass_index}/{passes_required}"
+                    )
+                    repeat_step = self._create_self_check_repeat_step(
+                        flow, advance_pass=False,
+                    )
+                    return repeat_step
 
         # Handle the bounded investigation loop: an INVESTIGATE round that did
         # not reach a conclusive root cause schedules another round, up to
@@ -1546,6 +1925,24 @@ class StateMachine:
         # Keep the outputs for reference, but mark that they may be outdated
         step_to_review.outputs["_is_outdated"] = True
 
+        # A rejected CONFIRM re-enters IMPLEMENT with revision feedback — a
+        # real code change. Capture a fresh fix baseline so the next
+        # SELF_CHECK round's incremental diff is relative to the state
+        # immediately before THIS change, not to a stale baseline from an
+        # earlier fix iteration.
+        if step_to_review.step_type == StepType.IMPLEMENT:
+            self._capture_fix_review_baseline(flow, iteration)
+
+        # A confirmation revision of SELF_CHECK is NOT a fix: no code changed
+        # since the rejected round, so scoping the re-run to the previous fix
+        # delta would leave the reviewer's feedback ungroundable whenever it
+        # names a defect outside that delta. Incremental scope is reserved for
+        # the round that follows an actual FIX.
+        if step_to_review.step_type == StepType.SELF_CHECK:
+            self._self_check_round_controller(flow).force_full(
+                "confirmation_revision"
+            )
+
         # Update flow state to point back to this step
         flow.state.current_step_id = step_to_review_id
 
@@ -1629,6 +2026,12 @@ class StateMachine:
             }
         )
 
+        # Capture before the pending IMPLEMENT is persisted or invoked. This is
+        # the only recoverable anchor for the exact code delta attributable to
+        # this fix attempt; a missing/corrupt capture is recorded as unavailable
+        # and later forces a full review instead of masquerading as an empty diff.
+        self._capture_fix_review_baseline(flow, iteration)
+
         logger.info(
             f"Transitioning to fix iteration {iteration} for {implement_step.step_type.value}"
         )
@@ -1661,15 +2064,6 @@ class StateMachine:
         # discovery-refined wording and any Ctrl-C user interjections —
         # making mid-flow corrections invisible to every fix iteration.
         implement_step.inputs["task_description"] = _compose_effective_task_description(flow)
-        # Mirror ``_build_step_inputs``: a plan-changing adjudication ruling must
-        # reach the REUSED implement step too, or it would write
-        # ``implemented_groups`` from the superseded pre-adjudication plan (which
-        # then flows into the next SELF_CHECK prompt, version_analyze, and the
-        # history renderer as stale audit/telemetry). Freshly built steps already
-        # get this; the reused one did not.
-        adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
-        if isinstance(adjudicated_plan, list) and adjudicated_plan:
-            implement_step.inputs["task_groups"] = adjudicated_plan
         # Same reasoning for the root-cause report: this path REUSES the
         # implement step instead of rebuilding its inputs, so without an
         # explicit copy here the fix iterations would be the only implement
@@ -2173,6 +2567,13 @@ class StateMachine:
             }
         )
 
+        # The ruling changed the effective requirement authority without
+        # changing code. Any in-flight incremental baseline therefore describes
+        # the wrong review contract and must be discarded before pass #1.
+        self._self_check_round_controller(flow).force_full(
+            "effective_requirements_changed"
+        )
+
         inputs = self._build_step_inputs(flow, StepType.SELF_CHECK)
         self_check_step = Step(
             step_type=StepType.SELF_CHECK,
@@ -2578,7 +2979,96 @@ class StateMachine:
             count += 1
         return count
 
-    def _create_self_check_repeat_step(self, flow: FlowInstance) -> Step:
+    def _unflushed_deferred_issues(
+        self, flow: FlowInstance, step: Step
+    ) -> list:
+        """Deferred findings the terminal pass never consumed into a fix loop.
+
+        The handler always writes ``self_check_deferred_issues`` back (``[]``
+        once flushed), so an outputs-less terminal pass — the Skip gate
+        force-completing a FAILED step — is the case where the context stash
+        survives with nobody to consume it.
+
+        WHY the guard is per ROUND, not per flow: it exists only to stop a
+        repeatedly skipped pass from looping inside one round. A later round
+        stashes its own freshly validated findings, and those must still get
+        their rescue — a flow-wide latch would silently discard them, the one
+        outcome the check-step contract forbids. The CALLER checks the
+        skipped-rescue case against the stash before consulting this latch,
+        so an attempted-but-unconsumed stash routes into the fix loop
+        instead of being latched away here.
+        """
+        attempted = flow.state.context.get("self_check_deferred_flush_attempted")
+        round_id = self._deferred_flush_round_key(step)
+        if isinstance(attempted, str) and attempted and attempted == round_id:
+            return []
+        if step.outputs.get("fix_needed"):
+            return []
+        if "self_check_deferred_issues" in (step.outputs or {}):
+            return []
+        stash = flow.state.context.get("self_check_deferred_issues") or []
+        return list(stash) if isinstance(stash, list) else []
+
+    @staticmethod
+    def _deferred_flush_round_key(step: Step) -> str:
+        """Identity of the round a deferred-flush rescue belongs to.
+
+        Legacy rounds carry no scope metadata, so they share one key — the
+        rescue stays bounded for them exactly as before.
+        """
+        return str(step.inputs.get("self_check_round_id") or "") or "legacy-round"
+
+    def _route_deferred_into_fix_loop(
+        self, flow: FlowInstance, step: Step, issues: list
+    ) -> None:
+        """Attach unflushed deferred findings to the step as fix-loop outputs.
+
+        Mirrors the handler's ``_build_fix_outputs`` shape so
+        ``_transition_to_fix`` consumes them exactly like a normal
+        finding-bearing pass: ``fix_instructions`` for the implement prompt,
+        ``fix_context.issues`` for the fix-iteration record, and a cleared
+        stash so a downstream reader cannot mistake them for still-pending
+        deferrals.
+        """
+        issue_details = "\n".join(
+            f"- [{str(issue.get('severity', 'high'))}] "
+            + " | ".join(
+                [
+                    str(issue.get("location") or "?"),
+                    (
+                        f"actual: "
+                        f"{issue.get('actual_behavior') or issue.get('description') or ''}"
+                    ),
+                    f"expected: {issue.get('expected_behavior') or ''}",
+                    f"divergence: {issue.get('divergence') or ''}",
+                ]
+            )
+            for issue in issues
+            if isinstance(issue, dict)
+        )
+        fix_iteration = flow.state.get_fix_iteration()
+        step.outputs["issues"] = copy.deepcopy(issues)
+        step.outputs["actionable_count"] = len(issues)
+        step.outputs["fix_needed"] = True
+        step.outputs["fix_iteration"] = fix_iteration
+        step.outputs["max_fix_iterations"] = self._get_max_fix_iterations()
+        step.outputs["fix_instructions"] = (
+            f"Self-check found {len(issues)} deferred issue(s) that need "
+            "fixing:\n"
+            f"{issue_details}\n\n"
+            "Fix the issues listed above and ensure the logic is correct."
+        )
+        step.outputs["fix_context"] = {
+            "reason": "self_check",
+            "issues": copy.deepcopy(issues),
+            "iteration": fix_iteration + 1,
+        }
+        step.outputs["self_check_deferred_issues"] = []
+        flow.state.context["self_check_deferred_issues"] = []
+
+    def _create_self_check_repeat_step(
+        self, flow: FlowInstance, *, advance_pass: bool = True
+    ) -> Step:
         """Create a repeated self_check Step instance for the N-pass requirement.
 
         Builds inputs via _build_step_inputs which computes the pass position so
@@ -2590,6 +3080,8 @@ class StateMachine:
         Returns:
             A new Step instance of type SELF_CHECK, already added to flow.state.
         """
+        if advance_pass:
+            self._self_check_round_controller(flow).advance_pass()
         inputs = self._build_step_inputs(flow, StepType.SELF_CHECK)
 
         step = Step(
@@ -2602,6 +3094,52 @@ class StateMachine:
         # current_step_index does NOT advance — we are still at the SELF_CHECK
         # slot in the selected_steps sequence.
         self.persistence.save_flow(flow)
+        return step
+
+    def _maybe_reflow_self_check_for_requirements(
+        self, flow: FlowInstance, current_step: Step
+    ) -> Optional[Step]:
+        """Re-enter full SELF_CHECK when requirements mutate after its slot."""
+        if current_step.step_type == StepType.SELF_CHECK:
+            return None
+        review_state = flow.state.context.get("self_check_review")
+        if not isinstance(review_state, dict) or not review_state.get(
+            "force_full_reason"
+        ):
+            return None
+        selected = flow.state.selected_steps
+        try:
+            self_check_index = selected.index(StepType.SELF_CHECK)
+        except ValueError:
+            return None
+        current_index = flow.state.current_step_index
+        if (
+            current_index < len(selected)
+            and selected[current_index] != current_step.step_type
+        ):
+            try:
+                current_index = selected.index(current_step.step_type)
+            except ValueError:
+                return None
+        if current_index < self_check_index:
+            # The ordinary forward sequence will consume the force-full marker
+            # when it reaches SELF_CHECK; no dynamic reflow is needed yet.
+            return None
+
+        inputs = self._build_step_inputs(flow, StepType.SELF_CHECK)
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        flow.state.current_step_index = self_check_index
+        self.persistence.save_flow(flow)
+        logger.info(
+            "Effective requirements changed after SELF_CHECK; reflowing to "
+            "full pass #1 before downstream gates may advance"
+        )
         return step
 
     def _build_step_inputs(self, flow: FlowInstance, step_type: StepType) -> Dict[str, Any]:
@@ -2636,6 +3174,8 @@ class StateMachine:
                 elif step.step_type == StepType.ANALYZE:
                     inputs["task_type"] = step.outputs.get("task_type")
                     inputs["scope"] = step.outputs.get("scope")
+                    inputs["complexity"] = step.outputs.get("complexity")
+                    inputs["analysis_reasoning"] = step.outputs.get("reasoning")
                     # Merged from the former project_summary step. The retired
                     # spec-selection mechanism no longer produces spec_content /
                     # relevant_specs / selected_items; downstream steps receive the
@@ -2727,18 +3267,21 @@ class StateMachine:
             inputs["original_task_description"] = inputs["task_description"]
         inputs["task_description"] = _compose_effective_task_description(flow)
 
-        # Adjudication also overrides the plan: prefer the latest ADJUDICATE's
-        # adjudicated_plan over the original PLAN task_groups so every
-        # downstream step — and the self_check verbatim_quote source pool —
-        # audits against the ruled plan rather than the superseded one. Only
-        # override when a ruling actually supplied a plan, leaving the
-        # no-adjudication path (task_groups from the PLAN step) untouched.
-        # Capture the pre-ruling plan first so a CONFIRM gating an unapproved
-        # ruling (below) can restore it as the reviewer's baseline.
-        pre_ruling_task_groups = inputs.get("task_groups")
-        adjudicated_plan = _latest_adjudicated_output(flow, "adjudicated_plan")
-        if isinstance(adjudicated_plan, list) and adjudicated_plan:
-            inputs["task_groups"] = adjudicated_plan
+        if step_type == StepType.IMPLEMENT:
+            inputs["requested_implementation_strategy"] = flow.state.context.get(
+                "requested_implementation_strategy"
+            )
+            inputs["effective_implementation_strategy"] = flow.state.context.get(
+                "effective_implementation_strategy"
+            )
+            inputs["strategy_reason"] = flow.state.context.get("strategy_reason", "")
+            inputs["analysis_context"] = {
+                "scope": inputs.get("scope"),
+                "complexity": inputs.get("complexity"),
+                "reasoning": inputs.get("analysis_reasoning"),
+                "project_summary": inputs.get("project_summary"),
+                "strategy_reason": inputs.get("strategy_reason"),
+            }
 
         # Special handling for CONFIRM step
         if step_type == StepType.CONFIRM:
@@ -2792,13 +3335,6 @@ class StateMachine:
                     inputs["task_description"] = _compose_effective_task_description(
                         flow, exclude_step_id=adj_id
                     )
-                    pre_ruling_plan = _latest_adjudicated_output(
-                        flow, "adjudicated_plan", exclude_step_id=adj_id
-                    )
-                    if isinstance(pre_ruling_plan, list) and pre_ruling_plan:
-                        inputs["task_groups"] = pre_ruling_plan
-                    else:
-                        inputs["task_groups"] = pre_ruling_task_groups
 
                 # Single YAML read for the entire CONFIRM resolution —
                 # consolidates what used to be three separate config
@@ -2882,17 +3418,17 @@ class StateMachine:
 
         # Special handling for SELF_CHECK step: ensure it receives test_results and changes_made
         if step_type == StepType.SELF_CHECK:
-            # Compute pass index: consecutive COMPLETED self_check at tail + 1
-            pass_index = self._count_consecutive_self_check_completed(flow) + 1
             workflow_cfg = self._get_workflow_config()
-            inputs["self_check_pass_index"] = pass_index
-            inputs["self_check_passes_required"] = self._get_self_check_passes_required()
-            inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
+            passes_required = self._get_self_check_passes_required()
+            inputs["self_check_passes_required"] = passes_required
+            self._prepare_self_check_scope(flow, inputs, passes_required)
+            pass_index = int(inputs.get("self_check_pass_index", 1) or 1)
+            # Serialized for old consumers, but permanently false: repeated or
+            # converged findings are never a completed SELF_CHECK outcome.
+            inputs["self_check_convergence_enabled"] = False
             inputs["self_check_defer_fix_threshold"] = workflow_cfg.self_check_defer_fix_threshold
-            # Periodic-backstop period, so the convergence guard can suppress the
-            # shortcut when a periodic ADJUDICATE is due (it would otherwise
-            # short-circuit to COMPLETED before the state machine's
-            # REVISION_NEEDED branch could route to ADJUDICATE).
+            # Periodic adjudication still consumes the same persisted setting;
+            # it is evaluated after a finding-bearing REVISION_NEEDED round.
             inputs["adjudicate_period"] = workflow_cfg.adjudicate_period
 
             # Defer-fix stash (item 1) lifecycle. pass #1 is the start of every
@@ -2931,37 +3467,21 @@ class StateMachine:
                 flow.state.context.get("user_interjections", [])
             )
 
-            # Signal to ``_build_source_pool`` whether an adjudication ruling is
-            # in effect. When present, its adjudicated_description has already
-            # replaced ``task_description_base`` above (both resolve through
-            # ``_effective_task_description_base``); the pool builder then drops
-            # the superseded original/refined text so a new issue that
-            # re-quotes an abolished clause fails validation.
+            # Preserve the explicit field for old history/resume consumers. The
+            # effective base above is already the adjudicated description, and
+            # modern source-pool validation never consults adjudicated_plan or
+            # task_groups.
             adjudicated_desc = _latest_adjudicated_output(flow, "adjudicated_description")
             if isinstance(adjudicated_desc, str) and adjudicated_desc:
                 inputs["adjudicated_description"] = adjudicated_desc
-                # Hand the abolished clause quotes to the source-pool builder so
-                # an abolished clause a plan task still restates verbatim is
-                # dropped from the pool too (a description-only ruling leaves the
-                # plan text otherwise quotable). See _build_source_pool.
-                ledger = flow.state.context.get(adjudication.LEDGER_KEY)
-                if isinstance(ledger, dict):
-                    abolished_quotes = [
-                        o.get("quote_norm")
-                        for o in ledger.get("observations", [])
-                        if o.get("abolished") and o.get("quote_norm")
-                    ]
-                    if abolished_quotes:
-                        inputs["abolished_clause_quotes"] = abolished_quotes
 
             # Inject prev_self_check_issues whenever this is the first pass
             # of a fix-loop round (pass_index == 1 AND fix_iteration > 0).
-            # The earlier ``self_check_convergence_enabled`` gate has been
-            # dropped: with the new schema (verbatim_quote + evidence_lines
-            # + previous_issue_resolutions), the LLM is required to
+            # Previous issues are injected regardless of the deprecated
+            # convergence setting: with the new schema (verbatim_quote +
+            # evidence_lines + previous_issue_resolutions), the LLM is required to
             # explicitly declare each prev_issue as fixed/still_present, so
-            # passing prev_issues is essential for correct review whether or
-            # not the fuzzy ``_issues_converged`` shortcut is enabled.
+            # passing prev_issues is essential for correct review.
             # Pass 2+ deliberately omits prev_issues to provide an
             # independent fresh review (N-pass invariant unchanged).
             if pass_index == 1 and fix_iteration > 0:
@@ -3356,6 +3876,339 @@ class StateMachine:
                 exc_info=True,
             )
 
+    def _review_scope_manager(self, flow: FlowInstance) -> ReviewScopeManager:
+        """Return the runtime review-scope store for this flow checkout."""
+        from .steps._project_root import resolve_flow_project_root
+
+        return ReviewScopeManager(resolve_flow_project_root(flow), flow.flow_id)
+
+    @staticmethod
+    def _review_scope_context(flow: FlowInstance) -> Dict[str, Any]:
+        value = flow.state.context.get("review_scope")
+        if not isinstance(value, dict):
+            value = {}
+            flow.state.context["review_scope"] = value
+        return value
+
+    def _self_check_round_controller(
+        self, flow: FlowInstance
+    ) -> SelfCheckRoundController:
+        return SelfCheckRoundController(flow.state.context)
+
+    @staticmethod
+    def _review_baseline_from(value: Any) -> Optional[ReviewBaseline]:
+        return ReviewBaseline.from_dict(value)
+
+    def _fix_baselines(
+        self, flow: FlowInstance, scope_context: Dict[str, Any]
+    ) -> Dict[str, ReviewBaseline]:
+        """Load every captured fix baseline by id from the runtime store."""
+        history = scope_context.get("fix_baseline_history")
+        manager = self._review_scope_manager(flow)
+        result: Dict[str, ReviewBaseline] = {}
+        if not isinstance(history, list):
+            return result
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            baseline_id = str(entry.get("baseline_id") or "")
+            if not baseline_id:
+                continue
+            baseline = manager.load_baseline(baseline_id)
+            if baseline is not None:
+                result[baseline_id] = baseline
+        return result
+
+    def _incremental_fix_baseline(
+        self, flow: FlowInstance, scope_context: Dict[str, Any]
+    ) -> Optional[ReviewBaseline]:
+        """The EARLIEST fix baseline not yet covered by a review round.
+
+        Multiple FIXes can run with no SELF_CHECK round between them. A round
+        diffed from the earliest uncovered baseline spans the union of every
+        such fix's changes, so a defect introduced by an earlier unreviewed
+        fix keeps its causal anchors inside the scope — diffing from only the
+        LAST fix would drop that fix's delta from the round entirely. When
+        the earliest uncovered baseline cannot be loaded the union cannot be
+        reconstructed, so this returns None and the round degrades to the
+        full fallback instead of silently narrowing the scope.
+        """
+        history = scope_context.get("fix_baseline_history")
+        covered = scope_context.get("covered_fix_baseline")
+        latest_dict = scope_context.get("latest_fix_baseline")
+        latest_id = (
+            latest_dict.get("baseline_id")
+            if isinstance(latest_dict, dict)
+            else None
+        )
+        if not isinstance(history, list) or not history:
+            # Pre-history persisted flows and synthetic callers that carry
+            # only the latest-fix-baseline key: there the latest baseline IS
+            # the earliest unreviewed one.
+            return self._review_baseline_from(latest_dict)
+        fix_baselines = self._fix_baselines(flow, scope_context)
+        found_covered = not covered
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            baseline_id = str(entry.get("baseline_id") or "")
+            if not baseline_id:
+                continue
+            if not found_covered:
+                if baseline_id == covered:
+                    found_covered = True
+                continue
+            # The first entry AFTER the covered baseline is the earliest
+            # unreviewed fix.
+            if baseline_id in fix_baselines:
+                return fix_baselines[baseline_id]
+            return None
+        # Everything in history is covered: only a newer fix baseline beyond
+        # the covered marker is still unreviewed (and its history entry may
+        # be missing in pre-history synthetic callers).
+        if latest_id and latest_id != covered:
+            baseline = fix_baselines.get(latest_id)
+            if baseline is not None:
+                return baseline
+            return self._review_baseline_from(latest_dict)
+        return None
+
+    def _ensure_implementation_review_baseline(
+        self, flow: FlowInstance, step: Step
+    ) -> None:
+        """Persist the pre-implementation code baseline exactly once."""
+        scope_context = self._review_scope_context(flow)
+        if "implementation_baseline" in scope_context:
+            return
+
+        manager = self._review_scope_manager(flow)
+        already_started = bool(
+            flow.state.get_fix_iteration() > 0
+            or step.inputs.get("is_fix_iteration")
+            or step.started_at is not None
+            or step.outputs.get("files_changed")
+            or step.outputs.get("changes_made")
+        )
+        try:
+            if already_started:
+                baseline = manager.unavailable_baseline(
+                    "implementation",
+                    "legacy/resumed flow crossed the implementation baseline "
+                    "boundary before diff-scoped review was available",
+                )
+            else:
+                baseline = manager.capture("implementation")
+        except Exception as exc:  # noqa: BLE001 - persist safe degradation
+            logger.warning("Failed to persist implementation review baseline: %s", exc)
+            baseline = ReviewBaseline(
+                baseline_id=f"implementation-{uuid.uuid4().hex[:12]}",
+                kind="implementation",
+                flow_id=flow.flow_id,
+                captured_at=datetime.now().isoformat(),
+                project_root=str(self.project_root),
+                available=False,
+                diagnostics=[str(exc)],
+            )
+        scope_context["implementation_baseline"] = baseline.to_dict()
+        # Persist immediately. The next operation is the writable IMPLEMENT
+        # handler, so relying only on the later generic RUNNING save would leave
+        # a crash window in which modifications exist but their baseline does not.
+        self.persistence.save_flow(flow)
+
+    def _capture_fix_review_baseline(
+        self, flow: FlowInstance, iteration: int
+    ) -> None:
+        """Persist an independent baseline immediately before one FIX call."""
+        scope_context = self._review_scope_context(flow)
+        manager = self._review_scope_manager(flow)
+        try:
+            baseline = manager.capture(f"fix-{iteration}")
+        except Exception as exc:  # noqa: BLE001 - full fallback remains safe
+            logger.warning("Failed to persist fix review baseline: %s", exc)
+            baseline = ReviewBaseline(
+                baseline_id=f"fix-{iteration}-{uuid.uuid4().hex[:12]}",
+                kind=f"fix-{iteration}",
+                flow_id=flow.flow_id,
+                captured_at=datetime.now().isoformat(),
+                project_root=str(self.project_root),
+                available=False,
+                diagnostics=[str(exc)],
+            )
+        scope_context["latest_fix_baseline"] = baseline.to_dict()
+        history = scope_context.setdefault("fix_baseline_history", [])
+        if not isinstance(history, list):
+            history = []
+            scope_context["fix_baseline_history"] = history
+        history.append({
+            "fix_iteration": int(iteration),
+            "baseline_id": baseline.baseline_id,
+            "available": baseline.available,
+            "diagnostics": list(baseline.diagnostics),
+        })
+
+    def _prepare_self_check_scope(
+        self,
+        flow: FlowInstance,
+        inputs: Dict[str, Any],
+        passes_required: int,
+    ) -> None:
+        """Attach one persisted review round and its reconstructed diff."""
+        scope_context = self._review_scope_context(flow)
+        had_round_state = isinstance(
+            flow.state.context.get("self_check_review"), dict
+        )
+        implementation_baseline = self._review_baseline_from(
+            scope_context.get("implementation_baseline")
+        )
+        # WHY the earliest uncovered fix baseline instead of the latest one:
+        # when two or more FIXes run with no SELF_CHECK round between them,
+        # the latest baseline alone scopes only the last fix's delta — a
+        # defect introduced by an earlier unreviewed fix would have no causal
+        # anchor in the round and its evidence would be dropped as bad.
+        incremental_fix_baseline = self._incremental_fix_baseline(
+            flow, scope_context
+        )
+        effective_description = _compose_effective_task_description(flow)
+        controller = self._self_check_round_controller(flow)
+        before_active = controller.active_round
+        active = controller.prepare_round(
+            requirement_text=effective_description,
+            fix_iteration=flow.state.get_fix_iteration(),
+            passes_required=passes_required,
+            implementation_baseline=implementation_baseline,
+            latest_fix_baseline=incremental_fix_baseline,
+        )
+        if controller.active_round is not before_active:
+            # A NEW round was created: every fix baseline up to the latest one
+            # is now inside its scope (a full round diffs from the
+            # implementation baseline, an incremental one from the earliest
+            # uncovered fix baseline — both span the latest fix).
+            latest = scope_context.get("latest_fix_baseline")
+            if isinstance(latest, dict) and latest.get("baseline_id"):
+                scope_context["covered_fix_baseline"] = latest.get("baseline_id")
+        if not had_round_state:
+            # Old persisted flows (and pre-scope synthetic callers) may already
+            # be between pass #1 and pass #N. Adopt that position once, then
+            # let the explicit persisted controller own all later passes.
+            # WHY the step's own recorded index wins: when a PENDING step is
+            # refreshed on resume, that step already sits at the tail of
+            # step_history and ends the completed-pass streak, so the tail
+            # count would answer "1" and re-run the whole chain. Freshly built
+            # inputs carry no index, and there the completed tail is the only
+            # evidence of where a pre-upgrade chain stood.
+            persisted_index = inputs.get("self_check_pass_index")
+            if (
+                isinstance(persisted_index, int)
+                and not isinstance(persisted_index, bool)
+                and persisted_index >= 1
+            ):
+                adopted = persisted_index
+            else:
+                adopted = self._count_consecutive_self_check_completed(flow) + 1
+            active["pass_index"] = min(
+                int(active.get("passes_required", passes_required) or passes_required),
+                adopted,
+            )
+
+        fix_baselines = self._fix_baselines(flow, scope_context)
+        if active.get("baseline_kind") == "implementation":
+            baseline = implementation_baseline
+        elif (
+            active.get("baseline_id")
+            and active.get("baseline_id") in fix_baselines
+        ):
+            baseline = fix_baselines[active.get("baseline_id")]
+        elif (
+            incremental_fix_baseline is not None
+            and incremental_fix_baseline.baseline_id == active.get("baseline_id")
+        ):
+            baseline = incremental_fix_baseline
+        elif (
+            implementation_baseline is not None
+            and implementation_baseline.baseline_id == active.get("baseline_id")
+        ):
+            baseline = implementation_baseline
+        else:
+            baseline = None
+
+        scope = self._review_scope_manager(flow).resolve(
+            str(active.get("scope_mode", "full")),
+            baseline,
+            full_baseline=implementation_baseline,
+            # The implement step's self-reported files are consulted for one
+            # case only: a path git ignores is invisible to baseline capture,
+            # so without them a real flow change would never be diffed,
+            # anchored or reviewed (see ReviewScopeManager.reconstruct).
+            declared_paths=_declared_changed_paths(inputs),
+        )
+        if scope.scope_mode != active.get("scope_mode"):
+            active["scope_mode"] = scope.scope_mode
+            active["baseline_id"] = scope.baseline_id
+            active["baseline_kind"] = "implementation"
+            active["round_reason"] = "incremental_undecidable_full_fallback"
+            if int(active.get("pass_index", 1) or 1) <= 1:
+                # The degrade happened before any pass ran, so the whole round
+                # genuinely reviews the full implementation diff and is
+                # credited as a full round. A degrade on a LATER pass leaves
+                # the accounting mode alone: pass #1 already reviewed only the
+                # fix delta, so the mandatory full closure round is still owed.
+                active["round_scope_mode"] = scope.scope_mode
+
+        active["scope_changed_paths"] = list(scope.changed_paths)
+        active["scope_diff_artifact"] = scope.artifact_path
+        active["scope_undecidable"] = scope.undecidable
+        active["scope_diagnostic"] = scope.diagnostic
+        active["scope_causal_anchors"] = copy.deepcopy(scope.causal_anchors)
+        active["scope_deletion_anchors"] = copy.deepcopy(scope.deletion_anchors)
+
+        inputs.update({
+            "self_check_round_id": active.get("round_id", ""),
+            "self_check_pass_index": int(active.get("pass_index", 1) or 1),
+            "self_check_passes_required": int(
+                active.get("passes_required", passes_required) or passes_required
+            ),
+            "scope_mode": scope.scope_mode,
+            "requested_scope_mode": scope.requested_mode,
+            "baseline_id": scope.baseline_id,
+            "scope_changed_paths": list(scope.changed_paths),
+            "scope_causal_anchors": copy.deepcopy(scope.causal_anchors),
+            "scope_deletion_anchors": copy.deepcopy(scope.deletion_anchors),
+            "scope_diff": scope.unified_diff,
+            "scope_diff_artifact": scope.artifact_path,
+            "scope_undecidable": scope.undecidable,
+            "scope_diagnostic": scope.diagnostic,
+            "scope_fallback_from_incremental": scope.fallback_from_incremental,
+            "requirement_fingerprint": active.get("requirement_fingerprint", ""),
+            "self_check_round_reason": active.get("round_reason", ""),
+        })
+
+    def _refresh_self_check_scope(self, flow: FlowInstance, step: Step) -> None:
+        """Refresh a pending SELF_CHECK when its requirement authority changed."""
+        passes_required = int(
+            step.inputs.get("self_check_passes_required")
+            or self._get_self_check_passes_required()
+        )
+        controller = self._self_check_round_controller(flow)
+        effective_description = _compose_effective_task_description(flow)
+        if controller.requirements_changed(effective_description):
+            controller.force_full("effective_requirements_changed")
+
+        # WHY: verbatim_quote validation resolves against the source pool built
+        # from these two inputs, which were snapshotted when the step was first
+        # constructed. An interjection recorded afterwards (Ctrl-C on a running
+        # SELF_CHECK, or a web interjection drained onto a pending one) rewrites
+        # only ``task_description``; without refreshing the clean base and the
+        # structured interjection list here, a finding quoting the new
+        # instruction is dropped as quote-not-in-source and the requirement
+        # becomes permanently unenforceable by SELF_CHECK.
+        step.inputs["task_description"] = effective_description
+        step.inputs["task_description_base"] = _effective_task_description_base(flow)
+        step.inputs["user_interjections"] = copy.deepcopy(
+            flow.state.context.get("user_interjections", [])
+        )
+
+        self._prepare_self_check_scope(flow, step.inputs, passes_required)
+
     def _ensure_baseline_ready(self, flow: FlowInstance) -> None:
         """Block until the pre-implement baseline is measured, before IMPLEMENT.
 
@@ -3503,6 +4356,12 @@ class StateMachine:
 
         current_step = flow.state.get_current_step()
 
+        strategy = ImplementationStrategyResolver.view(
+            flow.state.context,
+            task_type=flow.task_type,
+            selected_steps=flow.state.selected_steps,
+        )
+
         return {
             "flow_id": flow.flow_id,
             "status": flow.status.value,
@@ -3511,4 +4370,5 @@ class StateMachine:
             "percent": (completed / total * 100) if total > 0 else 0,
             "current_step": current_step.step_type.value if current_step else None,
             "current_step_status": current_step.status.value if current_step else None,
+            **strategy.to_dict(),
         }

@@ -1271,7 +1271,9 @@ class TestStreamJSONTrackerUsage:
         )
         tracker.process_line(line)
         u = tracker.usage
-        assert u.input_tokens == 100
+        # Anthropic-shaped usage: input_tokens EXCLUDES the cache categories,
+        # so the logical input total is 100 + 20 read + 10 creation.
+        assert u.input_tokens == 130
         assert u.output_tokens == 50
         assert u.cache_creation_input_tokens == 10
         assert u.cache_read_input_tokens == 20
@@ -1352,9 +1354,9 @@ class TestStreamJSONTrackerUsage:
         with accumulate_step_usage() as step:
             add_call_usage(tracker.usage)
             add_call_usage(tracker.usage)  # simulate a second call/retry
-        assert step.input_tokens == 10
-        assert step.output_tokens == 4
-        assert step.total_cost_usd == pytest.approx(0.02)
+        assert step.input_tokens == 5
+        assert step.output_tokens == 2
+        assert step.total_cost_usd == pytest.approx(0.01)
 
 
 class TestSessionTokenUsageModel:
@@ -1418,7 +1420,122 @@ class TestSessionTokenUsageModel:
         restored = State.from_dict(state.to_dict())
         assert restored.fix_iterations == 2
         assert restored.baseline_failures == ["tests/test_x.py::test_y"]
-        assert restored.session_token_usage.input_tokens == 1
+
+
+class TestSessionUsageRecordsModel:
+    """State.session_usage_records — the authoritative per-call ledger."""
+
+    def _record(self, call_id, input_tokens, output_tokens):
+        from tianluo.usage import UsageRecord, UsageStatus
+
+        return UsageRecord(
+            call_id=call_id,
+            attempt=0,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="anthropic",
+            resolved_model="claude-opus-5",
+            logical_input_tokens=input_tokens,
+            uncached_input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    def test_records_round_trip_and_projection_is_derived(self):
+        state = State()
+        state.add_session_usage_record(self._record("call-1", 100, 10))
+        state.add_session_usage_record(self._record("call-2", 50, 5))
+
+        restored = State.from_dict(state.to_dict())
+        assert len(restored.session_usage_records) == 2
+        # The projection is rebuilt from the records, never stored as its own
+        # diverging tally.
+        assert restored.session_token_usage.input_tokens == 150
+        assert restored.session_token_usage.output_tokens == 15
+
+    def test_add_drops_exact_duplicate_call_attempt(self):
+        state = State()
+        state.add_session_usage_record(self._record("call-1", 100, 10))
+        state.add_session_usage_record(self._record("call-1", 100, 10))
+        assert len(state.session_usage_records) == 1
+        assert state.session_token_usage.input_tokens == 100
+
+    def test_add_keeps_distinct_attempts(self):
+        state = State()
+        record = self._record("call-1", 100, 10)
+        state.add_session_usage_record(record)
+        retry = self._record("call-1", 20, 2)
+        retry.attempt = 1
+        state.add_session_usage_record(retry)
+        assert len(state.session_usage_records) == 2
+        assert state.session_token_usage.input_tokens == 120
+
+    def test_old_projection_with_embedded_records_is_imported(self):
+        from .token_usage import UsageTotals
+
+        old_state = State()
+        old_state.session_token_usage = UsageTotals.from_usage_record(
+            self._record("call-1", 70, 7)
+        )
+        payload = old_state.to_dict()
+        # Simulate an old engine.json: records only inside the projection.
+        legacy_projection = payload["session_token_usage"]
+        legacy_projection["usage_records"] = [
+            self._record("call-1", 70, 7).to_dict()
+        ]
+        payload.pop("session_usage_records", None)
+        restored = State.from_dict(payload)
+        assert len(restored.session_usage_records) == 1
+        assert restored.session_token_usage.input_tokens == 70
+
+    def test_legacy_ledger_flag_survives_a_modern_re_save(self):
+        """A non-zero tally stays authoritative once the ledger key appears.
+
+        ``to_dict`` always emits ``session_usage_records`` — for a record-less
+        pre-ledger flow that is an empty list. The flag must keep reporting the
+        tally as the only usage fact, or the usage surfaces silently drop the
+        flow's accumulated billing data on the first re-save.
+        """
+        legacy_payload = {
+            "current_step_id": None,
+            "step_history": [],
+            "steps": {},
+            "context": {},
+            "selected_steps": [],
+            "session_token_usage": {
+                "input_tokens": 5000,
+                "output_tokens": 400,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0,
+                "total_cost_usd": 1.23,
+            },
+        }
+        state = State.from_dict(legacy_payload)
+        assert state.legacy_usage_ledger is True
+        assert state.session_usage_records == []
+
+        resaved = state.to_dict()
+        assert resaved["session_usage_records"] == []
+        assert State.from_dict(resaved).legacy_usage_ledger is True
+        assert State.from_header_dict(resaved).legacy_usage_ledger is True
+
+    def test_modern_empty_ledger_is_not_legacy(self):
+        # Zero calls so far: an all-zero tally under a present ledger key must
+        # NOT be adapted into a fabricated unknown call.
+        state = State.from_dict(State().to_dict())
+        assert state.legacy_usage_ledger is False
+
+    def test_ledger_with_records_is_never_legacy(self):
+        state = State()
+        state.add_session_usage_record(self._record("call-1", 100, 10))
+        assert State.from_dict(state.to_dict()).legacy_usage_ledger is False
+
+    def test_records_serialize_once_not_twice(self):
+        state = State()
+        state.add_session_usage_record(self._record("call-1", 100, 10))
+        payload = state.to_dict()
+        # The projection is stored WITHOUT its embedded record list — the
+        # records live in session_usage_records and are not duplicated.
+        assert "usage_records" not in payload["session_token_usage"]
+        assert len(payload["session_usage_records"]) == 1
 
 
 class TestRunStepTokenAggregation:
@@ -1512,6 +1629,84 @@ class TestRunStepTokenAggregation:
             assert su.input_tokens == 350
             assert su.total_cost_usd == pytest.approx(0.35)
 
+    def test_step_publishes_usage_records_and_summary_from_shared_backend(self):
+        """step.outputs carries the authoritative per-call records plus the
+        UsageSummary derived from them; the session ledger holds the same
+        records, so step and flow views share one aggregation backend."""
+        from .token_usage import add_call_usage
+        from tianluo.usage import UsageRecord, UsageSummary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                add_call_usage(self._make_usage(input_tokens=120, output_tokens=12, total_cost_usd=0.006))
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("records published")
+            step = flow.state.get_current_step()
+
+            sm.run_step(flow, step)
+
+            assert isinstance(step.outputs["usage_records"], list)
+            assert len(step.outputs["usage_records"]) == 1
+            # The summary stores derived numbers only (records live in
+            # usage_records); recombining them reproduces the same totals.
+            summary = UsageSummary.from_dict(step.outputs["usage_summary"])
+            records = [
+                UsageRecord.from_dict(item)
+                for item in step.outputs["usage_records"]
+            ]
+            rebuilt = UsageSummary.summarize(records)
+            assert rebuilt.totals.input_tokens == 120
+            assert summary.actual_cost_usd == pytest.approx(0.006)
+            assert rebuilt.actual_cost_usd == summary.actual_cost_usd
+            # The persisted summary is authoritative on its own: it carries
+            # its aggregate token totals and completeness, so a consumer never
+            # reconstructs a zero-token unavailable summary from it.
+            assert summary.totals.input_tokens == 120
+            assert summary.totals.usage_status.value == "available"
+            assert summary.completeness == "complete"
+            # Session ledger holds the same record (no separate re-summing).
+            assert len(flow.state.session_usage_records) == 1
+            assert flow.state.session_token_usage.input_tokens == 120
+
+    def test_reused_step_accumulates_usage_records_across_executions(self):
+        """A step re-executed in a fix loop keeps every run's records on its
+        per-step ledger — the per-step summary must match the session total."""
+        from .token_usage import add_call_usage
+        from tianluo.usage import UsageRecord, UsageSummary
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sm = StateMachine(Path(tmpdir))
+
+            def handler(step, flow):
+                add_call_usage(
+                    self._make_usage(input_tokens=100, total_cost_usd=0.01)
+                )
+                return StepStatus.COMPLETED
+
+            sm.register_handler(StepType.ANALYZE, handler)
+            flow = sm.create_flow("reused step")
+            step = flow.state.get_current_step()
+            sm.run_step(flow, step)
+
+            # Fix-loop re-entry: the same Step object executes again with its
+            # own usage; the per-step ledger must keep BOTH runs' records.
+            step.status = StepStatus.PENDING
+            sm.run_step(flow, step)
+
+            records = [
+                UsageRecord.from_dict(item)
+                for item in step.outputs["usage_records"]
+            ]
+            assert len(records) == 2
+            step_total = UsageSummary.summarize(records)
+            assert step_total.totals.input_tokens == 200
+            assert step_total.actual_cost_usd == pytest.approx(0.02)
+            assert len(flow.state.session_usage_records) == 2
+
     def test_exception_step_still_aggregates_and_resets_scope(self):
         """A raising handler still records the usage gathered before it raised,
         and the step scope is reset (no contextvar leak)."""
@@ -1544,9 +1739,10 @@ class TestRunStepTokenAggregation:
         status. On the final terminal round, `token_usage` reflects the sum of
         all rounds and `carried_token_usage` is cleared.
 
-        This keeps the web session badge (which re-derives the total by summing
-        token_usage off emitted records) in agreement with the CLI authoritative
-        total (session_token_usage, which folds every run's step_usage).
+        This keeps the per-step display complete across paused rounds in
+        agreement with the CLI authoritative total (session_token_usage, which
+        folds every run's step_usage). The web badge renders the backend
+        UsageSummary payload, not a re-sum of emitted records.
         """
         from .token_usage import add_call_usage
 

@@ -436,6 +436,67 @@ def get_charter_injection(project_root: Path) -> str:
     )
 
 
+def get_self_check_constraint_sources(
+    project_root: Path,
+    changes_made: Any,
+    baseline_commit: Optional[str] = None,
+) -> Dict[str, str]:
+    """Return recorded project constraints relevant to a SELF_CHECK review.
+
+    The effective task description remains the functional-requirement authority;
+    this helper supplies the separate project-constraint channel: the full
+    charter and colocated WHY:/INVARIANT: comments from touched code.  The
+    comment harvest includes the baseline revision when available, so a change
+    cannot erase the very constraint against which it should be reviewed.
+
+    The returned strings are suitable both for prompt rendering and for
+    verbatim-quote validation.  Missing files or an unavailable baseline simply
+    omit that source instead of weakening the rest of the review.
+    """
+    from .charter import load_charter
+
+    sources: Dict[str, str] = {}
+    charter = load_charter(project_root)
+    if charter.strip():
+        sources["charter"] = charter
+
+    changed_paths: set[str] = set()
+    if isinstance(changes_made, dict):
+        entries = changes_made.get("files_changed") or []
+        if isinstance(entries, list):
+            for entry in entries:
+                if isinstance(entry, str) and entry:
+                    changed_paths.add(entry)
+                elif isinstance(entry, dict):
+                    path = entry.get("path") or entry.get("file_path")
+                    if isinstance(path, str) and path:
+                        changed_paths.add(path)
+
+    if changed_paths:
+        # Import lazily: invariant_check reuses self_check's validators, so a
+        # module-level import here would create a cycle during step registration.
+        from .steps.invariant_check import (
+            _harvest_why_comments,
+            _is_marked_why_comment,
+        )
+
+        why_comments = _harvest_why_comments(
+            project_root, changed_paths, baseline_commit,
+        )
+        marked_blocks = []
+        for block in why_comments:
+            marked = [
+                line for line in block.splitlines()
+                if _is_marked_why_comment(line)
+            ]
+            if marked:
+                marked_blocks.append("\n".join(marked))
+        if marked_blocks:
+            sources["why_comments"] = "\n\n".join(marked_blocks)
+
+    return sources
+
+
 def get_code_index_injection(project_root: Path) -> str:
     """Get the code-index root-map prompt injection.
 

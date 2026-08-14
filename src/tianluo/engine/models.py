@@ -10,9 +10,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .token_usage import UsageTotals
+from ..usage import UsageRecord, legacy_session_tally_is_authoritative
 
 # Sliding-window cap on State.fix_history to keep memory / engine.json size /
 # per-transition deepcopy cost bounded under unlimited mode
@@ -72,6 +73,22 @@ class StepType(Enum):
     # step-level cwd override), not in the worktree the flow body ran in.
     MERGE_INTEGRATE = "merge_integrate"  # Merge the flow branch into master (integrate() lib)
     VERSION_RECONCILE = "version_reconcile"  # Derive+apply the final version at merge (reconcile() lib)
+
+
+class RequestedImplementationStrategy(str, Enum):
+    """User-configurable strategy for a PLAN -> IMPLEMENT workflow segment."""
+
+    AUTO = "auto"
+    DIRECT = "direct"
+    PLANNED = "planned"
+
+
+class EffectiveImplementationStrategy(str, Enum):
+    """Persisted implementation path after strategy resolution."""
+
+    DIRECT = "direct"
+    PLANNED = "planned"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class StepStatus(Enum):
@@ -326,11 +343,48 @@ class State:
     baseline_failures: Optional[List[str]] = None
 
     # Session-level cumulative token / cost usage across every step of this
-    # flow. Each step's merged per-step total is folded in by
-    # ``state_machine.run_step`` after the step's handler returns. Held as a
-    # ``UsageTotals`` in memory and round-tripped as a JSON-primitive dict; an
-    # older engine.json lacking the key deserializes to an empty tally.
+    # flow. ``session_usage_records`` holds the authoritative per-call
+    # UsageRecords folded in by ``state_machine.run_step`` after each step's
+    # handler returns; ``session_token_usage`` is the legacy five-field
+    # projection derived from those records (kept in memory for display and
+    # backward compatibility, serialized without its embedded record list —
+    # the records live in ``session_usage_records`` so they are never stored
+    # twice). An older engine.json lacking the records key imports whatever
+    # records the old projection embedded.
+    session_usage_records: List[UsageRecord] = field(
+        default_factory=list, repr=False
+    )
     session_token_usage: UsageTotals = field(default_factory=UsageTotals)
+
+    # WHY: an EMPTY record ledger is ambiguous on its own — a modern flow that
+    # has not yet completed its first LLM call looks exactly like a pre-ledger
+    # flow whose only fact is the legacy five-field tally. Usage surfaces may
+    # adapt that tally into a legacy record ONLY in the latter case, so
+    # deserialization records whether the loaded file's tally is its only usage
+    # fact (see usage.legacy_session_tally_is_authoritative: a non-zero tally
+    # beside an empty ledger stays authoritative even after the modern
+    # serializer re-saves the flow and adds ``session_usage_records: []``).
+    # Runtime only (never serialized); a freshly constructed State is modern.
+    legacy_usage_ledger: bool = field(default=False, repr=False, compare=False)
+
+    def add_session_usage_record(self, record: UsageRecord) -> None:
+        """Append one call/attempt record, dropping exact duplicates.
+
+        A step re-run can fold an unchanged accumulator into the session
+        again; an exact (call_id, attempt) duplicate must not double-count.
+        Maintains the invariant that ``session_token_usage`` is a projection
+        of ``session_usage_records`` (never a second, diverging tally).
+        """
+        identity = (record.call_id, record.attempt)
+        if any(
+            (existing.call_id, existing.attempt) == identity
+            for existing in self.session_usage_records
+        ):
+            return
+        self.session_usage_records.append(record)
+        self.session_token_usage = UsageTotals.from_usage_records(
+            self.session_usage_records
+        )
 
     # -- Hot/cold split runtime bookkeeping (issue #244 一期; NOT serialized) --
     # The shared context / fix_history are externalized to a per-flow cold file
@@ -488,7 +542,26 @@ class State:
             "fix_iterations": self.fix_iterations,
             "fix_history": self.fix_history,
             "baseline_failures": self.baseline_failures,
-            "session_token_usage": self.session_token_usage.to_dict(),
+            # Records may live on either holder (old code folds into
+            # session_token_usage directly); serialize whichever has them.
+            "session_usage_records": [
+                record.to_dict()
+                for record in (
+                    self.session_usage_records
+                    or list(self.session_token_usage.usage_records)
+                )
+            ],
+            "session_token_usage": {
+                "input_tokens": self.session_token_usage.input_tokens,
+                "output_tokens": self.session_token_usage.output_tokens,
+                "cache_creation_input_tokens": (
+                    self.session_token_usage.cache_creation_input_tokens
+                ),
+                "cache_read_input_tokens": (
+                    self.session_token_usage.cache_read_input_tokens
+                ),
+                "total_cost_usd": self.session_token_usage.total_cost_usd,
+            },
         }
 
     def to_header_dict(self) -> Dict[str, Any]:
@@ -515,6 +588,28 @@ class State:
         """The shared cold payload externalized out of the header (issue #244)."""
         return {"context": self.context, "fix_history": self.fix_history}
 
+    @staticmethod
+    def _restore_session_usage(
+        data: Dict[str, Any],
+    ) -> Tuple[List[UsageRecord], UsageTotals]:
+        """Restore (records, projection) from a serialized state.
+
+        Newer files carry the authoritative ``session_usage_records`` list;
+        older ones only have the legacy five-field projection, which may embed
+        a ``usage_records`` list of its own — those are imported so an
+        upgraded engine.json never loses its per-call accounting.
+        """
+        raw_records = data.get("session_usage_records")
+        records = (
+            [UsageRecord.from_dict(item) for item in raw_records if isinstance(item, dict)]
+            if isinstance(raw_records, list)
+            else []
+        )
+        legacy = UsageTotals.from_dict(data.get("session_token_usage"))
+        if records:
+            return records, UsageTotals.from_usage_records(records)
+        return list(legacy.usage_records), legacy
+
     @classmethod
     def from_header_dict(cls, data: Dict[str, Any]) -> State:
         """Deserialize a header-only state: steps carry deferred bodies.
@@ -525,6 +620,7 @@ class State:
         :meth:`Step.from_header_dict`, so no per-step cold file is read.
         """
         loaded_history = data.get("fix_history", [])
+        session_records, session_usage = cls._restore_session_usage(data)
         state = cls(
             current_step_id=data.get("current_step_id"),
             step_history=data.get("step_history", []),
@@ -535,12 +631,14 @@ class State:
             fix_iterations=data.get("fix_iterations", 0),
             fix_history=[],
             baseline_failures=data.get("baseline_failures"),
-            session_token_usage=UsageTotals.from_dict(data.get("session_token_usage")),
+            session_usage_records=session_records,
+            session_token_usage=session_usage,
         )
         state.steps = {
             sid: Step.from_header_dict(step_data)
             for sid, step_data in data.get("steps", {}).items()
         }
+        state.legacy_usage_ledger = legacy_session_tally_is_authoritative(data)
         # Context body lives in the external cold payload resolved by the
         # persistence layer after this returns; until then it is NOT loaded, so a
         # failed cold read never masquerades as a genuine empty context on save.
@@ -559,6 +657,7 @@ class State:
         loaded_history = data.get("fix_history", [])
         if len(loaded_history) > FIX_HISTORY_MAX_ENTRIES:
             loaded_history = loaded_history[-FIX_HISTORY_MAX_ENTRIES:]
+        session_records, session_usage = cls._restore_session_usage(data)
         state = cls(
             current_step_id=data.get("current_step_id"),
             step_history=data.get("step_history", []),
@@ -575,7 +674,8 @@ class State:
             baseline_failures=data.get("baseline_failures"),
             # A missing key (older engine.json) yields an empty tally via
             # UsageTotals.from_dict(None); a stored dict round-trips exactly.
-            session_token_usage=UsageTotals.from_dict(data.get("session_token_usage")),
+            session_usage_records=session_records,
+            session_token_usage=session_usage,
         )
         # Keep ``state.context['fix_history']`` consistent with the clamped
         # list — ``increment_fix_iteration`` mirrors fix_history into context,
@@ -595,6 +695,7 @@ class State:
         state.cold_context_loaded = bool(data.get("_cold_context_loaded", True))
         ref = data.get("_cold_context_ref")
         state.cold_context_ref = ref if isinstance(ref, dict) else None
+        state.legacy_usage_ledger = legacy_session_tally_is_authoritative(data)
         return state
 
 
@@ -762,7 +863,19 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "uses_llm": True,
         "read_only": True,
         "inputs": ["task_description", "project_context"],
-        "outputs": ["task_type", "scope", "complexity", "reasoning", "root_cause_clear", "project_summary", "relevant_specs", "spec_content"],
+        "outputs": [
+            "task_type",
+            "scope",
+            "complexity",
+            "reasoning",
+            "root_cause_clear",
+            "requested_implementation_strategy",
+            "effective_implementation_strategy",
+            "strategy_reason",
+            "project_summary",
+            "relevant_specs",
+            "spec_content",
+        ],
     },
     StepType.INVESTIGATE: {
         "name": "investigate",
@@ -922,19 +1035,17 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         # location is flagged in opposite directions across rounds, self_check
         # cannot break the tie without mixing adjudication into review. This step
         # reads the cross-round fingerprint ledger + the currently-effective
-        # task_description/plan (no full transcript) and emits an override patch:
-        # adjudicated_description overrides task_description and/or
-        # adjudicated_plan overrides the latest plan's task_groups, minimally.
-        # Named for its products (adjudicated_description/adjudicated_plan),
-        # mirroring self_check/invariant_check duty-based naming.
+        # task description (no full transcript) and emits a corrected description.
+        # Legacy adjudicated_plan data remains in the schema so old flow records
+        # stay readable, but it is no longer an acceptance or routing authority.
         "description": (
             "Spec-contradiction adjudication (the fix-loop 'police'): given the "
             "cross-round issue-fingerprint ledger and the currently-effective "
-            "task_description/plan, rule on internal spec contradictions, "
+            "task_description, rule on internal spec contradictions, "
             "spec-vs-hard-constraint conflicts, and review divergence. Emits an "
-            "override patch (adjudicated_description / adjudicated_plan) with "
+            "adjudicated_description override with "
             "rationale + timestamp so downstream steps take the latest ruling "
-            "while the original discovery/plan outputs stay untouched."
+            "while original discovery and derived plan outputs stay untouched."
         ),
         "uses_llm": True,
         # Writes only its own outputs (no file edits), but those products drive

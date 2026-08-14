@@ -16,7 +16,14 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Union
+
+from tianluo.usage import (
+    UsageRecord,
+    UsageStatus,
+    legacy_usage_record,
+    parse_usage_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +83,7 @@ class ChatMessage:
     # :meth:`to_dict`) so legacy jsonl readers and user records stay
     # byte-identical to the pre-extension schema.
     token_usage: Optional[dict] = None
+    usage_records: Optional[List[dict]] = None
     # Optional agent name that produced this message. Set by
     # :func:`record_prompt` / :func:`record_response` from
     # ``LLMCaller._call_with_retry``'s current agent snapshot (e.g.
@@ -97,6 +105,8 @@ class ChatMessage:
         # field existed (backward-compatible on-disk schema).
         if data.get("token_usage") is None:
             data.pop("token_usage", None)
+        if data.get("usage_records") is None:
+            data.pop("usage_records", None)
         # Drop the optional agent/model metadata fields when absent so
         # legacy records serialize identically to before these fields existed.
         if data.get("agent_name") is None:
@@ -173,6 +183,7 @@ def record_response(
     attempt: int,
     fix_iteration: int = 0,
     agent_name: Optional[str] = None,
+    usage_record: Optional[Union[UsageRecord, Mapping[str, Any]]] = None,
 ) -> None:
     """Record an LLM response (raw NDJSON output).
 
@@ -202,12 +213,49 @@ def record_response(
     # so the web frontend can render a per-turn usage footnote and a per-step
     # cumulative sum. Empty (no result line / no usage) → leave the field unset
     # so the on-disk record stays backward-compatible.
-    usage = parse_usage_from_ndjson(raw_ndjson)
+    # An explicitly supplied record means the caller executed a real LLM
+    # subprocess attempt (LLMCaller passes the attempt's record for every
+    # outcome, success or crash); no record means the caller synthesized a
+    # non-LLM response (e.g. the test step's result summary).
+    from_llm_attempt = isinstance(usage_record, (UsageRecord, Mapping))
+    if isinstance(usage_record, UsageRecord):
+        authoritative_usage = usage_record
+    elif isinstance(usage_record, Mapping):
+        authoritative_usage = UsageRecord.from_dict(usage_record)
+    else:
+        authoritative_usage = parse_usage_record(
+            raw_ndjson,
+            attempt=attempt,
+            agent_name=agent_name,
+        )
+    usage_totals = UsageTotals.from_usage_record(authoritative_usage)
+    usage = None
+    if authoritative_usage.usage_status in (
+        UsageStatus.AVAILABLE,
+        UsageStatus.PARTIAL,
+    ):
+        usage = {
+            "input_tokens": usage_totals.input_tokens,
+            "output_tokens": usage_totals.output_tokens,
+            "cache_creation_input_tokens": (
+                usage_totals.cache_creation_input_tokens
+            ),
+            "cache_read_input_tokens": usage_totals.cache_read_input_tokens,
+            "total_cost_usd": usage_totals.total_cost_usd,
+        }
     # Best-effort model name extraction from init/system metadata in the
     # NDJSON stream. Failures are swallowed — the model field stays None and
     # is omitted from serialization, so a stream with no model info does not
     # break anything.
-    model_name = extract_model_name_from_ndjson(raw_ndjson if raw_ndjson else "")
+    model_name = (
+        authoritative_usage.reported_model
+        or (
+            authoritative_usage.resolved_model
+            if authoritative_usage.resolved_model != "unknown"
+            else None
+        )
+        or extract_model_name_from_ndjson(raw_ndjson if raw_ndjson else "")
+    )
     msg = ChatMessage(
         role="assistant",
         content=text,
@@ -216,7 +264,22 @@ def record_response(
         step_type=step_type,
         attempt=attempt,
         fix_iteration=fix_iteration,
-        token_usage=usage or None,
+        token_usage=usage,
+        # WHY the discriminator is provenance, not status: a real LLM attempt
+        # that produced no usage (crash, empty stdout) IS an unknown-usage call
+        # and the live session ledger counts it, so history must persist its
+        # UNAVAILABLE record or the history-only reconstruction reports fewer
+        # calls and a better completeness than the flow actually had. A
+        # synthesized non-LLM response (e.g. the test step's result summary)
+        # never ran a subprocess attempt and must not fabricate a call.
+        usage_records=(
+            [authoritative_usage.to_dict()]
+            if (
+                from_llm_attempt
+                or authoritative_usage.usage_status != UsageStatus.UNAVAILABLE
+            )
+            else None
+        ),
         agent_name=agent_name,
         model_name=model_name or None,
     )
@@ -327,6 +390,51 @@ def record_step_event(
             f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
     except OSError as exc:
         logger.warning("Failed to record step event for %s: %s", step_id, exc)
+
+
+def record_self_check_scope(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    scope_metadata: Dict[str, Any],
+) -> None:
+    """Record one auditable SELF_CHECK scope without inventing read telemetry.
+
+    Raw provider tool events remain the authority for files the checker actually
+    accessed.  This record carries only engine-known scope facts: baseline,
+    changed paths, round/pass position and fix iteration.
+    """
+    path = _history_file(project_root, flow_id, step_id)
+    round_id = str(scope_metadata.get("round_id", ""))
+    pass_index = scope_metadata.get("pass_index", 1)
+    try:
+        if path.exists():
+            with path.open("r", encoding="utf-8") as existing:
+                for line in existing:
+                    try:
+                        value = json.loads(line)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if (
+                        isinstance(value, dict)
+                        and value.get("type") == "self_check_scope"
+                        and str(value.get("round_id", "")) == round_id
+                        and value.get("pass_index") == pass_index
+                    ):
+                        return
+        record = {
+            "type": "self_check_scope",
+            "step_id": step_id,
+            "step_type": step_type,
+            "timestamp": datetime.now().isoformat(),
+            **scope_metadata,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as output:
+            output.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record SELF_CHECK scope for %s: %s", step_id, exc)
 
 
 def record_step_started(
@@ -1013,6 +1121,7 @@ def get_step_history(
                 "step_failed",
                 "step_output",
                 "waiting_for_lock",
+                "self_check_scope",
                 # Legacy anchor: pre-change worktree flows recorded a bare
                 # ``{"type": "merging"}`` bypass-status row (the webui merge
                 # side-state, now retired in favour of the merge_integrate /
@@ -1591,79 +1700,68 @@ def format_history_for_retry(
 
 
 def parse_usage_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> dict:
-    """Parse per-call token usage + cost from an LLM stream's result line.
-
-    Scans the raw NDJSON output for the terminal ``type == "result"`` line and
-    extracts the four token counts (``input_tokens`` / ``output_tokens`` /
-    ``cache_creation_input_tokens`` / ``cache_read_input_tokens``) plus the
-    top-level ``total_cost_usd``, using the exact same field semantics as
-    ``StreamJSONTracker._capture_usage`` in ``llm_caller.py`` — both the nested
-    ``message.usage`` shape and a flat top-level ``usage`` object are accepted,
-    missing fields default to ``0``, and ``total_cost_usd`` is read from the
-    result line's top level (not from inside ``usage``).
-
-    Returns the usage as a JSON-primitive dict (``UsageTotals.to_dict()`` shape)
-    when a result line carrying any usage/cost is found, otherwise an **empty
-    dict** ``{}`` (no result line, no usage payload, or an all-zero total). All
-    parsing is best-effort: a malformed line, missing field, or any structural
-    surprise is swallowed and yields ``{}`` rather than raising, mirroring the
-    tracker's never-break-the-stream contract.
-
-    Args:
-        raw_ndjson: The raw NDJSON output (str) or a pre-parsed list[dict].
-
-    Returns:
-        A dict with the five usage keys, or ``{}`` when no usage is present.
-    """
-    if not raw_ndjson:
-        return {}
-
+    """Return the legacy five-field projection of all terminal usage events."""
     try:
-        # Normalize to an iterable of parsed dicts.
-        if isinstance(raw_ndjson, list):
-            items = raw_ndjson
-        else:
-            items = []
-            for line in raw_ndjson.strip().split("\n"):
-                line = line.strip()
-                if not line or line.startswith("==="):
-                    continue
-                try:
-                    parsed = json.loads(line)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                items.append(parsed)
-
-        for data in items:
-            if not isinstance(data, dict) or data.get("type") != "result":
-                continue
-            # Prefer the nested message.usage shape, fall back to a flat
-            # top-level usage object — same precedence as the tracker.
-            usage_obj = None
-            message = data.get("message")
-            if isinstance(message, dict):
-                usage_obj = message.get("usage")
-            if not isinstance(usage_obj, dict):
-                top_usage = data.get("usage")
-                if isinstance(top_usage, dict):
-                    usage_obj = top_usage
-            captured = UsageTotals.from_dict(
-                usage_obj if isinstance(usage_obj, dict) else None
-            )
-            # total_cost_usd lives at the result line's top level, not inside
-            # usage, so fill it from there (matching _capture_usage).
-            if "total_cost_usd" in data:
-                captured.total_cost_usd = UsageTotals.from_dict(
-                    {"total_cost_usd": data.get("total_cost_usd")}
-                ).total_cost_usd
-            if captured.is_empty():
-                return {}
-            return captured.to_dict()
+        record = parse_usage_record(raw_ndjson)
+        if record.usage_status == UsageStatus.UNAVAILABLE:
+            return {}
+        totals = UsageTotals.from_usage_record(record)
+        return {
+            "input_tokens": totals.input_tokens,
+            "output_tokens": totals.output_tokens,
+            "cache_creation_input_tokens": totals.cache_creation_input_tokens,
+            "cache_read_input_tokens": totals.cache_read_input_tokens,
+            "total_cost_usd": totals.total_cost_usd,
+        }
     except Exception:  # pragma: no cover - defensive; never raise to caller
         logger.debug("Failed to parse usage from ndjson", exc_info=True)
         return {}
 
-    return {}
+
+def collect_usage_records_from_sessions(
+    sessions: Iterable[ChatSession],
+) -> Dict[str, List[UsageRecord]]:
+    """Recover per-step call/attempt UsageRecords from history sessions.
+
+    History-only flows carry no ``State``; their authoritative usage lives in
+    each assistant message's ``usage_records`` (one record per LLM call).
+    Messages predating that field fall back to their legacy five-field
+    ``token_usage`` tally, adapted through
+    :func:`~tianluo.usage.legacy_usage_record` so the summary is flagged
+    ``legacy_ambiguous`` instead of pretending the numbers are exact.
+
+    Legacy call ids carry the message's position in its jsonl file — the same
+    ``ordinal`` discriminator the daemon's history reader uses — because
+    ``attempt`` alone is not unique: a failed attempt and its retry, or
+    multi-round discovery calls, share an external attempt number, and records
+    collapsing in dedup would silently drop measured tokens and cost from the
+    summary.
+    """
+    records_by_step: Dict[str, List[UsageRecord]] = {}
+    for session in sessions:
+        for index, message in enumerate(session.messages):
+            if message.role != "assistant":
+                continue
+            step_records = records_by_step.setdefault(session.step_id, [])
+            if message.usage_records:
+                for raw in message.usage_records:
+                    if isinstance(raw, Mapping):
+                        # UNAVAILABLE records are deliberate accounting units
+                        # (one per attempt without usage) and must survive here:
+                        # the daemon and server surfaces count them as
+                        # unknown-usage calls, and filtering them would make
+                        # ``luo history show`` disagree with the WebUI on the
+                        # same flow.
+                        step_records.append(UsageRecord.from_dict(raw))
+            elif message.token_usage:
+                step_records.append(
+                    legacy_usage_record(
+                        message.token_usage,
+                        call_id=f"legacy:{session.step_id}:{index}",
+                        attempt=message.attempt,
+                    )
+                )
+    return records_by_step
 
 
 def extract_model_name_from_obj(obj: Any) -> Optional[str]:

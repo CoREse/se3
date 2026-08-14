@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 
 import pytest
@@ -503,6 +504,140 @@ def test_publish_flow_omits_worktree_key_by_default(client_and_app):
         assert resp.status_code == 202
         spawn = recv_daemon_frame(ws)
         assert "worktree" not in spawn.payload
+
+
+def test_publish_flow_threads_implementation_strategy(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "Direct it",
+                "project_root": "/p",
+                "implementation_strategy": "direct",
+            },
+        )
+        assert resp.status_code == 202
+        spawn = recv_daemon_frame(ws)
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["implementation_strategy"] == "direct"
+
+
+def test_publish_flow_omits_strategy_key_by_default(client_and_app):
+    """An old client that never sends the field stays fully legal."""
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "Plain", "project_root": "/p"},
+        )
+        assert resp.status_code == 202
+        spawn = recv_daemon_frame(ws)
+        assert "implementation_strategy" not in spawn.payload
+
+
+def test_publish_flow_rejects_invalid_strategy(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "X",
+                "project_root": "/p",
+                "implementation_strategy": "turbo",
+            },
+        )
+        assert resp.status_code == 422
+
+
+def test_publish_flow_strategy_refuses_pre_revision_7_daemon(client_and_app):
+    """An explicit strategy against a pre-7 daemon is a capability error.
+
+    Silently dropping the field would downgrade the operator's explicit
+    choice to project config / planned — never a quiet substitution.
+    """
+    client, app = client_and_app
+    hello = protocol.make_hello(
+        "m1", "host-1", "6.4.0", key=app.state.test_daemon_key
+    )
+    frame = json.loads(hello.to_json())
+    frame["payload"]["protocol_version"] = "6"
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps(frame))
+        recv_daemon_frame(ws)  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "Direct it",
+                "project_root": "/p",
+                "implementation_strategy": "direct",
+            },
+        )
+        assert resp.status_code == 501
+        body = resp.json()
+        assert body["reason"] == "unsupported_daemon"
+        # No spawn frame was dispatched for the refused request.
+        assert ws.receive_json()["type"] != protocol.MSG_SPAWN_FLOW
+
+    # The same old daemon accepts a strategy-less request: the field is
+    # omitted, so project configuration / default resolves it.
+    hello = protocol.make_hello(
+        "m1", "host-1", "6.4.0", key=app.state.test_daemon_key
+    )
+    frame = json.loads(hello.to_json())
+    frame["payload"]["protocol_version"] = "6"
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(json.dumps(frame))
+        recv_daemon_frame(ws)
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "Plain", "project_root": "/p"},
+        )
+        assert resp.status_code == 202
+        spawn = recv_daemon_frame(ws)
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert "implementation_strategy" not in spawn.payload
+
+
+def test_resume_flow_never_sends_strategy(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)  # WELCOME
+        ws.send_text(
+            protocol.make_status_update(
+                _snapshot(
+                    flows=[
+                        {
+                            "project_root": "/p",
+                            "flow_id": "f1",
+                            "status": "paused",
+                            "resumable": True,
+                        }
+                    ]
+                )
+            ).to_json()
+        )
+
+        resp = client.post("/api/flows/f1/resume")
+        assert resp.status_code == 202
+        spawn = recv_daemon_frame(ws)
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["resume_flow_id"] == "f1"
+        # The persisted flow's strategy is authoritative — never re-decided.
+        assert "implementation_strategy" not in spawn.payload
 
 
 def test_publish_flow_unknown_machine_404(client_and_app):
@@ -1759,6 +1894,44 @@ def test_publish_flow_from_issue_dispatches(client_and_app):
         # Issue content drives the task; the request task is dropped.
         assert spawn.payload["task_description"] == ""
         assert spawn.payload["discover"] is False
+
+
+def test_publish_flow_from_issue_threads_strategy(client_and_app):
+    """An explicit strategy reaches the from-issue spawn path too."""
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)  # WELCOME
+        _push_issue(ws, client, app, issue_id="011", project_root="/p")
+
+        resp = client.post(
+            "/api/flows",
+            json={
+                "from_issue_id": "011",
+                "implementation_strategy": "planned",
+            },
+        )
+        assert resp.status_code == 202, resp.text
+        spawn = recv_daemon_frame(ws)
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["from_issue_id"] == "011"
+        assert spawn.payload["implementation_strategy"] == "planned"
+
+
+def test_publish_flow_from_issue_omits_strategy_by_default(client_and_app):
+    client, app = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(_hello(app))
+        recv_daemon_frame(ws)  # WELCOME
+        _push_issue(ws, client, app, issue_id="012", project_root="/p")
+
+        resp = client.post(
+            "/api/flows",
+            json={"from_issue_id": "012"},
+        )
+        assert resp.status_code == 202, resp.text
+        spawn = recv_daemon_frame(ws)
+        assert "implementation_strategy" not in spawn.payload
 
 
 def test_publish_flow_from_issue_threads_discover(client_and_app):

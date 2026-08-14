@@ -294,27 +294,24 @@ class TestResolutionRecording:
 
 
 # ---------------------------------------------------------------------------
-# 3. Convergence suppression guard
+# 3. Repeated-finding adjudication routing
 # ---------------------------------------------------------------------------
 
-class TestConvergenceSuppression:
+class TestRepeatedFindingAdjudication:
     def _seed_prior_round(self, flow, expected):
         """Record a prior round flagging the shared position with ``expected``."""
         adjudication.record_self_check_round(
             flow.state.context, [_issue(expected=expected)], round_id="prior",
         )
 
-    def test_oscillation_suppresses_convergence(self, tmp_path):
-        """convergence_enabled=True + an oscillating position → the shortcut is
-        blocked and the flow enters the fix loop (REVISION_NEEDED) so the
-        adjudicator can intervene, rather than COMPLETED-converged."""
+    def test_oscillation_enters_fix_and_remains_available_to_adjudication(self, tmp_path):
+        """An oscillating validated finding stays in the fix loop."""
         flow = _make_flow(tmp_path)
         # Prior round demanded "returns None" at this position.
         self._seed_prior_round(flow, expected="returns None")
 
         # This round demands the OPPOSITE ("returns zero") at the same position
-        # (same file + quote), but keeps actual/divergence identical to a prev
-        # issue so ``_issues_converged`` would otherwise fire.
+        # (same file + quote) and repeats the prior issue identity.
         current = _issue(expected="returns zero")
         prev_for_convergence = _issue(expected="returns zero")
         step = _make_step(
@@ -328,9 +325,8 @@ class TestConvergenceSuppression:
         assert step.outputs.get("converged") is not True
         assert step.outputs["fix_needed"] is True
 
-    def test_non_oscillation_convergence_unchanged(self, tmp_path):
-        """No oscillation on the ledger → convergence shortcut still fires and
-        the pass COMPLETEs as converged (behaviour preserved)."""
+    def test_non_oscillation_repetition_still_enters_fix(self, tmp_path):
+        """Even without oscillation, a validated repeated finding enters fix."""
         flow = _make_flow(tmp_path)
         # Prior round demanded the SAME expected as this round → not oscillating.
         self._seed_prior_round(flow, expected="returns zero")
@@ -344,8 +340,9 @@ class TestConvergenceSuppression:
         )
         result = _run(step, flow, [current])
 
-        assert result == StepStatus.COMPLETED
-        assert step.outputs.get("converged") is True
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs["fix_needed"] is True
 
     def test_convergence_disabled_no_suppression_effect(self, tmp_path):
         """With convergence disabled (default), the oscillation guard has no

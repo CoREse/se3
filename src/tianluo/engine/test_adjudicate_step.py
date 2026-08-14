@@ -211,7 +211,7 @@ def test_handler_writes_override_to_own_outputs(tmp_path):
         status = adjmod.adjudicate_handler(step, flow)
     assert status == StepStatus.COMPLETED
     assert step.outputs["adjudicated_description"] == "Return None when x is None."
-    assert step.outputs["adjudicated_plan"] is None
+    assert "adjudicated_plan" not in step.outputs
     assert step.outputs["adjudication_rationale"]
     assert step.outputs["adjudicated_at"]  # ISO timestamp present
     assert step.outputs["contradiction_type"] == "internal_contradiction"
@@ -301,7 +301,7 @@ def test_benign_verdict_records_rejected_candidate(tmp_path):
     assert not decision.suppress_convergence
 
 
-def test_plan_override_accepted_only_as_nonempty_list(tmp_path):
+def test_plan_only_override_is_rejected_for_modern_ruling(tmp_path):
     flow = _flow_with_ledger(tmp_path)
     step = _adj_step(flow)
     groups = [{"group_id": "G1", "name": "fixed", "tasks": []}]
@@ -313,9 +313,10 @@ def test_plan_override_accepted_only_as_nonempty_list(tmp_path):
         "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
     }
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
-        adjmod.adjudicate_handler(step, flow)
-    assert step.outputs["adjudicated_plan"] == groups
-    assert step.outputs["adjudicated_description"] is None
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.FAILED
+    assert "adjudicated_description" in step.error_message
+    assert "adjudicated_plan" not in step.outputs
 
 
 def test_null_string_override_coerced_to_none(tmp_path):
@@ -387,7 +388,7 @@ def test_handler_does_not_touch_prior_step_outputs(tmp_path):
     # Original DISCOVERY + PLAN outputs unchanged; overrides live only on adj step.
     assert json.dumps(discovery_step.outputs, sort_keys=True) == discovery_snapshot
     assert json.dumps(plan_step.outputs, sort_keys=True) == plan_snapshot
-    assert step.outputs["adjudicated_plan"][0]["name"] == "changed"
+    assert "adjudicated_plan" not in step.outputs
     assert step.outputs["adjudicated_description"] == "Return None when x is None only."
 
 
@@ -635,9 +636,8 @@ def test_rejected_ruling_leaves_ledger_untouched(tmp_path):
 # Issue 2: abolish only positions whose clause actually left the source pool
 # --------------------------------------------------------------------------- #
 
-def test_plan_only_override_keeps_live_description_clause_counting(tmp_path):
-    """A plan-only fix must NOT abolish a description-grounded position whose
-    quoted clause still lives in the (unchanged) task description (issue 2)."""
+def test_plan_only_override_cannot_land(tmp_path):
+    """Modern adjudication cannot use a derived plan as a requirement patch."""
     flow = FlowInstance(task_description="Keep the hard constraint X and also do Y")
     flow.change_path = tmp_path / "c"
     ctx = flow.state.context
@@ -655,19 +655,11 @@ def test_plan_only_override_keeps_live_description_clause_counting(tmp_path):
         "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
     }
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
-        adjmod.adjudicate_handler(step, flow)
-    # The quoted clause survives in the effective (unchanged) description, so the
-    # position is not staged for abolition — it keeps counting toward triggers.
-    assert step.outputs["abolished_fingerprints"] == []
-    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+        status = adjmod.adjudicate_handler(step, flow)
+    assert status == StepStatus.FAILED
+    assert "adjudicated_plan" not in step.outputs
     ledger = adjmod._ledger(flow)
     assert not any(o["abolished"] for o in ledger["observations"])
-    # A next round at the same live position still oscillates (a THIRD distinct
-    # expectation) → suppress convergence, because the history was not abolished.
-    decision = adj.evaluate_triggers(
-        ctx, [_issue(quote=q, expected="mangle X")], fix_iteration=1, period_n=0
-    )
-    assert decision.suppress_convergence
 
 
 def test_description_rewrite_abolishes_only_the_removed_clause(tmp_path):
@@ -712,15 +704,119 @@ def test_description_rewrite_abolishes_only_the_removed_clause(tmp_path):
     assert all(o["abolished"] for o in removed)
 
 
-def test_description_only_ruling_keeps_clause_the_live_plan_still_restates(tmp_path):
-    """A description-only ruling must NOT abolish a clause the (un-overridden) plan
-    still restates. When no ``adjudicated_plan`` is supplied the latest plan stays
-    authoritative — self_check keeps validating ``plan_task`` quotes against it — so
-    a clause still present there remains quotable. Abolishing it on the strength of
-    a description rewrite alone would let the next SELF_CHECK drop a valid
-    plan-grounded issue as quote_not_in_source and silently erase an unchanged plan
-    requirement; only a ruling that also overrides the plan may retire that clause.
-    """
+def test_charter_grounded_position_survives_a_description_only_rewrite(tmp_path):
+    """self_check accepts a finding grounded in the charter (or a marked
+    WHY:/INVARIANT: comment), so the dead-clause pool must span those surfaces
+    too. A ruling that rewrites only the description leaves the quoted charter
+    sentence live — the position keeps its oscillation history and can trip the
+    triggers again."""
+    root = tmp_path / "project"
+    (root / "tianluo").mkdir(parents=True)
+    charter_clause = "Never delete user data without an explicit confirmation"
+    (root / "tianluo" / "charter.md").write_text(
+        f"# Charter\n\n## Key Constraints\n- {charter_clause}.\n",
+        encoding="utf-8",
+    )
+    (root / "src").mkdir()
+    (root / "src" / "a.py").write_text(
+        "# INVARIANT: purge always double-checks the confirmation flag\n"
+        "def purge():\n    return None\n",
+        encoding="utf-8",
+    )
+
+    flow = FlowInstance(task_description="Do A. Do B differently.")
+    flow.state.context["project_root"] = str(root)
+    ctx = flow.state.context
+    issue = _issue(file="src/a.py", quote=charter_clause, expected="guard deletes")
+    issue["expectation_source"]["type"] = "charter"
+    adj.record_self_check_round(ctx, [issue], round_id="r0")
+    flipped = _issue(file="src/a.py", quote=charter_clause, expected="allow deletes")
+    flipped["expectation_source"]["type"] = "charter"
+    adj.record_self_check_round(ctx, [flipped], round_id="r1")
+
+    implement = Step(
+        step_type=StepType.IMPLEMENT,
+        status=StepStatus.COMPLETED,
+        outputs={"files_changed": ["src/a.py"]},
+    )
+    flow.state.add_step(implement)
+
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "hard_constraint_conflict",
+        "adjudicated_description": "Do A.",
+        "adjudication_rationale": "drop the contradictory B demand",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        assert adjmod.adjudicate_handler(step, flow) == StepStatus.COMPLETED
+
+    # The charter sentence is untouched, so nothing may be abolished.
+    assert step.outputs["abolished_fingerprints"] == []
+    adjmod.apply_landed_ledger_effects(step, flow.state.context)
+    ledger = adjmod._ledger(flow)
+    assert not any(o["abolished"] for o in ledger["observations"])
+
+
+def test_why_comment_grounded_position_survives_a_description_only_rewrite(tmp_path):
+    """Same guarantee for a quote harvested from a marked WHY:/INVARIANT:
+    comment in a file this flow changed."""
+    root = tmp_path / "project"
+    (root / "tianluo").mkdir(parents=True)
+    (root / "tianluo" / "charter.md").write_text("# Charter\n", encoding="utf-8")
+    (root / "src").mkdir()
+    why_clause = "INVARIANT: the cache key must include the tenant id"
+    (root / "src" / "cache.py").write_text(
+        f"# {why_clause}\ndef key(tenant):\n    return tenant\n", encoding="utf-8"
+    )
+
+    flow = FlowInstance(task_description="Speed up the cache. Drop the tenant split.")
+    flow.state.context["project_root"] = str(root)
+    ctx = flow.state.context
+    for expected in ("include the tenant", "ignore the tenant"):
+        issue = _issue(file="src/cache.py", quote=why_clause, expected=expected)
+        issue["expectation_source"]["type"] = "why_comment"
+        adj.record_self_check_round(ctx, [issue], round_id=expected)
+
+    flow.state.add_step(
+        Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["src/cache.py"]},
+        )
+    )
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "hard_constraint_conflict",
+        "adjudicated_description": "Speed up the cache.",
+        "adjudication_rationale": "drop the contradictory tenant demand",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
+        assert adjmod.adjudicate_handler(step, flow) == StepStatus.COMPLETED
+
+    assert step.outputs["abolished_fingerprints"] == []
+
+
+def test_unreadable_constraint_channel_abolishes_nothing(tmp_path):
+    """A clause cannot be shown dead against a surface that could not be read:
+    the ruling stages no abolition rather than clearing live history."""
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(flow)
+    payload = {
+        "contradiction_type": "internal_contradiction",
+        "adjudicated_description": "Return None when x is None.",
+        "adjudication_rationale": "keep return",
+        "candidate_verdicts": [{"id": 0, "verdict": "contradiction"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _mock_call(payload)), \
+            patch.object(adjmod, "_constraint_source_texts", return_value=None):
+        assert adjmod.adjudicate_handler(step, flow) == StepStatus.COMPLETED
+    assert step.outputs["abolished_fingerprints"] == []
+
+
+def test_description_ruling_ignores_plan_restatement(tmp_path):
+    """A derived plan cannot keep an abolished requirement clause alive."""
     from tianluo.engine.steps.self_check import _validate_and_filter_issues
 
     flow = FlowInstance(
@@ -762,20 +858,15 @@ def test_description_only_ruling_keeps_clause_the_live_plan_still_restates(tmp_p
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         adjmod.adjudicate_handler(step, flow)
 
-    # The clause survives in the effective (unchanged) plan, so it is NOT staged for
-    # abolition despite leaving the adjudicated description.
-    assert step.outputs["abolished_fingerprints"] == []
+    assert len(step.outputs["abolished_fingerprints"]) == 2
     adjmod.apply_landed_ledger_effects(step, flow.state.context)
     ledger = adjmod._ledger(flow)
-    assert not any(o["abolished"] for o in ledger["observations"])
+    assert all(o["abolished"] for o in ledger["observations"])
 
-    # Downstream: nothing was abolished, so the self_check source pool still carries
-    # the live plan task, and a valid plan-grounded issue re-quoting the clause is
-    # KEPT (not silently dropped by validation).
     abolished_quotes = [
         o["quote_norm"] for o in ledger["observations"] if o["abolished"]
     ]
-    assert abolished_quotes == []
+    assert abolished_quotes
     sc_inputs = {
         "task_description_base": "Return None when x is None.",
         "adjudicated_description": "Return None when x is None.",
@@ -786,8 +877,8 @@ def test_description_only_ruling_keeps_clause_the_live_plan_still_restates(tmp_p
     live_issue = _issue(quote="raise when x is None", expected="raise ValueError")
     live_issue["expectation_source"]["type"] = "plan_task"
     kept, stats = _validate_and_filter_issues([live_issue], sc_inputs)
-    assert stats["quote_not_in_source_count"] == 0
-    assert len(kept) == 1
+    assert kept == []
+    assert stats["unsupported_source_type_count"] == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -809,7 +900,7 @@ def test_noop_contradiction_ruling_fails_after_retries(tmp_path):
     with patch.object(adjmod, "LLMCaller", _mock_call(payload)):
         status = adjmod.adjudicate_handler(step, flow)
     assert status == StepStatus.FAILED
-    assert "override patch" in step.error_message
+    assert "adjudicated_description" in step.error_message
     # Nothing was written or staged.
     ledger = adjmod._ledger(flow)
     assert not any(o["abolished"] for o in ledger["observations"])
@@ -852,7 +943,7 @@ def test_noop_contradiction_ruling_retries_then_succeeds(tmp_path):
     # The second attempt's prompt carried the strict re-prompt demanding a
     # covering patch (and rationale).
     assert "was rejected" in prompts[1].lower()
-    assert "covering override patch" in prompts[1].lower()
+    assert "adjudicated_description" in prompts[1].lower()
 
 
 def test_review_divergence_needs_no_patch(tmp_path):
@@ -1196,7 +1287,29 @@ def test_prompt_demands_homomorphic_sweep_and_conservatism(tmp_path):
     assert "AUTO-PASS" in p
     assert "covered_surfaces" in p
     assert "justification" in p
-    assert "RULE IN FULL, IN ONE GO" in p
+    assert "full corrected task description" in p.lower()
+    assert "derived scheduling data" in p.lower()
+
+
+def test_prompt_does_not_inject_plan_as_requirement_authority(tmp_path):
+    flow = _flow_with_ledger(tmp_path)
+    step = _adj_step(
+        flow,
+        task_groups=[
+            {"group_id": "G1", "tasks": [{"description": "PLAN ONLY SENTINEL"}]}
+        ],
+    )
+    prompts: list[str] = []
+    payload = {
+        "contradiction_type": "review_divergence",
+        "adjudicated_description": None,
+        "adjudication_rationale": "the review expectations diverged",
+        "candidate_verdicts": [{"id": 0, "verdict": "benign"}],
+    }
+    with patch.object(adjmod, "LLMCaller", _sequenced_caller([payload], prompts)):
+        assert adjmod.adjudicate_handler(step, flow) == StepStatus.COMPLETED
+    assert "PLAN ONLY SENTINEL" not in prompts[0]
+    assert "Currently-effective plan task groups" not in prompts[0]
 
 
 def test_covered_surfaces_persisted_on_patch_path(tmp_path):

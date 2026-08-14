@@ -87,6 +87,51 @@ class TestGetFlowDetailActive:
         detail = get_flow_detail(project, "flow-other-999")
         assert detail is None
 
+    def test_legacy_plan_and_plan_task_outputs_remain_visible(self, project):
+        flow_data = _make_flow_dict("flow-legacy-plan")
+        plan_id = "01_plan_legacy"
+        check_id = "02_self_check_legacy"
+        legacy_groups = [
+            {"group_id": "G1", "tasks": [{"description": "legacy task"}]}
+        ]
+        legacy_issue = {
+            "location": "src/legacy.py:4",
+            "description": "legacy issue",
+            "expectation_source": {
+                "type": "plan_task",
+                "verbatim_quote": "legacy task",
+            },
+        }
+        flow_data["state"]["step_history"] = [plan_id, check_id]
+        flow_data["state"]["selected_steps"] = ["plan", "self_check"]
+        flow_data["state"]["steps"] = {
+            plan_id: {
+                "step_id": plan_id,
+                "step_type": "plan",
+                "status": "completed",
+                "outputs": {"task_groups": legacy_groups},
+            },
+            check_id: {
+                "step_id": check_id,
+                "step_type": "self_check",
+                "status": "revision_needed",
+                "outputs": {
+                    "issues": [legacy_issue],
+                    "adjudicated_plan": legacy_groups,
+                },
+            },
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        detail = get_flow_detail(project, "flow-legacy-plan")
+        assert detail is not None
+        assert detail["steps"][0]["outputs"]["task_groups"] == legacy_groups
+        outputs = detail["steps"][1]["outputs"]
+        assert outputs["adjudicated_plan"] == legacy_groups
+        assert outputs["issues"][0]["expectation_source"]["type"] == "plan_task"
+
 
 class TestGetFlowDetailArchive:
     """get_flow_detail falls back to archived flows."""
@@ -550,3 +595,367 @@ class TestHistoryShowDetailedCliFixLoop:
         assert "id: 04_implement_abc)" not in out, (
             "Un-split implement section leaked into output; split did not run."
         )
+
+
+class TestHistoryUsageAndStrategySurfaces:
+    """The strategy / scope / usage projections surface through history show.
+
+    These pin the same backends the daemon and server consume
+    (strategy_view.py + usage.build_usage_payload), so the CLI JSON view can
+    never diverge from the control-plane payloads.
+    """
+
+    def _usage_record(self, call_id="c1", **overrides):
+        record = {
+            "schema_version": 2,
+            "call_id": call_id,
+            "attempt": 0,
+            "usage_status": "available",
+            "agent_name": "claude",
+            "runner_type": "claude-code",
+            "provider": "anthropic",
+            "resolved_model": "claude-opus-5",
+            "logical_input_tokens": 1000,
+            "uncached_input_tokens": 700,
+            "output_tokens": 100,
+            "cache_read_input_tokens": 200,
+            "cache_creation_input_tokens": 100,
+            "actual_cost_usd": 0.02,
+            "usage_event_ids": [f"ev-{call_id}"],
+        }
+        record.update(overrides)
+        return record
+
+    def test_active_flow_detail_carries_projections(self, project):
+        flow_data = _make_flow_dict("flow-usage-1")
+        impl_id = "01_implement_abc"
+        flow_data["state"]["step_history"] = [impl_id]
+        flow_data["state"]["selected_steps"] = ["analyze", "implement"]
+        flow_data["state"]["context"] = {
+            "requested_implementation_strategy": "direct",
+            "effective_implementation_strategy": "direct",
+            "strategy_reason": "explicit request",
+            "self_check_review": {
+                "active_round": {
+                    "round_id": "scr-x",
+                    "scope_mode": "incremental",
+                    "baseline_id": "fix-2-x",
+                    "fix_iteration": 2,
+                    "pass_index": 1,
+                },
+                "completed_full_rounds": 1,
+            },
+        }
+        record = self._usage_record()
+        flow_data["state"]["session_usage_records"] = [record]
+        flow_data["state"]["steps"] = {
+            impl_id: {
+                "step_id": impl_id,
+                "step_type": "implement",
+                "status": "completed",
+                "outputs": {"usage_records": [record]},
+            },
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        detail = get_flow_detail(project, "flow-usage-1")
+        assert detail is not None
+        strategy = detail["implementation_strategy"]
+        assert strategy["effective"] == "direct"
+        assert strategy["requested"] == "direct"
+        assert strategy["inferred"] is False
+        assert detail["review_scope"]["active_round"]["scope_mode"] == "incremental"
+        assert detail["review_scope"]["completed_full_rounds"] == 1
+        usage = detail["usage"]
+        assert usage["completeness"] == "complete"
+        assert len(usage["calls"]) == 1
+        assert usage["calls"][0]["resolved_model"] == "claude-opus-5"
+        # Per-step table is fed by step.outputs.usage_records.
+        assert "01_implement_abc" in usage["steps"]
+        assert usage["steps"]["01_implement_abc"]["record_count"] == 1
+
+    def test_active_flow_legacy_totals_fall_back(self, project):
+        flow_data = _make_flow_dict("flow-usage-legacy")
+        flow_data["state"]["selected_steps"] = ["plan", "implement"]
+        flow_data["state"]["session_token_usage"] = {
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_cost_usd": 0.004,
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        detail = get_flow_detail(project, "flow-usage-legacy")
+        usage = detail["usage"]
+        assert usage is not None
+        # Old five-field tally recovered and flagged legacy, never a fake 0.
+        assert usage["legacy"] is True
+        assert usage["calls"][0]["usage_status"] == "available"
+        assert usage["summary"]["totals"]["logical_input_tokens"] == 300
+
+    def test_active_flow_strategy_inferred_for_legacy(self, project):
+        flow_data = _make_flow_dict("flow-legacy-strategy")
+        flow_data["state"]["selected_steps"] = ["analyze", "plan", "implement", "test"]
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        detail = get_flow_detail(project, "flow-legacy-strategy")
+        strategy = detail["implementation_strategy"]
+        assert strategy["effective"] == "planned"
+        assert strategy["inferred"] is True
+        # This state records NO usage fact at all — neither a record ledger nor
+        # a five-field tally — so both surfaces omit usage rather than claim an
+        # unknown call. The daemon's flow_usage_summary reads the same bytes and
+        # must return the same verdict.
+        from tianluo.daemon.usage_backend import flow_usage_summary
+
+        assert detail["usage"]["summary"] is None
+        assert detail["usage"]["completeness"] == "none"
+        assert (
+            flow_usage_summary(
+                flow_data["state"],
+                project_root=project,
+                call_id="flow-legacy-strategy",
+            )
+            is None
+        )
+
+    def test_active_flow_legacy_tally_survives_modern_re_save(self, project):
+        """Re-saving a pre-ledger flow keeps its tally visible in the CLI.
+
+        The modern serializer adds ``session_usage_records: []`` beside the
+        untouched non-zero tally; that empty ledger means "no per-call records",
+        never "zero usage", so the adapted legacy call must still be rendered.
+        """
+        from tianluo.daemon.usage_backend import flow_usage_summary
+
+        flow_data = _make_flow_dict("flow-usage-resaved")
+        flow_data["state"]["selected_steps"] = ["plan", "implement"]
+        flow_data["state"]["session_usage_records"] = []
+        flow_data["state"]["session_token_usage"] = {
+            "input_tokens": 300,
+            "output_tokens": 30,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+            "total_cost_usd": 0.004,
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        usage = get_flow_detail(project, "flow-usage-resaved")["usage"]
+        assert usage["legacy"] is True
+        assert usage["summary"]["totals"]["logical_input_tokens"] == 300
+        assert usage["summary"]["actual_cost_usd"] == pytest.approx(0.004)
+        daemon_summary = flow_usage_summary(
+            flow_data["state"], project_root=project, call_id="flow-usage-resaved"
+        )
+        assert daemon_summary is not None
+        assert daemon_summary["totals"]["logical_input_tokens"] == 300
+
+    def test_history_only_flow_usage_from_messages(self, project):
+        flow_id = "flow-history-usage"
+        history_dir = project / "tianluo" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+        record = self._usage_record("hist-1")
+        _write_jsonl(
+            history_dir / "01_analyze_abc.jsonl",
+            [
+                _mk_msg("user", "analyze", "2026-04-17T10:00:00"),
+                {
+                    **_mk_msg("assistant", "analyze", "2026-04-17T10:00:30"),
+                    "usage_records": [record],
+                },
+            ],
+        )
+        legacy = {
+            **_mk_msg("assistant", "self_check", "2026-04-17T10:01:30"),
+            "token_usage": {
+                "input_tokens": 50,
+                "output_tokens": 5,
+                "total_cost_usd": 0.001,
+            },
+        }
+        _write_jsonl(
+            history_dir / "02_self_check_def.jsonl",
+            [legacy],
+        )
+
+        detail = _detail_from_history(project, flow_id)
+        assert detail is not None
+        usage = detail["usage"]
+        # Both records carry usable numbers, but the legacy-adapted one has
+        # no model/provider provenance — the summary reads partial instead
+        # of a confident "complete" beside the legacy note.
+        assert usage["completeness"] == "partial"
+        assert usage["summary"]["unknown_model_count"] == 1
+        assert usage["legacy"] is True
+        assert len(usage["calls"]) == 2
+        assert set(usage["steps"]) == {"01_analyze_abc", "02_self_check_def"}
+        # Strategy: history-only flows have no context; the recorded steps
+        # (analyze/self_check, no PLAN->IMPLEMENT surface) infer
+        # not_applicable — matching the engine's legacy inference.
+        assert detail["implementation_strategy"]["effective"] == "not_applicable"
+        assert detail["implementation_strategy"]["inferred"] is True
+        assert detail["review_scope"] is None
+
+    def test_show_cli_renders_usage_and_strategy_sections(
+        self, project, monkeypatch
+    ):
+        flow_data = _make_flow_dict("flow-render-usage", status="completed")
+        impl_id = "01_implement_abc"
+        record = self._usage_record()
+        flow_data["state"]["step_history"] = [impl_id]
+        flow_data["state"]["selected_steps"] = ["analyze", "implement"]
+        flow_data["state"]["context"] = {
+            "requested_implementation_strategy": "planned",
+            "effective_implementation_strategy": "planned",
+            "strategy_reason": "default",
+        }
+        flow_data["state"]["session_usage_records"] = [record]
+        flow_data["state"]["steps"] = {
+            impl_id: {
+                "step_id": impl_id,
+                "step_type": "implement",
+                "status": "completed",
+                "outputs": {"usage_records": [record]},
+            },
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+        monkeypatch.setattr(history_cmd, "get_project_root", lambda: project)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["show", "flow-render-usage"], env={"COLUMNS": "200"}
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        # i18n keys render (repo config may be zh-CN; both locales carry the
+        # section header, so assert on the structural content instead).
+        assert "claude-opus-5" in out
+        assert "claude-code" in out
+        assert "planned" in out
+        assert "01_implement_abc" in out
+
+    def test_show_cli_renders_legacy_plan_artifacts(self, project, monkeypatch):
+        flow_data = _make_flow_dict("flow-plan-artifacts", status="completed")
+        plan_id = "01_plan_legacy"
+        check_id = "02_self_check_legacy"
+        flow_data["state"]["step_history"] = [plan_id, check_id]
+        flow_data["state"]["selected_steps"] = ["plan", "self_check"]
+        flow_data["state"]["steps"] = {
+            plan_id: {
+                "step_id": plan_id,
+                "step_type": "plan",
+                "status": "completed",
+                "outputs": {
+                    "task_groups": [
+                        {"group_id": "G1", "tasks": [{"description": "legacy task"}]}
+                    ]
+                },
+            },
+            check_id: {
+                "step_id": check_id,
+                "step_type": "self_check",
+                "status": "revision_needed",
+                "outputs": {
+                    "issues": [
+                        {
+                            "location": "src/legacy.py:4",
+                            "description": "legacy issue",
+                            "expectation_source": {
+                                "type": "plan_task",
+                                "verbatim_quote": "legacy task",
+                            },
+                        }
+                    ],
+                    "adjudicated_plan": [{"group_id": "G1"}],
+                },
+            },
+        }
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+        monkeypatch.setattr(history_cmd, "get_project_root", lambda: project)
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app, ["show", "flow-plan-artifacts"], env={"COLUMNS": "200"}
+        )
+        assert result.exit_code == 0, result.output
+        out = result.output
+        # The legacy artifacts stay visible in their historical section
+        # (en-US locale in the tmp project).
+        assert "task group" in out
+        assert "adjudicated_plan" in out
+        assert "plan_task-sourced finding" in out
+        assert "Plan Artifacts" in out
+
+    def test_json_matches_text_source(self, project):
+        flow_data = _make_flow_dict("flow-json-usage")
+        record = self._usage_record()
+        flow_data["state"]["selected_steps"] = ["analyze", "implement"]
+        flow_data["state"]["session_usage_records"] = [record]
+        (project / "tianluo" / "state" / "engine.json").write_text(
+            json.dumps(flow_data), encoding="utf-8"
+        )
+
+        detail = get_flow_detail(project, "flow-json-usage")
+        # The JSON payload is the same structured summary the text renderer
+        # consumes (build_usage_payload output).
+        usage = detail["usage"]
+        assert usage["summary"]["totals"]["logical_input_tokens"] == 1000
+        assert usage["summary"]["actual_cost_usd"] == 0.02
+        assert usage["completeness"] == "complete"
+
+
+class TestArchivedFlowUsage:
+    """Archived flows recover usage through the same state-backed path."""
+
+    def test_archived_flow_carries_usage_and_strategy(self, project):
+        flow_data = _make_flow_dict("flow-archived-usage", task="Archived usage")
+        record = {
+            "schema_version": 2,
+            "call_id": "arch-1",
+            "attempt": 0,
+            "usage_status": "available",
+            "agent_name": "claude",
+            "runner_type": "claude-code",
+            "provider": "anthropic",
+            "resolved_model": "claude-opus-5",
+            "logical_input_tokens": 800,
+            "uncached_input_tokens": 700,
+            "output_tokens": 50,
+            "cache_read_input_tokens": 100,
+            "cache_creation_input_tokens": 0,
+            "actual_cost_usd": 0.01,
+        }
+        flow_data["state"]["selected_steps"] = ["plan", "implement"]
+        flow_data["state"]["context"] = {
+            "requested_implementation_strategy": "planned",
+            "effective_implementation_strategy": "planned",
+            "strategy_reason": "project config",
+        }
+        flow_data["state"]["session_usage_records"] = [record]
+        archive_file = (
+            project / "tianluo" / "state" / "archive" / "engine_20260401_140000.json"
+        )
+        archive_file.write_text(json.dumps(flow_data), encoding="utf-8")
+
+        detail = get_flow_detail(project, "flow-archived-usage")
+        assert detail is not None
+        assert detail["status"] == "completed"
+        assert detail["implementation_strategy"]["effective"] == "planned"
+        usage = detail["usage"]
+        assert usage["completeness"] == "complete"
+        assert usage["summary"]["totals"]["logical_input_tokens"] == 800
+        assert len(usage["calls"]) == 1
+        assert usage["calls"][0]["resolved_model"] == "claude-opus-5"

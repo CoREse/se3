@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tianluo.usage import CostSemantics, UsageRecord, UsageStatus
 from tianluo.engine.token_usage import (
     UsageTotals,
     accumulate_step_usage,
@@ -66,14 +67,14 @@ class TestUsageTotals:
         assert a.input_tokens == 7
         assert a.total_cost_usd == 0.5
 
-    def test_total_tokens_sums_all_four(self):
+    def test_total_tokens_does_not_double_count_input_cache_subsets(self):
         u = UsageTotals(
             input_tokens=1,
             output_tokens=2,
             cache_creation_input_tokens=4,
             cache_read_input_tokens=8,
         )
-        assert u.total_tokens == 15
+        assert u.total_tokens == 3
 
     def test_is_empty_false_when_only_cost(self):
         u = UsageTotals(total_cost_usd=0.0001)
@@ -151,6 +152,77 @@ class TestUsageTotals:
         u = UsageTotals.from_dict({"input_tokens": "42", "total_cost_usd": "0.5"})
         assert u.input_tokens == 42
         assert u.total_cost_usd == pytest.approx(0.5)
+
+    def test_usage_record_projection_round_trips_authority(self):
+        record = UsageRecord(
+            call_id="call-1",
+            attempt=1,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="openai",
+            # logical == uncached + every cache category: the round trip
+            # re-validates that invariant, so the fixture must satisfy it.
+            logical_input_tokens=105,
+            uncached_input_tokens=70,
+            output_tokens=20,
+            cache_read_input_tokens=30,
+            cache_creation_5m_input_tokens=5,
+            actual_cost_usd=None,
+        )
+        totals = UsageTotals.from_usage_record(record)
+        assert totals.input_tokens == 105
+        assert totals.total_tokens == 125
+        assert totals.cache_read_input_tokens == 30
+        assert totals.cache_creation_input_tokens == 5
+        assert totals.total_cost_usd == 0.0
+        restored = UsageTotals.from_dict(totals.to_dict())
+        assert restored.usage_records == [record]
+        assert restored.input_tokens == 105
+
+    def test_unavailable_record_survives_zero_projection(self):
+        record = UsageRecord(
+            call_id="failed-call",
+            attempt=0,
+            usage_status=UsageStatus.UNAVAILABLE,
+            actual_cost_usd=None,
+        )
+        totals = UsageTotals.from_usage_record(record)
+        assert totals.is_empty()
+        assert totals.has_usage_records
+        restored = UsageTotals.from_dict(totals.to_dict())
+        assert restored.usage_records[0].usage_status == UsageStatus.UNAVAILABLE
+
+    def test_cumulative_session_cost_uses_latest_record(self):
+        first = UsageRecord(
+            call_id="call-1",
+            attempt=0,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="anthropic",
+            provider_session_id="session",
+            logical_input_tokens=10,
+            uncached_input_tokens=10,
+            actual_cost_usd=0.1,
+            cost_semantics=CostSemantics.PROVIDER_SESSION_CUMULATIVE,
+        )
+        second = UsageRecord(
+            call_id="call-2",
+            attempt=1,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="anthropic",
+            provider_session_id="session",
+            logical_input_tokens=20,
+            uncached_input_tokens=20,
+            actual_cost_usd=0.25,
+            cost_semantics=CostSemantics.PROVIDER_SESSION_CUMULATIVE,
+        )
+        totals = UsageTotals.from_usage_record(first)
+        totals.add(UsageTotals.from_usage_record(second))
+        assert totals.input_tokens == 30
+        assert totals.total_cost_usd == pytest.approx(0.25)
+
+    def test_old_zero_tally_projects_as_legacy_ambiguous(self):
+        records = UsageTotals().to_usage_records(call_id="old")
+        assert records[0].usage_status == UsageStatus.LEGACY_AMBIGUOUS
+        assert records[0].actual_cost_usd is None
 
 
 class TestFormatting:
@@ -328,3 +400,159 @@ class TestUseStepUsageCrossThread:
                     f.result()
         assert step.input_tokens == n_threads * per_thread
         assert step.output_tokens == n_threads * per_thread * 2
+
+
+# ---------------------------------------------------------------------------
+# Legacy projection vs. authoritative UsageSummary consistency
+# ---------------------------------------------------------------------------
+
+
+class TestProjectionSummaryConsistency:
+    """The legacy five-field UsageTotals projection must never disagree with
+    the authoritative UsageSummary built from the same records."""
+
+    def _records(self):
+        from tianluo.pricing import PricingCatalog
+
+        records = [
+            UsageRecord(
+                call_id="a",
+                attempt=0,
+                usage_status=UsageStatus.AVAILABLE,
+                provider="anthropic",
+                resolved_model="claude-opus-5",
+                logical_input_tokens=100,
+                uncached_input_tokens=80,
+                cache_read_input_tokens=20,
+                output_tokens=10,
+                actual_cost_usd=0.001,
+            ),
+            UsageRecord(
+                call_id="b",
+                attempt=0,
+                usage_status=UsageStatus.AVAILABLE,
+                provider="anthropic",
+                resolved_model="claude-opus-5",
+                logical_input_tokens=50,
+                uncached_input_tokens=40,
+                cache_read_input_tokens=10,
+                output_tokens=5,
+                actual_cost_usd=0.0005,
+            ),
+        ]
+        return records, PricingCatalog.builtin()
+
+    def test_token_totals_agree_between_projection_and_summary(self):
+        from tianluo.usage import UsageSummary
+
+        records, catalog = self._records()
+        projection = UsageTotals.from_usage_records(records)
+        summary = UsageSummary.summarize(records, catalog=catalog)
+        assert projection.input_tokens == summary.totals.logical_input_tokens
+        assert projection.output_tokens == summary.totals.output_tokens
+        assert projection.cache_read_input_tokens == summary.totals.cache_read_input_tokens
+        assert projection.total_tokens == summary.totals.total_tokens
+
+    def test_projection_cost_matches_deduplicated_actual(self):
+        from tianluo.usage import UsageSummary
+
+        records, catalog = self._records()
+        projection = UsageTotals.from_usage_records(records)
+        summary = UsageSummary.summarize(records, catalog=catalog)
+        assert projection.total_cost_usd == pytest.approx(
+            summary.actual_cost_usd
+        )
+
+    def test_projection_zero_cost_when_actual_unknown(self):
+        # The legacy projection flattens unknown cost to 0.0 (its schema
+        # cannot express "unknown"); the summary keeps the distinction.
+        from tianluo.usage import UsageSummary
+
+        record = UsageRecord(
+            call_id="c",
+            attempt=0,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="anthropic",
+            resolved_model="claude-opus-5",
+            logical_input_tokens=10,
+            uncached_input_tokens=10,
+            output_tokens=2,
+        )
+        projection = UsageTotals.from_usage_records([record])
+        summary = UsageSummary.summarize([record])
+        assert projection.total_cost_usd == 0.0
+        assert summary.actual_cost_usd is None
+        assert summary.unknown_price_count == 1
+
+    def test_no_usage_and_explicit_zero_reach_different_displays(self):
+        from tianluo.usage import UsageSummary
+
+        missing = UsageRecord(call_id="m", attempt=0, usage_status=UsageStatus.UNAVAILABLE)
+        explicit_zero = UsageRecord(
+            call_id="z",
+            attempt=0,
+            usage_status=UsageStatus.AVAILABLE,
+            provider="anthropic",
+            resolved_model="claude-opus-5",
+            actual_cost_usd=0.0,
+        )
+        missing_summary = UsageSummary.summarize([missing])
+        zero_summary = UsageSummary.summarize([explicit_zero])
+        assert missing_summary.unknown_call_count == 1
+        assert missing_summary.actual_cost_usd is None
+        assert zero_summary.actual_cost_usd == 0.0
+        assert zero_summary.unknown_call_count == 0
+
+    def test_distinct_legacy_tallies_are_not_collapsed_by_dedup(self):
+        # Two steps of a resumed legacy flow each carry a five-field tally.
+        # Positional legacy ids ("legacy-add-1") collided, and identity-based
+        # dedup then silently dropped one distinct AVAILABLE measurement from
+        # the flow totals.
+        from tianluo.usage import UsageSummary
+
+        step_one = UsageTotals(
+            input_tokens=100, output_tokens=10, total_cost_usd=0.01,
+        )
+        step_two = UsageTotals(
+            input_tokens=200, output_tokens=20, total_cost_usd=0.02,
+        )
+        flow = UsageTotals(input_tokens=0, output_tokens=0)
+        flow.usage_records = []
+        # Fold each step tally into its own accumulator, then into the flow —
+        # the shape a resumed legacy flow produces.
+        acc_one = UsageTotals().add(step_one)
+        acc_two = UsageTotals().add(step_two)
+        acc_one.usage_records = acc_one.to_usage_records("legacy:step1")
+        acc_two.usage_records = acc_two.to_usage_records("legacy:step2")
+        merged = UsageTotals().add(acc_one).add(acc_two)
+        assert len({r.call_id for r in merged.usage_records}) == len(
+            merged.usage_records
+        )
+        summary = UsageSummary.summarize(merged.usage_records)
+        assert summary.totals.logical_input_tokens == 300
+        assert summary.totals.output_tokens == 30
+
+    def test_record_less_legacy_folds_get_unique_call_ids(self):
+        first = UsageTotals(input_tokens=10, output_tokens=1)
+        second = UsageTotals(input_tokens=20, output_tokens=2)
+        seeded = UsageTotals.from_usage_record(
+            UsageRecord(call_id="modern", attempt=0, usage_status=UsageStatus.AVAILABLE)
+        )
+        merged = UsageTotals.from_usage_record(
+            UsageRecord(call_id="modern2", attempt=0, usage_status=UsageStatus.AVAILABLE)
+        )
+        seeded.add(first)
+        merged.add(second)
+        ids = {r.call_id for r in seeded.usage_records + merged.usage_records}
+        assert len(ids) == len(seeded.usage_records) + len(merged.usage_records)
+
+    def test_accumulated_usage_projects_from_the_same_records(self):
+        from tianluo.usage import UsageSummary
+
+        records, catalog = self._records()
+        first = UsageTotals.from_usage_record(records[0])
+        second = UsageTotals.from_usage_record(records[1])
+        first.add(second)
+        summary = UsageSummary.summarize(records, catalog=catalog)
+        assert first.input_tokens == summary.totals.logical_input_tokens
+        assert first.total_cost_usd == pytest.approx(summary.actual_cost_usd)

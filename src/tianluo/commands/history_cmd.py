@@ -31,10 +31,18 @@ from ..i18n import t, t_status
 from ..engine.persistence import PersistenceManager
 from ..engine.chat_history import (
     list_flows as list_chat_flows,
+    collect_usage_records_from_sessions,
     get_flow_history,
     get_detailed_json,
     interleave_sessions_for_display,
     render_session_detailed,
+)
+from ..engine.display import build_history_usage_renderables
+from ..strategy_view import scope_view, strategy_view
+from ..usage import (
+    UsageRecord,
+    build_usage_payload,
+    legacy_usage_record,
 )
 
 app = typer.Typer(help=t("cli.help.history"))
@@ -145,6 +153,101 @@ def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     return archived
 
 
+def _strategy_value_label(value: Any) -> str:
+    """Localize one strategy enum value (WebUI ``strategy.value.*`` parity)."""
+    text = str(value or "").strip()
+    if text in ("auto", "direct", "planned", "not_applicable"):
+        return t(f"history.strategy.value.{text}")
+    return text or t("history.strategy.value.unknown")
+
+
+def _scope_mode_label(value: Any) -> str:
+    """Localize one SELF_CHECK scope_mode (WebUI ``scope.mode.*`` parity)."""
+    text = str(value or "").strip()
+    if text in ("full", "incremental"):
+        return t(f"history.scope.mode.{text}")
+    return text or "-"
+
+
+def _strategy_reason_text(strategy: Dict[str, Any]) -> str:
+    """The strategy-reason row text.
+
+    A ``reason_key`` marks a sentence the projection itself authored (legacy
+    inference), so it renders through the CLI catalog; a persisted reason is
+    flow data recorded at decision time and is shown verbatim.
+    """
+    key = str(strategy.get("reason_key") or "").strip()
+    if key == "legacy_inference":
+        return t("history.field.strategy_reason_legacy")
+    return str(strategy.get("reason") or "")
+
+
+def _pricing_catalog(project_root: Path) -> Any:
+    """Load the project's effective pricing catalog for cost estimation.
+
+    A missing / invalid ``tianluo.yaml`` degrades to the built-in table rather
+    than blocking history display; the estimate column then simply reflects
+    built-in prices.
+    """
+    try:
+        from ..config import load_pricing_catalog
+
+        return load_pricing_catalog(project_root)
+    except Exception:
+        from ..pricing import PricingCatalog
+
+        return PricingCatalog.builtin()
+
+
+def _state_usage_payload(project_root: Path, flow: Any) -> Dict[str, Any]:
+    """Build the usage/cost payload for a state-backed (active/archived) flow.
+
+    The authoritative session record list wins for the flow totals; per-step
+    records from ``step.outputs`` drive the per-step table.  A flow with no
+    recoverable records whose legacy five-field tally is its only usage fact
+    (``State.legacy_usage_ledger``, which stays true across a modern re-save)
+    falls back to that adapted tally so old flows show *something* honest
+    instead of a fabricated zero; a modern flow with an empty ledger has simply
+    made no LLM call yet and reports no usage.
+    """
+    catalog = _pricing_catalog(project_root)
+    records_by_step: Dict[str, List[UsageRecord]] = {}
+    for step_id in flow.state.step_history:
+        step = flow.state.steps.get(step_id)
+        if not step or not isinstance(step.outputs, dict):
+            continue
+        raw_records = step.outputs.get("usage_records")
+        if not isinstance(raw_records, list):
+            continue
+        records_by_step[step_id] = [
+            UsageRecord.from_dict(raw) for raw in raw_records if isinstance(raw, dict)
+        ]
+    flow_records = list(flow.state.session_usage_records)
+    if not flow_records:
+        flow_records = [
+            record for records in records_by_step.values() for record in records
+        ]
+    if not flow_records and getattr(flow.state, "legacy_usage_ledger", False):
+        # No authoritative records AND the loaded engine.json's five-field tally
+        # is its only usage fact (State.legacy_usage_ledger, shared test with
+        # the daemon's flow_usage_summary): adapt it — an all-zero shape becomes
+        # legacy_ambiguous — instead of silently omitting usage. A MODERN state
+        # with an empty ledger means "zero LLM calls so far", never an unknown
+        # call, so it must not synthesize one.
+        flow_records = [
+            legacy_usage_record(
+                flow.state.session_token_usage.to_dict(),
+                call_id="legacy-session-usage",
+            )
+        ]
+    return build_usage_payload(
+        records_by_step,
+        catalog,
+        flow_records=flow_records,
+        call_id=str(flow.flow_id),
+    )
+
+
 def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
     """Build detail dict from a FlowInstance object."""
     chat_sessions = get_flow_history(project_root, flow.flow_id)
@@ -166,6 +269,7 @@ def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
         })
 
     completed, total = flow.get_progress()
+    context = flow.state.context or {}
 
     return {
         "flow_id": flow.flow_id,
@@ -181,6 +285,16 @@ def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
         "current_step_id": flow.state.current_step_id,
         "steps": step_details,
         "chat_sessions": len(chat_sessions),
+        # Control-plane projections: strategy / scope audit / usage share one
+        # backend with the daemon and server surfaces (see strategy_view.py /
+        # usage.build_usage_payload), so CLI and WebUI never diverge.
+        "implementation_strategy": strategy_view(
+            context,
+            task_type=flow.task_type,
+            selected_steps=flow.state.selected_steps,
+        ),
+        "review_scope": scope_view(context),
+        "usage": _state_usage_payload(project_root, flow),
     }
 
 
@@ -273,6 +387,16 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
             "outputs": outputs,
         })
 
+    # History-only flows carry no State, so strategy / scope audit are not
+    # recoverable; usage is rebuilt from each assistant message's records
+    # (legacy five-field tallies adapt to flagged legacy_ambiguous records).
+    records_by_step = collect_usage_records_from_sessions(chat_sessions)
+    usage = build_usage_payload(
+        records_by_step,
+        _pricing_catalog(project_root),
+        call_id=flow_id,
+    )
+
     return {
         "flow_id": flow_id,
         "status": "history",
@@ -287,6 +411,13 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
         "current_step_id": None,
         "steps": step_details,
         "chat_sessions": len(chat_sessions),
+        "implementation_strategy": strategy_view(
+            {},
+            task_type=task_type,
+            selected_steps=[step["step_type"] for step in step_details],
+        ),
+        "review_scope": None,
+        "usage": usage,
     }
 
 
@@ -523,6 +654,54 @@ def show_cmd(
         info_table.add_row(t("history.field.completed"), format_datetime(detail['completed_at']))
     info_table.add_row(t("history.field.chat_sessions"), str(detail['chat_sessions']))
 
+    # Implementation strategy (requested/effective/reason) — same projection
+    # the daemon status and server payloads carry (strategy_view).
+    strategy = detail.get("implementation_strategy")
+    if isinstance(strategy, dict) and strategy.get("effective"):
+        value = _strategy_value_label(strategy["effective"])
+        if (
+            strategy.get("requested")
+            and strategy["requested"] not in (strategy["effective"], "auto")
+            and strategy["requested"] in ("auto", "direct", "planned")
+        ):
+            value = t(
+                "history.field.strategy_value",
+                effective=value,
+                requested=_strategy_value_label(strategy["requested"]),
+            )
+        if strategy.get("inferred"):
+            value = t("history.field.strategy_inferred", value=value)
+        info_table.add_row(t("history.field.strategy"), value)
+        reason = _strategy_reason_text(strategy)
+        if reason:
+            info_table.add_row(t("history.field.strategy_reason"), reason)
+
+    # SELF_CHECK scope audit (persisted round state).
+    review_scope = detail.get("review_scope")
+    if isinstance(review_scope, dict):
+        scope_parts = []
+        for key in ("active_round", "last_round"):
+            round_data = review_scope.get(key)
+            if isinstance(round_data, dict):
+                scope_parts.append(
+                    t(
+                        "history.field.scope_round",
+                        mode=_scope_mode_label(round_data.get("scope_mode")),
+                        pass_index=round_data.get("pass_index") or "-",
+                        fix=round_data.get("fix_iteration") or 0,
+                    )
+                )
+                break
+        if review_scope.get("completed_full_rounds"):
+            scope_parts.append(
+                t(
+                    "history.field.scope_full_rounds",
+                    count=review_scope["completed_full_rounds"],
+                )
+            )
+        if scope_parts:
+            info_table.add_row(t("history.field.scope"), ", ".join(scope_parts))
+
     console.print(info_table)
 
     # Steps table
@@ -559,11 +738,74 @@ def show_cmd(
             )
         console.print(steps_table)
 
+    # Legacy plan artifacts remain visible in their historical section even
+    # though task_groups / adjudicated_plan no longer carry SELF_CHECK
+    # authority: they are scheduling/history data, still worth displaying.
+    _show_plan_artifacts(detail)
+
+    # Independent usage/cost section, fed by the same structured payload the
+    # --json output carries (build_usage_payload).
+    usage_payload = detail.get("usage")
+    console.print(t("history.usage.header"))
+    if isinstance(usage_payload, dict) and (usage_payload.get("calls") or usage_payload.get("steps")):
+        for renderable in build_history_usage_renderables(
+            usage_payload, _pricing_catalog(project_root)
+        ):
+            console.print(renderable)
+    else:
+        console.print(t("history.usage.no_usage"))
+
     # Detailed LLM call display
     if detailed:
         _show_detailed_sessions(project_root, detail['flow_id'], verbose=verbose)
 
     console.print(t("history.show.restore_hint", flow_id=detail['flow_id']))
+
+
+def _show_plan_artifacts(detail: Dict[str, Any]) -> None:
+    """Render legacy PLAN / adjudication artifacts from step outputs.
+
+    Scans the flow's step outputs for the three historical data shapes the
+    modern SELF_CHECK no longer treats as authority — PLAN task_groups,
+    adjudicated_plan, and findings whose expectation_source is ``plan_task`` —
+    and renders a compact summary so they remain inspectable in their
+    historical section without implying any acceptance weight.
+    """
+    rows: List[tuple] = []
+    plan_step = None
+    for step in detail.get("steps", []):
+        outputs = step.get("outputs") or {}
+        if step.get("step_type") == "plan" and isinstance(
+            outputs.get("task_groups"), list
+        ):
+            groups = outputs["task_groups"]
+            if groups:
+                plan_step = step
+        if outputs.get("adjudicated_plan"):
+            rows.append((t("history.plan_artifacts.adjudicated_plan"), "plan"))
+        if step.get("step_type") == "self_check":
+            for issue in outputs.get("issues") or []:
+                source = issue.get("expectation_source") if isinstance(issue, dict) else None
+                if isinstance(source, dict) and source.get("type") == "plan_task":
+                    rows.append((t("history.plan_artifacts.plan_task_finding"), "self_check"))
+    if plan_step:
+        groups = plan_step["outputs"]["task_groups"]
+        rows.append(
+            (
+                t("history.plan_artifacts.task_groups", count=len(groups)),
+                "plan",
+            )
+        )
+    if not rows:
+        return
+
+    console.print(t("history.plan_artifacts.header"))
+    artifacts_table = Table(show_header=False, box=None)
+    artifacts_table.add_column(t("history.plan_artifacts.artifact"), style="bold")
+    artifacts_table.add_column(t("history.plan_artifacts.step"))
+    for artifact, step_type in rows:
+        artifacts_table.add_row(artifact, step_type)
+    console.print(artifacts_table)
 
 
 def _show_detailed_sessions(

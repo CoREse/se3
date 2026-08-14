@@ -33,7 +33,11 @@ pexpect = pytest.importorskip("pexpect")  # noqa: E402  (used for TIMEOUT/EOF)
 
 import json  # noqa: E402
 
-from tianluo.agent_runner import AgentRunner, InfraErrorType  # noqa: E402
+from tianluo.agent_runner import (  # noqa: E402
+    AgentInvocationIntent,
+    AgentRunner,
+    InfraErrorType,
+)
 import tianluo.claude_interactive_runner as cir  # noqa: E402
 from tianluo.claude_interactive_runner import (  # noqa: E402
     ClaudeInteractiveRunner,
@@ -55,6 +59,15 @@ from tianluo.claude_interactive_runner import (  # noqa: E402
     to_stream_json_ndjson,
     turn_complete,
 )
+
+
+def test_interactive_startup_metadata_does_not_guess_wrapper_model():
+    runner = ClaudeInteractiveRunner(
+        command={"cmd": "company-wrapper", "priority": 0}
+    )
+    metadata = runner.get_startup_metadata()
+    assert metadata.provider == "anthropic"
+    assert metadata.model is None
 
 
 # =============================================================================
@@ -193,6 +206,18 @@ class TestBuildCallArgs:
         args = runner.build_call_args("my effective prompt", read_only=False)
         assert "my effective prompt" not in args
         assert runner._pending_prompt == "my effective prompt"
+
+    def test_direct_intent_uses_plain_interactive_prompt(self):
+        runner = _make_runner()
+        args = runner.build_call_args(
+            "implement everything",
+            read_only=False,
+            invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+        )
+        assert "/goal" not in runner._pending_prompt
+        assert runner._pending_prompt == "implement everything"
+        assert "/goal" not in " ".join(args)
+        assert runner.supports_native_goal is False
 
     def test_context_files_translated_to_add_dir(self, tmp_path):
         f1 = tmp_path / "a" / "x.py"
@@ -1051,6 +1076,37 @@ class TestUsageExtraction:
         u = extract_usage_from_record(rec)
         assert all(u[k] == 0 for k in USAGE_TOKEN_KEYS)
 
+    def test_cache_creation_ttl_split_preserved_through_synthesized_result(self):
+        from tianluo.usage import parse_usage_record
+
+        rec = _assistant_record(
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 25,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 15,
+                    "ephemeral_1h_input_tokens": 10,
+                },
+            }
+        )
+        u = extract_usage_from_record(rec)
+        assert u["cache_creation_5m_input_tokens"] == 15
+        assert u["cache_creation_1h_input_tokens"] == 10
+        line = synthesize_result_line(u, 0.5, provider_session_id="s1")
+        record = parse_usage_record(line, call_id="c1", provider="anthropic")
+        # The TTL split reaches the unified parser instead of collapsing into
+        # generic cache creation, so the two TTL rates stay distinguishable.
+        assert record.cache_creation_5m_input_tokens == 15
+        assert record.cache_creation_1h_input_tokens == 10
+        assert record.cache_creation_input_tokens == 0  # 25 - 15 - 10
+
+    def test_ttl_split_absent_keeps_flat_shape(self):
+        u = extract_usage_from_record(_assistant_record(usage={"input_tokens": 7}))
+        assert "cache_creation_5m_input_tokens" not in u
+        assert "cache_creation_1h_input_tokens" not in u
+
     def test_synthesize_result_has_usage_and_cost(self):
         line = synthesize_result_line(
             {
@@ -1066,10 +1122,260 @@ class TestUsageExtraction:
         assert obj["usage"]["input_tokens"] == 1
         assert obj["total_cost_usd"] == 0.5
 
-    def test_synthesize_result_defaults_cost_zero(self):
+    def test_synthesize_result_omits_unreported_cost(self):
         obj = json.loads(synthesize_result_line({}))
-        assert obj["total_cost_usd"] == 0
-        assert obj["usage"]["input_tokens"] == 0
+        assert "total_cost_usd" not in obj
+        assert obj["usage"] == {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": 0,
+        }
+
+    def test_synthesize_result_omits_unreported_usage(self):
+        obj = json.loads(synthesize_result_line(None))
+        assert "usage" not in obj
+        assert "total_cost_usd" not in obj
+
+    def test_reused_interactive_session_has_delta_tokens_and_cumulative_cost(self):
+        from tianluo.usage import aggregate_usage_records, parse_usage_record
+
+        first = parse_usage_record(
+            synthesize_result_line(
+                {"input_tokens": 10, "output_tokens": 2},
+                0.1,
+                provider_session_id="interactive-shared",
+                usage_event_id="interactive-turn-1",
+            ),
+            call_id="interactive-call-1",
+        )
+        second = parse_usage_record(
+            synthesize_result_line(
+                {"input_tokens": 20, "output_tokens": 3},
+                0.25,
+                provider_session_id="interactive-shared",
+                usage_event_id="interactive-turn-2",
+            ),
+            call_id="interactive-call-2",
+        )
+        aggregate = aggregate_usage_records([first, second])
+        assert aggregate.logical_input_tokens == 30
+        assert aggregate.output_tokens == 5
+        assert aggregate.actual_cost_usd == pytest.approx(0.25)
+
+    def test_real_terminal_cost_record_reuses_accumulated_message_usage(
+        self, tmp_path
+    ):
+        transcript = tmp_path / "interactive-cost.jsonl"
+        records = [
+            {
+                "type": "assistant",
+                "message": {
+                    "model": "claude-test-model",
+                    "content": [{"type": "text", "text": "done"}],
+                    "stop_reason": "end_turn",
+                    "usage": {"input_tokens": 12, "output_tokens": 3},
+                },
+            },
+            {
+                "type": "result",
+                "result": "done",
+                "total_cost_usd": 0.02,
+            },
+        ]
+        transcript.write_text(
+            "\n".join(json.dumps(record) for record in records) + "\n",
+            encoding="utf-8",
+        )
+        watcher = SessionTranscriptWatcher(
+            tmp_path,
+            projects_dir=tmp_path,
+            session_id="interactive-cost-session",
+        )
+        watcher.path = transcript
+        output = watcher.poll()
+        assert watcher.synthesize_result() is None
+
+        from tianluo.usage import parse_usage_record
+
+        usage = parse_usage_record("\n".join(output))
+        assert usage.uncached_input_tokens == 12
+        assert usage.output_tokens == 3
+        assert usage.actual_cost_usd == pytest.approx(0.02)
+        assert usage.provider_session_id == "interactive-cost-session"
+
+    def test_multi_result_transcript_emits_per_result_deltas(self, tmp_path):
+        # A user replying before the turn-silence window closes yields several
+        # result records in one run.  Each must carry only the tokens
+        # accumulated since the previous emission — re-emitting the running
+        # session total as event_delta would double-count earlier turns.
+        from tianluo.usage import parse_usage_record
+
+        transcript = tmp_path / "interactive-multi-result.jsonl"
+        transcript.write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in [
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "model": "claude-test-model",
+                            "content": [{"type": "text", "text": "turn 1"}],
+                            "stop_reason": "end_turn",
+                            "usage": {"input_tokens": 100, "output_tokens": 10},
+                        },
+                    },
+                    {"type": "result", "result": "turn 1"},
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "model": "claude-test-model",
+                            "content": [{"type": "text", "text": "turn 2"}],
+                            "stop_reason": "end_turn",
+                            "usage": {"input_tokens": 50, "output_tokens": 5},
+                        },
+                    },
+                    {"type": "result", "result": "turn 2"},
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        watcher = SessionTranscriptWatcher(
+            tmp_path,
+            projects_dir=tmp_path,
+            session_id="interactive-multi-session",
+        )
+        watcher.path = transcript
+        output = watcher.poll()
+        assert watcher.synthesize_result() is None
+
+        result_lines = [
+            json.loads(line)
+            for line in output
+            if json.loads(line).get("type") == "result"
+        ]
+        assert [line["usage"]["input_tokens"] for line in result_lines] == [100, 50]
+        assert [line["usage"]["output_tokens"] for line in result_lines] == [10, 5]
+
+        usage = parse_usage_record(
+            "\n".join(output), call_id="multi-turn", provider="anthropic"
+        )
+        assert usage.logical_input_tokens == 150
+        assert usage.output_tokens == 15
+
+    def test_regressed_cumulative_snapshot_marks_record_partial(self, tmp_path):
+        # A second result whose usage snapshot went backwards must mark the
+        # emitted delta record partial with a diagnostic — a silent all-zero
+        # delta is legal-looking and would hide the anomaly from the
+        # downstream aggregator entirely.
+        from tianluo.usage import UsageStatus, parse_usage_record
+
+        transcript = tmp_path / "interactive-regressed.jsonl"
+        transcript.write_text(
+            "\n".join(
+                json.dumps(record)
+                for record in [
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "model": "claude-test-model",
+                            "content": [{"type": "text", "text": "turn 1"}],
+                            "stop_reason": "end_turn",
+                            "usage": {"input_tokens": 100, "output_tokens": 10},
+                        },
+                    },
+                    {"type": "result", "result": "turn 1"},
+                    # Re-reports a LOWER cumulative snapshot.
+                    {
+                        "type": "result",
+                        "result": "turn 2",
+                        "usage": {"input_tokens": 40, "output_tokens": 4},
+                    },
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        watcher = SessionTranscriptWatcher(
+            tmp_path,
+            projects_dir=tmp_path,
+            session_id="interactive-regressed-session",
+        )
+        watcher.path = transcript
+        output = watcher.poll()
+
+        result_lines = [
+            json.loads(line)
+            for line in output
+            if json.loads(line).get("type") == "result"
+        ]
+        second = result_lines[1]
+        assert second["usage"]["input_tokens"] == 0
+        assert second.get("partial") is True
+        assert any(
+            "non-monotonic" in diagnostic
+            for diagnostic in second.get("diagnostics", [])
+        )
+
+        usage = parse_usage_record(
+            "\n".join(output), call_id="regressed-session"
+        )
+        assert usage.usage_status == UsageStatus.PARTIAL
+        assert any(
+            "non-monotonic" in diagnostic for diagnostic in usage.diagnostics
+        )
+
+    def test_real_interactive_fixture_emits_delta_usage_with_session_metadata(
+        self, tmp_path, capsys
+    ):
+        from tianluo.engine.llm_caller import StreamJSONTracker
+        from tianluo.usage import UsageStatus, parse_usage_record
+
+        fixture = (
+            Path(__file__).parent / "fixtures" / "usage" / "claude_interactive.jsonl"
+        )
+        transcript = tmp_path / "interactive-provider-session.jsonl"
+        transcript.write_text(fixture.read_text(encoding="utf-8"), encoding="utf-8")
+        watcher = SessionTranscriptWatcher(
+            tmp_path,
+            projects_dir=tmp_path,
+            session_id="interactive-provider-session",
+        )
+        watcher.path = transcript
+        output_lines = watcher.poll()
+        synthesized = watcher.synthesize_result()
+        assert synthesized is not None
+        output_lines.append(synthesized)
+        raw = "\n".join(output_lines)
+
+        parsed = parse_usage_record(
+            raw,
+            call_id="interactive-fixture",
+            runner_type="claude-interactive",
+        )
+        tracker = StreamJSONTracker(
+            call_id="interactive-fixture",
+            usage_attempt=0,
+            runner_type="claude-interactive",
+        )
+        for line in output_lines:
+            tracker.process_line(line)
+        capsys.readouterr()
+
+        assert tracker.usage_record == parsed
+        assert parsed.provider == "anthropic"
+        assert parsed.provider_session_id == "interactive-provider-session"
+        # Anthropic's input_tokens EXCLUDES the cache categories (the real
+        # cache-heavy shape: single-digit uncached input beside tens of
+        # thousands of cached tokens), so the logical input total is their sum.
+        assert parsed.uncached_input_tokens == 7
+        assert parsed.cache_read_input_tokens == 14036 + 38452
+        assert parsed.cache_creation_input_tokens == 24399
+        assert parsed.logical_input_tokens == 7 + 14036 + 38452 + 24399
+        assert parsed.usage_status == UsageStatus.AVAILABLE
+        assert parsed.output_tokens == 27
+        assert parsed.actual_cost_usd is None
 
 
 class TestTurnComplete:
@@ -1181,6 +1487,64 @@ class TestSessionTranscriptWatcher:
             1 for ln in lines if json.loads(ln).get("type") == "init"
         )
         assert init_count == 1
+
+    def test_carried_result_usage_is_emitted_as_increment(self, tmp_path):
+        # A transcript ``result`` record that carries its own usage carries a
+        # cumulative session snapshot. It must be re-emitted as the increment
+        # beyond what earlier result records already accounted for — otherwise
+        # the shared aggregator sums the snapshot on top of the earlier deltas
+        # and every turn before it is double-counted.
+        projects = tmp_path / "projects"
+        cwd = "/p"
+        target = projects / munge_cwd(cwd)
+        watcher = SessionTranscriptWatcher(cwd=cwd, projects_dir=projects)
+        watcher.snapshot()
+        f = target / "s.jsonl"
+        _write_jsonl(
+            f,
+            [
+                _assistant_record(
+                    cwd=cwd, stop_reason="end_turn",
+                    usage={"input_tokens": 100, "output_tokens": 10},
+                ),
+                {"type": "result", "cwd": cwd, "sessionId": "sess-abc"},
+                _assistant_record(
+                    cwd=cwd, stop_reason="end_turn",
+                    usage={"input_tokens": 50, "output_tokens": 5},
+                ),
+                {
+                    "type": "result",
+                    "cwd": cwd,
+                    "sessionId": "sess-abc",
+                    "usage": {"input_tokens": 150, "output_tokens": 15},
+                },
+                _assistant_record(
+                    cwd=cwd, stop_reason="end_turn",
+                    usage={"input_tokens": 20, "output_tokens": 5},
+                ),
+                {"type": "result", "cwd": cwd, "sessionId": "sess-abc"},
+            ],
+        )
+        watcher.locate()
+        lines = watcher.poll()
+        results = [
+            json.loads(ln) for ln in lines
+            if json.loads(ln).get("type") == "result"
+        ]
+        assert len(results) == 3
+        # Turn 1 delta, turn 2 snapshot-increment, turn 3 delta after snapshot.
+        assert results[0]["usage"]["input_tokens"] == 100
+        assert results[0]["usage"]["output_tokens"] == 10
+        assert results[0]["usage"]["cache_creation_input_tokens"] == 0
+        assert results[0]["usage"]["cache_read_input_tokens"] == 0
+        assert results[1]["usage"]["input_tokens"] == 50
+        assert results[1]["usage"]["output_tokens"] == 5
+        assert results[2]["usage"]["input_tokens"] == 20
+        assert results[2]["usage"]["output_tokens"] == 5
+        assert results[1]["usage_semantics"] == "event_delta"
+        # Every turn's tokens are aggregated exactly once: 100+50+20 / 10+5+5.
+        assert sum(r["usage"]["input_tokens"] for r in results) == 170
+        assert sum(r["usage"]["output_tokens"] for r in results) == 20
 
     def test_write_activity_tracks_mtime(self, tmp_path):
         projects = tmp_path / "projects"

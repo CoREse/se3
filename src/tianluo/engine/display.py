@@ -11,11 +11,13 @@ from typing import Any, Dict, Optional
 
 from rich.console import Console
 from rich.style import Style
+from rich.table import Table
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
 from ..i18n import t
+from ..usage import UsageRecord, UsageStatus, UsageSummary, estimate_record_cost
 from .token_usage import UsageTotals, format_cost
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -132,6 +134,16 @@ def render_usage_block(
         (t("cli.display.usage.cache_creation"), f"{totals.cache_creation_input_tokens:,}"),
         (t("cli.display.usage.cost"), format_cost(totals.total_cost_usd)),
     ]
+    _render_usage_rows(rows, title)
+
+
+def _render_usage_rows(rows: list[tuple[str, str]], title: str) -> None:
+    """Render the shared fixed two-column usage table body.
+
+    Left-aligned dim labels, right-aligned values, standard reverse-color
+    title/footer chrome — the one visual shape every usage block shares so
+    numbers line up across step and session views.
+    """
     label_w = max(len(label) for label, _ in rows)
     value_w = max(len(value) for _, value in rows)
 
@@ -147,6 +159,261 @@ def render_usage_block(
     console.print("")
     console.print(_reverse_footer(_USAGE_BLOCK_COLOR))
     console.print("")
+
+
+def _format_optional_cost(value: Any) -> str:
+    """Render a cost that may be unknown — unknown shows "Unknown", not $0."""
+    if value is None:
+        return t("cli.display.usage.unknown_cost")
+    return format_cost(value)
+
+
+def render_usage_summary_block(
+    summary: Any, title: Optional[str] = None
+) -> None:
+    """Render a session usage/cost summary from the shared UsageSummary backend.
+
+    Shows token totals plus the two cost columns — provider actual and
+    estimated — kept separate so the display never fabricates a single
+    "total" that mixes both. Unknown-usage/model/price/cache-TTL call counts
+    and the completeness label surface whatever could not be measured;
+    nothing renders when the flow consumed no LLM calls at all.
+
+    Accepts a :class:`~tianluo.usage.UsageSummary`, its persisted dict, or
+    ``None``.
+    """
+    if summary is None:
+        return
+    if not isinstance(summary, UsageSummary):
+        summary = UsageSummary.from_dict(summary)
+    if not summary.records and not _summary_has_measurements(summary):
+        # A records-free (wire-shaped) summary still carries its aggregate
+        # totals and cost columns — the per-step block persists exactly that
+        # shape, so gating on the record list alone would hide it.
+        return
+
+    if title is None:
+        title = t("cli.run.session_usage_title")
+
+    console = get_console()
+    for renderable in _usage_summary_renderable(summary, title):
+        console.print(renderable)
+
+
+def _summary_has_measurements(summary: UsageSummary) -> bool:
+    """True when a records-free summary still carries something to show."""
+    totals = summary.totals
+    return bool(
+        totals.logical_input_tokens
+        or totals.output_tokens
+        or totals.cache_read_input_tokens
+        or totals.cache_creation_total_input_tokens
+        or summary.actual_cost_usd
+        or summary.estimated_cost_usd
+        or summary.unknown_call_count
+    )
+
+
+def _usage_status_label(status: Any) -> str:
+    """Render one UsageStatus value via i18n; unknown values stay verbatim.
+
+    Accepts both a raw wire string and a ``UsageStatus`` member. WHY the
+    ``getattr(..., "value")`` hop: ``UsageStatus`` is a ``(str, Enum)`` mixin,
+    so ``str(member)`` yields ``'UsageStatus.AVAILABLE'`` — feeding that to the
+    constructor raises and would print the Python repr instead of the label.
+    """
+    raw = getattr(status, "value", status)
+    try:
+        parsed = UsageStatus(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+    return t(f"usage.status.{parsed.value}")
+
+
+def _usage_summary_renderable(summary: UsageSummary, title: str) -> list:
+    """The renderable half of the summary block, shared with history display.
+
+    Returns the reverse-color title / rows / footer as a list of rich objects
+    (built without printing) so callers with their own console can render it,
+    while :func:`render_usage_summary_block` prints the same list.
+    """
+    totals = summary.totals
+    rows = [
+        (t("cli.display.usage.input_tokens"), f"{totals.logical_input_tokens:,}"),
+        (t("cli.display.usage.output_tokens"), f"{totals.output_tokens:,}"),
+        (t("cli.display.usage.cache_read"), f"{totals.cache_read_input_tokens:,}"),
+        (
+            t("cli.display.usage.cache_creation"),
+            f"{totals.cache_creation_total_input_tokens:,}",
+        ),
+        (t("cli.display.usage.actual_cost"), _format_optional_cost(summary.actual_cost_usd)),
+        (
+            t("cli.display.usage.estimated_cost"),
+            _format_optional_cost(summary.estimated_cost_usd),
+        ),
+        (
+            t("cli.display.usage.completeness"),
+            t(
+                "cli.display.usage.completeness_complete"
+                if summary.completeness == "complete"
+                else "cli.display.usage.completeness_partial"
+            ),
+        ),
+    ]
+    for label, count in (
+        (t("cli.display.usage.unknown_calls"), summary.unknown_call_count),
+        (t("cli.display.usage.unknown_model"), summary.unknown_model_count),
+        (t("cli.display.usage.unknown_price"), summary.unknown_price_count),
+        (t("cli.display.usage.unknown_cache_ttl"), summary.unknown_cache_ttl_count),
+    ):
+        if count:
+            rows.append((label, f"{count:,}"))
+
+    label_w = max(len(label) for label, _ in rows)
+    value_w = max(len(value) for _, value in rows)
+    lines = [
+        f"  [dim]{label.ljust(label_w)}[/dim]  {value.rjust(value_w)}"
+        for label, value in rows
+    ]
+    return [
+        _reverse_title(title, _USAGE_BLOCK_COLOR),
+        Text(""),
+        Text("\n".join(lines)),
+        Text(""),
+        _reverse_footer(_USAGE_BLOCK_COLOR),
+        Text(""),
+    ]
+
+
+def build_history_usage_renderables(
+    payload: Optional[Dict[str, Any]], catalog: Any = None
+) -> list:
+    """Return Rich renderables for a :func:`~tianluo.usage.build_usage_payload` dict.
+
+    The caller prints the returned list with its own console (``luo history
+    show`` owns one), mirroring :func:`render_session_detailed`.  The payload
+    is the same structured summary the ``--json`` path emits, so text and JSON
+    views can never drift; ``catalog`` (optional) is the pricing table used
+    for the per-call estimate column.  Returns ``[]`` for a missing payload
+    or a flow with no recorded usage at all.
+    """
+    if not isinstance(payload, dict):
+        return []
+    calls = payload.get("calls")
+    steps = payload.get("steps")
+    if not isinstance(calls, list) and not isinstance(steps, dict):
+        return []
+    if not calls and not steps:
+        return []
+
+    renderables: list = [Text("")]
+
+    if isinstance(calls, list) and calls:
+        renderables.append(Text(t("history.usage.calls_header"), style="bold"))
+        table = Table()
+        table.add_column(t("history.usage.col.call"), justify="right")
+        table.add_column(t("history.usage.col.agent"))
+        table.add_column(t("history.usage.col.runner"))
+        table.add_column(t("history.usage.col.provider"))
+        table.add_column(t("history.usage.col.model"))
+        table.add_column(t("history.usage.col.status"))
+        table.add_column(t("history.usage.col.input"), justify="right")
+        table.add_column(t("history.usage.col.output"), justify="right")
+        table.add_column(t("history.usage.col.cache_read"), justify="right")
+        table.add_column(t("history.usage.col.cache_create"), justify="right")
+        table.add_column(t("history.usage.col.actual"), justify="right")
+        table.add_column(t("history.usage.col.estimate"), justify="right")
+        for index, raw in enumerate(calls, 1):
+            if not isinstance(raw, dict):
+                continue
+            record = UsageRecord.from_dict(raw)
+            # ``resolved_model`` carries the internal "unknown" sentinel when
+            # the model could not be resolved; the user-visible placeholder
+            # must follow the UI language like the adjacent cells do.
+            resolved = record.resolved_model
+            model = (
+                resolved
+                if resolved and resolved != "unknown"
+                else t("cli.display.usage.model_unknown")
+            )
+            if record.reported_model and record.reported_model != model:
+                model = f"{model} ({record.reported_model})"
+            actual = _format_optional_cost(record.actual_cost_usd)
+            # Prefer the estimate embedded by build_usage_payload — the one
+            # shared backend result the WebUI also renders — so the two
+            # surfaces can never disagree on the same call's figure.
+            embedded_estimate = raw.get("estimated_cost_usd")
+            estimate_label = t("cli.display.usage.unknown_cost")
+            if embedded_estimate is not None:
+                estimate_label = format_cost(embedded_estimate)
+            else:
+                estimate = estimate_record_cost(record, catalog)
+                if estimate.is_estimated:
+                    estimate_label = format_cost(estimate.estimated_cost_usd)
+            table.add_row(
+                f"{index}:{record.attempt}",
+                record.agent_name or "-",
+                record.runner_type or "-",
+                record.provider or "-",
+                model,
+                _usage_status_label(record.usage_status),
+                f"{record.logical_input_tokens:,}",
+                f"{record.output_tokens:,}",
+                f"{record.cache_read_input_tokens:,}",
+                f"{record.cache_creation_total_input_tokens:,}",
+                actual,
+                estimate_label,
+            )
+        renderables.append(table)
+        renderables.append(Text(""))
+
+    if isinstance(steps, dict) and steps:
+        renderables.append(Text(t("history.usage.steps_header"), style="bold"))
+        step_table = Table()
+        step_table.add_column(t("history.usage.col.step"))
+        step_table.add_column(t("history.usage.col.calls"), justify="right")
+        step_table.add_column(t("history.usage.col.input"), justify="right")
+        step_table.add_column(t("history.usage.col.output"), justify="right")
+        step_table.add_column(t("history.usage.col.actual"), justify="right")
+        step_table.add_column(t("history.usage.col.estimate"), justify="right")
+        step_table.add_column(t("history.usage.col.completeness"))
+        for step_key, entry in steps.items():
+            if not isinstance(entry, dict):
+                continue
+            summary = UsageSummary.from_dict(entry.get("summary"))
+            step_table.add_row(
+                str(step_key),
+                str(entry.get("record_count") or 0),
+                f"{summary.totals.logical_input_tokens:,}",
+                f"{summary.totals.output_tokens:,}",
+                _format_optional_cost(summary.actual_cost_usd),
+                _format_optional_cost(summary.estimated_cost_usd),
+                t(
+                    "usage.completeness_complete"
+                    if summary.completeness == "complete"
+                    else "usage.completeness_partial"
+                ),
+            )
+        renderables.append(step_table)
+        renderables.append(Text(""))
+
+    summary = payload.get("summary")
+    if isinstance(summary, dict):
+        summary_obj = UsageSummary.from_dict(summary)
+        renderables.append(Text(t("history.usage.flow_header"), style="bold"))
+        # The boxed summary inside the flow-totals region must carry a
+        # flow-level title — reusing the per-session title here would present
+        # flow totals under a "session usage" label.
+        renderables.extend(
+            _usage_summary_renderable(
+                summary_obj, t("history.usage.flow_totals_title")
+            )
+        )
+    if payload.get("legacy"):
+        renderables.append(
+            Text(t("history.usage.legacy_note"), style="dim")
+        )
+    return renderables
 
 
 def render_full(content: str, title: Optional[str] = None) -> None:

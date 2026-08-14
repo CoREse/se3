@@ -302,6 +302,62 @@ class TestChainTailMergeIntoFix:
         assert len(step.outputs["fix_context"]["issues"]) == 1
 
 
+class TestDeferHotDisabledMidChain:
+    """The defer threshold is re-read from tianluo.yaml on every pass; a
+    hot-edit to 0 must NOT orphan the stash accumulated by earlier passes.
+    A non-empty stash always reaches the fix loop — the flush/merge decision
+    must not depend solely on the CURRENT pass's defer_enabled value.
+    """
+
+    def test_clean_last_pass_flushes_stash_even_when_defer_now_disabled(
+        self, tmp_path,
+    ):
+        flow = _make_flow(tmp_path)
+        prior = _valid_issue(severity="medium", actual="stashed before hot-edit")
+        step = _make_step(
+            pass_index=2, passes_required=2, threshold=0, deferred=[prior],
+        )
+        result = _run_handler(step, flow, [])  # clean last pass
+        assert result == StepStatus.REVISION_NEEDED
+        assert "stashed before hot-edit" in step.outputs["fix_instructions"]
+        assert len(step.outputs["fix_context"]["issues"]) == 1
+        # Consumed into the fix loop: the stash output is cleared.
+        assert step.outputs["self_check_deferred_issues"] == []
+
+    def test_finding_pass_merges_stash_even_when_defer_now_disabled(
+        self, tmp_path,
+    ):
+        """A finding-bearing pass with deferral hot-disabled still merges the
+        prior stash so fix_instructions carries the FULL accumulated set."""
+        flow = _make_flow(tmp_path)
+        prior = _valid_issue(severity="medium", actual="stashed before hot-edit")
+        step = _make_step(
+            pass_index=2, passes_required=2, threshold=0, deferred=[prior],
+        )
+        issues = [_valid_issue(severity="low", actual="new pass finding")]
+        result = _run_handler(step, flow, issues)
+        assert result == StepStatus.REVISION_NEEDED
+        fixed = step.outputs["fix_context"]["issues"]
+        assert len(fixed) == 2
+        assert "stashed before hot-edit" in step.outputs["fix_instructions"]
+        assert "new pass finding" in step.outputs["fix_instructions"]
+
+    def test_clean_middle_pass_echoes_stash_even_when_defer_now_disabled(
+        self, tmp_path,
+    ):
+        """A non-terminal clean pass keeps carrying the stash so the tail pass
+        can flush it — regardless of the current pass's threshold."""
+        flow = _make_flow(tmp_path)
+        prior = _valid_issue(severity="medium", actual="stashed before hot-edit")
+        step = _make_step(
+            pass_index=2, passes_required=3, threshold=0, deferred=[prior],
+        )
+        result = _run_handler(step, flow, [])
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["self_check_deferred_issues"] == [prior]
+        assert step.outputs["self_check_deferred"] is True
+
+
 class TestSignatureDedupAcrossPasses:
     def test_duplicate_dropped_when_merging_into_fix(self, tmp_path):
         flow = _make_flow(tmp_path)
@@ -400,11 +456,10 @@ class TestConvergenceSubordinateToDefer:
         assert len(step.outputs["self_check_deferred_issues"]) == 2
 
     def test_below_threshold_no_stash_tail_pass_enters_fix_not_converged(self, tmp_path):
-        """With deferral enabled, a below-threshold converged pass with NO
+        """With deferral enabled, a repeated pass with NO
         pending stash is NOT exempt from the defer/fix arbitration: at the chain
-        tail (last pass) it MUST enter the fix loop rather than be dropped by the
-        convergence shortcut. Regression for the bug where pass 1/1 returned a
-        converged COMPLETED and lost the lone recurring finding."""
+        tail (last pass) it MUST enter the fix loop. Regression coverage ensures
+        pass 1/1 cannot lose the lone recurring finding."""
         flow = _make_flow(tmp_path)
         issues = [_valid_issue(severity="low", actual="lone recurring bug", path="a.py")]
         step = self._convergence_step(
@@ -430,17 +485,17 @@ class TestConvergenceSubordinateToDefer:
         assert step.outputs.get("self_check_deferred") is True
         assert len(step.outputs["self_check_deferred_issues"]) == 1
 
-    def test_convergence_still_applies_when_deferral_disabled(self, tmp_path):
-        """threshold=0 (deferral off): the legacy convergence shortcut is
-        preserved — converged non-critical issues return COMPLETED."""
+    def test_repeated_findings_enter_fix_when_deferral_disabled(self, tmp_path):
+        """threshold=0 enters fix even when legacy convergence is requested."""
         flow = _make_flow(tmp_path)
         issues = [_valid_issue(severity="medium", actual="recurring bug", path="a.py")]
         step = self._convergence_step(
             pass_index=1, passes_required=1, threshold=0, prev_issues=list(issues),
         )
         result = _run_handler(step, flow, issues)
-        assert result == StepStatus.COMPLETED
-        assert step.outputs.get("converged") is True
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs.get("converged") is not True
+        assert step.outputs["fix_needed"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -538,6 +593,136 @@ class TestStashLifecycle:
         assert sc3.step_type == StepType.SELF_CHECK
         assert sc3.inputs["self_check_pass_index"] == 3
         assert sc3.inputs["self_check_deferred_issues"] == [i1, i2]
+
+    def test_deferred_flush_rescue_is_scoped_per_round(self, tmp_path):
+        """The Skip rescue guard bounds retries WITHIN one round only.
+
+        A flow-wide latch would silently discard a later round's freshly
+        stashed validated findings — the one outcome the check-step contract
+        forbids — so a new round must get its own rescue.
+        """
+        cfg = WorkflowConfig(
+            self_check_passes_required=1, self_check_defer_fix_threshold=3,
+        )
+        sm = _make_state_machine(tmp_path, cfg)
+        flow = _flow_ready(tmp_path)
+        i1 = _valid_issue(actual="deferred bug one")
+        flow.state.context["self_check_deferred_issues"] = [i1]
+
+        # Round A's terminal pass was force-completed by the Skip gate: no
+        # outputs, so nobody consumed the stash.
+        round_a = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.COMPLETED,
+            inputs={"self_check_round_id": "scr-aaaaaaaaaaaa"},
+            outputs={},
+        )
+        assert sm._unflushed_deferred_issues(flow, round_a) == [i1]
+
+        # The rescue runs once and latches for THIS round.
+        flow.state.context["self_check_deferred_flush_attempted"] = (
+            sm._deferred_flush_round_key(round_a)
+        )
+        assert sm._unflushed_deferred_issues(flow, round_a) == []
+
+        # A later round with its own stash is rescued again.
+        round_b = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.COMPLETED,
+            inputs={"self_check_round_id": "scr-bbbbbbbbbbbb"},
+            outputs={},
+        )
+        assert sm._unflushed_deferred_issues(flow, round_b) == [i1]
+
+    def test_later_round_skip_reenters_fix_loop_instead_of_discarding(
+        self, tmp_path,
+    ):
+        """End-to-end: a second Skipped terminal pass still re-runs with the
+        stash re-injected rather than closing the round clean."""
+        cfg = WorkflowConfig(
+            self_check_passes_required=1, self_check_defer_fix_threshold=3,
+        )
+        sm = _make_state_machine(tmp_path, cfg)
+        flow = _flow_ready(tmp_path)
+        i1 = _valid_issue(actual="deferred bug one")
+
+        # An earlier round already consumed its one rescue.
+        flow.state.context["self_check_deferred_flush_attempted"] = "scr-earlier"
+
+        inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs["self_check_round_id"]
+        skipped = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.COMPLETED,
+            inputs=inputs,
+            outputs={},
+        )
+        flow.state.add_step(skipped)
+        flow.state.current_step_id = skipped.step_id
+        flow.state.context["self_check_deferred_issues"] = [i1]
+
+        nxt = sm.transition_to_next(flow)
+        assert nxt is not None
+        assert nxt.step_type == StepType.SELF_CHECK
+        assert nxt.inputs["self_check_deferred_issues"] == [i1]
+        assert flow.state.context["self_check_deferred_flush_attempted"] == (
+            inputs["self_check_round_id"]
+        )
+
+    def test_requirement_mutation_keeps_deferred_stash_in_new_full_round(
+        self, tmp_path,
+    ):
+        """A mid-chain interjection ends the pass chain, but the deferred
+        stash must survive the forced full round's pass-#1 reset."""
+        cfg = WorkflowConfig(
+            self_check_passes_required=3, self_check_defer_fix_threshold=3,
+        )
+        sm = _make_state_machine(tmp_path, cfg)
+        flow = _flow_ready(tmp_path)
+
+        # Pass 1: real inputs (round id present) + a deferred finding.
+        inputs1 = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs1["self_check_round_id"]
+        i1 = _valid_issue(actual="deferred bug one")
+        sc1 = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.COMPLETED,
+            inputs=inputs1,
+            outputs={
+                "self_check_deferred_issues": [i1],
+                "self_check_deferred": True,
+                "issues": [],
+                "actionable_count": 0,
+            },
+        )
+        flow.state.add_step(sc1)
+        flow.state.current_step_id = sc1.step_id
+
+        # Pass 2: clean, echoes the stash forward unchanged.
+        sc2 = sm.transition_to_next(flow)
+        assert sc2.inputs["self_check_pass_index"] == 2
+        assert sc2.inputs["self_check_deferred_issues"] == [i1]
+        sc2.status = StepStatus.COMPLETED
+        sc2.outputs = {
+            "self_check_deferred_issues": [i1],
+            "self_check_deferred": True,
+            "issues": [],
+            "actionable_count": 0,
+        }
+        flow.state.current_step_id = sc2.step_id
+
+        # User interjects mid-chain → effective requirements mutate → the
+        # controller must force a new full round at pass #1 WITHOUT
+        # discarding the stash accumulated by the invalidated chain.
+        flow.state.context["user_interjections"] = [
+            {"text": "also keep the legacy API working"}
+        ]
+        sc3 = sm.transition_to_next(flow)
+        assert sc3.step_type == StepType.SELF_CHECK
+        assert sc3.inputs["self_check_pass_index"] == 1
+        assert sc3.inputs["self_check_round_id"] != sc2.inputs["self_check_round_id"]
+        assert sc3.inputs["self_check_deferred_issues"] == [i1]
+        assert flow.state.context["self_check_deferred_issues"] == [i1]
 
 
 # ---------------------------------------------------------------------------

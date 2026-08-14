@@ -112,6 +112,27 @@ too old" up front, which the UI degrades to plain path text. This module owns
 only the wire schema, the version constant, and this contract; the containment
 check that keeps a fetch inside the uploads directory lives in the daemon, and
 the dispatch decision lives in the server.
+
+Protocol version 7 added the optional ``implementation_strategy`` field on
+:data:`MSG_SPAWN_FLOW`. It is a *behavioural* field, not merely additive: a
+pre-7 daemon that silently ignores it would quietly fall back to the project's
+``workflow.implementation_strategy`` / the planned default — turning an
+operator's explicit web choice into a different flow than the one they
+published. The version was therefore bumped to ``7`` so the server can consult
+the daemon's advertised ``protocol_version`` (see
+:func:`supports_spawn_strategy`) *before* dispatching and answer with an
+immediate, explainable "this machine's daemon is too old" capability error
+instead of a silent downgrade. A daemon that never receives the field (an
+older server, or a request without an explicit strategy) behaves exactly as
+before: the CLI adds no ``--implementation-strategy`` option, so the project
+configuration / default resolves the strategy. As with every other gate here,
+this module owns only the wire schema, the version constant, and this
+contract; the dispatch decision lives in the server. The usage-summary fields
+added to :data:`MSG_STATUS_UPDATE` / :data:`MSG_HISTORY_DATA` snapshots in the
+same revision are purely additive payload keys and are not themselves the
+reason for the bump — as is the ``usage_catalog`` field on
+:data:`MSG_HISTORY_DATA`, which carries the project's pricing table so the
+server's append-time re-aggregation never rebuilds with no catalog.
 """
 
 from __future__ import annotations
@@ -142,7 +163,11 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # repeated on every re-render), so letting them each wait out a timeout against
 # a pre-fetch daemon would saturate the browser's connections rather than cost
 # one visible delay (see the module docstring).
-PROTOCOL_VERSION = "6"
+# Revision "7" added the optional implementation_strategy field on SPAWN_FLOW;
+# the server refuses to dispatch an explicit strategy to a peer advertising
+# "6" or older so a silent downgrade to project config / planned can never
+# masquerade as the requested strategy (see the module docstring).
+PROTOCOL_VERSION = "7"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -246,6 +271,30 @@ def supports_fetch(peer_version: Any) -> bool:
     """
     try:
         return int(str(peer_version).strip()) >= MIN_FETCH_PROTOCOL_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
+#: Minimum peer ``protocol_version`` that understands the optional
+#: ``implementation_strategy`` field on :data:`MSG_SPAWN_FLOW`. The server
+#: checks this *before* dispatching a request that carries an explicit
+#: strategy: a pre-7 daemon that silently dropped the field would run the
+#: project-configured / default strategy instead — a *behavioural* downgrade
+#: that must surface as an explainable capability error, never as a quiet
+#: substitution. A missing or non-numeric version degrades safely to ``False``
+#: (refuse, report unsupported), mirroring :func:`supports_uploads` and
+#: :func:`supports_fetch`.
+MIN_SPAWN_STRATEGY_PROTOCOL_VERSION = 7
+
+
+#: Valid values for the optional ``implementation_strategy`` spawn field.
+SPAWN_STRATEGY_VALUES: FrozenSet[str] = frozenset({"auto", "direct", "planned"})
+
+
+def supports_spawn_strategy(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the revision-7 spawn-strategy field."""
+    try:
+        return int(str(peer_version).strip()) >= MIN_SPAWN_STRATEGY_PROTOCOL_VERSION
     except (TypeError, ValueError):
         return False
 
@@ -777,6 +826,7 @@ def make_spawn_flow(
     worktree: bool = False,
     resume_flow_id: str = "",
     from_issue_id: str = "",
+    implementation_strategy: str = "",
 ) -> Message:
     """server → daemon: instruct a daemon to spawn a new ``luo run`` flow.
 
@@ -792,7 +842,9 @@ def make_spawn_flow(
     When *resume_flow_id* is non-empty, the daemon resumes the named flow
     (``luo run --resume --flow-id <id>``) instead of starting a fresh one.
     The ``task_description`` is ignored in this case — the flow's own
-    persisted state supplies the task.
+    persisted state supplies the task. ``implementation_strategy`` is likewise
+    never sent on a resume: the persisted flow strategy is authoritative and
+    must not be re-decided.
 
     When *from_issue_id* is non-empty, the daemon spawns the flow from an
     existing issue (``luo run --from-issue <id>``); the issue's description
@@ -801,6 +853,14 @@ def make_spawn_flow(
     Like *resume_flow_id*, the field is omitted from the wire when empty, so a
     plain fresh-spawn payload stays byte-for-byte backward compatible and the
     ``PROTOCOL_VERSION`` is not bumped.
+
+    When *implementation_strategy* is non-empty (revision 7), the daemon's
+    spawner appends ``--implementation-strategy <value>`` so the flow's
+    explicit web choice overrides the project configuration.  The value must
+    be a :data:`SPAWN_STRATEGY_VALUES` member; the server must check
+    :func:`supports_spawn_strategy` against the daemon's advertised protocol
+    version BEFORE sending a frame that carries it — a pre-7 daemon would
+    silently ignore the field and run a different strategy than requested.
     """
     payload: Dict[str, Any] = {
         "task_description": task_description,
@@ -814,6 +874,14 @@ def make_spawn_flow(
         payload["resume_flow_id"] = resume_flow_id
     if from_issue_id:
         payload["from_issue_id"] = from_issue_id
+    if implementation_strategy:
+        strategy = str(implementation_strategy).strip()
+        if strategy not in SPAWN_STRATEGY_VALUES:
+            raise ProtocolError(
+                f"spawn implementation_strategy must be one of "
+                f"{sorted(SPAWN_STRATEGY_VALUES)}, got {implementation_strategy!r}"
+            )
+        payload["implementation_strategy"] = strategy
     return Message(type=MSG_SPAWN_FLOW, payload=payload)
 
 
@@ -1386,6 +1454,8 @@ def make_history_data(
     *,
     cursor: Dict[str, Any] | None = None,
     cursor_base: Dict[str, Any] | None = None,
+    usage: Optional[Dict[str, Any]] = None,
+    usage_catalog: Optional[Dict[str, Any]] = None,
     seq: int = 0,
 ) -> Message:
     """daemon → server: deliver history records for *flow_id*.
@@ -1405,23 +1475,42 @@ def make_history_data(
     on the wire: a version-skewed daemon omits it and the receiver falls back to
     its count-derived estimate.
 
+    *usage* (revision 7, optional) is the flow's structured usage/cost payload
+    (:func:`~tianluo.usage.build_usage_payload`), computed by the daemon with
+    the same backend the CLI and server use — the server relays it verbatim
+    and never re-prices it. It rides *full* snapshots (the whole-flow view);
+    *append* deltas omit it, and the server re-aggregates from its cached
+    records when no full snapshot has landed since connect. Omitted from the
+    wire when ``None`` so pre-7 peers never see the key.
+
+    *usage_catalog* (additive, optional) is the serialized pricing catalog
+    (:class:`~tianluo.pricing.PricingCatalog` as dict) that priced *usage* —
+    the project's ``pricing.models`` overrides merged onto the built-in
+    table. It rides ANY frame whose records carry usage (full or append), so
+    the server's append-time re-aggregation prices the SAME cached records
+    with the SAME table instead of degrading to a catalog-less rebuild. The
+    server cannot reach the project's ``tianluo.yaml`` itself (it lives on the
+    owning machine), which is why the catalog must ride the wire. Purely
+    additive like *usage*: omitted when ``None``, ignored by pre-7 peers.
+
     Raises :class:`ProtocolError` when *mode* is not a recognized value.
     """
     if mode not in HISTORY_MODES:
         raise ProtocolError(
             f"history data mode must be one of {sorted(HISTORY_MODES)}, got {mode!r}"
         )
-    return Message(
-        type=MSG_HISTORY_DATA,
-        payload={
-            "flow_id": flow_id,
-            "mode": mode,
-            "records": list(records),
-            "cursor": dict(cursor) if cursor else {},
-            "cursor_base": dict(cursor_base) if cursor_base else {},
-        },
-        seq=seq,
-    )
+    payload: Dict[str, Any] = {
+        "flow_id": flow_id,
+        "mode": mode,
+        "records": list(records),
+        "cursor": dict(cursor) if cursor else {},
+        "cursor_base": dict(cursor_base) if cursor_base else {},
+    }
+    if usage is not None:
+        payload["usage"] = dict(usage)
+    if usage_catalog is not None:
+        payload["usage_catalog"] = dict(usage_catalog)
+    return Message(type=MSG_HISTORY_DATA, payload=payload, seq=seq)
 
 
 # -- traffic-reduction messages (protocol revision 3) ---------------------

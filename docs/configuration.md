@@ -24,6 +24,10 @@ wins.
    - [`confirmation`](#confirmation)
    - [`language`](#language)
    - [`workflow`](#workflow)
+     - [Implementation strategy for PLAN-to-IMPLEMENT flows](#implementation-strategy-for-plan-to-implement-flows)
+     - [Self-check review scope (full-incremental-closure)](#self-check-review-scope-full-incremental-closure)
+   - [`pricing`](#pricing)
+     - [Usage and cost visibility in history and the web console](#usage-and-cost-visibility-in-history-and-the-web-console)
    - [`investigation`](#investigation)
    - [`test`](#test)
    - [`e2e`](#e2e)
@@ -152,7 +156,7 @@ from the project file only:
 | `confirmation.steps` | Yes | **Entry-level**, same rule as `agents`. |
 | `language` | Yes | **Field-level.** Each of `language` / `spec_language` independently takes the project value when set, otherwise the global one. |
 | `server` | Yes | **Whole-block.** A project `server:` section wholly replaces the global one (no deep merge). |
-| everything else | No | Project file only (`workflow`, `test`, `implement`, `steps`, `version`, `documentation`, `code_index`, `merge`, `conflict_resolver`, `claude_subprocess`, `spec_write_protection`, `investigation`, `presets`, …). |
+| everything else | No | Project file only (`workflow`, `test`, `implement`, `steps`, `version`, `documentation`, `code_index`, `merge`, `conflict_resolver`, `claude_subprocess`, `spec_write_protection`, `investigation`, `presets`, `pricing`, …). |
 
 ### Legacy `se3.yaml` / `se3.local.yaml`
 
@@ -211,6 +215,8 @@ Each entry corresponds to an `AgentDef`:
 | *(map key)* | string | — | The agent's `name`. Must be a non-empty string; other keys are skipped with a warning. |
 | `type` | string | `claude-code` | Which `AgentRunner` adapter drives this agent. See the table below. |
 | `cmd` | string | — | The CLI command to invoke. **Required** — an entry with no usable `cmd` is skipped with a warning. |
+| `provider` | string | `""` | Declared LLM provider for this agent (e.g. `anthropic`, `openai`). Used as the **declared fallback** for usage accounting when the runner's stream reports no provider; it never overrides a provider-reported value. |
+| `model` | string | `""` | Declared model for this agent. After environment-variable expansion it feeds the canonical `resolved_model` fallback chain (provider report → expanded agent model → runner startup metadata → `unknown`); a literal like `$ANTHROPIC_MODEL` never enters `resolved_model` — the raw value stays in `reported_model` for diagnosis. |
 | `priority` | int | `0` | **Deprecated and ignored.** Rotation order is the *written order* of the name lists in `llm_caller`, not this number. Setting it emits a one-shot deprecation warning per source. |
 
 A shorthand form is accepted: `primary: claude` is equivalent to
@@ -398,10 +404,99 @@ Fix-loop and self_check behaviour. Loaded into `WorkflowConfig`.
 |-----|------|---------|---------|
 | `max_fix_iterations` | int `>= 0` | `100` | Cap on the test→verify→fix loop. **`0` (or `null`) means unlimited.** Negative → `ConfigError`. A float (even `0.0`) or bool warns and falls back to `100` — the unlimited sentinel must be the literal int `0` or `null`. |
 | `self_check_passes_required` | int `>= 1` | `1` | How many self_check passes must run. `< 1` → `ConfigError`. bool/float/non-integer warns and falls back to `1`. See the nested-chain interaction in [`llm_caller`](#self_check-nested-per-pass-chains). |
-| `self_check_convergence_enabled` | bool | `false` | Whether self_check passes must converge (stop finding new issues) in addition to meeting the pass count. Accepts `true`/`false`/`1`/`0`/`yes`/`no`/`on`/`off`; anything else warns and falls back. |
 | `baseline_fix_max_attempts` | int `>= 0` | `3` | Per-flow cap on looping *inherited* (pre-implement baseline) test failures. Deliberately independent of `max_fix_iterations`, which may be the unlimited sentinel — inherited failures must stay bounded on their own. **`0` disables baseline looping entirely** (inherited failures are surfaced, never looped). Negative → `ConfigError`. |
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | For nested self_check chains: when a non-final pass finds *fewer* than this many issues and none is critical/high severity, its fix is deferred so the remaining passes run first; their findings are then deduped into one consolidated fix loop. **`0` (or `null`) disables deferral** — every issue-finding pass fixes immediately (the historical behaviour). Negative → `ConfigError`. |
 | `adjudicate_period` | int `>= 0` | `10` | Period, in fix iterations, of the adjudicate step's catch-all safety net: every N fix iterations one adjudicate run is forced even when no structural oscillation signal fired. **`0` (or `null`) disables the periodic net** (adjudicate then runs only on the structural triggers: candidate oscillation / contradiction / recurrence). Unlike its siblings this key is **fail-fast on a bad type**: a bool, a float, or a non-numeric string raises `ConfigError` rather than defaulting, because silently defaulting would enable an interval the user never asked for. A cleanly integer-valued string (`"7"`) still coerces. Negative → `ConfigError`. |
+| `implementation_strategy` | `auto` \| `direct` \| `planned` | `planned` | Default implementation strategy for new flows with a PLAN → IMPLEMENT surface (see below). **Fail-fast on any other value** (it silently changes which steps a flow runs). |
+
+The retired `workflow.self_check_convergence_enabled` key is accepted only for
+configuration compatibility. It is always normalized to `false`, and the
+deprecation warning is emitted **once per process** (a long-lived daemon /
+server that reloads the config repeatedly logs it only on the first load);
+validated findings always enter the fix loop.
+
+#### Implementation strategy for PLAN-to-IMPLEMENT flows
+
+**Task type and implementation strategy are different layers.** The task type
+(`feature` / `bugfix` / `small` / `review` / `survey` / discovery) defines the
+whole flow's step sequence and quality gates. The implementation strategy only
+controls the *implementation phase* of flows whose default sequence contains a
+PLAN → IMPLEMENT segment (`feature`, `bugfix`, discovery):
+
+- **`planned`** (default) — keeps the existing PLAN step, `task_groups`, the
+  dependency DAG, the per-group worktree scheduling and the PLAN confirm gate.
+- **`direct`** — drops PLAN and its confirm gate; ANALYZE / INVESTIGATE /
+  IMPLEMENT and every other quality gate of the task type stay. The single
+  IMPLEMENT step carries the full effective requirements and hands the whole
+  implementation to one autonomous caller run, which must analyse the
+  requirements itself, implement them completely, and run targeted verification
+  before returning the structured implementation summary. A partial result or
+  non-empty `incomplete_tasks` never advances to TEST — the flow re-enters
+  IMPLEMENT through the normal retry / resume machinery (a later caller always
+  continues in the existing workspace and never switches back to `planned`).
+  `direct` works with **every** writable AgentRunner; a runner's native goal
+  loop (e.g. Claude Code's `/goal` in print mode) is an optional per-call
+  enhancement, never an entry requirement and never flow-authoritative state.
+- **`auto`** — the ANALYZE step requests a structured `direct|planned`
+  recommendation (task size, module coupling, dependency chains, worktree
+  isolation value, recovery granularity, single-call feasibility) and persists
+  it as the flow's effective strategy. A missing or invalid recommendation
+  deterministically falls back to `planned`.
+
+Priority for a new flow: explicit CLI (`--implementation-strategy`) / web
+request → `workflow.implementation_strategy` → `planned`. The requested value
+is persisted in the flow context; the effective value and its reason are
+decided **exactly once in ANALYZE** and persisted too. A resume recovers the
+persisted path — later configuration changes never alter a running flow.
+Flows without a PLAN → IMPLEMENT surface (`small`, `review`, `survey`) record
+`effective_implementation_strategy = not_applicable` and keep their exact step
+sequences; legacy flows infer their strategy read-only from the persisted
+`selected_steps` (PLAN present → `planned`, `small`-style no-PLAN flows →
+`not_applicable`) without rewriting history.
+
+#### Self-check review scope (full-incremental-closure)
+
+SELF_CHECK is judged against the **effective task description** (the original
+task or the discovery refined description, user interjections, and the
+adjudicated description) plus the charter and `WHY:`/`INVARIANT:` project
+constraints. PLAN, `task_groups`, the implementation summary and the legacy
+`adjudicated_plan` are scheduling / history hints only — they can never
+narrow, widen or override the requirements.
+
+Rounds are scoped by a persisted, recoverable **baseline** (stored in runtime
+state, never in git; the workspace diff is rebuilt from it):
+
+1. Before the first IMPLEMENT, an **implementation baseline** is captured so
+   the first review covers everything this flow changed and excludes the
+   user's pre-flow working-tree modifications. Commits the flow makes itself
+   (for example the per-group merges of a planned multi-group IMPLEMENT) stay
+   inside the scope — the baseline is content-keyed, so it survives HEAD
+   moving forward; only history that no longer contains the baseline commit
+   (rebase, amend, a backwards reset) is undecidable. The first SELF_CHECK
+   round is `full` (complete requirements + the whole flow diff). A clean full
+   round proceeds directly to the next gate.
+2. Before every FIX, a **fix baseline** is captured; the post-fix round is
+   `incremental` (attention focused on the fix's exact diff, its changed files
+   and the still-open findings — while checkers may still read the whole
+   repository, the charter, the code-index, test results and unmodified code,
+   and must trace impact along call chains, shared state, protocols, data
+   formats, configuration, concurrency and invariants).
+3. A clean incremental round is followed by a **full closure round**; only a
+   clean closure round reaches INVARIANT_CHECK. A closure finding re-enters
+   FIX and the incremental → closure cycle repeats.
+4. Any change to the effective task description (adjudication, interjection)
+   or an undecidable baseline **forces a full round** — an empty diff is never
+   used to fake an incremental review.
+5. **TEST always runs the project's full configured test commands** — SELF_CHECK
+   scope never selects or shrinks tests.
+
+All validated findings — deferred, repeated, or adjudicated — always enter the
+fix loop; there is no convergence / severity / divergence path that passes a
+round with unresolved findings.
+
+Each SELF_CHECK step persists its `scope_mode`, baseline id, changed paths, fix
+iteration and pass index for the CLI history view and the web console's scope
+audit.
 
 `WorkflowConfig` also carries a field named `self_check_passes_required_explicit`.
 It is **not a config key** — it is derived at load time (it records whether
@@ -418,6 +513,57 @@ At load time the resolved `max_fix_iterations` and its winning source file are
 logged once per config path (`workflow config: max_fix_iterations=… (effective
 source: …)`), specifically so a `tianluo.local.yaml` shadowing the committed
 value is visible rather than mysterious.
+
+### `pricing`
+
+Model pricing overrides for the session usage/cost summary. Loaded into
+`PricingConfig` and merged onto the built-in versioned price table (every
+built-in entry records its catalog version, source URL and effective date).
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `pricing.models.<canonical_model>.<category>` | number `>= 0` | built-in table | USD **per million tokens** for one price category of one model. Categories: `input` / `uncached_input`, `output`, `cache_read`, `cache_creation` / `cache_write`, `cache_creation_5m`, `cache_creation_1h`. |
+
+Behavioural notes:
+
+- Model keys are **alias-normalized** before merging (`Opus-5` → `claude-opus-5`).
+  A key that maps to neither an alias nor a built-in entry **defines a new
+  entry** for that exact name.
+- A non-numeric, boolean, or negative value drops the *offending model entry*
+  (with a warning) while valid sibling overrides still apply; pricing is
+  display accounting, so a typo must not fail the flow but must also never
+  silently become a wrong price.
+- Provider-reported actual cost is always authoritative. Estimates cover only
+  calls that reported tokens but no actual cost, and only when the model and
+  every nonzero token category have a price — **unknown model, unknown price,
+  or a missing cache-TTL price renders as "unknown cost", never as `$0`**.
+- Uncatalogued providers (e.g. Codex, which bills by subscription) simply show
+  tokens with unknown cost.
+
+#### Usage and cost visibility in history and the web console
+
+Every LLM call/attempt is recorded as a unified usage record (`usage_status`,
+agent, runner, provider, provider session, reported / resolved model, token
+categories, provider actual cost). The record is the single accounting unit;
+the flow session summary, `luo history show`, the daemon history payload and
+the web console all render the **same backend aggregation** — the frontend
+never re-sums provider sessions, cached tokens or pricing itself.
+
+- Provider-reported **actual cost** is de-duplicated by billing session / call
+  semantics and stays the authoritative *actual* column. **Estimated cost**
+  covers only billing units that reported tokens but no actual cost, using
+  the merged price table. Actual and estimated are always shown as separate
+  columns — never added into a fabricated "total".
+- Missing usage, missing model, missing price, or an unknown cache TTL is
+  displayed as **unknown / partial**, never as a misleading `$0`. Explicit
+  zero-usage reports stay distinguishable from missing data, and legacy
+  five-field records are flagged `legacy` rather than guessed at.
+- `luo history show <flow_id>` prints the per-call, per-step and flow totals
+  (with `--json` emitting the same structured payload), and the web console's
+  history view and live-flow sidebar show the same figures plus the
+  implementation strategy and the self-check scope audit. Active, archived and
+  history-only flows are all recoverable; flows predating the unified records
+  are marked incomplete instead of being rewritten.
 
 ### `investigation`
 

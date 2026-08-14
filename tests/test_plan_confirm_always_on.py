@@ -139,7 +139,13 @@ class TestResolvePlanInputs:
         assert resolved["reviewer"] is None
         # only claude is on PATH, so the builtin chain narrows to it
         assert resolved["agents"] == [
-            {"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}
+            {
+                "name": "claude",
+                "type": "claude-code",
+                "cmd": "claude",
+                "priority": 0,
+                "provider": "anthropic",
+            }
         ]
         # resolve_confirm_inputs is the single source of truth for CONFIRM
         # inputs, so it already bakes in the concrete default rather than

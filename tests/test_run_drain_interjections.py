@@ -163,6 +163,34 @@ def test_drain_writes_history_jsonl(tmp_path: Path):
     )
 
 
+def test_drain_invalidates_incremental_self_check_round(tmp_path: Path):
+    step = _make_step(status=StepStatus.PENDING)
+    flow = _make_flow(step=step)
+    flow.state.selected_steps = [StepType.TEST, StepType.SELF_CHECK]
+    flow.state.context["self_check_review"] = {
+        "active_round": {
+            "round_id": "scr-old",
+            "scope_mode": "incremental",
+            "requirement_fingerprint": "old",
+        }
+    }
+    interaction_calls.write_interjection_request(
+        tmp_path / "tianluo" / "calls",
+        "new requirement",
+        flow_id=flow.flow_id,
+        call_id="i-scope",
+    )
+
+    run_mod._drain_pending_interjections(
+        flow, tmp_path, _RecordingPersistence()
+    )
+
+    review = flow.state.context["self_check_review"]
+    assert "active_round" not in review
+    assert review["force_full_reason"] == "effective_requirements_changed"
+    assert review["last_round"]["status"] == "invalidated"
+
+
 def test_drain_with_no_calls_is_noop(tmp_path: Path):
     """No call files → return empty list, no side effects."""
     flow = _make_flow()

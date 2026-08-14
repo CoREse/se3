@@ -28,6 +28,12 @@ agents:
   primary: { type: claude-code, cmd: claude, priority: 10 }
   backup: { type: claude-code, cmd: kclaude, priority: 5 }
   low:    { type: claude-code, cmd: hclaude, priority: 1 }
+  # Optional declared metadata feeding usage accounting / cost attribution.
+  # `provider` is the declared fallback when the runner's stream reports no
+  # provider; `model` (after environment-variable expansion) feeds the
+  # resolved_model fallback chain. Neither ever overrides a provider-reported
+  # value. E.g.:
+  # primary: { type: claude-code, cmd: claude, provider: anthropic, model: $ANTHROPIC_MODEL }
 
 # LLM Caller Configuration
 # `defaults` is the default caller chain by agent name (referencing
@@ -210,6 +216,39 @@ workflow:
   # (or null) to disable — every issue-finding pass triggers fix immediately
   # (the historical behavior). Default: 0.
   # self_check_defer_fix_threshold: 0
+
+  # Implementation strategy for new flows with a PLAN → IMPLEMENT surface
+  # (feature / bugfix / discovery). Task type still defines the whole flow;
+  # this only shapes the implementation phase. Values:
+  #   planned — PLAN + task_groups + DAG + per-group worktree scheduling (default)
+  #   direct  — skip PLAN/confirm; one holistic autonomous IMPLEMENT call that
+  #             analyses the full requirements, implements them completely and
+  #             runs targeted verification (works with every writable runner;
+  #             a runner's native goal loop is an optional enhancement)
+  #   auto    — ANALYZE recommends direct|planned once and persists it
+  # Priority: CLI/Web request > this config > planned. Decided once in ANALYZE
+  # and persisted; resume always follows the persisted path.
+  # The retired self_check_convergence_enabled key is accepted for old-config
+  # compatibility only and is always normalized to false.
+  # implementation_strategy: planned
+
+# Model pricing overrides for the session usage/cost summary (provider actual
+# cost is always preferred; estimates cover only calls that reported tokens
+# but no actual cost). Prices are USD per MILLION tokens. The built-in
+# versioned price table (with per-entry source and effective date) is merged
+# with these overrides keyed by canonical model name; aliases (e.g. "Opus-5")
+# are normalized, and a key that matches nothing defines a new entry.
+# Categories: input (or uncached_input), output, cache_read, cache_creation
+# (or cache_write), cache_creation_5m, cache_creation_1h. Unknown models or
+# missing prices are displayed as "unknown cost", never as $0.
+# pricing:
+#   models:
+#     claude-opus-5:
+#       input: 5.0
+#       output: 25.0
+#       cache_read: 0.5
+#       cache_creation_5m: 6.25
+#       cache_creation_1h: 10.0
 
 # 调查步骤（investigate）配置
 # investigate 面向『症状已知、原因不明』的问题做探索式根因调查：允许临时日志 /

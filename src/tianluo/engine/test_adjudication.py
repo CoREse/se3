@@ -349,46 +349,6 @@ def test_rejected_candidate_position_not_retriggered():
     assert adj.REASON_OSCILLATION not in decision.reasons
 
 
-# --------------------------------------------------------------------------- #
-# should_suppress_convergence
-# --------------------------------------------------------------------------- #
-
-def test_should_suppress_convergence_true_on_oscillation():
-    ctx = {}
-    adj.record_self_check_round(ctx, [_issue(expected="A")])
-    flip = _issue(expected="B")
-    adj.record_self_check_round(ctx, [flip])
-    assert adj.should_suppress_convergence(ctx, [flip]) is True
-
-
-def test_should_suppress_convergence_false_when_no_signal():
-    ctx = {}
-    stable = _issue(expected="A")
-    adj.record_self_check_round(ctx, [stable])
-    adj.record_self_check_round(ctx, [stable])
-    assert adj.should_suppress_convergence(ctx, [stable]) is False
-
-
-def test_should_suppress_convergence_true_on_due_periodic_backstop():
-    """A due periodic backstop must suppress convergence too — otherwise the
-    convergence shortcut short-circuits to COMPLETED before the state machine's
-    REVISION_NEEDED branch ever evaluates the backstop, silently skipping the
-    every-N-iteration safety net (issue: periodic backstop skipped under
-    convergence)."""
-    ctx = {}
-    stable = _issue(expected="A")
-    adj.record_self_check_round(ctx, [stable])
-    adj.record_self_check_round(ctx, [stable])  # converged, no signal
-    # Below the period: still allowed to converge.
-    assert adj.should_suppress_convergence(
-        ctx, [stable], fix_iteration=5, period_n=10
-    ) is False
-    # At the period edge: convergence must yield so ADJUDICATE can run.
-    assert adj.should_suppress_convergence(
-        ctx, [stable], fix_iteration=10, period_n=10
-    ) is True
-
-
 def test_ledger_survives_dict_round_trip():
     """The ledger is plain JSON-able dict content (State.from_dict continuity)."""
     import json

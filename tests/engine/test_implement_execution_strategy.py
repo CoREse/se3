@@ -19,6 +19,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 from tianluo.config import ImplementConfig
+from tianluo.agent_runner import AgentInvocationIntent
 from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 
 
@@ -267,3 +268,518 @@ class TestExecutionStrategyDispatch:
         # Small multi-group tasks take the LOC-merge single-call path,
         # not the per-group sequential loop.
         mock_single.assert_called_once()
+
+
+class TestHolisticExecutionStrategy:
+    """Direct and small use one whole-task executor without plan groups."""
+
+    @staticmethod
+    def _flow_step(tmp_path, *, task_type="feature", effective="direct"):
+        flow = FlowInstance(
+            flow_id="holistic-flow",
+            task_description="Implement the complete requirement",
+            task_type=task_type,
+            change_path=tmp_path / "tianluo",
+        )
+        flow.state.context["effective_implementation_strategy"] = effective
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            step_id="holistic-implement",
+            inputs={
+                "task_description": "Implement the complete requirement",
+                "task_type": task_type,
+                "effective_implementation_strategy": effective,
+                "task_groups": [{"group_id": "MUST_NOT_APPEAR"}],
+                "analysis_context": {
+                    "scope": "cross-module",
+                    "complexity": "medium",
+                    "reasoning": "one autonomous call is reasonable",
+                    "project_summary": "project-summary-marker",
+                },
+                "root_cause_report": {
+                    "root_cause": "root-cause-marker",
+                    "evidence": [],
+                },
+            },
+        )
+        return flow, step
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="\nRUNTIME-MARKER",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="\nCODE-INDEX-MARKER",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="\nCHARTER-MARKER",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_direct_prompt_is_whole_requirement_and_has_full_context(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._flow_step(tmp_path)
+        status = implement_handler(step, flow)
+
+        assert status == StepStatus.COMPLETED
+        prompt = mock_run.call_args.args[0]
+        assert "Implement the complete requirement" in prompt
+        assert "Independently analyze" in prompt
+        assert "implement the requirement in full" in prompt
+        assert "run targeted validation" in prompt
+        assert "project-summary-marker" in prompt
+        assert "root-cause-marker" in prompt
+        assert "CHARTER-MARKER" in prompt
+        assert "CODE-INDEX-MARKER" in prompt
+        assert "Task Groups" not in prompt
+        assert "MUST_NOT_APPEAR" not in prompt
+        assert mock_run.call_args.kwargs["implemented_groups_override"] == []
+        assert (
+            mock_run.call_args.kwargs["invocation_intent"]
+            == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+        )
+        assert step.outputs["implemented_groups"] == []
+
+    @patch(f"{_IMP}._apply_restricted_edits", return_value=([], []))
+    @patch(f"{_IMP}.LLMCaller")
+    def test_nonempty_incomplete_tasks_override_complete_and_preserve_outputs(
+        self, mock_caller_cls, mock_apply, tmp_path,
+    ):
+        from tianluo.engine.steps.implement import _run_single_llm_call
+
+        flow, step = self._flow_step(tmp_path)
+        step.outputs.update({
+            "files_changed": ["first.py"],
+            "tests_added": ["test_first.py"],
+            "test_mapping": {"first.py": ["test_first.py"]},
+        })
+        mock_caller_cls.return_value.call.return_value = json.dumps({
+            "files_changed": ["second.py"],
+            "tests_added": ["test_second.py"],
+            "test_mapping": {"second.py": ["test_second.py"]},
+            "summary": "more work remains",
+            "completion_status": "complete",
+            "incomplete_tasks": ["finish integration"],
+            "restricted_edits": [],
+        })
+
+        status = _run_single_llm_call(
+            "prompt",
+            step,
+            flow,
+            tmp_path,
+            [],
+            0,
+            implemented_groups_override=[],
+            invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            preserve_existing_outputs=True,
+        )
+
+        assert status == StepStatus.PARTIAL
+        assert step.outputs["completion_status"] == "partial"
+        assert step.outputs["incomplete_tasks"] == ["finish integration"]
+        assert step.outputs["implemented_groups"] == []
+        assert step.outputs["files_changed"] == ["first.py", "second.py"]
+        assert step.outputs["tests_added"] == [
+            "test_first.py", "test_second.py",
+        ]
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_small_shares_executor_but_not_direct_intent(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._flow_step(
+            tmp_path, task_type="small", effective="not_applicable",
+        )
+        status = implement_handler(step, flow)
+
+        assert status == StepStatus.COMPLETED
+        assert "Small task type" in mock_run.call_args.args[0]
+        assert (
+            mock_run.call_args.kwargs["invocation_intent"]
+            == AgentInvocationIntent.DEFAULT
+        )
+        assert step.outputs["implemented_groups"] == []
+
+    @patch(f"{_IMP}._apply_restricted_edits", return_value=([], []))
+    @patch(f"{_IMP}.LLMCaller")
+    def test_junk_structured_result_is_partial_not_complete(
+        self, mock_caller_cls, mock_apply, tmp_path,
+    ):
+        from tianluo.engine.steps.implement import _run_single_llm_call
+
+        flow, step = self._flow_step(tmp_path)
+        mock_caller_cls.return_value.call.return_value = json.dumps(
+            {"note": "no JSON found"}
+        )
+
+        status = _run_single_llm_call(
+            "prompt",
+            step,
+            flow,
+            tmp_path,
+            [],
+            0,
+            implemented_groups_override=[],
+            invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            preserve_existing_outputs=True,
+        )
+
+        # A dict carrying none of the implementation-summary keys is not an
+        # implementation report: the holistic path must stay recoverable
+        # instead of advancing to TEST on zero implementation.
+        assert status == StepStatus.PARTIAL
+        assert step.outputs["completion_status"] == "partial"
+        assert step.outputs["incomplete_tasks"]
+
+    @patch(f"{_IMP}._apply_restricted_edits", return_value=([], []))
+    @patch(f"{_IMP}.LLMCaller")
+    def test_planned_complete_with_leftover_tasks_stays_complete(
+        self, mock_caller_cls, mock_apply, tmp_path,
+    ):
+        from tianluo.engine.steps.implement import _run_single_llm_call
+
+        flow, step = self._flow_step(tmp_path, effective="planned")
+        mock_caller_cls.return_value.call.return_value = json.dumps({
+            "files_changed": ["second.py"],
+            "tests_added": [],
+            "test_mapping": {},
+            "summary": "done with leftovers",
+            "completion_status": "complete",
+            "incomplete_tasks": ["finish integration"],
+            "restricted_edits": [],
+        })
+
+        status = _run_single_llm_call(
+            "prompt", step, flow, tmp_path, [], 0,
+        )
+
+        # Planned flows keep their historical recording: an honest
+        # complete-with-leftover report still records "complete" — the
+        # partial coercion is a holistic-path rule only.
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["completion_status"] == "complete"
+        assert step.outputs["incomplete_tasks"] == ["finish integration"]
+
+
+class TestFlowTypeMatrix:
+    """End-to-end matrix across planned / direct / small / review / survey.
+
+    Planned flows keep their PLAN -> IMPLEMENT scheduling data; direct and
+    small share the whole-task executor without task_groups; review/survey
+    never gain an IMPLEMENT segment and record not_applicable.
+    """
+
+    def _flow_with_history(self, tmp_path, *, task_type, effective, history_steps):
+        from tianluo.engine.state_machine import StateMachine
+
+        machine = StateMachine(tmp_path)
+        flow = FlowInstance(
+            flow_id=f"matrix-{task_type}",
+            task_description="matrix task",
+            task_type=task_type,
+        )
+        flow.state.context["effective_implementation_strategy"] = effective
+        flow.state.selected_steps = [
+            StepType.ANALYZE,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+        ]
+        for step in history_steps:
+            flow.state.add_step(step)
+        flow.state.current_step_index = flow.state.selected_steps.index(
+            StepType.IMPLEMENT
+        )
+        return machine, flow
+
+    def test_planned_task_groups_flow_into_implement_inputs(self, tmp_path):
+        machine, flow = self._flow_with_history(
+            tmp_path,
+            task_type="feature",
+            effective="planned",
+            history_steps=[
+                Step(
+                    step_type=StepType.PLAN,
+                    status=StepStatus.COMPLETED,
+                    outputs={
+                        "task_groups": [
+                            {
+                                "group_id": "G1",
+                                "group_order": 1,
+                                "depends_on": [],
+                                "tasks": [{"id": 1, "estimated_loc": 40}],
+                            }
+                        ]
+                    },
+                )
+            ],
+        )
+        inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
+        assert inputs["task_groups"][0]["group_id"] == "G1"
+        assert inputs["task_groups"][0]["tasks"][0]["estimated_loc"] == 40
+
+    def test_direct_inputs_never_carry_plan_task_groups(self, tmp_path):
+        machine, flow = self._flow_with_history(
+            tmp_path,
+            task_type="feature",
+            effective="direct",
+            history_steps=[
+                Step(
+                    step_type=StepType.ANALYZE,
+                    status=StepStatus.COMPLETED,
+                    outputs={
+                        "task_type": "feature",
+                        "analysis_context": {"scope": "whole requirement"},
+                    },
+                ),
+                Step(
+                    step_type=StepType.INVESTIGATE,
+                    status=StepStatus.COMPLETED,
+                    outputs={
+                        "root_cause_report": {"root_cause": "clear"},
+                    },
+                ),
+            ],
+        )
+        inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
+        assert "task_groups" not in inputs
+
+    def test_review_and_survey_never_gain_implement_and_are_not_applicable(
+        self, tmp_path
+    ):
+        from tianluo.engine.state_machine import StateMachine
+
+        machine = StateMachine(tmp_path)
+        for task_type in ("review", "survey"):
+            flow = machine.create_flow("task", task_type=task_type)
+            assert StepType.IMPLEMENT not in flow.state.selected_steps
+            assert StepType.PLAN not in flow.state.selected_steps
+            assert (
+                flow.state.context["effective_implementation_strategy"]
+                == "not_applicable"
+            )
+
+    def test_small_keeps_holistic_implement_and_is_not_applicable(self, tmp_path):
+        from tianluo.engine.state_machine import StateMachine
+
+        machine = StateMachine(tmp_path)
+        flow = machine.create_flow("task", task_type="small")
+        assert StepType.IMPLEMENT in flow.state.selected_steps
+        assert StepType.PLAN not in flow.state.selected_steps
+        assert (
+            flow.state.context["effective_implementation_strategy"]
+            == "not_applicable"
+        )
+        assert (
+            flow.state.context["requested_implementation_strategy"] == "planned"
+        )
+
+    def test_holistic_partial_continuations_are_bounded(self, tmp_path):
+        from tianluo.engine.state_machine import (
+            _HOLISTIC_CONTINUATION_LIMIT,
+            StateMachine,
+        )
+
+        machine = StateMachine(tmp_path)
+        flow = FlowInstance(
+            flow_id="bounded-direct",
+            task_description="bounded direct task",
+            task_type="feature",
+        )
+        flow.state.context["effective_implementation_strategy"] = "direct"
+        flow.state.selected_steps = [
+            StepType.ANALYZE,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+        ]
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            step_id="bounded-implement",
+            inputs={
+                "task_description": "task",
+                "task_type": "feature",
+                "effective_implementation_strategy": "direct",
+            },
+            outputs={
+                "completion_status": "partial",
+                "incomplete_tasks": ["still working"],
+            },
+            status=StepStatus.PARTIAL,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        flow.state.current_step_index = flow.state.selected_steps.index(
+            StepType.IMPLEMENT
+        )
+
+        # Each automatic continuation re-arms the same step...
+        for _ in range(_HOLISTIC_CONTINUATION_LIMIT):
+            returned = machine.transition_to_next(flow)
+            assert returned is step
+            assert step.status == StepStatus.PENDING
+            # ...and the next agent call reports partial again.
+            step.status = StepStatus.PARTIAL
+
+        # Past the limit the automatic loop stops: the step is persisted
+        # FAILED so run.py routes into its Retry/Skip/Abort decision path.
+        returned = machine.transition_to_next(flow)
+        assert returned is None
+        assert step.status == StepStatus.FAILED
+        assert step.error_message
+        assert step.inputs["holistic_continuations"] == (
+            _HOLISTIC_CONTINUATION_LIMIT + 1
+        )
+
+        # A user Retry re-runs the handler; a further partial result must not
+        # silently loop again — it fails back into the decision path.
+        step.status = StepStatus.PENDING
+        step.outputs["completion_status"] = "complete"
+        step.outputs["incomplete_tasks"] = []
+        step.status = StepStatus.PARTIAL
+        step.outputs["completion_status"] = "partial"
+        returned = machine.transition_to_next(flow)
+        assert step.status == StepStatus.FAILED
+
+    def _make_direct_flow_with_partial_implement(self, tmp_path):
+        """Build a direct flow whose IMPLEMENT step carries a partial record."""
+        from tianluo.engine.state_machine import StateMachine
+
+        machine = StateMachine(tmp_path)
+        flow = FlowInstance(
+            flow_id="skip-direct",
+            task_description="skip direct task",
+            task_type="feature",
+        )
+        flow.state.context["effective_implementation_strategy"] = "direct"
+        flow.state.selected_steps = [
+            StepType.ANALYZE,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+        ]
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            step_id="skip-implement",
+            inputs={
+                "task_description": "task",
+                "task_type": "feature",
+                "effective_implementation_strategy": "direct",
+            },
+            outputs={
+                "completion_status": "partial",
+                "incomplete_tasks": ["still working"],
+            },
+            status=StepStatus.PARTIAL,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        flow.state.current_step_index = flow.state.selected_steps.index(
+            StepType.IMPLEMENT
+        )
+        return machine, flow, step
+
+    def test_holistic_partial_skip_advances_past_exhausted_step(self, tmp_path):
+        from tianluo.engine.state_machine import _HOLISTIC_CONTINUATION_LIMIT
+
+        machine, flow, step = self._make_direct_flow_with_partial_implement(
+            tmp_path
+        )
+
+        # Exhaust the automatic continuation budget exactly as the bounded
+        # test does: each transition re-arms the step and the agent reports
+        # partial again, until the final transition persists FAILED and
+        # returns None so run.py routes into its Retry/Skip/Abort path.
+        for _ in range(_HOLISTIC_CONTINUATION_LIMIT):
+            machine.transition_to_next(flow)
+            step.status = StepStatus.PARTIAL
+
+        returned = machine.transition_to_next(flow)
+        assert returned is None
+        assert step.status == StepStatus.FAILED
+        continuations_before_skip = step.inputs["holistic_continuations"]
+
+        # run.py's Skip decision: force COMPLETED, mark the one-shot skip
+        # flag, and transition. The gate must NOT re-capture the partial
+        # record — a Skip must advance past the failed step, not re-present
+        # the same failure prompt.
+        step.status = StepStatus.COMPLETED
+        step.inputs["holistic_skip_forced"] = True
+        returned = machine.transition_to_next(flow)
+        assert returned is not None
+        assert returned is not step
+        assert returned.step_type == StepType.TEST
+        assert flow.state.get_current_step() is returned
+        assert step.status == StepStatus.COMPLETED
+        assert step.inputs["holistic_continuations"] == continuations_before_skip
+        # The flag is one-shot: consumed by the transition so a later fix
+        # loop reusing this step cannot inherit the skip intent.
+        assert "holistic_skip_forced" not in step.inputs
+
+    def test_holistic_partial_skip_under_limit_does_not_rearm(self, tmp_path):
+        machine, flow, step = self._make_direct_flow_with_partial_implement(
+            tmp_path
+        )
+
+        # An LLM error can leave the step FAILED while outputs still carry
+        # the previous partial record (preserve_existing_outputs). A default
+        # transition from a COMPLETED status with that record still re-arms
+        # the automatic continuation (crash-resume semantics)...
+        step.status = StepStatus.FAILED
+        step.error_message = "boom"
+        step.status = StepStatus.COMPLETED
+        returned = machine.transition_to_next(flow)
+        assert returned is step
+        assert step.status == StepStatus.PENDING
+
+        # ...but the explicit user Skip must advance without re-invoking the
+        # implement agent — otherwise Skip silently becomes a paid Retry.
+        step.status = StepStatus.COMPLETED
+        step.inputs["holistic_skip_forced"] = True
+        returned = machine.transition_to_next(flow)
+        assert returned is not None
+        assert returned is not step
+        assert returned.step_type == StepType.TEST
+        assert flow.state.get_current_step() is returned
+        assert step.status == StepStatus.COMPLETED
+

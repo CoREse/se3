@@ -289,6 +289,32 @@ stateDiagram-v2
 
 `analyze` 仍可能调整选定的序列；上表是起点，不是冻结的契约。
 
+#### 实现策略：PLAN → IMPLEMENT 阶段如何运行
+
+在 task type 之上，默认序列包含 PLAN → IMPLEMENT 区间的 flow（`feature`、
+`bugfix`、discovery）会选择一个**实现策略**，它只塑造这一阶段 —— `planned`
+（默认：PLAN、task groups、依赖 DAG 与逐 group 的 worktree 调度）、`direct`
+（跳过 PLAN 及其 confirm 关口；一次整体自主 IMPLEMENT 调用，自主分析完整需求、
+完整实现并运行针对性验证）或 `auto`（ANALYZE 一次性推荐 `direct` 或 `planned`
+并持久化该选择）。通过 `luo run --implementation-strategy auto|direct|planned`
+或 `workflow.implementation_strategy` 配置选择；优先级为显式请求 → 项目配置 →
+`planned`。有效值与理由在 ANALYZE 中只决策一次并持久化 —— resume 永远沿用已
+持久化的路径，`small` / `review` / `survey` 记录 `not_applicable` 且序列不变。
+
+`direct` 适用于所有可写 agent runner；runner 的原生 goal 循环（例如 Claude Code
+print 模式下的 `/goal`）只是单次调用内的可选增强，不是准入条件，也绝非 flow 级
+权威状态。partial 结果或非空 `incomplete_tasks` 绝不会前进到 TEST —— flow 经
+正常 retry/resume 机制重入 IMPLEMENT，后继 caller 在现有工作区继续。
+
+SELF_CHECK 以**有效任务描述**为验收权威（原始任务或 discovery 精化、用户
+interjection、裁决后的描述），外加 charter 与 `WHY:`/`INVARIANT:` 约束 —— PLAN、
+task groups 与 implementation summary 只是调度线索。审查按可恢复基线界定的
+scoped round 运行：首轮 `full` 覆盖本 flow 改动的全部内容，修复后的轮次为
+`incremental`（聚焦该次 fix 的精确 diff），incremental 干净之后总是跟随一个
+`full` closure round 才能继续前进；有效需求一旦改变即强制回到 `full`。TEST 始终
+执行项目配置的完整测试 —— 审查范围绝不缩小它 —— 每个通过验证的 finding 也一律
+进入 fix loop。
+
 ### 三种运行形态
 
 - **`luo run --worktree`** — 在自己的 git worktree 里跑**完全相同**的 flow：相同
@@ -391,6 +417,9 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 - **`--from-issue <id>`** — 以 `tianluo/issues/` 中一条既有 issue 作为输入发起 flow，
   并在 flow 结束时把结果写回该 issue（成功完成的 flow 会解决它）。这正是
   `luo salvage` 为未完成工作补完 issue 之后的预期跟进路径。
+- **`--implementation-strategy auto|direct|planned`** — 新 flow 的显式实现策略
+  请求（见上文的实现策略一节）。省略时读项目配置、再回落 `planned`；resume 时
+  忽略该参数，恢复已持久化的策略。
 
 ### `luo code-index` — 结构地图
 
@@ -411,6 +440,14 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 | `luo history show <flow_id>` | 展示某个 flow 的逐 step 结构化详情。参数：`--detailed`（LLM 调用细节）/ `--verbose`（完整 tool-call 流）/ `--json`。 |
 | `luo history restore <flow_id>` | 按 ID 续跑某个 flow（委托给 `luo run --resume --flow-id`）。`--dry-run` 仅打印命令不执行。 |
 | `luo history archived` | 仅列出归档 flow。`--json` 输出机读 JSON。 |
+
+`luo history show <flow_id>` 还会打印一块独立的**用量 / 成本**区域 —— 逐 LLM
+call/attempt、逐 step 与 flow 合计（输入 / 输出 / 缓存 tokens、供应商 actual
+cost、估算成本、unknown 计数与完整性），外加该 flow 的实现策略与 self-check
+scope audit。供应商 actual cost 保持权威并与估算分列；用量、模型或价格缺失时
+显示 `unknown`/partial，绝不显示误导性的 `$0`。`--json` 输出同一份结构化汇总。
+网页控制台的 history 视图与 live-flow 侧栏展示同一后端数字。
+
 
 ### `luo issue` — 项目 issue
 

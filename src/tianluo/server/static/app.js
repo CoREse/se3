@@ -60,6 +60,10 @@ const state = {
   selectedMachineId: null,
   selectedFlowId: null,   // flow open in the full-screen flow view
   flowDetail: null,       // last fetched flow object (for the open flow view)
+  // Backend usage payload delivered over the WS history_data path for the open
+  // flow (full frames only). Fallback badge source when the snapshot's compact
+  // `usage_summary` has not arrived yet; reset on flow open/close.
+  flowConversationUsage: null,
   flowMachineId: null,    // machine id owning the open flow
   flowConversationRecords: [],   // conversation records shown in the flow view
   // Opaque progress token from the running-flow view's last REST snapshot
@@ -235,6 +239,12 @@ const state = {
   backfillUnfillable: {},
   // History-detail counterpart of `flowConversationEpoch`.
   historyEpoch: 0,
+  // The open history session's backend usage payload (the `usage` field of the
+  // /api/history/{flow_id} bundle — {calls, steps, summary, legacy,
+  // completeness}). Sent only on complete full snapshots, so it is adopted on
+  // every full / delta load that carries it and kept otherwise. The history
+  // badge and the usage region render exclusively from this payload.
+  historyUsage: null,
   // project_root key of the currently-selected History tab; null lets
   // pickDefaultHistoryProjectRoot pick the most-recently-active project. Reset
   // by closeHistory() so the next openHistory() recomputes the default.
@@ -511,6 +521,7 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       pending: hasPendingCall(f),
       resumable: isFlowResumable(f),
       resuming: resuming(f && f.flow_id),
+      strategy: (f && f.implementation_strategy) || null,
     })),
   });
 }
@@ -1015,6 +1026,25 @@ const UPLOAD_ERROR_KEYS = {
 function uploadErrorKey(code) {
   const c = typeof code === "string" ? code.trim() : "";
   return UPLOAD_ERROR_KEYS[c] || "upload.errFailed";
+}
+
+// Machine-readable ``reason`` → i18n key map for POST /api/flows refusals —
+// the same contract as UPLOAD_ERROR_KEYS: prose lives in the language packs,
+// the wire carries only codes. An unrecognised code falls back to the
+// backend's own ``detail`` rather than painting a raw token.
+const FLOW_LAUNCH_ERROR_KEYS = {
+  unsupported_daemon: "newTask.errUnsupportedDaemonStrategy",
+};
+
+function flowLaunchErrorMessage(status, detail) {
+  if (detail && typeof detail === "object" && typeof detail.reason === "string") {
+    const key = FLOW_LAUNCH_ERROR_KEYS[detail.reason];
+    if (key) return tf(key, "Server refused the request.");
+  }
+  if (detail && typeof detail === "object" && typeof detail.detail === "string") {
+    return detail.detail;
+  }
+  return tf("error.serverReturned", `Server returned ${status}.`, { status });
 }
 
 // Names of the rows still in flight, in paste order.
@@ -3191,10 +3221,14 @@ function issueLaunchReasonText(model) {
 // Build the ``POST /api/flows`` body for starting a flow from an issue.  The
 // issue's machine/project are passed so the server can reject a target
 // mismatch; the server re-resolves them owner-scoped and ignores the task
-// content (the issue description becomes the task).  Pure.
-function buildIssueFlowBody(iss, discover, worktree) {
+// content (the issue description becomes the task).  ``strategy`` is the
+// explicit auto/direct/planned implementation strategy; when it is empty
+// (project default) the field is OMITTED so the daemon resolves the project
+// configuration / planned default — an explicit empty string would read as a
+// request to override.  Pure.
+function buildIssueFlowBody(iss, discover, worktree, strategy) {
   const id = iss && iss.id != null ? String(iss.id) : "";
-  return {
+  const body = {
     from_issue_id: id,
     machine_id: issueMachineId(iss),
     project_root: iss && iss.project_root ? String(iss.project_root) : "",
@@ -3202,14 +3236,17 @@ function buildIssueFlowBody(iss, discover, worktree) {
     discover: Boolean(discover),
     worktree: Boolean(worktree),
   };
+  if (strategy) body.implementation_strategy = String(strategy);
+  return body;
 }
 
 // Build the ``POST /api/flows`` body for the New Task form.  ``discover``
 // starts the flow from the discovery step; ``worktree`` runs the flow in an
 // isolated worktree that auto-merges back on success (equivalent to the CLI
-// ``se3 run --worktree``).  Pure.
-function buildNewFlowBody({ machineId, task, taskType, discover, worktree, projectRoot }) {
-  return {
+// ``se3 run --worktree``).  ``strategy`` follows the same omit-when-empty rule
+// as buildIssueFlowBody.  Pure.
+function buildNewFlowBody({ machineId, task, taskType, discover, worktree, projectRoot, strategy }) {
+  const body = {
     machine_id: machineId,
     task: task,
     task_type: taskType,
@@ -3217,6 +3254,8 @@ function buildNewFlowBody({ machineId, task, taskType, discover, worktree, proje
     worktree: Boolean(worktree),
     project_root: projectRoot,
   };
+  if (strategy) body.implementation_strategy = String(strategy);
+  return body;
 }
 
 // ---------------------------------------------------------------------------
@@ -3382,6 +3421,13 @@ function renderFlowCard(flow) {
       : (flow.task_type || "")),
     el("span", null, `${flow.current_step_index || 0}/${flow.total_steps || 0}`),
   );
+  // Effective implementation strategy as a low-key chip (backend projection;
+  // absent on pre-G10 snapshots and for flows with no strategy surface).
+  const strategy = flow.implementation_strategy;
+  if (strategy && strategy.effective) {
+    meta.appendChild(el("span", "flow-strategy-chip strategy-" + strategy.effective,
+      strategyValueLabel(strategy.effective)));
+  }
 
   card.append(head, bar, meta);
   card.addEventListener("click", () => openFlowView(flow.flow_id));
@@ -3409,6 +3455,7 @@ function isFlowViewOpen() {
 function openFlowView(flowId) {
   state.selectedFlowId = flowId;
   state.flowDetail = null;
+  state.flowConversationUsage = null;
   state.flowMachineId = null;
   state.flowConversationRecords = [];
   // A different flow is opening: drop any progress token held for the prior
@@ -3511,6 +3558,7 @@ function doCloseFlowView() {
   state.flowConversationEpoch += 1;
   state.selectedFlowId = null;
   state.flowDetail = null;
+  state.flowConversationUsage = null;
   state.flowMachineId = null;
   state.flowConversationRecords = [];
   state.flowConversationProgress = null;
@@ -4349,6 +4397,9 @@ async function refreshFlowDetail() {
     maybeSettleViaPendingCallsDiff(data.flow);
     renderFlowSidebar(data.flow, data.machine_id);
     renderInterventions(data.flow);
+    // The backend usage summary rides this snapshot; refresh the badge so a
+    // mid-run usage change is reflected even when no new record landed.
+    updateFlowUsageBadge(state.flowConversationRecords);
   } catch (_) {
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     noteDetailFetchFailure(tf("flow.detailNetworkError", "Network error loading flow details."));
@@ -4390,6 +4441,11 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     machineId: machineId ?? null,
     resumable: isFlowResumable(f),
     resumeInProgress: Boolean(resumeInProgress),
+    // The strategy/scope/usage projections the sidebar now renders (G10):
+    // any change to them must rebuild the sidebar like any other visible field.
+    strategy: f.implementation_strategy ?? null,
+    review_scope: f.review_scope ?? null,
+    usage_summary: f.usage_summary ?? null,
   });
 }
 
@@ -4436,6 +4492,27 @@ function renderFlowSidebar(flow, machineId) {
   if (flow.current_step) overview.appendChild(kv(tf("flowSidebar.currentStep", "Current step"), flow.current_step));
   if (flow.updated_at) overview.appendChild(kv(tf("flowSidebar.updated", "Updated"), formatTime(flow.updated_at)));
   body.appendChild(overview);
+
+  // -- implementation strategy / review scope / usage (G10) --
+  // All three come from the shared backend projections the daemon relays in
+  // the flow snapshot; the sidebar only labels them (see the rendering section
+  // above). Absent projections add nothing, so pre-G10 snapshots look exactly
+  // as before.
+  appendStrategySection(body, flow);
+  const scopeRows = buildScopeRows(flow.review_scope);
+  if (scopeRows) {
+    const scopeSec = el("div", "detail-section");
+    scopeSec.appendChild(el("h4", null, tf("scope.label", "Review scope")));
+    scopeSec.appendChild(scopeRows);
+    body.appendChild(scopeSec);
+  }
+  const compactUsage = usagePayloadSummary(flow.usage_summary);
+  if (compactUsage) {
+    const usageSec = el("div", "detail-section");
+    usageSec.appendChild(el("h4", null, tf("usage.title", "Usage / cost")));
+    renderCompactUsageSummary(usageSec, compactUsage);
+    body.appendChild(usageSec);
+  }
 
   // -- steps --
   const steps = Array.isArray(flow.step_history) ? flow.step_history : [];
@@ -6247,6 +6324,18 @@ function applyHistoryFrameRecords(msg) {
       state.flowConversationAppendSeq);
   }
 
+  // A full frame may carry the backend usage payload (`usage`) — the same
+  // schema the REST bundle delivers. Adopt it for whichever view is open so a
+  // WS-only update path never leaves the badge / region behind the backend.
+  if (msg.usage && typeof msg.usage === "object") {
+    if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
+      state.historyUsage = msg.usage;
+    }
+    if (state.selectedFlowId === msg.flow_id) {
+      state.flowConversationUsage = msg.usage;
+    }
+  }
+
   // -- history view consumer --
   if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
     // Capture the reader's position BEFORE re-rendering: an append grows
@@ -6261,6 +6350,7 @@ function applyHistoryFrameRecords(msg) {
         // rebuild in that case; a pure tail append keeps the cheap append render.
         renderHistoryRecords(msg.flow_id, state.historyRecords, append && !rec.updatedInPlace);
         refreshHistoryStickyHeader();
+        refreshHistoryMetaAndUsage(msg.flow_id);
         updateHistoryUsageBadge(state.historyRecords);
         if (stick) scrollHistoryToBottom();
       }
@@ -6279,6 +6369,7 @@ function applyHistoryFrameRecords(msg) {
       state.historySignature = null;
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
       refreshHistoryStickyHeader();
+      refreshHistoryMetaAndUsage(msg.flow_id);
       updateHistoryUsageBadge(state.historyRecords);
       if (stick) scrollHistoryToBottom();
     }
@@ -6620,6 +6711,9 @@ async function openHistorySession(flowId, opts) {
     // bundle. A reconnect re-fetch of the *same* session repopulates it.
     state.historyProgress = null;
     state.historySignature = null;
+    // A different session must never show the previous session's usage payload
+    // (the badge + usage region reset with it until this load lands).
+    state.historyUsage = null;
   }
   // Narrow screens switch to the detail panel; inert on desktop. Idempotent on
   // a reconnect refresh where the detail panel is already shown.
@@ -6635,6 +6729,18 @@ async function openHistorySession(flowId, opts) {
   // cleared historyRecords so the badge hides until the load lands; a reconnect
   // refresh keeps the prior total visible.
   updateHistoryUsageBadge(state.historyRecords);
+  // Clear the strategy/scope meta + usage region on a fresh open so a session
+  // switch can never briefly show the previous session's blocks; a reconnect
+  // refresh keeps the existing blocks until the load settles.
+  if (!incremental) {
+    const meta = $("history-meta");
+    if (meta) meta.innerHTML = "";
+    const usageRegion = $("history-usage-region");
+    if (usageRegion) {
+      usageRegion.innerHTML = "";
+      usageRegion.classList.add("hidden");
+    }
+  }
 
   // Inject a Resume button into the detail header when the session is resumable.
   // Anchor the resume-bar to the flow_id line (a stable static element) rather
@@ -6695,6 +6801,13 @@ async function openHistorySession(flowId, opts) {
       state.selectedHistoryId !== flowId ||
       state.historyEpoch !== requestEpoch
     ) return;
+    // Adopt the backend usage payload when the bundle carries one (complete
+    // full snapshots only); an incremental/delta reply without it keeps the
+    // previously-adopted payload — the summary never flickers to empty on a
+    // reconnect refresh.
+    if (data && data.usage && typeof data.usage === "object") {
+      state.historyUsage = data.usage;
+    }
     // Measure stickiness before the render mutates layout.
     const stick = incremental ? isNearBottom(historyScrollContainer()) : true;
     // Same shared full/delta decision as the running-flow loader. On first open
@@ -6732,6 +6845,9 @@ async function openHistorySession(flowId, opts) {
     // Delta delivery → incremental append render; full fallback → full rebuild.
     renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
     refreshHistoryStickyHeader();
+    // Strategy/scope meta and the backend usage region ride the same records /
+    // payload the conversation just rendered, so they refresh in lockstep.
+    refreshHistoryMetaAndUsage(flowId);
     updateHistoryUsageBadge(state.historyRecords);
     if (stick) scrollHistoryToBottom();
     await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation, result.pending);
@@ -7714,6 +7830,7 @@ function openIssueLaunchModal(iss) {
   const msgNode = $("issue-launch-message");
   const discoverInput = $("issue-launch-discover");
   const worktreeInput = $("issue-launch-worktree");
+  const strategyInput = $("issue-launch-strategy");
   const errBox = $("issue-launch-error");
   if (titleNode) titleNode.textContent = tf("issueLaunch.title", "Launch Flow from Issue");
   if (msgNode) {
@@ -7723,6 +7840,8 @@ function openIssueLaunchModal(iss) {
   }
   if (discoverInput) discoverInput.checked = false;
   if (worktreeInput) worktreeInput.checked = false;
+  // Same reset-to-project-default rule as the New Task form (G10).
+  if (strategyInput) strategyInput.value = "";
   if (errBox) errBox.classList.add("hidden");
   modal.dataset.issueKey = issueCompositeKey(iss);
   modal.dataset.machineId = issueMachineId(iss);
@@ -7753,7 +7872,8 @@ async function confirmIssueLaunch() {
     };
   const discover = Boolean($("issue-launch-discover") && $("issue-launch-discover").checked);
   const worktree = Boolean($("issue-launch-worktree") && $("issue-launch-worktree").checked);
-  const body = buildIssueFlowBody(iss, discover, worktree);
+  const strategy = ($("issue-launch-strategy") && $("issue-launch-strategy").value.trim()) || "";
+  const body = buildIssueFlowBody(iss, discover, worktree, strategy);
 
   const confirmBtn = $("issue-launch-confirm");
   if (confirmBtn) confirmBtn.disabled = true;
@@ -7771,7 +7891,7 @@ async function confirmIssueLaunch() {
       showToast("success", tf("toast.issueFlowDispatched", "Flow dispatched from the issue."));
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
+      const message = flowLaunchErrorMessage(resp.status, detail);
       if (errBox) showFormError(errBox, message);
       showToast("error", tf("toast.flowLaunchFailed", `Failed to launch flow: ${message}`, { message }));
     }
@@ -7952,12 +8072,10 @@ function normalizeRecord(rec) {
   // `step_output` events are emitted for non-terminal steps (PAUSED /
   // REVISION_NEEDED / RETRYING) that consumed tokens but have not reached a
   // terminal status. They carry the step data including `token_usage` so the
-  // web console can show a per-step usage footnote and include their usage in
-  // the session-total badge. Their `kind` is `"step_output"` and they render
-  // as a usage-only chip (no full report card, since the step hasn't
-  // completed). `accumulateSessionUsage` de-duplicates: when a
-  // `step_completed`/`step_failed` record also exists for the same `step_id`,
-  // the terminal record is preferred so there is no double-counting.
+  // web console can show a per-step usage footnote. Their `kind` is
+  // `"step_output"` and they render as a usage-only chip (no full report
+  // card, since the step hasn't completed). A `step_completed`/`step_failed`
+  // record for the same `step_id` supersedes the chip for that step.
   const eventType = String(pick("type") || "").toLowerCase();
   if (eventType === "step_completed" || eventType === "step_failed" || eventType === "step_output") {
     const data = pick("data") && typeof pick("data") === "object" ? pick("data") : {};
@@ -13287,8 +13405,9 @@ function renderStepOutputUsageRecord(norm) {
 
   // Usage footnote — the primary visible content. Only rendered when the
   // step actually consumed tokens; an empty/absent usage produces no row.
-  const usage = norm.stepReport && norm.stepReport.outputs
-    && norm.stepReport.outputs.token_usage;
+  const stepOutputs = (norm.stepReport && norm.stepReport.outputs) || {};
+  const usage = stepOutputs.token_usage;
+  const usageSummary = usagePayloadSummary(stepOutputs.usage_summary);
   if (isTokenUsageEmpty(usage)) {
     // No tokens consumed — still return the row with a collapsed chip only,
     // so the record's existence is preserved for the session badge logic.
@@ -13320,7 +13439,7 @@ function renderStepOutputUsageRecord(norm) {
   }
 
   // With usage: render the usage footnote as the primary display.
-  const label = stepLabel + " · " + formatTokenUsage(usage);
+  const label = stepLabel + " · " + formatTokenUsage(usage, usageSummary);
   const chipWrap = el("div", "msg-chip-wrap collapsed step-event-chip kind-step_output");
   const chip = el("button", "msg-chip step-event-chip-button", "▸ " + label);
   chip.type = "button";
@@ -13345,7 +13464,7 @@ function renderStepOutputUsageRecord(norm) {
   row.appendChild(chipWrap);
 
   // Usage footnote in expanded form (always visible alongside the chip).
-  const footnote = buildStepUsageFootnote(usage);
+  const footnote = buildStepUsageFootnote(usage, usageSummary);
   if (footnote) row.appendChild(footnote);
 
   return row;
@@ -13579,14 +13698,19 @@ function formatCostUsd(v) {
 // are chrome, so they come from the language dictionary (`usage.valueLine`);
 // resolve() (not t()) is used so a boot-time dict miss degrades to the English
 // baseline below rather than painting a raw key into a usage badge.
-function formatTokenUsage(usage) {
+function formatTokenUsage(usage, summary) {
   const u = usage && typeof usage === "object" ? usage : {};
+  // When the backend's shared UsageSummary is available it owns the cost
+  // column: the legacy five-field projection collapses "no provider cost
+  // reported" to 0.0, and rendering that as "$0.0000" fabricates a billing
+  // figure the flow summary itself reports as unknown.
+  const s = summary && typeof summary === "object" ? summary : null;
   const params = {
     in: formatTokenCount(u.input_tokens),
     out: formatTokenCount(u.output_tokens),
     cacheRead: formatTokenCount(u.cache_read_input_tokens),
     cacheWrite: formatTokenCount(u.cache_creation_input_tokens),
-    cost: formatCostUsd(u.total_cost_usd),
+    cost: s ? formatCostOrUnknown(s.actual_cost_usd) : formatCostUsd(u.total_cost_usd),
   };
   const line = I18N.resolve("usage.valueLine", params);
   if (line != null) return line;
@@ -13601,8 +13725,11 @@ function formatTokenUsage(usage) {
 
 // Sum the per-step `token_usage` carried on the conversation records into one
 // session total. De-duplicates by full record identity (`recordKey`) — NOT by
-// step_id — so the badge equals the engine's authoritative session total, which
-// folds EVERY run_step's usage into `flow.state.session_token_usage`.
+// step_id. RETAINED FOR TESTS AND DIAGNOSTICS ONLY: since G10 no rendered
+// badge consumes this helper — the backend UsageSummary payload is the sole
+// authoritative total, and a missing payload renders an explicit
+// "unavailable" state (see applyUsageBadge) instead of a client-side sum that
+// could double-count cumulative session costs or misclassify cached tokens.
 //
 // The match relies on the engine surfacing every token-consuming run in an
 // emitted record. Both terminal (COMPLETED/PARTIAL/FAILED) and non-terminal
@@ -13612,9 +13739,7 @@ function formatTokenUsage(usage) {
 // also carries its combined (carried + current) total forward in
 // `carried_token_usage` so the next run's `token_usage` includes all prior
 // rounds. The single terminal record for a multi-round step therefore reflects
-// the SUM of all its rounds — the same amount the engine folded into the
-// session total — so this client-side re-derivation no longer undercounts
-// paused/revision rounds.
+// the SUM of all its rounds.
 //
 // **De-duplication across `step_output` and `step_completed`**: When both a
 // `step_output` (non-terminal intermediate) and a `step_completed` /
@@ -13737,12 +13862,13 @@ function accumulateSessionUsage(records) {
 // Reads ONLY `outputs.token_usage`, never the internal `carried_token_usage`
 // field — per the G2 convention that both CLI (render_step_usage) and WebUI
 // (this function) share a single, consistent display source.
-function buildStepUsageFootnote(usage) {
+function buildStepUsageFootnote(usage, summary) {
   if (isTokenUsageEmpty(usage)) return null;
   const foot = el("div", "step-report__usage");
   foot.append(
     el("span", "step-report__usage-label", tf("stepReport.usageLabel", "tokens")),
-    el("span", "step-report__usage-value", formatTokenUsage(usage)),
+    el("span", "step-report__usage-value",
+      formatTokenUsage(usage, usagePayloadSummary(summary))),
   );
   return foot;
 }
@@ -13858,20 +13984,365 @@ function appendRoundUsageFootnote(container, norm) {
   if (foot) container.appendChild(foot);
 }
 
-// Recompute and render the flow-view session-usage badge from the conversation
-// records the client has received so far. Hidden (and emptied) when nothing has
-// been consumed yet, so it never shows a bare "0" placeholder. Best-effort —
+// Render the flow-view session-usage badge from the conversation records the
+// client has received so far. Hidden (and emptied) when nothing has been
+// consumed yet, so it never shows a bare "0" placeholder. Best-effort —
 // a render fault here must never disturb the conversation.
-// Shared renderer for a session-total usage badge. Both the running-flow badge
-// and the history-detail badge delegate here (passing their own element) so the
-// accounting, empty-usage suppression, and try/catch fault tolerance stay
-// identical across the two views — the history view reuses the running-flow
-// view's exact rendering logic rather than a divergent copy.
-function applyUsageBadge(badge, records) {
+// The single applyUsageBadge is defined in the G10 backend-summary section
+// below (payload-first, explicit-unavailable otherwise) —
+// updateFlowUsageBadge / updateHistoryUsageBadge delegate to it with their
+// own payload sources.
+function updateFlowUsageBadge(records) {
+  // The open flow's compact backend summary (from the /api/flows/{id} snapshot)
+  // is the authoritative badge source; the WS-delivered full payload is the
+  // next fallback, and a pre-payload daemon leaves both null so the badge
+  // shows the explicit unavailable state inside applyUsageBadge.
+  const payload = (state.flowDetail && state.flowDetail.usage_summary)
+    || state.flowConversationUsage;
+  applyUsageBadge($("flow-usage-badge"), records, payload);
+}
+
+// History-detail counterpart of updateFlowUsageBadge: same total over the open
+// session's records, rendered into the history view's header badge.
+function updateHistoryUsageBadge(records) {
+  applyUsageBadge($("history-usage-badge"), records, state.historyUsage);
+}
+
+// ---------------------------------------------------------------------------
+// Backend usage-summary rendering (G10)
+// ---------------------------------------------------------------------------
+//
+// The backend (engine → daemon → server) computes ONE usage/cost payload
+// through tianluo.usage.build_usage_payload / UsageSummary — including
+// provider-session de-duplication, cached-token semantics, model resolution
+// and pricing. The frontend only RENDERS that payload; it never re-sums
+// provider session costs, cached tokens or model pricing (the legacy
+// client-side accumulation below stays solely as the pre-payload fallback for
+// old daemons). Two payload shapes arrive, both consumed by the same
+// renderers so history and live flows share one schema:
+//
+//   * full   — the history bundle's `usage`: {calls, steps, summary, legacy,
+//              completeness};
+//   * compact — FlowSnapshot / SessionMeta `usage_summary`: the records-free
+//              UsageSummary dict ({totals, actual_cost_usd, estimated_cost_usd,
+//              unknown_*, partial, diagnostics, completeness}).
+//
+// `usage_status` distinguishes explicit zeros (available + zero fields — a
+// real "this call cost nothing" report) from missing data (unavailable) and
+// legacy five-field adaptations (legacy_ambiguous); a non-available status is
+// rendered as its own label, never as a misleading 0.
+
+// Localized one-word label for a UsageStatus value; "" for `available` so the
+// normal row carries no extra mark.
+function usageStatusMark(status) {
+  const s = String(status || "");
+  if (!s || s === "available") return "";
+  const text = I18N.resolve("usage.status." + s);
+  if (text != null) return text;
+  return s;
+}
+
+function usageTotalsFields(totals) {
+  const t = totals && typeof totals === "object" ? totals : {};
+  return {
+    input: usageNum(t.logical_input_tokens),
+    output: usageNum(t.output_tokens),
+    cacheRead: usageNum(t.cache_read_input_tokens),
+    cacheCreate: usageNum(t.cache_creation_input_tokens)
+      + usageNum(t.cache_creation_5m_input_tokens)
+      + usageNum(t.cache_creation_1h_input_tokens),
+    status: String(t.usage_status || "available"),
+  };
+}
+
+// Render the totals of a UsageSummary (its `totals` UsageRecord-shaped dict) as
+// one compact labelled string. A non-available status renders its own label
+// instead of pretending the zeros mean anything.
+function formatUsageTotals(totals) {
+  const f = usageTotalsFields(totals);
+  const params = {
+    in: formatTokenCount(f.input),
+    out: formatTokenCount(f.output),
+    cacheRead: formatTokenCount(f.cacheRead),
+    cacheCreate: formatTokenCount(f.cacheCreate),
+  };
+  const mark = usageStatusMark(f.status);
+  const base = I18N.resolve("usage.totalsLine", params);
+  const line = base != null
+    ? base
+    : ("in " + params.in + " · out " + params.out +
+       " · cache r/w " + params.cacheRead + "/" + params.cacheCreate);
+  return mark ? line + " · " + mark : line;
+}
+
+// Optional USD: "$0.0123", or the localized "unknown" label for null/absent —
+// an absent actual cost is missing data, never a fabricated $0.
+function formatCostOrUnknown(v) {
+  if (v == null || v === "") return tf("usage.unknown", "unknown");
+  return formatCostUsd(v);
+}
+
+// "—" for a cost the backend never computed (per-call estimates do not exist
+// in the payload — only flow/step summaries carry them), distinct from the
+// "unknown" label used for a summary cost that is genuinely missing.
+function formatCostOrDash(v) {
+  if (v == null || v === "") return "—";
+  return formatCostUsd(v);
+}
+
+// Extract the records-free summary dict from either payload shape (compact
+// summary passthrough; full payload's `summary`), or null when neither holds
+// one. Every renderer below goes through this single shape normalizer.
+function usagePayloadSummary(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  if (payload.summary && typeof payload.summary === "object") return payload.summary;
+  if (payload.totals && typeof payload.totals === "object") return payload;
+  return null;
+}
+
+// Append the actual/estimated/unknown counters + completeness badge for one
+// summary dict. Actual and estimated stay separate lines (the backend never
+// combines them, so the UI must not either); unknown counters only appear
+// when non-zero.
+function appendUsageCostLines(container, summary) {
+  const s = summary && typeof summary === "object" ? summary : {};
+  const actual = s.actual_cost_usd;
+  const estimated = s.estimated_cost_usd;
+  const row = el("div", "usage-cost-row");
+  row.append(
+    el("span", "usage-cost-item",
+      tf("usage.actual", "Actual") + " " + formatCostOrUnknown(actual)),
+  );
+  if (estimated != null) {
+    row.append(
+      el("span", "usage-cost-item usage-cost-item--estimate",
+        tf("usage.estimated", "Estimated") + " " + formatCostUsd(estimated)),
+    );
+  }
+  container.appendChild(row);
+  const unknowns = [
+    ["unknownCalls", usageNum(s.unknown_call_count)],
+    ["unknownModel", usageNum(s.unknown_model_count)],
+    ["unknownPrice", usageNum(s.unknown_price_count)],
+    ["unknownCacheTtl", usageNum(s.unknown_cache_ttl_count)],
+  ];
+  const parts = [];
+  for (const [key, count] of unknowns) {
+    if (count > 0) parts.push(tf("usage." + key, key) + " " + count);
+  }
+  if (parts.length) {
+    container.appendChild(el("div", "usage-unknown-line", parts.join(" · ")));
+  }
+  if (s.completeness) {
+    const complete = s.completeness === "complete";
+    container.appendChild(el(
+      "span",
+      "usage-completeness " + (complete ? "ok" : "warn"),
+      tf("usage.completeness", "Completeness") + ": " +
+      tf("usage.completeness." + s.completeness, s.completeness),
+    ));
+  }
+  if (s.partial) {
+    container.appendChild(el("div", "usage-note", tf(
+      "usage.partialNote", "Usage incomplete — see per-call status.")));
+  }
+}
+
+// Render a compact UsageSummary (flow snapshot / session meta shape) into a
+// container: totals line + cost/unknown/completeness lines.
+function renderCompactUsageSummary(container, summary) {
+  const s = usagePayloadSummary(summary);
+  if (!s || !container) return;
+  container.appendChild(el("div", "usage-totals-line", formatUsageTotals(s.totals)));
+  appendUsageCostLines(container, s);
+}
+
+// Render the full build_usage_payload shape ({calls, steps, summary, legacy,
+// completeness}) into a container: flow totals, per-call table, per-step
+// table. Only ever fed backend-computed payloads.
+function renderUsagePayloadRegion(container, payload) {
+  if (!container || !payload || typeof payload !== "object") return;
+  const summary = usagePayloadSummary(payload);
+  if (!summary) {
+    if (payload.completeness === "none") {
+      container.appendChild(el("p", "empty", tf("usage.noUsage", "No usage data recorded.")));
+    }
+    return;
+  }
+  container.appendChild(el("h4", "usage-region__title", tf("usage.flowHeader", "Flow totals")));
+  renderCompactUsageSummary(container, summary);
+  if (payload.legacy) {
+    container.appendChild(el("div", "usage-note", tf(
+      "usage.legacyNote", "Usage recovered from legacy records — may be incomplete.")));
+  }
+
+  const calls = Array.isArray(payload.calls) ? payload.calls : [];
+  if (calls.length) {
+    container.appendChild(el("h4", "usage-region__title", tf("usage.callsHeader", "LLM calls / attempts")));
+    const table = el("table", "usage-table");
+    const thead = el("thead");
+    const cols = [
+      ["call", tf("usage.col.call", "Call"), ""],
+      ["agent", tf("usage.col.agent", "Agent"), ""],
+      ["runner", tf("usage.col.runner", "Runner"), ""],
+      ["provider", tf("usage.col.provider", "Provider"), ""],
+      ["model", tf("usage.col.model", "Model"), ""],
+      ["status", tf("usage.col.status", "Status"), ""],
+      ["input", tf("usage.col.input", "Input"), "num"],
+      ["output", tf("usage.col.output", "Output"), "num"],
+      ["cacheRead", tf("usage.col.cacheRead", "Cache read"), "num"],
+      ["cacheCreate", tf("usage.col.cacheCreate", "Cache create"), "num"],
+      ["actual", tf("usage.col.actual", "Actual"), "num"],
+      ["estimate", tf("usage.col.estimate", "Estimate"), "num"],
+    ];
+    const headRow = el("tr");
+    for (const [, label, cls] of cols) {
+      headRow.appendChild(el("th", cls || null, label));
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const record of calls) {
+      const f = usageTotalsFields(record);
+      const row = el("tr");
+      const attempt = record && record.attempt ? "#" + record.attempt : "";
+      row.appendChild(el("td", null, String((record && record.call_id) || "") + attempt));
+      row.appendChild(el("td", null, (record && record.agent_name) || "-"));
+      row.appendChild(el("td", null, (record && record.runner_type) || "-"));
+      row.appendChild(el("td", null, (record && record.provider) || "-"));
+      // The backend's internal "unknown" sentinel is user-visible text here,
+      // so it must follow the UI language like the CLI's
+      // cli.display.usage.model_unknown counterpart does.
+      const rawModel = (record && record.resolved_model) || "";
+      const model = rawModel && rawModel !== "unknown"
+        ? rawModel
+        : tf("usage.unknown", "unknown");
+      const modelCell = el("td", null, model);
+      // The raw provider value stays visible as the hover title for diagnosis;
+      // unresolved model names never enter pricing anyway (the backend marks
+      // them unknown).
+      if (record && record.reported_model && record.reported_model !== model) {
+        modelCell.title = String(record.reported_model);
+      }
+      row.appendChild(modelCell);
+      row.appendChild(el("td", null,
+        usageStatusMark(record && record.usage_status) || tf("usage.status.available", "available")));
+      row.appendChild(el("td", "num", formatTokenCount(f.input)));
+      row.appendChild(el("td", "num", formatTokenCount(f.output)));
+      row.appendChild(el("td", "num", formatTokenCount(f.cacheRead)));
+      row.appendChild(el("td", "num", formatTokenCount(f.cacheCreate)));
+      row.appendChild(el("td", "num",
+        formatCostOrUnknown(record && record.actual_cost_usd)));
+      // Per-call estimates are computed by the shared backend payload
+      // (build_usage_payload), the same result the CLI terminal table
+      // renders; a dash reads as "not estimable", never as a missing
+      // computation.
+      row.appendChild(el("td", "num",
+        formatCostOrDash(record && record.estimated_cost_usd)));
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+  }
+
+  const steps = payload.steps && typeof payload.steps === "object" ? payload.steps : {};
+  const stepKeys = Object.keys(steps);
+  if (stepKeys.length) {
+    container.appendChild(el("h4", "usage-region__title", tf("usage.stepsHeader", "Per-step usage")));
+    const table = el("table", "usage-table");
+    const thead = el("thead");
+    const headRow = el("tr");
+    for (const label of [
+      tf("usage.col.step", "Step"),
+      tf("usage.col.calls", "Calls"),
+      tf("usage.col.input", "Input"),
+      tf("usage.col.output", "Output"),
+      tf("usage.col.cacheRead", "Cache read"),
+      tf("usage.col.cacheCreate", "Cache create"),
+      tf("usage.col.actual", "Actual"),
+      tf("usage.col.estimate", "Estimate"),
+      tf("usage.col.completeness", "Completeness"),
+    ]) {
+      headRow.appendChild(el("th", null, label));
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    for (const stepKey of stepKeys) {
+      const entry = steps[stepKey];
+      const entrySummary = entry && entry.summary;
+      const f = usageTotalsFields(entrySummary && entrySummary.totals);
+      const row = el("tr");
+      row.appendChild(el("td", null, stepKey || "-"));
+      row.appendChild(el("td", null, String(usageNum(entry && entry.record_count))));
+      row.appendChild(el("td", "num", formatTokenCount(f.input)));
+      row.appendChild(el("td", "num", formatTokenCount(f.output)));
+      row.appendChild(el("td", "num", formatTokenCount(f.cacheRead)));
+      row.appendChild(el("td", "num", formatTokenCount(f.cacheCreate)));
+      row.appendChild(el("td", "num",
+        formatCostOrUnknown(entrySummary && entrySummary.actual_cost_usd)));
+      row.appendChild(el("td", "num",
+        formatCostOrUnknown(entrySummary && entrySummary.estimated_cost_usd)));
+      const completeness = entrySummary && entrySummary.completeness;
+      row.appendChild(el("td", null, completeness
+        ? tf("usage.completeness." + completeness, completeness)
+        : "-"));
+      tbody.appendChild(row);
+    }
+    table.appendChild(tbody);
+    container.appendChild(table);
+  }
+}
+
+// True when any record carries a non-empty legacy token_usage — a signal that
+// usage exists while the backend supplied no authoritative summary. Pure
+// existence probe only: it never computes a total, because the frontend must
+// not apply a second accounting formula.
+function hasLegacyTokenUsage(records) {
+  if (!Array.isArray(records)) return false;
+  for (const rec of records) {
+    let norm;
+    try { norm = normalizeRecord(rec); } catch (_) { continue; }
+    const usage = norm && norm.stepReport
+      && norm.stepReport.outputs && norm.stepReport.outputs.token_usage;
+    if (!isTokenUsageEmpty(usage)) return true;
+  }
+  return false;
+}
+
+// Shared renderer for a session-total usage badge. `payload` (full history
+// payload or compact flow/session summary) is the backend authority. A
+// pre-payload (legacy) daemon yields no summary: the badge then shows an
+// explicit "unavailable" state instead of recomputing totals client-side —
+// blind client-side summation could double-count cumulative session costs or
+// misclassify cached tokens, diverging from the backend rules. Hidden (and
+// emptied) when neither holds anything, so it never shows a bare "0".
+function applyUsageBadge(badge, records, payload) {
   if (!badge) return;
   try {
-    const totals = accumulateSessionUsage(records);
-    if (isTokenUsageEmpty(totals)) {
+    const summary = usagePayloadSummary(payload);
+    if (summary) {
+      badge.innerHTML = "";
+      badge.append(
+        el("span", "flow-usage-badge__label", tf("usage.sessionLabel", "Session")),
+        el("span", "flow-usage-badge__value", formatUsageTotals(summary.totals)),
+      );
+      const actual = summary.actual_cost_usd;
+      const estimated = summary.estimated_cost_usd;
+      if (actual != null || estimated != null) {
+        const costParts = [];
+        if (actual != null) {
+          costParts.push(tf("usage.actual", "Actual") + " " + formatCostUsd(actual));
+        }
+        if (estimated != null) {
+          costParts.push(tf("usage.estimated", "Estimated") + " " + formatCostUsd(estimated));
+        }
+        badge.append(el("span", "flow-usage-badge__cost", costParts.join(" · ")));
+      }
+      badge.classList.remove("hidden");
+      return;
+    }
+    if (!hasLegacyTokenUsage(records)) {
       badge.innerHTML = "";
       badge.classList.add("hidden");
       return;
@@ -13879,7 +14350,8 @@ function applyUsageBadge(badge, records) {
     badge.innerHTML = "";
     badge.append(
       el("span", "flow-usage-badge__label", tf("usage.sessionLabel", "Session")),
-      el("span", "flow-usage-badge__value", formatTokenUsage(totals)),
+      el("span", "flow-usage-badge__value",
+        tf("usage.unavailableNote", "usage unavailable — legacy data")),
     );
     badge.classList.remove("hidden");
   } catch (_) {
@@ -13888,14 +14360,226 @@ function applyUsageBadge(badge, records) {
   }
 }
 
-function updateFlowUsageBadge(records) {
-  applyUsageBadge($("flow-usage-badge"), records);
+// ---------------------------------------------------------------------------
+// Implementation-strategy + review-scope display (G10)
+// ---------------------------------------------------------------------------
+//
+// The strategy projection ({requested, effective, reason, inferred}) and the
+// scope audit ({active_round, last_round, last_clean_full_round_id,
+// completed_full_rounds}) are computed by the shared backends
+// (strategy_view.py / review_scope) and relayed verbatim; the UI only labels
+// them. A legacy flow's inferred view is displayed with an explicit
+// "inferred" note and never written back.
+
+function strategyValueLabel(value) {
+  const s = String(value || "");
+  if (!s) return tf("strategy.value.unknown", "unknown");
+  const text = I18N.resolve("strategy.value." + s);
+  if (text != null) return text;
+  return s;
 }
 
-// History-detail counterpart of updateFlowUsageBadge: same total over the open
-// session's records, rendered into the history view's header badge.
-function updateHistoryUsageBadge(records) {
-  applyUsageBadge($("history-usage-badge"), records);
+// The strategy-reason text. A ``reason_key`` marks a sentence the backend
+// projection itself authored (legacy inference) rather than persisted flow
+// data, so it is rendered through this catalog instead of verbatim English.
+function strategyReasonText(strategy) {
+  const key = String((strategy && strategy.reason_key) || "");
+  if (key) {
+    const text = I18N.resolve("strategy.reason." + key);
+    if (text != null) return text;
+  }
+  return strategy && strategy.reason ? String(strategy.reason) : "";
+}
+
+// Build the strategy rows (effective + requested + reason) for a strategy
+// projection dict, or null when nothing is recoverable.
+function buildStrategyRows(strategy) {
+  if (!strategy || typeof strategy !== "object") return null;
+  const effective = strategy.effective;
+  if (!effective) return null;
+  const frag = document.createDocumentFragment();
+  const kv = (k, v, title) => {
+    const row = el("div", "kv");
+    const valEl = el("span", "v", String(v));
+    if (title) valEl.title = title;
+    row.append(el("span", "k", k), valEl);
+    return row;
+  };
+  let value = strategyValueLabel(effective);
+  if (strategy.inferred) {
+    value += " · " + tf("strategy.inferredNote", "inferred from legacy records");
+  }
+  if (strategy.requested && strategy.requested !== "auto" && strategy.requested !== effective) {
+    value += " (" + tf("strategy.requestedLabel", "requested")
+      + " " + strategyValueLabel(strategy.requested) + ")";
+  }
+  frag.appendChild(kv(tf("strategy.label", "Implementation strategy"), value));
+  const reasonText = strategyReasonText(strategy);
+  if (reasonText) {
+    frag.appendChild(kv(tf("strategy.reasonLabel", "Strategy reason"), reasonText));
+  }
+  return frag;
+}
+
+// Render the strategy section into the flow sidebar body. Appended directly
+// (not as its own titled section) so a flow without strategy info keeps the
+// exact pre-G10 sidebar.
+function appendStrategySection(body, flow) {
+  const rows = buildStrategyRows(flow && flow.implementation_strategy);
+  if (!rows) return;
+  const section = el("div", "detail-section");
+  section.appendChild(el("h4", null, tf("strategy.label", "Implementation strategy")));
+  section.appendChild(rows);
+  body.appendChild(section);
+}
+
+// Build the scope-audit rows from a review_scope projection, or null when the
+// flow recorded none. `changedPathCount` is optional extra context from the
+// last self_check outputs.
+function buildScopeRows(reviewScope, changedPathCount) {
+  if (!reviewScope || typeof reviewScope !== "object") return null;
+  const round = (reviewScope.last_round && typeof reviewScope.last_round === "object")
+    ? reviewScope.last_round
+    : (reviewScope.active_round && typeof reviewScope.active_round === "object")
+      ? reviewScope.active_round
+      : null;
+  const parts = [];
+  if (round) {
+    const mode = String(round.scope_mode || "");
+    const modeLabel = I18N.resolve("scope.mode." + mode);
+    const modeDisplay = modeLabel != null ? modeLabel : (mode || "-");
+    const passDisplay = round.pass_index != null ? String(round.pass_index) : "-";
+    const fixDisplay = round.fix_iteration != null ? String(round.fix_iteration) : "-";
+    // The fallback literal carries the interpolated values already — tf() only
+    // interpolates the *dictionary* template, so the no-dict fallback must be
+    // pre-built (same pattern as formatTokenUsage's English baseline).
+    parts.push(tf("scope.round.line",
+      `${modeDisplay} pass ${passDisplay} · fix ${fixDisplay}`,
+      { mode: modeDisplay, pass: passDisplay, fix: fixDisplay }));
+    if (round.baseline_id) {
+      const id = String(round.baseline_id).slice(0, 12);
+      parts.push(tf("scope.baseline", `baseline ${id}`, { id }));
+    }
+  }
+  if (changedPathCount != null && changedPathCount > 0) {
+    parts.push(tf("scope.changedPaths", `${changedPathCount} changed path(s)`,
+      { count: changedPathCount }));
+  }
+  const fullRounds = usageNum(reviewScope.completed_full_rounds);
+  if (fullRounds > 0) {
+    parts.push(tf("scope.fullRounds", `${fullRounds} full round(s) clean`,
+      { count: fullRounds }));
+  }
+  if (!parts.length) return null;
+  const row = el("div", "kv");
+  row.append(
+    el("span", "k", tf("scope.label", "Review scope")),
+    el("span", "v", parts.join(" · ")),
+  );
+  return row;
+}
+
+// Collect the most recent self_check scope audit facts from conversation
+// records (the engine persists scope_mode / baseline_id / scope_changed_paths
+// / fix_iteration / pass_index into step outputs). Used by the history detail,
+// whose session meta does not carry review_scope. Records without scope fields
+// contribute nothing.
+function collectScopeAuditFromRecords(records) {
+  let found = null;
+  if (!Array.isArray(records)) return found;
+  for (const rec of records) {
+    let norm;
+    try { norm = normalizeRecord(rec); } catch (_) { continue; }
+    if (!norm || norm.role !== "step-event" || !norm.stepReport) continue;
+    const outputs = norm.stepReport.outputs;
+    if (!outputs || typeof outputs !== "object") continue;
+    if (outputs.scope_mode == null && outputs.baseline_id == null) continue;
+    found = {
+      scope_mode: outputs.scope_mode || null,
+      baseline_id: outputs.baseline_id || "",
+      fix_iteration: outputs.fix_iteration != null ? outputs.fix_iteration : 0,
+      pass_index: outputs.self_check_pass_index != null
+        ? outputs.self_check_pass_index
+        : (outputs.pass_index != null ? outputs.pass_index : null),
+      changed_paths: Array.isArray(outputs.scope_changed_paths)
+        ? outputs.scope_changed_paths : [],
+    };
+  }
+  return found;
+}
+
+// Render the history detail's strategy + scope meta block (the session-meta
+// strategy projection and the scope audit collected from the records) plus the
+// backend usage region. Every consumer below shares these renderers, so the
+// live-flow sidebar, the history detail and the badges never diverge.
+function renderHistoryStrategyScope(container, session, records) {
+  if (!container) return;
+  const frag = document.createDocumentFragment();
+  const strategyRows = buildStrategyRows(session && session.implementation_strategy);
+  if (strategyRows) {
+    const strategySec = el("div", "history-meta-block");
+    strategySec.appendChild(el(
+      "span", "history-meta-label", tf("strategy.label", "Implementation strategy") + ":"));
+    strategySec.appendChild(strategyRows);
+    frag.appendChild(strategySec);
+  }
+  const audit = collectScopeAuditFromRecords(records);
+  if (audit) {
+    const roundMode = audit.scope_mode || "";
+    const modeLabel = I18N.resolve("scope.mode." + roundMode);
+    const modeDisplay = modeLabel != null ? modeLabel : (roundMode || "-");
+    const passDisplay = audit.pass_index != null ? String(audit.pass_index) : "-";
+    const fixDisplay = String(audit.fix_iteration || 0);
+    const parts = [
+      tf("scope.round.line",
+        `${modeDisplay} pass ${passDisplay} · fix ${fixDisplay}`,
+        { mode: modeDisplay, pass: passDisplay, fix: fixDisplay }),
+    ];
+    if (audit.baseline_id) {
+      const id = String(audit.baseline_id).slice(0, 12);
+      parts.push(tf("scope.baseline", `baseline ${id}`, { id }));
+    }
+    if (audit.changed_paths.length) {
+      const count = audit.changed_paths.length;
+      parts.push(tf("scope.changedPaths", `${count} changed path(s)`, { count }));
+    }
+    const scopeSec = el("div", "history-meta-block");
+    scopeSec.appendChild(el(
+      "span", "history-meta-label", tf("scope.label", "Review scope") + ":"));
+    scopeSec.appendChild(el("span", "history-meta-value", parts.join(" · ")));
+    frag.appendChild(scopeSec);
+  }
+  if (frag.childNodes.length) {
+    container.innerHTML = "";
+    container.appendChild(frag);
+  }
+}
+
+// Render the open history session's backend usage payload into
+// `#history-usage-region`. Hidden (and emptied) when the session carries no
+// payload — history and live flows share the exact same renderers, so there is
+// one schema and one set of formulas on the wire and on screen.
+function renderHistoryUsageRegion() {
+  const container = $("history-usage-region");
+  if (!container) return;
+  container.innerHTML = "";
+  const summary = usagePayloadSummary(state.historyUsage);
+  if (!summary) {
+    container.classList.add("hidden");
+    return;
+  }
+  renderUsagePayloadRegion(container, state.historyUsage);
+  container.classList.remove("hidden");
+}
+
+// Refresh the open history session's strategy/scope meta and the backend usage
+// region in one pass — the shared post-render step for the REST load and the
+// WS history_data consumers alike.
+function refreshHistoryMetaAndUsage(flowId) {
+  const session = (state.historySessions || []).find(
+    (x) => x && x.flow_id === flowId);
+  renderHistoryStrategyScope($("history-meta"), session, state.historyRecords);
+  renderHistoryUsageRegion();
 }
 
 // Build a default-open collapsible report card. `buildBody()` is invoked
@@ -13950,7 +14634,8 @@ function renderStepReport(step) {
     // Token-usage footnote (G4): a low-key one-liner at the card's bottom,
     // shown only when this step actually consumed tokens. Steps with no
     // `token_usage` get no extra row, so their card structure is unchanged.
-    const usageFoot = buildStepUsageFootnote((step.outputs || {}).token_usage);
+    const usageFoot = buildStepUsageFootnote(
+      (step.outputs || {}).token_usage, (step.outputs || {}).usage_summary);
     if (usageFoot) frag.appendChild(usageFoot);
     return frag;
   });
@@ -15006,6 +15691,10 @@ function openNewTask() {
   $("nt-task").value = "";
   $("nt-discover").checked = false;
   $("nt-worktree").checked = false;
+  // Reset the strategy control to "project default" so a previously chosen
+  // explicit strategy never silently leaks into the next published task.
+  const ntStrategy = $("nt-strategy");
+  if (ntStrategy) ntStrategy.value = "";
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
   const manualInput = $("nt-project-manual");
@@ -15164,6 +15853,7 @@ async function submitNewTask(event) {
   const taskType = $("nt-type").value;
   const discover = $("nt-discover").checked;
   const worktree = $("nt-worktree").checked;
+  const strategy = ($("nt-strategy") && $("nt-strategy").value.trim()) || "";
   const projectSelectValue = $("nt-project").value.trim();
 
   if (!machineId) return showFormError(errBox, tf("newTask.errSelectMachine", "Select a target machine."));
@@ -15210,6 +15900,7 @@ async function submitNewTask(event) {
           discover,
           worktree,
           projectRoot,
+          strategy,
         }),
       ),
     });
@@ -15222,7 +15913,7 @@ async function submitNewTask(event) {
       showToast("success", tf("toast.taskPublished", "Task published."));
     } else {
       const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
+      const message = flowLaunchErrorMessage(resp.status, detail);
       showFormError(errBox, message);
       showToast("error", tf("toast.taskPublishFailed", `Could not publish task: ${message}`, { message }));
       submit.disabled = false;
@@ -16427,6 +17118,25 @@ if (typeof module !== "undefined" && module.exports) {
     // tests/frontend/history_usage.test.mjs.
     applyUsageBadge,
     updateHistoryUsageBadge,
+    // Backend usage-summary rendering (G10) — exposed for the DOM-free /
+    // DOM-stub tests in tests/frontend/strategy_usage_summary.test.mjs.
+    usageStatusMark,
+    formatUsageTotals,
+    formatCostOrUnknown,
+    formatCostOrDash,
+    usagePayloadSummary,
+    appendUsageCostLines,
+    renderCompactUsageSummary,
+    renderUsagePayloadRegion,
+    renderHistoryUsageRegion,
+    // Implementation-strategy + review-scope display (G10) — exposed for the
+    // DOM-free / DOM-stub tests in tests/frontend/strategy_usage_summary.test.mjs.
+    strategyValueLabel,
+    buildStrategyRows,
+    appendStrategySection,
+    buildScopeRows,
+    collectScopeAuditFromRecords,
+    renderHistoryStrategyScope,
     // Per-round usage footnote (G5) — exposed for the DOM-free tests in
     // tests/frontend/round_usage.test.mjs.
     buildRoundUsageFootnote,
@@ -16753,6 +17463,13 @@ if (typeof module !== "undefined" && module.exports) {
     I18N,
     applyNodeTranslations,
     repaintOpenModals,
+    // Element/label helpers shared by the DOM-stub test modules (G10) so the
+    // strategy/usage-summary suites build and inspect the same nodes the app
+    // renders, without re-implementing el()/tf() locally.
+    el,
+    tf,
+    $,
+    usageNum,
     // Live-state chrome that a language switch must repaint itself (the badge
     // and the tab title carry no data-i18n attribute) — exposed for the
     // DOM-stub tests in tests/frontend/i18n_render_switch.test.mjs.

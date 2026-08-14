@@ -26,9 +26,18 @@ from __future__ import annotations
 import contextvars
 import logging
 import threading
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, Mapping, Optional
+from typing import Any, Dict, Iterator, List, Mapping, Optional
+
+from tianluo.usage import (
+    LEGACY_UNKNOWN_CALL_ID,
+    UsageRecord,
+    UsageStatus,
+    aggregate_usage_records,
+    legacy_usage_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +82,57 @@ class UsageTotals:
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
     total_cost_usd: float = 0.0
+    usage_records: List[UsageRecord] = field(default_factory=list, repr=False)
+    legacy_usage_missing: bool = field(default=False, repr=False, compare=False)
+    # WHY: a record-less legacy tally folded into another accumulator needs a
+    # call id that is unique per SOURCE tally. A positional id ("legacy-add-1")
+    # collides whenever two accumulators each fold one legacy tally, and the
+    # identity-based dedup then silently drops one distinct measurement from
+    # the flow totals. This per-instance token makes each tally's adapted
+    # record its own billing unit. Excluded from equality/serialization: it is
+    # provenance for the adapter, not part of the tally's value.
+    _legacy_id_token: str = field(default="", repr=False, compare=False)
+
+    # Completeness and provenance of the last fold, surfaced in-memory (the
+    # legacy five-field serialization shape is fixed, so these never ride
+    # ``to_dict``). A duplicate record-less fold — the same tally object
+    # folded twice — has no record identity to dedup against and must not
+    # silently double a possibly-duplicate measurement.
+    partial: bool = field(default=False, repr=False, compare=False)
+    diagnostics: List[str] = field(default_factory=list, repr=False, compare=False)
+    # Per-instance identities of record-less tallies already folded into this
+    # accumulator via the blind field-wise path, so a duplicate fold is
+    # skipped instead of summed.
+    _folded_sources: set = field(default_factory=set, repr=False, compare=False)
+
+    @classmethod
+    def from_usage_records(
+        cls, records: List[UsageRecord]
+    ) -> "UsageTotals":
+        """Build the legacy projection from authoritative usage records."""
+        records = list(records)
+        if not records:
+            return cls()
+        aggregate = aggregate_usage_records(records)
+        return cls(
+            input_tokens=aggregate.logical_input_tokens,
+            output_tokens=aggregate.output_tokens,
+            cache_creation_input_tokens=(
+                aggregate.cache_creation_total_input_tokens
+            ),
+            cache_read_input_tokens=aggregate.cache_read_input_tokens,
+            total_cost_usd=aggregate.actual_cost_usd or 0.0,
+            usage_records=records,
+            partial=aggregate.usage_status in (
+                UsageStatus.PARTIAL,
+                UsageStatus.LEGACY_AMBIGUOUS,
+            ),
+            diagnostics=list(aggregate.diagnostics),
+        )
+
+    @classmethod
+    def from_usage_record(cls, record: UsageRecord) -> "UsageTotals":
+        return cls.from_usage_records([record])
 
     def add(self, other: Optional["UsageTotals"]) -> "UsageTotals":
         """Accumulate ``other`` into ``self`` field-by-field; returns ``self``.
@@ -82,29 +142,94 @@ class UsageTotals:
         """
         if other is None:
             return self
-        self.input_tokens += other.input_tokens
-        self.output_tokens += other.output_tokens
-        self.cache_creation_input_tokens += other.cache_creation_input_tokens
-        self.cache_read_input_tokens += other.cache_read_input_tokens
-        self.total_cost_usd += other.total_cost_usd
+        if self.usage_records or other.usage_records:
+            records = list(self.usage_records)
+            if not records and not self.is_empty():
+                records.append(
+                    legacy_usage_record(
+                        self.to_dict(), call_id=self._legacy_call_id("accumulator")
+                    )
+                )
+            if other.usage_records:
+                records.extend(other.usage_records)
+            elif not other.is_empty():
+                records.append(
+                    legacy_usage_record(
+                        other.to_dict(), call_id=other._legacy_call_id("add")
+                    )
+                )
+            authoritative = UsageTotals.from_usage_records(records)
+            self.input_tokens = authoritative.input_tokens
+            self.output_tokens = authoritative.output_tokens
+            self.cache_creation_input_tokens = (
+                authoritative.cache_creation_input_tokens
+            )
+            self.cache_read_input_tokens = authoritative.cache_read_input_tokens
+            self.total_cost_usd = authoritative.total_cost_usd
+            self.usage_records = records
+            self.legacy_usage_missing = False
+        else:
+            # WHY: record-less tallies have no record identity to dedup
+            # against, so the field-wise sum must attribute its sources — a
+            # duplicate fold (the same tally object folded twice) is skipped
+            # with a diagnostic instead of silently doubling a
+            # possibly-duplicate measurement into an available-looking total.
+            if other is self:
+                self.partial = True
+                self.diagnostics.append(
+                    "record-less tally folded into itself; fold skipped "
+                    "and marked partial"
+                )
+                return self
+            source = other._source_identity()
+            if source in self._folded_sources:
+                self.partial = True
+                self.diagnostics.append(
+                    "duplicate record-less tally fold skipped by source "
+                    "identity; marked partial"
+                )
+                return self
+            self._folded_sources.add(source)
+            self.input_tokens += other.input_tokens
+            self.output_tokens += other.output_tokens
+            self.cache_creation_input_tokens += other.cache_creation_input_tokens
+            self.cache_read_input_tokens += other.cache_read_input_tokens
+            self.total_cost_usd += other.total_cost_usd
+            if not other.is_empty():
+                self.legacy_usage_missing = False
         return self
+
+    def _source_identity(self) -> str:
+        """Per-instance identity used to attribute record-less folds."""
+        if not self._legacy_id_token:
+            self._legacy_id_token = uuid.uuid4().hex[:12]
+        return self._legacy_id_token
+
+    def _legacy_call_id(self, kind: str) -> str:
+        """Stable, per-tally call id for this instance's legacy adaptation."""
+        return f"legacy:{kind}:{self._source_identity()}"
 
     @property
     def total_tokens(self) -> int:
-        """Sum of all four token counts (input + output + both cache kinds)."""
-        return (
-            self.input_tokens
-            + self.output_tokens
-            + self.cache_creation_input_tokens
-            + self.cache_read_input_tokens
-        )
+        """Logical input plus output; cache fields are input classifications."""
+        return self.input_tokens + self.output_tokens
+
+    @property
+    def has_usage_records(self) -> bool:
+        return bool(self.usage_records)
 
     def is_empty(self) -> bool:
         """True when every token field is zero and the cost is (near) zero.
 
         Used by the display layer to suppress an empty usage block / footnote.
         """
-        return self.total_tokens == 0 and self.total_cost_usd == 0.0
+        return (
+            self.input_tokens == 0
+            and self.output_tokens == 0
+            and self.cache_creation_input_tokens == 0
+            and self.cache_read_input_tokens == 0
+            and self.total_cost_usd == 0.0
+        )
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to a JSON-primitive dict (ints + a float).
@@ -112,13 +237,16 @@ class UsageTotals:
         The key set is stable so it can be persisted in ``step.outputs`` /
         ``State.session_token_usage`` and read back by both display ends.
         """
-        return {
+        data = {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
             "total_cost_usd": self.total_cost_usd,
         }
+        if self.usage_records:
+            data["usage_records"] = [record.to_dict() for record in self.usage_records]
+        return data
 
     @classmethod
     def from_dict(cls, data: Optional[Mapping[str, Any]]) -> "UsageTotals":
@@ -128,8 +256,20 @@ class UsageTotals:
         ``_coerce_*`` helpers, so an older ``engine.json`` lacking the field —
         or a raw CLI ``usage`` payload with only some keys — loads cleanly.
         """
+        if data is None:
+            return cls(legacy_usage_missing=True)
         if not data:
-            return cls()
+            return cls(legacy_usage_missing=True)
+        if "usage_status" in data or "logical_input_tokens" in data:
+            return cls.from_usage_record(UsageRecord.from_dict(data))
+        raw_records = data.get("usage_records", [])
+        records = [
+            UsageRecord.from_dict(item)
+            for item in raw_records
+            if isinstance(item, Mapping)
+        ] if isinstance(raw_records, list) else []
+        if records:
+            return cls.from_usage_records(records)
         return cls(
             input_tokens=_coerce_int(data.get("input_tokens")),
             output_tokens=_coerce_int(data.get("output_tokens")),
@@ -139,6 +279,16 @@ class UsageTotals:
             cache_read_input_tokens=_coerce_int(data.get("cache_read_input_tokens")),
             total_cost_usd=_coerce_float(data.get("total_cost_usd")),
         )
+
+    def to_usage_records(
+        self, call_id: str = LEGACY_UNKNOWN_CALL_ID
+    ) -> List[UsageRecord]:
+        """Expose records, adapting an old tally without inventing provenance."""
+        if self.usage_records:
+            return list(self.usage_records)
+        if self.legacy_usage_missing:
+            return [legacy_usage_record(None, call_id=call_id)]
+        return [legacy_usage_record(self.to_dict(), call_id=call_id)]
 
 
 # ---------------------------------------------------------------------------
@@ -230,10 +380,17 @@ def add_call_usage(usage: Any) -> None:
             return  # No active step scope — safe no-op.
         if usage is None:
             return
-        if isinstance(usage, UsageTotals):
+        if isinstance(usage, UsageRecord):
+            increment = UsageTotals.from_usage_record(usage)
+        elif isinstance(usage, UsageTotals):
             increment = usage
         elif isinstance(usage, Mapping):
-            increment = UsageTotals.from_dict(usage)
+            if "usage_status" in usage or "logical_input_tokens" in usage:
+                increment = UsageTotals.from_usage_record(
+                    UsageRecord.from_dict(usage)
+                )
+            else:
+                increment = UsageTotals.from_dict(usage)
         else:
             return
         # The accumulator may be shared across DAG worker threads (see

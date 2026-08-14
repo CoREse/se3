@@ -30,6 +30,7 @@ from ..dag_scheduler import (
     classify_chains,
 )
 from ..chat_history import record_group_status
+from ...agent_runner import AgentInvocationIntent
 from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
@@ -390,16 +391,134 @@ IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + WHY_COMMENT_CONVENTION
 IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + WHY_COMMENT_CONVENTION
 FIX_PROMPT = FIX_PROMPT + "\n" + WHY_COMMENT_CONVENTION
 
+# Direct and small deliberately share one whole-task execution contract.  The
+# replacement removes task_groups from the rendered prompt altogether; a
+# strategy-free small flow and a direct feature remain distinguishable through
+# the execution-mode text and runner intent passed below.
+HOLISTIC_IMPLEMENT_PROMPT = IMPLEMENT_PROMPT.replace(
+    "You are an expert software engineer. Implement the following tasks by writing code.",
+    "You are an expert software engineer. Complete this entire requirement by writing code.",
+).replace(
+    "## Task Groups\n{task_groups}",
+    """## Holistic Implementation Mode
+{execution_mode}
+
+## Autonomous Execution Contract
+Independently analyze the complete effective requirement and the repository,
+then implement the requirement in full. Do not stop after analysis or a partial
+subset. Inspect any additional code needed to understand cross-module effects,
+run targeted validation appropriate to the changes, and only then return the
+existing structured implementation summary.
+
+## ANALYZE Context
+{analysis_context}
+
+## Prior Partial-Attempt Context
+{continuation_context}""",
+).replace(
+    # The holistic prompt carries no Task Groups section, so the group-oriented
+    # instruction would send the caller looking for an enumerated task list —
+    # and its absence could read as license to stop early, contradicting the
+    # Autonomous Execution Contract above.
+    "2. Implement each task in the task groups above.",
+    "2. Implement the complete effective requirement described above.",
+)
+
 # Two-segment marker only: USER_CONTENT region is empty.
 # implement consumes upstream LLM artifacts (design / task_groups /
 # changes_made / test_results) and framework-derived task_description;
 # nothing at this assembly point is a user-literal field. The web console
 # renders the whole post-BEGIN tail inside the collapsed system-prompt chip.
 IMPLEMENT_PROMPT = inject_boundary(IMPLEMENT_PROMPT, "## Task Description\n")
+HOLISTIC_IMPLEMENT_PROMPT = inject_boundary(
+    HOLISTIC_IMPLEMENT_PROMPT, "## Task Description\n",
+)
 IMPLEMENT_GROUP_PROMPT = inject_boundary(
     IMPLEMENT_GROUP_PROMPT, "## Task Description\n",
 )
 FIX_PROMPT = inject_boundary(FIX_PROMPT, "## Task Description\n")
+
+
+def _holistic_execution_mode(
+    step: Step, flow: FlowInstance,
+) -> str | None:
+    """Return ``small``/``direct`` only for persisted whole-task paths."""
+    task_type = step.inputs.get("task_type") or flow.task_type
+    if task_type == "small":
+        return "small"
+    effective = step.inputs.get("effective_implementation_strategy")
+    if effective is None:
+        effective = flow.state.context.get("effective_implementation_strategy")
+    if effective == "direct":
+        return "direct"
+    return None
+
+
+def _run_holistic_implement(
+    *,
+    mode: str,
+    step: Step,
+    flow: FlowInstance,
+    project_root: Path,
+    task_description: str,
+    task_type: str,
+    spec_summary: str,
+    root_cause_section: str,
+    injection: str,
+    retry_count: int,
+) -> StepStatus:
+    """Execute one whole-task implementation for direct or small flows."""
+    if mode == "direct":
+        execution_mode = (
+            "Direct strategy for the current task type. There is no PLAN or "
+            "task-group authority; deliver the complete effective requirement "
+            "in this autonomous implementation path."
+        )
+        invocation_intent = AgentInvocationIntent.DIRECT_IMPLEMENTATION
+    else:
+        execution_mode = (
+            "Small task type. Preserve its compact task semantics while using "
+            "the shared whole-task implementation executor."
+        )
+        invocation_intent = AgentInvocationIntent.DEFAULT
+
+    analysis_context = step.inputs.get("analysis_context")
+    if not isinstance(analysis_context, dict):
+        analysis_context = {
+            "scope": step.inputs.get("scope"),
+            "complexity": step.inputs.get("complexity"),
+            "reasoning": step.inputs.get("analysis_reasoning"),
+            "project_summary": step.inputs.get("project_summary"),
+        }
+    continuation = step.inputs.get("previous_output") or {}
+    prompt = HOLISTIC_IMPLEMENT_PROMPT.format(
+        task_description=task_description,
+        task_type=task_type,
+        design_section="",
+        execution_mode=execution_mode,
+        analysis_context=json.dumps(
+            analysis_context, indent=2, ensure_ascii=False, default=str,
+        ),
+        continuation_context=json.dumps(
+            continuation, indent=2, ensure_ascii=False, default=str,
+        ) if continuation else "No previous partial attempt.",
+        spec_summary=spec_summary,
+        root_cause_section=root_cause_section,
+    )
+    if injection:
+        prompt += injection
+
+    return _run_single_llm_call(
+        prompt,
+        step,
+        flow,
+        project_root,
+        [],
+        retry_count,
+        implemented_groups_override=[],
+        invocation_intent=invocation_intent,
+        preserve_existing_outputs=True,
+    )
 
 
 def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -419,8 +538,8 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
     task_description = step.inputs.get("task_description", "")
-    task_type = step.inputs.get("task_type", "feature")
-    task_groups = step.inputs.get("task_groups", [])
+    task_type = step.inputs.get("task_type") or flow.task_type or "feature"
+    holistic_mode = _holistic_execution_mode(step, flow)
     design_doc = step.inputs.get("design_doc", {})
     spec_content = step.inputs.get("spec_content", {})
     fix_context = step.inputs.get("fix_context")
@@ -520,9 +639,26 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if injection:
             prompt += injection
 
-        result = _run_single_llm_call(
-            prompt, step, flow, project_root, task_groups, retry_count,
-        )
+        if holistic_mode:
+            result = _run_single_llm_call(
+                prompt,
+                step,
+                flow,
+                project_root,
+                [],
+                retry_count,
+                implemented_groups_override=[],
+                preserve_existing_outputs=True,
+            )
+        else:
+            result = _run_single_llm_call(
+                prompt,
+                step,
+                flow,
+                project_root,
+                step.inputs.get("task_groups", []),
+                retry_count,
+            )
         # Recompute session_commits against the flow-wide baseline so any
         # commits a prior worktree-DAG entry merged onto main remain visible
         # to version_analyze. The fix-iteration LLM call itself does not
@@ -535,7 +671,25 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         _resolve_files_changed(step, project_root, baseline_hash)
         return result
 
+    if holistic_mode:
+        result = _run_holistic_implement(
+            mode=holistic_mode,
+            step=step,
+            flow=flow,
+            project_root=project_root,
+            task_description=task_description,
+            task_type=task_type,
+            spec_summary=spec_summary,
+            root_cause_section=root_cause_section,
+            injection=injection,
+            retry_count=retry_count,
+        )
+        step.outputs["implemented_groups"] = []
+        _resolve_files_changed(step, project_root, baseline_hash)
+        return result
+
     # Determine if we should use group-by-group execution
+    task_groups = step.inputs.get("task_groups", [])
     groups = _extract_sorted_groups(task_groups)
 
     if len(groups) <= 1:
@@ -2353,6 +2507,21 @@ def _run_dag_parallel(
     return StepStatus.COMPLETED
 
 
+# Keys of the structured implementation summary the Phase-2 extraction must
+# yield. A truthy dict carrying NONE of them (a refusal, or JSON with junk
+# keys) is not an implementation report at all — see the holistic gate below.
+_IMPLEMENT_SUMMARY_KEYS = frozenset({
+    "files_changed",
+    "tests_added",
+    "test_mapping",
+    "summary",
+    "completion_status",
+    "incomplete_tasks",
+    "restricted_edits",
+    "estimated_test_duration",
+})
+
+
 def _run_single_llm_call(
     prompt: str,
     step: Step,
@@ -2361,6 +2530,9 @@ def _run_single_llm_call(
     task_groups,
     retry_count: int,
     stream_prefix: str = '',
+    implemented_groups_override: Any = None,
+    invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
+    preserve_existing_outputs: bool = False,
 ) -> StepStatus:
     """Execute a single LLM call for implement (fallback path)."""
     try:
@@ -2377,17 +2549,43 @@ def _run_single_llm_call(
             prompt=prompt,
             json_mode="two_phase",
             json_schema_hint='{"files_changed": [], "tests_added": [], "estimated_test_duration": 120, "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
+            invocation_intent=invocation_intent,
         )
 
         result = parse_json_response(response, required_keys=[])
 
+        # A Phase-2 extraction can yield a truthy dict that carries none of
+        # the implementation-summary keys (a refusal, or JSON with junk keys).
+        # For a holistic call that is not a completed implementation — the
+        # caller never reported what it did — so keep the step recoverable via
+        # the unparseable-result branch below instead of advancing to TEST on
+        # zero implementation. Planned flows keep their historical lenient
+        # parsing (defaults recorded, step forwards).
+        holistic = _holistic_execution_mode(step, flow)
+        if holistic and result and not _IMPLEMENT_SUMMARY_KEYS.intersection(result):
+            result = None
+
         if result:
-            files_changed = result.get("files_changed", [])
+            files_changed = list(result.get("files_changed", []) or [])
+            if preserve_existing_outputs:
+                files_changed = list(dict.fromkeys(
+                    list(step.outputs.get("files_changed", []) or [])
+                    + files_changed
+                ))
 
             # Apply restricted edits (Bug A)
             restricted_edits = result.get("restricted_edits", [])
             if restricted_edits:
                 applied, failed_edits = _apply_restricted_edits(restricted_edits, project_root)
+                if preserve_existing_outputs:
+                    applied = (
+                        list(step.outputs.get("restricted_edits_applied", []) or [])
+                        + applied
+                    )
+                    failed_edits = (
+                        list(step.outputs.get("restricted_edits_failed", []) or [])
+                        + failed_edits
+                    )
                 step.outputs["restricted_edits_applied"] = applied
                 step.outputs["restricted_edits_failed"] = failed_edits
                 # Add successfully edited files to files_changed
@@ -2401,17 +2599,50 @@ def _run_single_llm_call(
                     logger.warning("Failed %d restricted edits", len(failed_edits))
 
             step.outputs["files_changed"] = files_changed
-            step.outputs["tests_added"] = result.get("tests_added", [])
-            step.outputs["test_mapping"] = result.get("test_mapping", {})
-            step.outputs["implemented_groups"] = task_groups
-            step.outputs["summary"] = result.get("summary", "")
-            step.outputs["estimated_test_duration"] = _sanitize_estimated_test_duration(
+            tests_added = list(result.get("tests_added", []) or [])
+            test_mapping = dict(result.get("test_mapping", {}) or {})
+            if preserve_existing_outputs:
+                tests_added = list(dict.fromkeys(
+                    list(step.outputs.get("tests_added", []) or [])
+                    + tests_added
+                ))
+                prior_mapping = dict(step.outputs.get("test_mapping", {}) or {})
+                prior_mapping.update(test_mapping)
+                test_mapping = prior_mapping
+            step.outputs["tests_added"] = tests_added
+            step.outputs["test_mapping"] = test_mapping
+            step.outputs["implemented_groups"] = (
+                task_groups
+                if implemented_groups_override is None
+                else implemented_groups_override
+            )
+            summary = result.get("summary", "")
+            if preserve_existing_outputs and not summary:
+                summary = step.outputs.get("summary", "")
+            step.outputs["summary"] = summary
+            estimated_duration = _sanitize_estimated_test_duration(
                 result.get("estimated_test_duration")
             )
+            if preserve_existing_outputs and estimated_duration is None:
+                estimated_duration = step.outputs.get("estimated_test_duration")
+            step.outputs["estimated_test_duration"] = estimated_duration
 
             # Completion status detection (Bug B)
-            completion_status = result.get("completion_status", "complete")
-            incomplete_tasks = result.get("incomplete_tasks", [])
+            completion_status = str(
+                result.get("completion_status", "complete") or "complete"
+            ).strip().lower()
+            incomplete_tasks = list(result.get("incomplete_tasks", []) or [])
+            # Only the holistic (direct/small) path may not advance on leftover
+            # tasks — its transition re-enters IMPLEMENT until complete. Planned
+            # flows keep their historical recording so an honest
+            # complete-with-leftover report still commits/summarizes as
+            # complete rather than gaining an out-of-scope "partial" stamp.
+            if (
+                holistic
+                and incomplete_tasks
+                and completion_status != "failed"
+            ):
+                completion_status = "partial"
             step.outputs["completion_status"] = completion_status
             step.outputs["incomplete_tasks"] = incomplete_tasks
 
@@ -2428,10 +2659,25 @@ def _run_single_llm_call(
             return StepStatus.COMPLETED
         else:
             logger.warning("Could not parse implement summary JSON, using defaults")
+            step.outputs["implemented_groups"] = (
+                task_groups
+                if implemented_groups_override is None
+                else implemented_groups_override
+            )
+            if preserve_existing_outputs:
+                step.outputs.setdefault("files_changed", [])
+                step.outputs.setdefault("tests_added", [])
+                step.outputs.setdefault("test_mapping", {})
+                step.outputs.setdefault("estimated_test_duration", None)
+                step.outputs["completion_status"] = "partial"
+                step.outputs.setdefault(
+                    "incomplete_tasks",
+                    ["Return a valid structured implementation summary."],
+                )
+                return StepStatus.PARTIAL
             step.outputs["files_changed"] = []
             step.outputs["tests_added"] = []
             step.outputs["test_mapping"] = {}
-            step.outputs["implemented_groups"] = task_groups
             step.outputs["estimated_test_duration"] = None
 
         return StepStatus.COMPLETED

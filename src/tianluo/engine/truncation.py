@@ -59,6 +59,15 @@ FAILURES_SECTION_MAX_CHARS = 3000
 SELF_CHECK_TASK_GROUPS_MAX_CHARS = 2000
 
 # ---------------------------------------------------------------------------
+# self_check — baseline-to-current scope diff max chars injected in prompt
+# Used by: self_check._format_review_scope
+# Bounds the reconstructed review-scope diff so a large vendored/generated
+# file cannot blow the model context window; the complete diff stays
+# available at the persisted artifact referenced by the prompt.
+# ---------------------------------------------------------------------------
+SELF_CHECK_SCOPE_DIFF_MAX_CHARS = 20000
+
+# ---------------------------------------------------------------------------
 # Web tool-chip detail payload max chars
 # Used by: tool_formatters.build_tool_detail_payload
 # Bounds the structured detail body (diff / read text / bash output / matches)

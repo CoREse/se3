@@ -44,6 +44,7 @@ from ._fix_context import format_fix_iteration_display
 # Reuse self_check's anchoring machinery verbatim — single source of truth so
 # the two anchored checks cannot drift in their normalization / validation.
 from .self_check import (
+    _NON_REJECTION_STAT_KEYS,
     _changed_paths,
     _describe_issue,
     _normalize_for_quote_match,
@@ -435,9 +436,10 @@ def _build_anchor_inputs(step: Step, flow: FlowInstance, project_root: Path) -> 
     ``_build_source_pool`` it calls) unchanged. Those read:
 
     - ``task_description_base`` — the clean task text (anchor #1)
-    - ``spec_content`` (non-``base`` entries) — here we inject the charter full
-      text (anchor #2) and the harvested why-comments (anchor #3) under
-      descriptive keys, so they enter the verbatim_quote source pool.
+    - ``project_constraints`` — here we inject the charter full text (anchor #2)
+      and the harvested why-comments (anchor #3), so this dedicated invariant
+      check keeps its recorded-constraint authority without reopening
+      SELF_CHECK's retired legacy ``spec_content`` source path.
     - ``changes_made.files_changed`` — the touched paths, used to validate each
       issue's ``evidence_lines``.
 
@@ -479,6 +481,9 @@ def _build_anchor_inputs(step: Step, flow: FlowInstance, project_root: Path) -> 
 
     return {
         "task_description_base": task_description,
+        "project_constraints": spec_content,
+        # Preserve the established rendering shape for this step and old
+        # history consumers; SELF_CHECK's source-pool helper ignores it.
         "spec_content": spec_content,
         "changes_made": changes_made,
     }
@@ -790,7 +795,7 @@ def invariant_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             reasons = ", ".join(
                 f"{k}={v}" for k, v in validation_stats.items()
                 if k.endswith("_count") and v > 0
-                and k not in ("kept_count", "input_count")
+                and k not in _NON_REJECTION_STAT_KEYS
             )
             logger.info(
                 "invariant_check validation: %d raw -> %d kept (dropped %d: %s)",

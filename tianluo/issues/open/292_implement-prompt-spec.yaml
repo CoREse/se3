@@ -1,0 +1,36 @@
+id: '292'
+description: '我在implement的prompt里看到了残留的spec相关prompt，你看看还有没有其它地方有残留，一起去掉：
+
+  ## SPEC FILE WRITE PROTECTION
+
+  You are free to change existing code behavior as the task requires — this constraint
+  does NOT restrict what behavior you may implement.
+
+
+  It restricts only one thing: the spec files under `tianluo/specs/**` are read-only
+  for this step. Recording code into spec files is the dedicated job of the `update_spec`
+  step and `luo sync`, not of this step.
+
+
+  Forbidden actions:
+
+  - Do NOT use Write, Edit, or NotebookEdit to create, modify, or delete any file
+  under `tianluo/specs/`
+
+  - Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, `sed -i`,
+  `tee`, `cp`/`mv` into `tianluo/specs/`)
+
+
+  If your change alters existing behavior or you believe a project convention should
+  be recorded, do NOT edit any spec file yourself — just note it in your summary.
+  Durable records live in the charter (`tianluo/charter.md`, high-level conventions/architecture)
+  and in colocated why-comments (code-level intent); they are kept current by their
+  own dedicated mechanisms (the `charter_freshness` step and the implement step''s
+  why-comment convention), not by writing a spec file in this step.
+
+  另外，plan步骤的先design，再生成task group，design步骤是否多余？后面有任何地方用到了产生的“design”吗？可以参考tianluo/history/20260812-142556_990dd0fa所做的direct模式的修改。'
+status: open
+tags: []
+source: human
+created_at: '2026-08-13T16:12:01.254854'
+updated_at: '2026-08-13T16:12:01.254854'

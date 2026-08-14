@@ -79,6 +79,106 @@ class TestUsageBlockLabels:
         return _usage()
 
 
+class TestHistoryUsageModelPlaceholder:
+    """The per-call Model cell localizes the unresolved-model placeholder."""
+
+    @staticmethod
+    def _wide_console() -> tuple[Console, StringIO]:
+        # The usage table has 12 columns; a narrow console ellipsizes cells
+        # and would hide the very placeholder this test asserts.
+        buf = StringIO()
+        return Console(file=buf, width=300, force_terminal=True, highlight=False), buf
+
+    def test_unresolved_model_placeholder_localized(self):
+        from tianluo.engine.display import build_history_usage_renderables
+
+        payload = {
+            "calls": [
+                {
+                    "schema_version": 2,
+                    "call_id": "c1",
+                    "attempt": 0,
+                    "usage_status": "unavailable",
+                    "resolved_model": "unknown",
+                }
+            ],
+        }
+        for lang, placeholder in (("en-US", "unknown"), ("zh-CN", "未知")):
+            i18n.set_language(lang)
+            console, buf = self._wide_console()
+            set_console(console)
+            for renderable in build_history_usage_renderables(payload):
+                console.print(renderable)
+            out = buf.getvalue()
+            assert placeholder in out
+
+    def test_resolved_model_shown_verbatim(self):
+        from tianluo.engine.display import build_history_usage_renderables
+
+        payload = {
+            "calls": [
+                {
+                    "schema_version": 2,
+                    "call_id": "c1",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "resolved_model": "claude-opus-5",
+                }
+            ],
+        }
+        i18n.set_language("zh-CN")
+        console, buf = self._wide_console()
+        set_console(console)
+        for renderable in build_history_usage_renderables(payload):
+            console.print(renderable)
+        assert "claude-opus-5" in buf.getvalue()
+
+    def test_flow_totals_box_carries_flow_level_title(self):
+        from tianluo.engine.display import build_history_usage_renderables
+
+        payload = {
+            "calls": [
+                {
+                    "schema_version": 2,
+                    "call_id": "c1",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "resolved_model": "claude-opus-5",
+                }
+            ],
+            "summary": {
+                "actual_cost_usd": None,
+                "estimated_cost_usd": None,
+                "unknown_call_count": 0,
+                "unknown_model_count": 0,
+                "unknown_price_count": 0,
+                "unknown_cache_ttl_count": 0,
+                "partial": False,
+                "diagnostics": [],
+                "totals": {
+                    "schema_version": 2,
+                    "call_id": "summary",
+                    "attempt": 0,
+                    "usage_status": "unavailable",
+                    "resolved_model": "unknown",
+                },
+            },
+        }
+        for lang, flow_title, session_title in (
+            ("en-US", "Flow Usage Totals", "Session Token Usage"),
+            ("zh-CN", "本次流程用量合计", "本次会话 Token 用量"),
+        ):
+            i18n.set_language(lang)
+            console, buf = self._wide_console()
+            set_console(console)
+            for renderable in build_history_usage_renderables(payload):
+                console.print(renderable)
+            out = buf.getvalue()
+            assert flow_title in out
+            # The per-session title must not leak into the flow-totals box.
+            assert session_title not in out
+
+
 class TestProposalLabelsVsContent:
     def test_labels_localized_content_verbatim(self):
         i18n.set_language("zh-CN")
@@ -96,3 +196,54 @@ class TestProposalLabelsVsContent:
         # English framework labels are gone.
         assert "Summary:" not in out
         assert "Rationale:" not in out
+
+
+class TestUsageStatusColumn:
+    """The per-call Status column must render the localized ``usage.status.*``
+    label, not the Python enum repr.
+
+    ``UsageStatus`` is a ``(str, Enum)`` mixin, so ``str(member)`` is
+    ``'UsageStatus.AVAILABLE'`` — feeding that back into the constructor used
+    to raise and fall through to printing the repr verbatim.
+    """
+
+    def test_enum_member_renders_localized_label(self):
+        from tianluo.engine.display import _usage_status_label
+        from tianluo.usage import UsageStatus
+
+        i18n.set_language("en-US")
+        assert _usage_status_label(UsageStatus.AVAILABLE) == "available"
+        i18n.set_language("zh-CN")
+        assert _usage_status_label(UsageStatus.AVAILABLE) == "可用"
+        assert _usage_status_label(UsageStatus.LEGACY_AMBIGUOUS) == "旧记录"
+
+    def test_wire_string_and_unknown_value_still_supported(self):
+        from tianluo.engine.display import _usage_status_label
+
+        i18n.set_language("en-US")
+        assert _usage_status_label("partial") == "partial"
+        assert _usage_status_label("nonsense") == "nonsense"
+
+    def test_calls_table_has_no_enum_repr(self):
+        from tianluo.engine.display import build_history_usage_renderables
+
+        payload = {
+            "calls": [
+                {
+                    "schema_version": 2,
+                    "call_id": "c1",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "resolved_model": "claude-opus-5",
+                }
+            ],
+        }
+        i18n.set_language("en-US")
+        buf = StringIO()
+        console = Console(file=buf, width=240, force_terminal=False, highlight=False)
+        set_console(console)
+        for renderable in build_history_usage_renderables(payload):
+            console.print(renderable)
+        out = buf.getvalue()
+        assert "UsageStatus." not in out
+        assert "available" in out

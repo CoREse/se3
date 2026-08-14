@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from .agent_runner import AgentRunner, InfraErrorType
+from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
 
 # Platform-specific imports for process resource monitoring
 try:
@@ -107,11 +107,14 @@ class CodexEventConverter:
     output — the converter never raises.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, provider: Optional[str] = "openai") -> None:
         self._agent_messages: List[str] = []
         self._seen_turn_terminal: bool = False
         self._tool_counter: int = 0
         self._touched_files: set = set()
+        self._provider: Optional[str] = provider
+        self._provider_session_id: Optional[str] = None
+        self._reported_model: Optional[str] = None
 
     @property
     def touched_files(self) -> set:
@@ -142,20 +145,17 @@ class CodexEventConverter:
         event_type = event.get("type", "")
 
         try:
-            if event_type == "thread.started":
-                return []
-
-            if event_type == "turn.started":
-                return []
+            if event_type in ("thread.started", "turn.started"):
+                return self._handle_metadata_event(event_type, event)
 
             if event_type == "item.updated" or event_type == "item.completed":
                 return self._handle_item_event(event_type, event)
 
             if event_type == "turn.completed":
-                return self._handle_turn_completed(event.get("data", event))
+                return self._handle_turn_completed(self._merged_event(event))
 
             if event_type in ("turn.failed", "error"):
-                return self._handle_turn_failed(event.get("data", event))
+                return self._handle_turn_failed(self._merged_event(event))
 
             # Unknown event type — log and skip
             logger.debug(
@@ -171,6 +171,156 @@ class CodexEventConverter:
             )
             return []
 
+    @staticmethod
+    def _merged_event(event: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(event)
+        nested = event.get("data")
+        if isinstance(nested, dict):
+            merged.update(nested)
+        return merged
+
+    @staticmethod
+    def _metadata_value(
+        data: Dict[str, Any], keys: tuple[str, ...]
+    ) -> Optional[str]:
+        containers = [data]
+        for name in ("thread", "turn", "session", "message", "response"):
+            nested = data.get(name)
+            if isinstance(nested, dict):
+                containers.append(nested)
+        for container in containers:
+            for key in keys:
+                value = container.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return None
+
+    def _update_metadata(
+        self, data: Dict[str, Any], *, thread_started: bool = False
+    ) -> Dict[str, Any]:
+        provider = self._metadata_value(data, ("provider", "provider_name"))
+        model = self._metadata_value(data, ("model", "model_name"))
+        session_id = self._metadata_value(
+            data, ("provider_session_id", "session_id", "thread_id")
+        )
+        if session_id is None and thread_started:
+            session_id = self._metadata_value(data, ("id",))
+        if provider is not None:
+            self._provider = provider
+        if model is not None:
+            self._reported_model = model
+        if session_id is not None:
+            self._provider_session_id = session_id
+
+        metadata: Dict[str, Any] = {}
+        if provider is not None:
+            metadata["provider"] = provider
+        if model is not None:
+            metadata["model"] = model
+        if session_id is not None:
+            metadata["provider_session_id"] = session_id
+        return metadata
+
+    def _handle_metadata_event(
+        self, event_type: str, event: Dict[str, Any]
+    ) -> List[str]:
+        data = self._merged_event(event)
+        metadata = self._update_metadata(
+            data, thread_started=event_type == "thread.started"
+        )
+        if not metadata:
+            return []
+        return [json.dumps({"type": "init", **metadata}, ensure_ascii=False)]
+
+    @staticmethod
+    def _usage_payload(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        candidates = [data.get("usage")]
+        for name in ("message", "turn", "response"):
+            nested = data.get(name)
+            candidates.append(
+                nested.get("usage") if isinstance(nested, dict) else None
+            )
+        raw = next((item for item in candidates if isinstance(item, dict)), None)
+        if raw is None:
+            return None
+
+        usage: Dict[str, Any] = {}
+        field_aliases = {
+            "input_tokens": ("input_tokens", "prompt_tokens"),
+            "output_tokens": ("output_tokens", "completion_tokens"),
+            # WHY: the two provider shapes disagree on whether input_tokens
+            # contains the cached tokens, and the shared normalizer decides by
+            # field name. Renaming cached_input_tokens to the Anthropic key
+            # would make an OpenAI-shape subset be normalized as an additive
+            # exclusive category and double-bill it — so each shape's marker
+            # field is passed through unchanged.
+            "cached_input_tokens": ("cached_input_tokens",),
+            "cache_read_input_tokens": ("cache_read_input_tokens",),
+            "cache_creation_input_tokens": ("cache_creation_input_tokens",),
+            "cache_creation_5m_input_tokens": (
+                "cache_creation_5m_input_tokens",
+                "cache_creation_5_minute_input_tokens",
+            ),
+            "cache_creation_1h_input_tokens": (
+                "cache_creation_1h_input_tokens",
+                "cache_creation_1_hour_input_tokens",
+            ),
+        }
+        for target, aliases in field_aliases.items():
+            for alias in aliases:
+                if alias in raw:
+                    usage[target] = raw[alias]
+                    break
+        details = raw.get("input_tokens_details")
+        if isinstance(details, dict):
+            usage["input_tokens_details"] = dict(details)
+        return usage
+
+    @staticmethod
+    def _cost_payload(data: Dict[str, Any]) -> tuple[bool, Any]:
+        for container in (
+            data,
+            data.get("turn") if isinstance(data.get("turn"), dict) else {},
+            data.get("message") if isinstance(data.get("message"), dict) else {},
+            data.get("response") if isinstance(data.get("response"), dict) else {},
+        ):
+            for key in ("actual_cost_usd", "total_cost_usd", "cost_usd"):
+                if key in container and container.get(key) is not None:
+                    return True, container.get(key)
+        return False, None
+
+    def _apply_terminal_metadata(
+        self, result_event: Dict[str, Any], data: Dict[str, Any]
+    ) -> None:
+        explicit = self._update_metadata(data)
+        provider = explicit.get("provider", self._provider)
+        model = explicit.get("model", self._reported_model)
+        session_id = explicit.get(
+            "provider_session_id", self._provider_session_id
+        )
+        usage_event_id = self._metadata_value(
+            data,
+            ("usage_event_id", "request_id", "response_id", "turn_id"),
+        )
+        if usage_event_id is None:
+            turn = data.get("turn")
+            if isinstance(turn, dict):
+                usage_event_id = self._metadata_value(turn, ("id",))
+        if usage_event_id is None and str(data.get("type", "")).startswith(
+            "turn."
+        ):
+            usage_event_id = self._metadata_value(data, ("id",))
+        if provider is not None:
+            result_event["provider"] = provider
+        if model is not None:
+            result_event["model"] = model
+        if session_id is not None:
+            result_event["provider_session_id"] = session_id
+        if usage_event_id is not None:
+            result_event["usage_event_id"] = usage_event_id
+        for key in ("usage_semantics", "cost_semantics"):
+            if key in data:
+                result_event[key] = data[key]
     def _handle_item_event(self, event_type: str, event: Dict[str, Any]) -> List[str]:
         """Handle ``item.updated`` / ``item.completed`` events.
 
@@ -365,42 +515,18 @@ class CodexEventConverter:
         # Collect accumulated agent messages as the result text
         result_text = "\n".join(self._agent_messages) if self._agent_messages else ""
 
-        # Parse usage — codex may carry it at multiple nesting levels.
-        # Priority: data.usage → data.message.usage → data.turn.usage
-        # Defensive: a key present with null value must not crash .get();
-        # mirror _handle_turn_failed's isinstance(candidate, dict) guard.
-        usage_raw: Dict[str, Any] = {}
-        for candidate in (
-            data.get("usage"),
-            data.get("message", {}).get("usage") if isinstance(data.get("message"), dict) else None,
-            data.get("turn", {}).get("usage") if isinstance(data.get("turn"), dict) else None,
-        ):
-            if isinstance(candidate, dict) and candidate:
-                usage_raw = candidate
-                break
-
-        usage = {
-            "input_tokens": usage_raw.get("input_tokens", 0),
-            "output_tokens": usage_raw.get("output_tokens", 0),
-            "cache_creation_input_tokens": usage_raw.get("cache_creation_input_tokens", 0),
-            "cache_read_input_tokens": usage_raw.get("cached_input_tokens",
-                                                       usage_raw.get("cache_read_input_tokens", 0)),
-        }
-
-        # total_cost_usd — check top-level first, then nested turn/message.
-        # Treat None as 0 so explicit null doesn't propagate.
-        cost = data.get("total_cost_usd") or 0
-        if not cost and isinstance(data.get("turn"), dict):
-            cost = data["turn"].get("total_cost_usd") or 0
-        if not cost and isinstance(data.get("message"), dict):
-            cost = data["message"].get("total_cost_usd") or 0
-
         result_event = {
             "type": "result",
             "result": result_text,
-            "usage": usage,
-            "total_cost_usd": cost,
         }
+        usage = self._usage_payload(data)
+        if usage is not None:
+            result_event["usage"] = usage
+        cost_seen, cost = self._cost_payload(data)
+        if cost_seen:
+            result_event["total_cost_usd"] = cost
+        self._apply_terminal_metadata(result_event, data)
+        self._agent_messages = []
         return [json.dumps(result_event, ensure_ascii=False)]
 
     def _handle_turn_failed(self, data: Dict[str, Any]) -> List[str]:
@@ -415,34 +541,20 @@ class CodexEventConverter:
         if isinstance(error_msg, dict):
             error_msg = error_msg.get("message", str(error_msg))
 
-        # Extract usage if the failure event carries it (same multi-form
-        # extraction as _handle_turn_completed); default to zeros.
-        usage_raw: Dict[str, Any] = {}
-        for candidate in (
-            data.get("usage"),
-            data.get("message", {}).get("usage") if isinstance(data.get("message"), dict) else None,
-            data.get("turn", {}).get("usage") if isinstance(data.get("turn"), dict) else None,
-        ):
-            if isinstance(candidate, dict) and candidate:
-                usage_raw = candidate
-                break
-
-        usage = {
-            "input_tokens": usage_raw.get("input_tokens", 0),
-            "output_tokens": usage_raw.get("output_tokens", 0),
-            "cache_creation_input_tokens": usage_raw.get("cache_creation_input_tokens", 0),
-            "cache_read_input_tokens": usage_raw.get("cached_input_tokens",
-                                                       usage_raw.get("cache_read_input_tokens", 0)),
-        }
-
         result_event = {
             "type": "result",
             "subtype": "error",
             "is_error": True,
             "result": str(error_msg),
-            "usage": usage,
-            "total_cost_usd": 0,
         }
+        usage = self._usage_payload(data)
+        if usage is not None:
+            result_event["usage"] = usage
+        cost_seen, cost = self._cost_payload(data)
+        if cost_seen:
+            result_event["total_cost_usd"] = cost
+        self._apply_terminal_metadata(result_event, data)
+        self._agent_messages = []
         return [json.dumps(result_event, ensure_ascii=False)]
 
     def finalize(self) -> List[str]:
@@ -464,14 +576,8 @@ class CodexEventConverter:
             result_event = {
                 "type": "result",
                 "result": result_text,
-                "usage": {
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cache_creation_input_tokens": 0,
-                    "cache_read_input_tokens": 0,
-                },
-                "total_cost_usd": 0,
             }
+            self._apply_terminal_metadata(result_event, {})
             return [json.dumps(result_event, ensure_ascii=False)]
 
         # No output at all — synthesize an error result
@@ -480,14 +586,8 @@ class CodexEventConverter:
             "subtype": "error",
             "is_error": True,
             "result": "Codex process exited without producing output",
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "cache_creation_input_tokens": 0,
-                "cache_read_input_tokens": 0,
-            },
-            "total_cost_usd": 0,
         }
+        self._apply_terminal_metadata(result_event, {})
         return [json.dumps(result_event, ensure_ascii=False)]
 
 
@@ -580,6 +680,8 @@ class CodexRunner(AgentRunner):
     (``StreamJSONTracker``, chat history, web console, etc.) work unchanged.
     """
 
+    startup_provider = "openai"
+
     def __init__(
         self,
         project_root: Optional[Path] = None,
@@ -607,6 +709,7 @@ class CodexRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         spec_guard_plugin: Optional[Path] = None,
+        invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Build codex CLI arguments from intent-level parameters.
 
@@ -713,7 +816,9 @@ class CodexRunner(AgentRunner):
             )
 
             # Convert codex JSONL output to Claude NDJSON
-            converter = CodexEventConverter()
+            converter = CodexEventConverter(
+                provider=self.command.get("provider") or "openai"
+            )
             converted_lines: List[str] = []
             for line in (result.stdout or "").splitlines(keepends=True):
                 converted_lines.extend(converter.convert_line(line))
@@ -900,7 +1005,9 @@ class CodexRunner(AgentRunner):
         output_buffer: List[str] = []
         last_activity = time.time()
         log_fh = None
-        converter = CodexEventConverter()
+        converter = CodexEventConverter(
+            provider=self.command.get("provider") or "openai"
+        )
 
         if log_file:
             log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1059,14 +1166,8 @@ class CodexRunner(AgentRunner):
                     "subtype": "error",
                     "is_error": True,
                     "result": error_text,
-                    "usage": {
-                        "input_tokens": 0,
-                        "output_tokens": 0,
-                        "cache_creation_input_tokens": 0,
-                        "cache_read_input_tokens": 0,
-                    },
-                    "total_cost_usd": 0,
                 }
+                converter._apply_terminal_metadata(error_result, {})
                 output_buffer.append(json.dumps(error_result, ensure_ascii=False) + "\n")
                 if log_fh:
                     log_fh.write(json.dumps(error_result, ensure_ascii=False) + "\n")

@@ -4136,3 +4136,132 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     word-break: break-all;
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Implementation strategy / review scope / backend usage summary (G10)
+ * ---------------------------------------------------------------------------
+ * The sidebar and history detail render the daemon's strategy / scope /
+ * usage projections; the styles below keep them as low-key annotations that
+ * match the surrounding kv rows and report cards.
+ */
+
+/* Flow-card strategy chip: one dim word beside the step/type meta line. */
+.flow-strategy-chip {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  white-space: nowrap;
+}
+
+/* Sidebar usage block (compact UsageSummary). */
+.usage-totals-line {
+  font-variant-numeric: tabular-nums;
+  font-size: 12px;
+  word-break: break-word;
+}
+.usage-cost-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 3px 0;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.usage-cost-item--estimate { color: var(--fg-dim); }
+.usage-unknown-line {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding-bottom: 3px;
+}
+.usage-completeness {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+}
+.usage-completeness.ok { color: var(--green); }
+.usage-completeness.warn { color: var(--orange, #b8791a); }
+.usage-note {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 3px 0;
+}
+
+/* Session badge cost suffix (actual / estimated stay separate columns). */
+.flow-usage-badge__cost { font-variant-numeric: tabular-nums; }
+
+/* History detail: strategy/scope meta blocks under the flow-id line. */
+.history-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+.history-meta-block {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.history-meta-block .kv { padding: 0; }
+.history-meta-block .kv .k { min-width: 0; }
+.history-meta-label { font-weight: 600; }
+.history-meta-value { font-variant-numeric: tabular-nums; word-break: break-word; }
+.history-meta:empty { display: none; }
+
+/* History detail: backend usage/cost region (per-call + per-step + totals).
+ * Tables overflow-x scroll on narrow screens so wide token columns never push
+ * the layout; on desktop they stay full width. */
+.history-usage-region {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 12px;
+}
+.history-usage-region.hidden { display: none; }
+.usage-region__title {
+  margin: 4px 0 2px;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  letter-spacing: 0.04em;
+}
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  overflow-x: auto;
+  display: block;
+  white-space: nowrap;
+}
+.usage-table th,
+.usage-table td {
+  padding: 3px 8px;
+  border-bottom: 1px dotted var(--border);
+  text-align: left;
+}
+.usage-table th {
+  color: var(--fg-dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+.usage-table .num { text-align: right; }
+.usage-table tr:last-child td { border-bottom: none; }
+
+@media (max-width: 600px) {
+  /* The sidebar drawer shares the modal-width constraints; the usage tables
+   * and strategy rows must degrade the same way the kv rows do. */
+  .kv { flex-wrap: wrap; }
+  .kv .k { min-width: 100%; }
+  .flow-strategy-chip { white-space: normal; }
+}

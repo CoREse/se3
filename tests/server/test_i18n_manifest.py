@@ -10,6 +10,7 @@ it is derived from the locale directory, and it carries each language's endonym.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -75,3 +76,54 @@ def test_a_locale_without_its_own_endonym_labels_itself(monkeypatch, tmp_path):
     monkeypatch.setattr(app_mod, "UI_LOCALES_DIR", locales)
 
     assert app_mod._discover_ui_languages() == [{"code": "ja-JP", "label": "ja-JP"}]
+
+# ---------------------------------------------------------------------------
+# G10: strategy / scope / usage-cost keys ship in both dictionaries
+# ---------------------------------------------------------------------------
+G10_UI_KEYS = (
+    "newTask.strategy",
+    "issueLaunch.strategy",
+    "strategy.label",
+    "strategy.option.projectDefault",
+    "strategy.option.auto",
+    "strategy.option.direct",
+    "strategy.option.planned",
+    "strategy.value.not_applicable",
+    "scope.label",
+    "scope.round.line",
+    "scope.baseline",
+    "scope.changedPaths",
+    "scope.fullRounds",
+    "usage.title",
+    "usage.status.partial",
+    "usage.status.unavailable",
+    "usage.status.legacy_ambiguous",
+    "usage.completeness",
+    "usage.actual",
+    "usage.estimated",
+    "usage.unknown",
+    "usage.flowHeader",
+    "usage.callsHeader",
+    "usage.stepsHeader",
+    "usage.col.actual",
+    "usage.col.estimate",
+    "usage.legacyNote",
+    "usage.noUsage",
+)
+
+
+def _locale_dict(code):
+    path = Path(app_mod.STATIC_DIR) / "i18n" / f"{code}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_g10_ui_keys_ship_in_both_locales():
+    """The strategy/scope/usage labels the console renders ship in both locale
+    files — the manifest is derived from the directory, so this also pins that
+    the two served dictionaries are complete."""
+    en = _locale_dict("en-US")
+    zh = _locale_dict("zh-CN")
+    for key in G10_UI_KEYS:
+        assert key in en, f"en-US missing {key}"
+        assert key in zh, f"zh-CN missing {key}"
+

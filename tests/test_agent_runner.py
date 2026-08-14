@@ -10,7 +10,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pytest
 
-from tianluo.agent_runner import AgentRunner, InfraErrorType, RunResult
+from tianluo.agent_runner import (
+    AgentRunner,
+    InfraErrorType,
+    RunResult,
+    RunnerStartupMetadata,
+)
 
 
 class TestInfraErrorType:
@@ -102,3 +107,25 @@ class TestAgentRunnerABC:
 
         runner = CompleteRunner()
         assert isinstance(runner, AgentRunner)
+
+    def test_startup_metadata_uses_explicit_runner_contract(self):
+        class MetadataRunner(AgentRunner):
+            startup_provider = "compatible-provider"
+            startup_model = "verified-startup-model"
+
+            def run(self, args, **kwargs):
+                return subprocess.CompletedProcess(args=[], returncode=0)
+
+            def run_with_monitor(self, args, **kwargs):
+                return None
+
+            def detect_infra_error(self, returncode, stdout, stderr):
+                return InfraErrorType.NONE
+
+            def build_call_args(self, prompt, read_only, **kwargs):
+                return [prompt]
+
+        assert MetadataRunner().get_startup_metadata() == RunnerStartupMetadata(
+            provider="compatible-provider",
+            model="verified-startup-model",
+        )

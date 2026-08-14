@@ -40,6 +40,19 @@ tianluo 由若干子系统拼合而成；以下只记录需要主观判断、无
 这一『程序驱动、LLM 只填思考空位』的边界是核心架构决策：步骤路由、上下文流转、
 流程的可中断/可续跑都由代码确定性掌控；任何 flow 都可在确切的中断点恢复。
 
+**Task type vs. implementation strategy — two distinct levels.** Task type
+(feature / bugfix / small / review / survey …) decides the step composition and
+type semantics of a whole flow; implementation strategy is a narrower axis that
+only selects the execution shape of the segment which originally contains both
+PLAN and IMPLEMENT, and is simply not applicable to flows that never had that
+surface. The strategy is decided once, persisted together with its reason, and
+never re-decided mid-flow: a resumed flow keeps executing the path it already
+entered, whatever the configuration says later. Where a runner owns a native
+continuous-execution loop, that loop only enhances execution *inside* a single
+implementation call; it never becomes authoritative state — tianluo's persisted
+flow state, workspace, history and quality gates remain the only authority on
+whether a flow is complete.
+
 **执行栈分层：LLMCaller 之上、AgentRunner 之下。** 所有 LLM 调用经统一的两层
 结构。上层 LLMCaller 负责 agent 列表轮换、prompt 注入、JSON 抽取模式与重试上下文
 重建；其下每个 AgentRunner 适配器只封装『一条 CLI 命令的一次调用』。关键边界：
@@ -139,6 +152,14 @@ treated as local, preserving pre-upgrade behaviour.
   修复。不得引入丢弃、豁免、按 severity 分级放行，或『记为 issue 以后再修』等
   任何绕过当场修复的通道。抑制无价值报告只能通过提高 prompt 侧的报告门槛与
   证据落地校验来实现——前者留下痕迹，后者只筛『证据是否成立』而非『值不值得修』。
+- **Requirement authority of check steps**: what a check step accepts against is
+  the effective task description chain (the original or refined task description,
+  user interjections, and the adjudicated description); charter, `WHY:` /
+  `INVARIANT:` comments and code invariants remain the project-side constraints.
+  Plan output — task groups included — is *derived scheduling data* (division of
+  work, dependency ordering, isolated execution, progress recovery, history
+  display). It may serve as a historical or locating hint, but must never narrow,
+  widen, or override the requirements a check step verifies.
 
 ### Requirement: Workflow Conventions
 - 用 `luo commit` 而非 `git commit`（强制测试通过、拦截敏感文件）。

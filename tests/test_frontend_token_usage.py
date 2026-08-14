@@ -73,7 +73,7 @@ def test_frontend_token_usage_node_suite_passes():
         "G4 accumulateSessionUsage de-dups identical re-delivered records",
         "G4 accumulateSessionUsage counts fix-loop re-runs of one step_id",
         "G4 report card shows a usage footnote when the step has usage",
-        "G4 updateFlowUsageBadge shows + populates the badge once usage exists",
+        "G4 updateFlowUsageBadge shows explicit unavailable state without a backend payload",
     ):
         assert needle in combined, (
             f"expected G4 check {needle!r} in node output:\n{combined}"
@@ -105,3 +105,66 @@ def test_token_usage_badge_wired_into_page():
     idx = html.find('id="flow-usage-badge"')
     tag = html[idx : html.find(">", idx)]
     assert "hidden" in tag, "flow-usage-badge must be default-hidden"
+
+# ---------------------------------------------------------------------------
+# G10: backend usage-summary payload rendering
+# ---------------------------------------------------------------------------
+def test_g10_strategy_usage_module_present():
+    """The G10 strategy/usage-summary mjs module exists and is wired in."""
+    module = REPO_ROOT / "tests" / "frontend" / "strategy_usage_summary.test.mjs"
+    assert module.is_file(), f"missing {module}"
+    harness = FRONTEND_TEST.read_text(encoding="utf-8")
+    assert "strategy_usage_summary.test.mjs" in harness, (
+        "strategy_usage_summary.test.mjs is not registered in test_app_pure.mjs"
+    )
+    assert "registerStrategyUsageSummaryTests" in harness
+
+
+def test_g10_node_checks_executed():
+    """The node suite's G10 checks must actually run (payload preference,
+    explicit-zero vs unavailable, project-default omission)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not available on PATH")
+    result = subprocess.run(
+        [node, str(FRONTEND_TEST)],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO_ROOT),
+        timeout=90,
+    )
+    combined = result.stdout + result.stderr
+    assert result.returncode == 0, (
+        f"frontend test runner exited {result.returncode}:\n{combined}"
+    )
+    for needle in (
+        "G10 buildNewFlowBody omits strategy when project-default",
+        "G10 buildNewFlowBody sends explicit auto/direct/planned",
+        "G10 formatUsageTotals marks non-available instead of zero",
+        "G10 renderUsagePayloadRegion renders calls + steps + flow totals",
+        "G10 badge prefers the backend payload over client-side sums",
+        "G10 history + live flow badges render the SAME backend summary",
+        "G10 collectScopeAuditFromRecords extracts the latest scope facts",
+    ):
+        assert needle in combined, (
+            f"expected G10 check {needle!r} in node output:\n{combined}"
+        )
+
+
+def test_g10_strategy_selects_wired_into_page():
+    """Both strategy controls (New Task + issue launch) exist with a
+    project-default first option (value ""), and the history detail carries
+    the meta + usage-region containers the renderers write into."""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    for sel_id in ("nt-strategy", "issue-launch-strategy"):
+        assert f'id="{sel_id}"' in html, f"{sel_id} select is missing"
+    for container_id in ("history-meta", "history-usage-region"):
+        assert f'id="{container_id}"' in html, f"{container_id} is missing"
+
+
+def test_g10_usage_region_css_present():
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    assert ".history-usage-region" in css, "history-usage-region CSS missing"
+    assert ".usage-table" in css, "usage-table CSS missing"
+    assert ".flow-strategy-chip" in css, "flow-strategy-chip CSS missing"
+

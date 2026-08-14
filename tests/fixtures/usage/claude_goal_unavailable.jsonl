@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","provider":"anthropic","session_id":"claude-session-goal-unavailable","model":"claude-sonnet-4-5-20250929"}
+{"type":"result","subtype":"error","session_id":"claude-session-goal-unavailable","result":"Unknown slash command: /goal","is_error":true}

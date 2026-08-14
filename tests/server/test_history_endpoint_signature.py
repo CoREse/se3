@@ -469,3 +469,96 @@ def test_not_modified_requires_a_signature():
         assert legacy["records"] == []
 
     asyncio.run(scenario())
+
+
+def test_history_detail_carries_daemon_usage_payload(client_and_app):
+    """A full frame's usage payload is relayed verbatim in the detail reply."""
+    client, app = client_and_app
+    flow_id = "flow-usage-wire"
+    usage_payload = {
+        "calls": [],
+        "steps": {},
+        "summary": {
+            "actual_cost_usd": 0.5,
+            "estimated_cost_usd": None,
+            "totals": {"logical_input_tokens": 1000, "output_tokens": 100},
+            "completeness": "complete",
+        },
+        "legacy": False,
+        "completeness": "complete",
+    }
+    daemon = client.websocket_connect("/ws")
+    sock = daemon.__enter__()
+    sock.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+    protocol.decode(sock.receive_text())  # WELCOME
+    sock.send_text(
+        protocol.make_history_data(
+            flow_id,
+            protocol.HISTORY_MODE_FULL,
+            [_RECORD_1],
+            usage=usage_payload,
+        ).to_json()
+    )
+    for _ in range(50):
+        resp = client.get(f"/api/history/{flow_id}")
+        if resp.status_code == 200 and resp.json().get("cached"):
+            body = resp.json()
+            assert body["usage"] == usage_payload
+            daemon.__exit__(None, None, None)
+            return
+    daemon.__exit__(None, None, None)
+    raise AssertionError("bundle never became cache-visible")
+
+
+def test_history_detail_rebuilds_usage_from_cached_records(client_and_app):
+    """Without a daemon payload the detail rebuilds usage via the shared backend."""
+    client, app = client_and_app
+    flow_id = "flow-usage-rebuild"
+    record = {
+        "step_id": "01_implement_x",
+        "ordinal": 1,
+        "message": {
+            "role": "assistant",
+            "content": "done",
+            "usage_records": [
+                {
+                    "schema_version": 2,
+                    "call_id": "c1",
+                    "attempt": 0,
+                    "usage_status": "available",
+                    "provider": "anthropic",
+                    "resolved_model": "claude-opus-5",
+                    "logical_input_tokens": 1000,
+                    "uncached_input_tokens": 900,
+                    "output_tokens": 100,
+                    "cache_read_input_tokens": 100,
+                    "cache_creation_input_tokens": 0,
+                    "cache_creation_5m_input_tokens": 0,
+                    "cache_creation_1h_input_tokens": 0,
+                    "actual_cost_usd": 0.02,
+                }
+            ],
+        },
+    }
+    daemon = client.websocket_connect("/ws")
+    sock = daemon.__enter__()
+    sock.send_text(authed_hello(app, "m1", "host", "6.4.0"))
+    protocol.decode(sock.receive_text())  # WELCOME
+    sock.send_text(
+        protocol.make_history_data(
+            flow_id, protocol.HISTORY_MODE_FULL, [record]
+        ).to_json()
+    )
+    for _ in range(50):
+        resp = client.get(f"/api/history/{flow_id}")
+        if resp.status_code == 200 and resp.json().get("cached"):
+            body = resp.json()
+            usage = body.get("usage")
+            assert usage is not None
+            assert usage["completeness"] == "complete"
+            assert usage["summary"]["totals"]["logical_input_tokens"] == 1000
+            assert len(usage["calls"]) == 1
+            daemon.__exit__(None, None, None)
+            return
+    daemon.__exit__(None, None, None)
+    raise AssertionError("bundle never became cache-visible")

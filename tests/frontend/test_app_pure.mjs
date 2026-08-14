@@ -3911,6 +3911,11 @@ await historyFlowIdMod.registerHistoryFlowIdTests({ app, check, checkAsync, find
 const historyUsageMod = await import("./history_usage.test.mjs");
 historyUsageMod.registerHistoryUsageTests({ app, check, findOne, findAll });
 
+// Register the G10 backend strategy / usage-summary rendering tests (separate
+// module — same `check` reporter, same `app` module, same shared DOM stub).
+const strategyUsageMod = await import("./strategy_usage_summary.test.mjs");
+strategyUsageMod.registerStrategyUsageSummaryTests({ app, check, findOne, findAll });
+
 // Register the G3 admin-only user-management row-model tests (separate module —
 // same `check` reporter, same `app` module, same shared DOM stub).
 const userMgmtMod = await import("./user_mgmt.test.mjs");

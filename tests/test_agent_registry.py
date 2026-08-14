@@ -283,3 +283,34 @@ class TestAgentDef:
         agent = AgentDef(name="x", cmd="c")
         assert agent.type == "claude-code"
         assert agent.priority == 0
+        assert agent.provider is None
+        assert agent.model is None
+
+    def test_provider_and_model_survive_registry_resolution(self, tmp_path):
+        (tmp_path / "tianluo.yaml").write_text(
+            """agents:
+  primary:
+    type: claude-code
+    cmd: claude-wrapper
+    provider: anthropic-compatible
+    model: $ANTHROPIC_MODEL
+llm_caller:
+  defaults: [primary]
+"""
+        )
+        with _no_global(tmp_path):
+            registry = load_agent_registry(tmp_path)
+            chain = load_agents(tmp_path)
+
+        assert registry["primary"].provider == "anthropic-compatible"
+        assert registry["primary"].model == "$ANTHROPIC_MODEL"
+        assert chain == [
+            {
+                "name": "primary",
+                "type": "claude-code",
+                "cmd": "claude-wrapper",
+                "priority": 0,
+                "provider": "anthropic-compatible",
+                "model": "$ANTHROPIC_MODEL",
+            }
+        ]

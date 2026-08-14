@@ -52,7 +52,7 @@ class TestBuiltinDefaultChain:
 
         assert chain == [
             {"name": "claude", "type": "claude-code", "cmd": "claude",
-             "priority": 0},
+             "priority": 0, "provider": "anthropic"},
         ]
 
     def test_only_codex_available(self):
@@ -61,7 +61,8 @@ class TestBuiltinDefaultChain:
             chain = _builtin_default_chain()
 
         assert chain == [
-            {"name": "codex", "type": "codex", "cmd": "codex", "priority": 0},
+            {"name": "codex", "type": "codex", "cmd": "codex", "priority": 0,
+             "provider": "openai"},
         ]
 
     def test_both_available_preserves_declared_order(self):

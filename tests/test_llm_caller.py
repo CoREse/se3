@@ -11,13 +11,19 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from tianluo.engine.llm_caller import LLMCaller
+from tianluo.engine.llm_caller import LLMCallError, LLMCaller
+from tianluo.agent_runner import AgentInvocationIntent, RunnerStartupMetadata
+from tianluo.claude_runner import ClaudeCodeRunner
+from tianluo.engine.workspace_snapshot import WorkspaceSnapshot
+from tianluo.engine.token_usage import accumulate_step_usage
+from tianluo.usage import UsageStatus
 
 
 def _make_caller(**kwargs) -> LLMCaller:
@@ -112,6 +118,90 @@ class TestCallTwoPhaseRequiredKeys:
         assert "summary" in parsed
         # Phase 1 only — no Phase 2 needed
         assert mock_retry.call_count == 1
+
+    def test_phase1_and_json_phase2_are_distinct_usage_calls(self, tmp_path):
+        outputs = [
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": "not json yet"}
+                                ]
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "usage_event_id": "phase-1-usage",
+                            "usage": {"input_tokens": 10, "output_tokens": 2},
+                        }
+                    ),
+                ]
+            ),
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "type": "assistant",
+                            "message": {
+                                "content": [
+                                    {"type": "text", "text": '{"issues": []}'}
+                                ]
+                            },
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "result",
+                            "usage_event_id": "phase-2-usage",
+                            "usage": {"input_tokens": 6, "output_tokens": 1},
+                        }
+                    ),
+                ]
+            ),
+        ]
+
+        class TwoPhaseRunner:
+            def build_call_args(self, prompt, read_only, **kwargs):
+                return [prompt]
+
+            def run_with_monitor(self, args, **kwargs):
+                output = outputs.pop(0)
+                for line in output.splitlines():
+                    kwargs["on_output"](line)
+                return SimpleNamespace(
+                    success=True,
+                    output=output,
+                    interrupted=False,
+                    returncode=0,
+                    cmd_used="two-phase",
+                )
+
+        caller = _make_caller(project_root=tmp_path, step_type="analyze")
+        runner = TwoPhaseRunner()
+        with patch.object(
+            caller, "_get_current_runner", return_value=runner
+        ), patch.object(caller, "_record_prompt"), patch.object(
+            caller, "_record_response"
+        ), accumulate_step_usage() as totals:
+            result = caller.call(
+                "analyze",
+                json_mode="two_phase",
+                required_keys=["issues"],
+            )
+
+        assert json.loads(result) == {"issues": []}
+        assert len(totals.usage_records) == 2
+        assert [record.usage_event_ids for record in totals.usage_records] == [
+            ["phase-1-usage"],
+            ["phase-2-usage"],
+        ]
+        assert totals.input_tokens == 16
+        assert totals.output_tokens == 3
 
 
 class TestCallPassesRequiredKeys:
@@ -216,6 +306,24 @@ class _ArgsCapturingRunner:
     def run_with_monitor(self, args, **kwargs):
         self.captured_args = list(args)
         return _FakeResult(output="")
+
+
+def test_direct_intent_keeps_legacy_runner_on_plain_autonomous_prompt():
+    """A pre-intent third-party runner remains a valid direct executor."""
+    caller = _make_caller(step_type="implement")
+    runner = _ArgsCapturingRunner()
+    with patch.object(LLMCaller, "_get_current_runner", return_value=runner), \
+         patch.object(LLMCaller, "_record_prompt"), \
+         patch.object(LLMCaller, "_record_response"):
+        caller.call(
+            "implement all requirements",
+            json_mode="off",
+            invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+        )
+
+    prompt = runner.captured_args[runner.captured_args.index("-p") + 1]
+    assert prompt.startswith("implement all requirements")
+    assert not prompt.startswith("/goal")
 
 
 class TestReadOnlyToolDisallowList:
@@ -324,3 +432,622 @@ class TestForceReadOnlyOverride:
             step_type="charter_freshness", force_read_only=False
         ).call("propose charter patch", json_mode="off")
         assert "READ-ONLY STEP CONSTRAINT" not in mock_retry.call_args[1]["prompt"]
+
+
+class TestNativeGoalFallback:
+    """Claude /goal fallback is allowed only before any observable work."""
+
+    @staticmethod
+    def _streaming_side_effect(outputs, captured_args):
+        pending = list(outputs)
+
+        def run(args, **kwargs):
+            captured_args.append(list(args))
+            output = pending.pop(0)
+            on_output = kwargs.get("on_output")
+            if on_output:
+                for line in output.splitlines():
+                    on_output(line)
+            return SimpleNamespace(
+                success=True,
+                output=output,
+                interrupted=False,
+                returncode=0,
+                cmd_used="claude",
+            )
+
+        return run
+
+    def test_explicit_unavailable_without_side_effects_falls_back_same_runner(
+        self, tmp_path,
+    ):
+        caller = _make_caller(
+            project_root=tmp_path,
+            step_type="implement",
+            max_retries=1,
+        )
+        runner = ClaudeCodeRunner(
+            project_root=tmp_path,
+            command={"cmd": "claude", "priority": 0},
+        )
+        unavailable = json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "Unknown slash command: /goal",
+        })
+        completed = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "ordinary print mode completed",
+        })
+        captured_args = []
+        runner.run_with_monitor = MagicMock(
+            side_effect=self._streaming_side_effect(
+                [unavailable, completed], captured_args,
+            )
+        )
+        snapshot = WorkspaceSnapshot(head_commit="abc", available=True)
+
+        with patch.object(caller, "_get_current_runner", return_value=runner), \
+             patch.object(caller, "_record_prompt") as record_prompt, \
+             patch.object(caller, "_record_response") as record_response, \
+             patch(
+                 "tianluo.engine.workspace_snapshot.snapshot_workspace",
+                 return_value=snapshot,
+             ), \
+             patch("tianluo.engine.llm_caller.add_call_usage") as add_usage:
+            result = caller.call(
+                "implement all requirements",
+                json_mode="off",
+                invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            )
+
+        assert "ordinary print mode completed" in result
+        assert len(captured_args) == 2
+        assert captured_args[0][captured_args[0].index("-p") + 1].startswith(
+            "/goal\n\n"
+        )
+        fallback_prompt = captured_args[1][captured_args[1].index("-p") + 1]
+        assert fallback_prompt.startswith("implement all requirements")
+        assert not fallback_prompt.startswith("/goal")
+        assert record_prompt.call_count == 2
+        assert record_response.call_count == 2
+        assert add_usage.call_count == 2
+        # The fallback is a real second invocation: its prompt AND response
+        # land under a distinct sub-attempt so retry-context groups hold one
+        # prompt + one response each (the /goal failure stays in its own).
+        prompt_attempts = [call.args[1] for call in record_prompt.call_args_list]
+        response_attempts = [call.args[1] for call in record_response.call_args_list]
+        assert prompt_attempts == [0, 99]
+        assert response_attempts == [0, 99]
+        usage_records = [call.args[0] for call in add_usage.call_args_list]
+        assert all(
+            record.usage_status == UsageStatus.UNAVAILABLE
+            for record in usage_records
+        )
+        assert usage_records[0].call_id != usage_records[1].call_id
+        assert usage_records[1].call_id.endswith(":plain-fallback")
+
+    def test_interrupted_goal_attempt_never_launches_plain_fallback(
+        self, tmp_path,
+    ):
+        # Even when the CLI already printed the /goal rejection and no tool
+        # ran, a user interrupt must end the attempt — not spawn a second
+        # long-running fallback subprocess after the Ctrl+C.
+        caller = _make_caller(
+            project_root=tmp_path,
+            step_type="implement",
+            max_retries=1,
+        )
+        runner = ClaudeCodeRunner(
+            project_root=tmp_path,
+            command={"cmd": "claude", "priority": 0},
+        )
+        unavailable = json.dumps({
+            "type": "result",
+            "subtype": "error_during_execution",
+            "is_error": True,
+            "result": "Unknown slash command: /goal",
+        })
+        captured_args = []
+
+        def interrupted_run(args, **kwargs):
+            captured_args.append(list(args))
+            on_output = kwargs.get("on_output")
+            if on_output:
+                for line in unavailable.splitlines():
+                    on_output(line)
+            return SimpleNamespace(
+                success=False,
+                output=unavailable,
+                interrupted=True,
+                returncode=130,
+                cmd_used="claude",
+            )
+
+        runner.run_with_monitor = MagicMock(side_effect=interrupted_run)
+        snapshot = WorkspaceSnapshot(head_commit="abc", available=True)
+
+        with patch.object(caller, "_get_current_runner", return_value=runner), \
+             patch.object(caller, "_record_prompt") as record_prompt, \
+             patch.object(caller, "_record_response") as record_response, \
+             patch(
+                 "tianluo.engine.workspace_snapshot.snapshot_workspace",
+                 return_value=snapshot,
+             ), \
+             patch("tianluo.engine.llm_caller.add_call_usage"):
+            with pytest.raises(KeyboardInterrupt):
+                caller.call(
+                    "implement all requirements",
+                    json_mode="off",
+                    invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+                )
+
+        # Exactly one subprocess ran — the interrupted /goal attempt. The
+        # interrupt is honored instead of launching a plain-mode fallback.
+        assert len(captured_args) == 1
+        assert record_prompt.call_count == 1
+        assert record_response.call_count == 1
+
+    def test_tool_event_blocks_automatic_plain_fallback(self, tmp_path):
+        caller = _make_caller(
+            project_root=tmp_path,
+            step_type="implement",
+            max_retries=1,
+        )
+        runner = ClaudeCodeRunner(
+            project_root=tmp_path,
+            command={"cmd": "claude", "priority": 0},
+        )
+        output = "\n".join([
+            json.dumps({
+                "type": "assistant",
+                "message": {"content": [{
+                    "type": "tool_use",
+                    "id": "tool-1",
+                    "name": "Read",
+                    "input": {"file_path": "src/example.py"},
+                }]},
+            }),
+            json.dumps({
+                "type": "result",
+                "subtype": "success",
+                "is_error": False,
+                "result": "Unknown slash command: /goal",
+            }),
+        ])
+        captured_args = []
+        runner.run_with_monitor = MagicMock(
+            side_effect=self._streaming_side_effect([output], captured_args)
+        )
+        snapshot = WorkspaceSnapshot(head_commit="abc", available=True)
+
+        with patch.object(caller, "_get_current_runner", return_value=runner), \
+             patch.object(caller, "_record_prompt"), \
+             patch.object(caller, "_record_response"), \
+             patch(
+                 "tianluo.engine.workspace_snapshot.snapshot_workspace",
+                 return_value=snapshot,
+             ):
+            caller.call(
+                "implement all requirements",
+                json_mode="off",
+                invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            )
+
+        assert len(captured_args) == 1
+
+    def test_stderr_only_goal_report_falls_back_without_stream_event(
+        self, tmp_path,
+    ):
+        # A Claude CLI build that reports the missing /goal ONLY on stderr
+        # (no stream-json event, no tool call) must still trip the fallback:
+        # the runner's stderr tail feeds the same gate as the stdout path.
+        caller = _make_caller(
+            project_root=tmp_path,
+            step_type="implement",
+            max_retries=1,
+        )
+        runner = ClaudeCodeRunner(
+            project_root=tmp_path,
+            command={"cmd": "claude", "priority": 0},
+        )
+        quiet = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "no native goal output",
+        })
+        completed = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "ordinary print mode completed",
+        })
+        captured_args = []
+
+        def run(args, **kwargs):
+            captured_args.append(list(args))
+            output = [quiet, completed][len(captured_args) - 1]
+            on_output = kwargs.get("on_output")
+            if on_output:
+                for line in output.splitlines():
+                    on_output(line)
+            return SimpleNamespace(
+                success=True,
+                output=output,
+                interrupted=False,
+                returncode=0,
+                cmd_used="claude",
+                stderr_tail=(
+                    "Error: Unknown command: /goal\n"
+                    if len(captured_args) == 1
+                    else ""
+                ),
+            )
+
+        runner.run_with_monitor = MagicMock(side_effect=run)
+        snapshot = WorkspaceSnapshot(head_commit="abc", available=True)
+
+        with patch.object(caller, "_get_current_runner", return_value=runner), \
+             patch.object(caller, "_record_prompt"), \
+             patch.object(caller, "_record_response"), \
+             patch(
+                 "tianluo.engine.workspace_snapshot.snapshot_workspace",
+                 return_value=snapshot,
+             ), \
+             patch("tianluo.engine.llm_caller.add_call_usage"):
+            result = caller.call(
+                "implement all requirements",
+                json_mode="off",
+                invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            )
+
+        assert "ordinary print mode completed" in result
+        assert len(captured_args) == 2
+        fallback_prompt = captured_args[1][captured_args[1].index("-p") + 1]
+        assert not fallback_prompt.startswith("/goal")
+
+
+class TestDirectCallerRotation:
+    """Direct intent keeps LLMCaller's existing workspace handoff semantics."""
+
+    _streaming_side_effect = staticmethod(
+        TestNativeGoalFallback._streaming_side_effect
+    )
+
+    def test_successor_continues_partial_workspace_with_retry_context(
+        self, tmp_path,
+    ):
+        calls = []
+
+        class Runner:
+            supports_native_goal = False
+
+            def __init__(self, name, fails=False):
+                self.name = name
+                self.fails = fails
+
+            def build_call_args(
+                self,
+                prompt,
+                read_only,
+                context_files=None,
+                spec_guard_plugin=None,
+                invocation_intent=AgentInvocationIntent.DEFAULT,
+            ):
+                calls.append((self.name, prompt, invocation_intent))
+                return [prompt]
+
+            def run_with_monitor(self, args, **kwargs):
+                if self.fails:
+                    (tmp_path / "partial-work.txt").write_text(
+                        "kept for successor", encoding="utf-8",
+                    )
+                    return SimpleNamespace(
+                        success=False,
+                        output="infrastructure failure",
+                        interrupted=False,
+                        returncode=1,
+                        cmd_used=self.name,
+                    )
+                assert (tmp_path / "partial-work.txt").read_text(
+                    encoding="utf-8"
+                ) == "kept for successor"
+                output = json.dumps({
+                    "type": "result",
+                    "subtype": "success",
+                    "is_error": False,
+                    "result": "continued and completed",
+                })
+                if kwargs.get("on_output"):
+                    kwargs["on_output"](output)
+                return SimpleNamespace(
+                    success=True,
+                    output=output,
+                    interrupted=False,
+                    returncode=0,
+                    cmd_used=self.name,
+                )
+
+            def detect_infra_error(self, returncode, stdout, stderr):
+                from tianluo.agent_runner import InfraErrorType
+
+                return InfraErrorType.STARTUP_FAILURE
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            max_retries=2,
+            retry_delay=0,
+            flow_id="rotation-flow",
+            step_id="implement-step",
+            step_type="implement",
+            agents=[
+                {"name": "first", "type": "claude-code", "cmd": "first"},
+                {"name": "second", "type": "codex", "cmd": "second"},
+            ],
+        )
+        caller._runner_cache = {
+            "first": Runner("first", fails=True),
+            "second": Runner("second"),
+        }
+
+        with patch.object(caller, "_record_prompt"), \
+             patch.object(caller, "_record_response"), \
+             patch.object(
+                 caller,
+                 "_get_retry_context",
+                 return_value="Prior caller failed after partial workspace work.",
+             ):
+            result = caller.call(
+                "implement the entire requirement",
+                json_mode="off",
+                invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            )
+
+        assert "continued and completed" in result
+        assert [entry[0] for entry in calls] == ["first", "second"]
+        assert all(
+            entry[2] == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+            for entry in calls
+        )
+        assert "Prior caller failed" in calls[1][1]
+        assert all("/goal" not in entry[1] for entry in calls)
+
+    @pytest.mark.parametrize("failure_reports_usage", [False, True])
+    def test_failed_attempt_and_rotation_share_authoritative_usage_ledger(
+        self, tmp_path, monkeypatch, failure_reports_usage
+    ):
+        monkeypatch.setenv("FIRST_MODEL", "claude-configured-first")
+
+        class LedgerRunner:
+            supports_native_goal = False
+
+            def __init__(self, name, succeeds):
+                self.name = name
+                self.succeeds = succeeds
+
+            def get_startup_metadata(self, env=None):
+                return RunnerStartupMetadata(
+                    provider="anthropic" if self.name == "first" else "openai",
+                    model="runner-startup-fallback",
+                )
+
+            def build_call_args(self, prompt, read_only, **kwargs):
+                return [prompt]
+
+            def run_with_monitor(self, args, **kwargs):
+                if self.succeeds:
+                    lines = [
+                        json.dumps(
+                            {
+                                "type": "init",
+                                "provider": "openai",
+                                "session_id": "second-session",
+                                "model": "GPT-5-Codex",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "result",
+                                "usage_event_id": "second-result",
+                                "usage": {
+                                    "input_tokens": 20,
+                                    "cached_input_tokens": 5,
+                                    "output_tokens": 3,
+                                },
+                                "result": "completed",
+                            }
+                        ),
+                    ]
+                    output = "\n".join(lines)
+                    for line in lines:
+                        kwargs["on_output"](line)
+                    return SimpleNamespace(
+                        success=True,
+                        output=output,
+                        interrupted=False,
+                        returncode=0,
+                        cmd_used=self.name,
+                    )
+
+                failure = {
+                    "type": "result",
+                    "subtype": "error",
+                    "is_error": True,
+                    "result": "quota exceeded",
+                }
+                if failure_reports_usage:
+                    failure.update(
+                        {
+                            "usage_event_id": "failed-result",
+                            "usage": {"input_tokens": 7, "output_tokens": 1},
+                        }
+                    )
+                line = json.dumps(failure)
+                kwargs["on_output"](line)
+                return SimpleNamespace(
+                    success=False,
+                    output=line,
+                    interrupted=False,
+                    returncode=1,
+                    cmd_used=self.name,
+                )
+
+            def detect_infra_error(self, returncode, stdout, stderr):
+                from tianluo.agent_runner import InfraErrorType
+
+                return InfraErrorType.USAGE_LIMIT
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            max_retries=2,
+            retry_delay=0,
+            flow_id="usage-rotation-flow",
+            step_id="usage-step",
+            step_type="implement",
+            agents=[
+                {
+                    "name": "first",
+                    "type": "claude-code",
+                    "cmd": "first",
+                    "provider": "anthropic",
+                    "model": "$FIRST_MODEL",
+                },
+                {
+                    "name": "second",
+                    "type": "codex",
+                    "cmd": "second",
+                    "provider": "openai",
+                    "model": "configured-second",
+                },
+            ],
+        )
+        caller._runner_cache = {
+            "first": LedgerRunner("first", succeeds=False),
+            "second": LedgerRunner("second", succeeds=True),
+        }
+
+        with patch.object(caller, "_record_prompt"), patch.object(
+            caller, "_record_response"
+        ) as record_response, accumulate_step_usage() as totals:
+            output = caller.call("finish", json_mode="off")
+
+        assert "completed" in output
+        assert len(totals.usage_records) == 2
+        failed, succeeded = totals.usage_records
+        assert failed.usage_status == (
+            UsageStatus.AVAILABLE
+            if failure_reports_usage
+            else UsageStatus.UNAVAILABLE
+        )
+        assert failed.agent_name == "first"
+        assert failed.runner_type == "claude-code"
+        assert failed.provider == "anthropic"
+        assert failed.configured_model == "claude-configured-first"
+        assert failed.resolved_model_source == "agent_config"
+        assert succeeded.usage_status == UsageStatus.AVAILABLE
+        assert succeeded.agent_name == "second"
+        assert succeeded.provider_session_id == "second-session"
+        assert succeeded.reported_model == "GPT-5-Codex"
+        assert succeeded.resolved_model == "gpt-5-codex"
+        assert succeeded.resolved_model_source == "provider"
+        assert failed.call_id != succeeded.call_id
+        assert record_response.call_count == 2
+        assert [
+            call.kwargs["usage_record"].call_id
+            for call in record_response.call_args_list
+        ] == [failed.call_id, succeeded.call_id]
+
+    def test_runner_exception_still_records_unavailable_attempt(self, tmp_path):
+        class ExplodingRunner:
+            def get_startup_metadata(self, env=None):
+                return RunnerStartupMetadata(
+                    provider="compatible", model="verified-startup-model"
+                )
+
+            def build_call_args(self, prompt, read_only, **kwargs):
+                return [prompt]
+
+            def run_with_monitor(self, args, **kwargs):
+                raise RuntimeError("spawn transport failed")
+
+        caller = _make_caller(project_root=tmp_path, max_retries=1)
+        runner = ExplodingRunner()
+        with patch.object(
+            caller, "_get_current_runner", return_value=runner
+        ), patch.object(caller, "_record_prompt"), patch.object(
+            caller, "_record_response"
+        ) as response, accumulate_step_usage() as totals:
+            with pytest.raises(LLMCallError, match="spawn transport failed"):
+                caller.call("work", json_mode="off")
+
+        assert len(totals.usage_records) == 1
+        record = totals.usage_records[0]
+        assert record.usage_status == UsageStatus.UNAVAILABLE
+        assert record.provider == "compatible"
+        assert record.resolved_model == "verified-startup-model"
+        assert record.resolved_model_source == "runner_startup"
+        assert response.call_args.kwargs["usage_record"].call_id == record.call_id
+
+    @pytest.mark.parametrize(
+        "before,after",
+        [
+            (
+                WorkspaceSnapshot(
+                    head_commit="abc", tracked_diff_hash="before", available=True,
+                ),
+                WorkspaceSnapshot(
+                    head_commit="abc", tracked_diff_hash="after", available=True,
+                ),
+            ),
+            (
+                WorkspaceSnapshot(head_commit="abc", available=True),
+                WorkspaceSnapshot(
+                    available=False, unavailable_reason="git unavailable",
+                ),
+            ),
+        ],
+        ids=("workspace-changed", "snapshot-undecidable"),
+    )
+    def test_workspace_change_or_undecidable_snapshot_blocks_fallback(
+        self, tmp_path, before, after,
+    ):
+        caller = _make_caller(
+            project_root=tmp_path,
+            step_type="implement",
+            max_retries=1,
+        )
+        runner = ClaudeCodeRunner(
+            project_root=tmp_path,
+            command={"cmd": "claude", "priority": 0},
+        )
+        unavailable = json.dumps({
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "Unknown slash command: /goal",
+        })
+        captured_args = []
+        runner.run_with_monitor = MagicMock(
+            side_effect=self._streaming_side_effect(
+                [unavailable], captured_args,
+            )
+        )
+
+        with patch.object(caller, "_get_current_runner", return_value=runner), \
+             patch.object(caller, "_record_prompt"), \
+             patch.object(caller, "_record_response"), \
+             patch(
+                 "tianluo.engine.workspace_snapshot.snapshot_workspace",
+                 side_effect=[before, after],
+             ):
+            caller.call(
+                "implement all requirements",
+                json_mode="off",
+                invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
+            )
+
+        assert len(captured_args) == 1

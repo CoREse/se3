@@ -46,6 +46,7 @@ try:
         get_console,
         render_full,
         render_usage_block,
+        render_usage_summary_block,
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, HistorySink, JsonSink
@@ -70,6 +71,7 @@ except ImportError:
         get_console,
         render_full,
         render_usage_block,
+        render_usage_summary_block,
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, HistorySink, JsonSink
@@ -925,6 +927,12 @@ def _drain_pending_interjections(
                 interjections=interjections,
             )
         )
+    if StepType.SELF_CHECK in (getattr(flow.state, "selected_steps", None) or []):
+        from ..engine.review_scope import SelfCheckRoundController
+
+        SelfCheckRoundController(flow.state.context).force_full(
+            "effective_requirements_changed"
+        )
     persistence.save_flow(flow)
     return drained_texts
 
@@ -1127,6 +1135,12 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
                 interjections=flow.state.context["user_interjections"],
             )
         )
+        if StepType.SELF_CHECK in (getattr(flow.state, "selected_steps", None) or []):
+            from ..engine.review_scope import SelfCheckRoundController
+
+            SelfCheckRoundController(flow.state.context).force_full(
+                "effective_requirements_changed"
+            )
         get_console().print(t("cli.run.interrupt.recorded"))
     else:
         get_console().print(t("cli.run.interrupt.retry_as_is"))
@@ -2149,6 +2163,7 @@ def run_flow(
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
     manage_pidfile: bool = True,
+    implementation_strategy: Optional[str] = None,
 ) -> int:
     """Run a flow to completion.
 
@@ -2195,6 +2210,8 @@ def run_flow(
             ``cwd==main_root`` and the main ``engine.json`` does not carry the
             worktree flow_id) could not discover the process — and would then
             archive/delete the worktree out from under a still-running merge.
+        implementation_strategy: Explicit strategy request for a new flow.
+            Resume paths ignore this input and recover the persisted strategy.
 
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -2250,6 +2267,7 @@ def run_flow(
             worktree_branch=worktree_branch,
             worktree_original_branch=worktree_original_branch,
             main_lock=main_lock,
+            implementation_strategy=implementation_strategy,
         )
     finally:
         # Restore original signal handler
@@ -2375,6 +2393,7 @@ def _run_flow_impl(
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
     main_lock: Any = None,
+    implementation_strategy: Optional[str] = None,
 ) -> int:
     """Internal implementation of flow execution.
 
@@ -2516,6 +2535,7 @@ def _run_flow_impl(
                 task_type=task_type,
                 change_name=change_name,
                 is_worktree_mode=is_worktree_mode,
+                implementation_strategy=implementation_strategy,
             )
 
             # Set source issue ID if provided
@@ -2818,6 +2838,15 @@ def _run_flow_impl(
                 _restore_discovery_display(current_step)
             result = StepStatus.PAUSED
             # No LLM call on resume — just re-displays the prior question.
+            step_ran_llm = False
+
+        elif current_step.status == StepStatus.FAILED:
+            # A bounded holistic IMPLEMENT continuation persists FAILED (with
+            # an error message) via transition_to_next instead of re-running
+            # the agent. Route that persisted failure into the Retry/Skip/Abort
+            # decision path below without re-invoking the handler — run_step
+            # has no FAILED-status guard and would treat the step as RUNNING.
+            result = StepStatus.FAILED
             step_ran_llm = False
 
         else:
@@ -3142,6 +3171,14 @@ def _run_flow_impl(
             elif choice == 1:
                 # Force step to completed so transition works
                 current_step.status = StepStatus.COMPLETED
+                # A holistic IMPLEMENT still carries its partial record in
+                # outputs (completion_status='partial' / incomplete_tasks);
+                # the transition's continuation gate would re-capture it and
+                # either re-present the same failure prompt or re-run the
+                # agent. Skip is an explicit human decision — mark the step
+                # so the gate (one-shot, consumed on transition) advances
+                # past it without re-arming.
+                current_step.inputs["holistic_skip_forced"] = True
                 state_machine.transition_to_next(flow)
                 persistence.save_flow(flow)
                 continue
@@ -3198,9 +3235,9 @@ def _run_flow_impl(
         # Worktree flows defer resolve to the trailing merge (run_merge), so
         # they are skipped here.
         _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=True)
-        # Session-level token/cost summary (sum of every step's usage). Renders
-        # nothing when the flow consumed no LLM tokens.
-        render_usage_block(flow.state.session_token_usage, title=t("cli.run.session_usage_title"))
+        # Session-level usage/cost summary from the shared UsageSummary
+        # backend. Renders nothing when the flow consumed no LLM calls.
+        _render_session_usage_summary(flow, project_root)
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
@@ -3215,11 +3252,53 @@ def _run_flow_impl(
         # semantics), now also covering the resume path.
         _finalize_sync_source_issue(project_root, flow, is_worktree_mode, resolved=False)
         # Still surface whatever tokens/cost were consumed before the failure.
-        render_usage_block(flow.state.session_token_usage, title=t("cli.run.session_usage_title"))
+        _render_session_usage_summary(flow, project_root)
         return 1
     else:
         get_console().print(t("cli.run.flow_ended_status", status=flow.status.value))
         return 0
+
+
+def _render_session_usage_summary(flow: Any, project_root: Path) -> None:
+    """Render the session usage/cost summary from the shared UsageSummary backend.
+
+    The CLI shows the same actual / estimated / unknown classification that
+    step outputs and history payloads derive from the same records + pricing
+    catalog — nothing here re-sums or re-prices independently. A flow with no
+    recoverable per-call records (older schema) falls back to the legacy
+    five-field block so usage never disappears on upgrade.
+    """
+    from ..usage import UsageSummary
+
+    records = list(getattr(flow.state, "session_usage_records", None) or [])
+    if not records:
+        records = list(flow.state.session_token_usage.usage_records)
+    if records:
+        try:
+            from ..config import load_pricing_catalog
+
+            catalog = load_pricing_catalog(project_root)
+        except Exception:
+            logger.debug(
+                "Failed to load pricing catalog for session summary",
+                exc_info=True,
+            )
+            # Degrade to the builtin catalog, matching history_cmd and the
+            # daemon usage backend: a different fallback here would make the
+            # end-of-flow summary and `luo history show` of the very same flow
+            # print contradictory estimates from the shared backend.
+            from ..pricing import PricingCatalog
+
+            catalog = PricingCatalog.builtin()
+        render_usage_summary_block(
+            UsageSummary.summarize(records, catalog=catalog),
+            title=t("cli.run.session_usage_title"),
+        )
+        return
+    # Legacy fallback: no per-call records — keep the old five-field block.
+    render_usage_block(
+        flow.state.session_token_usage, title=t("cli.run.session_usage_title")
+    )
 
 
 def _finalize_sync_source_issue(
@@ -3658,6 +3737,7 @@ def run_worktree_mode(
     prompt_history: Any = None,
     output_format: str = "cli",
     source_issue_id: Optional[str] = None,
+    implementation_strategy: Optional[str] = None,
 ) -> int:
     """Run a flow in an isolated git worktree, then merge the result back.
 
@@ -3738,6 +3818,7 @@ def run_worktree_mode(
             worktree_branch=worktree_branch,
             worktree_original_branch=original_branch,
             manage_pidfile=False,
+            implementation_strategy=implementation_strategy,
         )
 
         if exit_code != 0:

@@ -17,6 +17,7 @@ from tianluo.config import (
     ConfigError,
     DEFAULT_ADJUDICATE_PERIOD,
     DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
+    DEFAULT_IMPLEMENTATION_STRATEGY,
     DEFAULT_INVESTIGATION_MAX_ITERATIONS,
     DEFAULT_MAX_FIX_ITERATIONS,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
@@ -65,18 +66,49 @@ class TestWorkflowConfigFromDict:
         assert cfg.self_check_passes_required == 3
         assert cfg.self_check_convergence_enabled == DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
 
-    def test_custom_convergence_enabled_true(self):
+    def test_deprecated_convergence_true_normalizes_false(self, caplog):
+        import tianluo.config as _config
+
+        # The deprecation guard is process-level; reset it so this test's
+        # warning assertion holds regardless of test ordering.
+        _config._convergence_deprecation_warned = False
         cfg = WorkflowConfig.from_dict(
             {"workflow": {"self_check_convergence_enabled": True}}
         )
-        assert cfg.self_check_convergence_enabled is True
+        assert cfg.self_check_convergence_enabled is False
+        assert "deprecated" in caplog.text
 
-    def test_convergence_enabled_string_true(self):
-        """String 'true' should be coerced to bool True."""
+    def test_deprecated_convergence_warns_once_per_process(self, caplog):
+        import logging as _logging
+
+        import tianluo.config as _config
+
+        # The deprecation guard is process-level; reset it so this test's
+        # warning assertion holds regardless of test ordering.
+        _config._convergence_deprecation_warned = False
+        with caplog.at_level(_logging.WARNING):
+            cfg = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_convergence_enabled": True}}
+            )
+            # Workflow config is loaded repeatedly during a flow; the
+            # deprecation warning must be emitted once per process, not once
+            # per parse.
+            again = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_convergence_enabled": True}}
+            )
+        assert cfg.self_check_convergence_enabled is False
+        assert again.self_check_convergence_enabled is False
+        messages = [
+            record.message for record in caplog.records
+            if "self_check_convergence_enabled is deprecated" in record.message
+        ]
+        assert len(messages) == 1
+
+    def test_deprecated_convergence_string_true_normalizes_false(self):
         cfg = WorkflowConfig.from_dict(
             {"workflow": {"self_check_convergence_enabled": "true"}}
         )
-        assert cfg.self_check_convergence_enabled is True
+        assert cfg.self_check_convergence_enabled is False
 
     def test_convergence_enabled_string_false(self):
         """String 'false' should be coerced to bool False."""
@@ -158,7 +190,7 @@ class TestWorkflowConfigFromDict:
         )
         assert cfg.max_fix_iterations == 15
         assert cfg.self_check_passes_required == 2
-        assert cfg.self_check_convergence_enabled is True
+        assert cfg.self_check_convergence_enabled is False
 
     def test_invalid_max_fix_iterations_falls_back_to_default(self):
         """Non-integer max_fix_iterations falls back to default."""
@@ -272,6 +304,41 @@ class TestWorkflowConfigFromDict:
         assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
         assert cfg.self_check_convergence_enabled == DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
 
+    @pytest.mark.parametrize("strategy", ["auto", "direct", "planned"])
+    def test_implementation_strategy_accepts_all_legal_values(self, strategy):
+        cfg = WorkflowConfig.from_dict(
+            {"workflow": {"implementation_strategy": strategy}}
+        )
+        assert cfg.implementation_strategy == strategy
+        assert cfg.implementation_strategy_explicit is True
+
+    def test_implementation_strategy_defaults_to_planned(self):
+        cfg = WorkflowConfig.from_dict({})
+        assert cfg.implementation_strategy == DEFAULT_IMPLEMENTATION_STRATEGY
+        assert cfg.implementation_strategy == "planned"
+        assert cfg.implementation_strategy_explicit is False
+
+    @pytest.mark.parametrize("value", ["automatic", "DIRECT", "", None, 1])
+    def test_invalid_implementation_strategy_names_config_path(self, value):
+        with pytest.raises(
+            ConfigError,
+            match=r"workflow\.implementation_strategy=.*must be one of",
+        ):
+            WorkflowConfig.from_dict(
+                {"workflow": {"implementation_strategy": value}}
+            )
+
+    def test_explicit_implementation_strategy_overrides_project_value(self):
+        cfg = WorkflowConfig.from_dict(
+            {"workflow": {"implementation_strategy": "direct"}}
+        )
+        assert cfg.resolve_implementation_strategy("auto") == "auto"
+        assert cfg.resolve_implementation_strategy() == "direct"
+
+    def test_programmatically_constructed_strategy_is_resolved(self):
+        cfg = WorkflowConfig(implementation_strategy="direct")
+        assert cfg.resolve_implementation_strategy() == "direct"
+
 
 # ---------------------------------------------------------------------------
 # WorkflowConfig.baseline_fix_max_attempts (mechanism B)
@@ -342,7 +409,7 @@ workflow:
         cfg = WorkflowConfig.load(tmp_path)
         assert cfg.max_fix_iterations == 10
         assert cfg.self_check_passes_required == 3
-        assert cfg.self_check_convergence_enabled is True
+        assert cfg.self_check_convergence_enabled is False
 
     def test_load_no_config_file(self, tmp_path: Path):
         """When no tianluo.yaml exists, defaults are returned."""

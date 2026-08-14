@@ -1,0 +1,4 @@
+{"type":"init","provider":"anthropic","provider_session_id":"claude-session-reused","model":"claude-sonnet-4-5-20250929"}
+{"type":"result","usage_event_id":"claude-turn-1","provider_session_id":"claude-session-reused","usage_semantics":"event_delta","usage":{"input_tokens":100,"output_tokens":20},"total_cost_usd":0.003}
+{"type":"result","usage_event_id":"claude-turn-2","provider_session_id":"claude-session-reused","usage_semantics":"event_delta","usage":{"input_tokens":150,"output_tokens":35},"total_cost_usd":0.008}
+{"type":"result","usage_event_id":"claude-turn-2","provider_session_id":"claude-session-reused","usage_semantics":"event_delta","usage":{"input_tokens":150,"output_tokens":35},"total_cost_usd":0.008}

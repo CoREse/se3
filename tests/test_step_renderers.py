@@ -783,6 +783,34 @@ class TestStepUsageBlock:
         mock_usage.assert_called_once()
         assert mock_usage.call_args[0][0] == self._USAGE
 
+    @patch("tianluo.engine.step_renderers.render_usage_summary_block")
+    @patch("tianluo.engine.step_renderers.render_usage_block")
+    def test_usage_summary_wins_over_the_legacy_projection(
+        self, mock_legacy, mock_summary,
+    ):
+        """A step whose calls report tokens but no provider cost must not
+        print a fabricated $0: the shared UsageSummary owns the cost column,
+        and the legacy five-field projection collapses a missing cost to 0.0."""
+        from tianluo.engine.step_renderers import render_step_usage
+
+        summary = {
+            "totals": {"logical_input_tokens": 100, "output_tokens": 10},
+            "actual_cost_usd": None,
+            "estimated_cost_usd": None,
+            "completeness": "partial",
+            "unknown_call_count": 0,
+        }
+        step = _make_step(
+            StepType.SELF_CHECK,
+            {"token_usage": self._USAGE, "usage_summary": summary},
+            status=StepStatus.COMPLETED,
+        )
+        render_step_usage(step)
+
+        mock_summary.assert_called_once()
+        assert mock_summary.call_args[0][0] == summary
+        mock_legacy.assert_not_called()
+
     @patch("tianluo.engine.step_renderers.render_usage_block")
     def test_usage_block_not_read_from_carried_token_usage(self, mock_usage):
         """render_step_usage reads ONLY outputs.token_usage, never the
