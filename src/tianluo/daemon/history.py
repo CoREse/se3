@@ -525,6 +525,172 @@ class FlowRead:
     usage_catalog: Optional[Dict[str, Any]] = None
 
 
+def _hash_span(
+    path: Path, start: int, end: int, hasher: "hashlib._Hash"
+) -> Optional[bool]:
+    """Fold the file bytes ``[start, end)`` into *hasher*.
+
+    Returns ``True`` when the whole span was read, ``False`` when the file ended
+    early (it is shorter than *end* — truncated or replaced), and ``None`` when
+    the file could not be read at all.  The three outcomes are distinct because
+    the callers treat them differently: a short read still yields a digest (over
+    fewer bytes, so it cannot compare equal and forces a full re-read), while an
+    unreadable file yields no digest at all.
+
+    The single seam every prefix-verification disk read goes through, so the
+    cost of rewrite detection is measurable (and mutable in tests) in one place
+    rather than spread across the two verification paths and
+    :meth:`DaemonHistoryReader._consumed_signature`.
+    """
+    remaining = end - start
+    if remaining <= 0:
+        return True
+    try:
+        with open(path, "rb") as fh:
+            if start:
+                fh.seek(start)
+            while remaining > 0:
+                chunk = fh.read(min(remaining, SIGNATURE_CHUNK_BYTES))
+                if not chunk:
+                    return False
+                hasher.update(chunk)
+                remaining -= len(chunk)
+    except OSError:
+        return None
+    return True
+
+
+class _PrefixVerifier:
+    """Per-file cache that verifies a consumed prefix without re-hashing it all.
+
+    The rewrite check :meth:`DaemonHistoryReader.read_flow` runs before every
+    incremental read compares a *disk* hash of the consumed prefix ``[0, offset)``
+    against the running hash the reader folded from the bytes it actually
+    consumed.  Hashing the whole prefix from disk every round is correct but
+    quadratic while a large backlog drains: each capped round advances the offset
+    by one byte budget and re-hashes everything before it, so a ~1000-round drain
+    of a 253 MB step file re-read ~125 GB (issue #287).
+
+    This cache keeps the hash of an already-verified prefix ``[0, verified)`` so
+    a normal round only has to read ``[verified, offset)`` — the span the PREVIOUS
+    round consumed — and extend a copy of that hash to obtain the ``[0, offset)``
+    digest.  A full re-hash from byte 0 still runs whenever the cache cannot be
+    trusted or the offset has doubled since the last one.
+
+    INVARIANT: every consumed byte is re-read from disk and compared against the
+    consumed-side running hash exactly once — in the round immediately after the
+    round that consumed it — and the ENTIRE prefix is re-verified from byte 0
+    whenever the offset has doubled since the last full verification.  That is a
+    deliberate weakening of "re-hash the whole prefix every round" (issue #209)
+    with an exactly bounded cost: an in-place rewrite of a region already
+    verified in an earlier round is detected no later than the next doubling
+    point, i.e. after at most the file's current size in further appended bytes,
+    instead of on the very next round.  It is not detected *later* than that, and
+    a rewrite touching the most recently consumed span — the shape a retried step
+    produces, since it re-runs from the start and overwrites its own records — is
+    still caught immediately.  The mitigations that keep the weakening
+    unreachable in the dangerous cases: the cache is dropped outright on a file
+    identity (``st_ino``/``st_dev``) change, on a file shorter than the offset,
+    on any failed verification, and by the caller on a copy switch / detected
+    rewrite / full read; and once the verified offset has caught up with the
+    consumed offset (``offset <= verified``, i.e. a round that had no fresh span
+    to re-read) verification falls back to a full re-hash for as long as that
+    lasts.  That last rule is what keeps an IDLE file — the one an equal-size,
+    same-mtime-tick in-place retry can hide in, since neither its size nor its
+    stat moves (#209) — at exactly today's detection strength: verification lags
+    consumption by one round, so the first poll after a consuming round still
+    re-reads that round's span from disk, and every poll after that re-hashes the
+    whole prefix.  The doubling schedule makes the full re-hashes cost
+    ``n + n/2 + n/4 + … ≤ 2n`` bytes over a whole drain, so total verification
+    I/O stays linear in the file size.
+    """
+
+    __slots__ = ("_verified_offset", "_hasher", "_identity", "_last_full_offset")
+
+    def __init__(self) -> None:
+        self._verified_offset = 0
+        self._hasher: Optional["hashlib._Hash"] = None
+        self._identity: Optional[Tuple[int, int]] = None
+        self._last_full_offset = 0
+
+    def _drop(self) -> None:
+        """Forget the cached prefix so the next verification starts from byte 0."""
+        self._verified_offset = 0
+        self._hasher = None
+        self._identity = None
+        self._last_full_offset = 0
+
+    def verify(
+        self, path: Path, offset: int, expected: Optional[bytes]
+    ) -> bool:
+        """Return whether the file's ``[0, offset)`` prefix still hashes to *expected*.
+
+        *expected* is the reader's running consumed-side digest; ``None`` (no
+        running hash for this file) can never verify, exactly as an absent
+        signature could not before.  A ``False`` result means the consumed prefix
+        changed, is unreadable, or cannot be vouched for — the caller must treat
+        the recorded offset/cursor as stale and re-read from the start.
+        """
+        if expected is None or offset <= 0:
+            # An empty consumed prefix has no disk bytes to compare against a
+            # real digest, so it never verifies — the same answer the whole-prefix
+            # signature gave (it returned ``b""`` for an empty prefix, which never
+            # equals a blake2b digest).
+            self._drop()
+            return False
+        try:
+            st = path.stat()
+        except OSError:
+            self._drop()
+            return False
+        identity = (st.st_ino, st.st_dev)
+
+        if (
+            self._hasher is None
+            or self._identity != identity
+            or st.st_size < offset
+            or offset <= self._verified_offset
+            or offset >= 2 * self._last_full_offset
+        ):
+            return self._verify_full(path, offset, expected, identity)
+        return self._verify_incremental(path, offset, expected, identity)
+
+    def _verify_full(
+        self,
+        path: Path,
+        offset: int,
+        expected: bytes,
+        identity: Tuple[int, int],
+    ) -> bool:
+        hasher = hashlib.blake2b(digest_size=16)
+        outcome = _hash_span(path, 0, offset, hasher)
+        if outcome is None or hasher.digest() != expected:
+            self._drop()
+            return False
+        self._verified_offset = offset
+        self._last_full_offset = offset
+        self._hasher = hasher
+        self._identity = identity
+        return True
+
+    def _verify_incremental(
+        self,
+        path: Path,
+        offset: int,
+        expected: bytes,
+        identity: Tuple[int, int],
+    ) -> bool:
+        hasher = self._hasher.copy()
+        outcome = _hash_span(path, self._verified_offset, offset, hasher)
+        if outcome is not True or hasher.digest() != expected:
+            self._drop()
+            return False
+        self._verified_offset = offset
+        self._hasher = hasher
+        self._identity = identity
+        return True
+
+
 class DaemonHistoryReader:
     """Builds a history index and serves incremental per-flow conversation reads."""
 
@@ -615,6 +781,19 @@ class DaemonHistoryReader:
         # hasher object is not part of the wire/cursor contract — it is purely
         # reader-internal optimization state and cold-starts after a restart.
         self._prefix_hashers: Dict[str, "hashlib._Hash"] = {}
+
+        # Per-file disk-side counterpart of ``_prefix_hashers``, keyed by the same
+        # absolute path: the cache that lets the rewrite check re-read only the
+        # span consumed since the last verification instead of the whole prefix
+        # (see :class:`_PrefixVerifier`, which documents exactly how much
+        # detection strength that trades away and how it is bounded).  Its
+        # lifetime is deliberately tied to ``_prefix_hashers``/``_read_offsets``:
+        # every event that makes a recorded offset untrustworthy — a copy switch,
+        # a detected rewrite, a full read — drops the entry here too, so no path
+        # can leave a verifier vouching for content the reader no longer believes
+        # in.  Reader-internal optimization state, not part of the wire/cursor
+        # contract; it cold-starts (one full re-hash) after a restart.
+        self._prefix_verifiers: Dict[str, _PrefixVerifier] = {}
 
         # (flow_id, bare-filename) -> absolute path last read for that name. The
         # wire cursor is keyed by BARE filename ({name: line-count}) while the
@@ -1502,20 +1681,10 @@ class DaemonHistoryReader:
         if offset <= 0:
             return b""
         digest = hashlib.blake2b(digest_size=16)
-        remaining = offset
-        try:
-            with open(path, "rb") as fh:
-                while remaining > 0:
-                    chunk = fh.read(min(remaining, SIGNATURE_CHUNK_BYTES))
-                    if not chunk:
-                        # File is now shorter than the consumed offset — it was
-                        # truncated / replaced.  The hash covers fewer bytes than
-                        # the stored signature did, so it cannot compare equal,
-                        # forcing a safe full re-read.
-                        break
-                    digest.update(chunk)
-                    remaining -= len(chunk)
-        except OSError:
+        # A short read (file now shorter than the consumed offset — truncated /
+        # replaced) still yields a digest, over fewer bytes: it cannot compare
+        # equal to the stored signature, which forces a safe full re-read.
+        if _hash_span(path, 0, offset, digest) is None:
             return None
         return digest.digest()
 
@@ -1724,6 +1893,14 @@ class DaemonHistoryReader:
             # round, so the next round can detect a copy switch (see above).
             self._cursor_source[source_key] = jsonl_key
 
+            if copy_switched:
+                # This bare filename now resolves to a different physical file, so
+                # the read below restarts it from line 0 anyway. Any verifier state
+                # left over from an earlier stretch on THIS path vouches for a
+                # prefix nobody watched in between, so it is dropped rather than
+                # carried across the gap.
+                self._prefix_verifiers.pop(jsonl_key, None)
+
             prev = self._read_offsets.get(jsonl_key)
 
             # Detect an in-place truncation / rewrite that a size/offset
@@ -1739,14 +1916,22 @@ class DaemonHistoryReader:
             #      needed (the whole-prefix hash would also diverge, but the size
             #      shortcut spares even that read).
             #   2. otherwise (grew past, or equal to, the consumed offset) →
-            #      re-hash the WHOLE consumed prefix ``[0, offset)`` from disk and
-            #      compare it against the running full-prefix hash maintained from
-            #      the bytes already read.  A genuine append leaves the entire
-            #      consumed prefix byte-for-byte identical, so the two hashes match;
-            #      an in-place retry that re-runs the step rewrites at least one
-            #      byte of the prefix, so they diverge — whether the changed record
-            #      is the leading prompt/status head, the trailing terminal/status
-            #      record, or any record in the MIDDLE of a large prefix.
+            #      verify the WHOLE consumed prefix ``[0, offset)`` against the
+            #      running full-prefix hash maintained from the bytes already
+            #      read.  A genuine append leaves the entire consumed prefix
+            #      byte-for-byte identical, so the two hashes match; an in-place
+            #      retry that re-runs the step rewrites at least one byte of the
+            #      prefix, so they diverge — whether the changed record is the
+            #      leading prompt/status head, the trailing terminal/status
+            #      record, or any record in the MIDDLE of a large prefix.  The
+            #      disk side of that comparison goes through ``_PrefixVerifier``,
+            #      which re-reads only the span consumed since the last
+            #      verification and periodically (on offset doubling) re-hashes
+            #      from byte 0: re-hashing the whole prefix on EVERY round made a
+            #      capped drain quadratic — ~1000 rounds over a 253 MB step file
+            #      re-read ~125 GB and pinned the daemon (issue #287).  The
+            #      verifier's own INVARIANT: note states precisely which
+            #      detections that defers and by how much.
             #
             # Bounded sampled windows (a head window ``[0, W)`` and/or a boundary
             # window ``[offset - W, offset)``) were tried as a cheaper grow-case
@@ -1790,17 +1975,23 @@ class DaemonHistoryReader:
                     # prefix against the running full-prefix hash; any divergence
                     # means a consumed record changed (head, middle, or boundary)
                     # and the stale offset/cursor must be discarded.
-                    cur_consumed_sig = self._consumed_signature(jsonl, prev_offset)
+                    verifier = self._prefix_verifiers.get(jsonl_key)
+                    if verifier is None:
+                        verifier = _PrefixVerifier()
+                        self._prefix_verifiers[jsonl_key] = verifier
                     prev_hasher = self._prefix_hashers.get(jsonl_key)
-                    prev_consumed_sig = (
-                        prev_hasher.digest() if prev_hasher is not None else None
-                    )
-                    if (
-                        cur_consumed_sig is None
-                        or prev_consumed_sig is None
-                        or cur_consumed_sig != prev_consumed_sig
+                    if not verifier.verify(
+                        jsonl,
+                        prev_offset,
+                        prev_hasher.digest() if prev_hasher is not None else None,
                     ):
                         rewritten = True
+            if rewritten:
+                # The recorded offset is stale, so anything the verifier vouched
+                # for describes content this reader is about to discard. Drop it
+                # with the offset it belongs to, so the post-rewrite read starts
+                # the verifier from a full hash of the replacement content.
+                self._prefix_verifiers.pop(jsonl_key, None)
 
             can_incremental = (
                 prev is not None
@@ -2152,7 +2343,11 @@ class DaemonHistoryReader:
                 # consumed prefix ``[0, offset)`` — built from the bytes already
                 # streamed, with no extra disk read.  The next round can then tell
                 # an append (prefix unchanged) from another rewrite (prefix
-                # changed).
+                # changed).  The prefix verifier is dropped rather than seeded:
+                # this branch is entered exactly when the file's identity or
+                # content is in doubt, so the next round re-hashes the new prefix
+                # from byte 0 once and re-anchors the doubling schedule there.
+                self._prefix_verifiers.pop(jsonl_key, None)
                 self._record_offset(
                     jsonl_key,
                     jsonl,

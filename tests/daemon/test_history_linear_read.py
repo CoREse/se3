@@ -119,10 +119,10 @@ class _CountingHandle:
 def read_bytes(monkeypatch):
     """Count the bytes ``read_flow``'s RECORD path pulls out of ``*.jsonl``.
 
-    Reads performed by :meth:`DaemonHistoryReader._consumed_signature` are muted:
-    the rewrite-detection re-hash is the *other* quadratic term in this defect and
-    is owned by the prefix-verifier work, so billing it here would drown the
-    signal this fixture exists to measure.
+    Reads performed for rewrite detection (every one of which goes through
+    ``history._hash_span``) are muted: that re-hash is the *other* quadratic term
+    in this defect and is owned by the prefix-verifier work, so billing it here
+    would drown the signal this fixture exists to measure.
     """
     state = {"bytes": 0, "muted": False}
     real_open = builtins.open
@@ -135,18 +135,16 @@ def read_bytes(monkeypatch):
 
     monkeypatch.setattr(builtins, "open", counting_open)
 
-    real_sig = DaemonHistoryReader._consumed_signature
+    real_span = history_mod._hash_span
 
-    def muted_signature(path, offset):
+    def muted_span(path, start, end, hasher):
         state["muted"] = True
         try:
-            return real_sig(path, offset)
+            return real_span(path, start, end, hasher)
         finally:
             state["muted"] = False
 
-    monkeypatch.setattr(
-        DaemonHistoryReader, "_consumed_signature", staticmethod(muted_signature)
-    )
+    monkeypatch.setattr(history_mod, "_hash_span", muted_span)
 
     def take():
         value = state["bytes"]
