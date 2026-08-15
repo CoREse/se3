@@ -275,8 +275,8 @@ class TestPackaging:
     def test_loader_reads_through_the_import_system_only(self):
         """No path is ever joined onto ``__file__``.
 
-        Both readers (``importlib.resources.files`` on 3.9+, ``pkgutil.get_data``
-        on 3.8) delegate to the package's loader, so a package imported from a
+        Both readers (``importlib.resources.files`` and the ``pkgutil.get_data``
+        fallback) delegate to the package's loader, so a package imported from a
         zip resolves its templates like any other install.
         """
         from pathlib import Path

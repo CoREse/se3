@@ -1439,7 +1439,7 @@ def create_app(
 
     # WHY: a plain nested function, NOT a @staticmethod — a staticmethod object
     # is only directly callable from Python 3.10, and this package supports
-    # 3.8+. Decorating it would make the compatibility gate itself raise a
+    # 3.9+. Decorating it would make the compatibility gate itself raise a
     # TypeError (HTTP 500) exactly where it is supposed to explain the refusal.
     def _strategy_unsupported(machine_id: str) -> JSONResponse:
         """Refuse an explicit strategy for a pre-revision-7 daemon.

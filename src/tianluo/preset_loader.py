@@ -57,7 +57,7 @@ LAYER_PROJECT = "project"
 # Built-in prompts ship as package data alongside this module. Resolve
 # the path relative to this file (NOT the cwd) so it works from an
 # installed wheel — mirrors version_script_interface.py's template
-# loading idiom and stays Python 3.8-safe.
+# loading idiom and stays safe across the supported 3.9+ range.
 _BUILTIN_PROMPTS_DIR = Path(__file__).parent / "templates" / "prompts"
 
 # Project-local prompts live under this path, relative to project_root.

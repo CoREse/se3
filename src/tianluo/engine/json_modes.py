@@ -28,6 +28,13 @@ Usage:
     response = caller.call(prompt, json_mode=JsonMode.TWO_PHASE)
 """
 
+# WHY: `get_json_mode` annotates parameters with PEP 604 unions
+# (`JsonMode | None`), which signature evaluation resolves at import time and
+# which `type.__or__` cannot support before 3.10. Deferring annotations keeps
+# this module importable on the package's declared 3.9 floor without rewriting
+# the annotations, and matches the charter's annotation style.
+from __future__ import annotations
+
 from enum import Enum, auto
 
 

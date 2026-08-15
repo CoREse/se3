@@ -7,13 +7,18 @@ def _get_version() -> str:
         from importlib.metadata import version, PackageNotFoundError
         return version("tianluo")
     except (ImportError, PackageNotFoundError):
-        # Fallback for Python < 3.8 or if package is not installed
+        # Fallback for a source checkout where the package is not installed.
+        # WHY: the TOML reader lookup lives inside the same guarded block as the
+        # file read — tomllib is stdlib only on 3.11+ and tomli is not a declared
+        # dependency, so on a supported older interpreter (requires-python >=3.9)
+        # having neither must degrade to "unknown" rather than let
+        # ModuleNotFoundError escape and break `import tianluo` entirely.
         try:
-            import tomllib
-        except ImportError:
-            import tomli as tomllib
+            try:
+                import tomllib
+            except ImportError:
+                import tomli as tomllib
 
-        try:
             from pathlib import Path
             pyproject_path = Path(__file__).parent.parent.parent / "pyproject.toml"
             with open(pyproject_path, "rb") as f:

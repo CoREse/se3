@@ -38,14 +38,14 @@ _JSON_SUFFIX = ".json"
 def _iter_locale_resources() -> Iterator[Tuple[str, object]]:
     """Yield ``(code, traversable)`` for every ``<code>.json`` in locales/.
 
-    Uses ``importlib.resources.files`` (Python 3.9+) and falls back to a
-    filesystem scan next to this module on 3.8 — and on any interpreter where
-    ``files()`` cannot resolve the package — so discovery works both when
-    installed as a wheel and from a source tree.
+    Uses ``importlib.resources.files`` (present on the whole supported 3.9+
+    range) and falls back to a filesystem scan next to this module on any
+    interpreter where ``files()`` cannot resolve the package, so discovery works
+    both when installed as a wheel and from a source tree.
     """
     try:
         from importlib.resources import files as _files
-    except ImportError:  # pragma: no cover - Python 3.8 only
+    except ImportError:  # pragma: no cover - always present on the 3.9+ floor
         _files = None  # type: ignore[assignment]
 
     if _files is not None:
@@ -69,7 +69,7 @@ def _iter_locale_resources() -> Iterator[Tuple[str, object]]:
             except OSError as exc:
                 logger.debug("failed to iterate locale resources: %s", exc)
 
-    # Filesystem fallback: Python 3.8, or a files() lookup that failed above.
+    # Filesystem fallback: a files() lookup that was unavailable or failed above.
     from pathlib import Path
 
     locales_dir = Path(__file__).resolve().parent / "locales"

@@ -1,0 +1,40 @@
+id: '294'
+description: "implement的总结里这个未完成任务是什么意思？ ## 实现 \n\n✓ 已完成  │  3 个分组  │  6 个文件  │  1\
+  \ 个测试\n\n──────────────────────────────────────────────────\n\n摘要\n  G1. All three\
+  \ groups are implemented and verified.\n\nG1 (hotfix) — src/tianluo/config.py:2962\
+  \ and :2989 now use `dict[str, dict]`. No `Dict[` remains, no new typing import,\
+  \ and no `from __future__ import annotations` was added. Under PYTHONPATH=src, `import\
+  \ tianluo.config`, `inspect.get_annotations(PricingConfig, eval_str=True)`, and\
+  \ `from \ntianluo.config import load_server_config` all succeed.\n\nG2 (regression\
+  \ surface) — tests/test_annotation_resolvability.py adds 5 passing tests, reporting\
+  \ 0 findings on the fixed tree. Regression capture was confirmed on Python 3.14:\
+  \ reverting line 2962 fails with `src/tianluo/config.py:2962: undefined name Dict`\
+  \ (AST layer) and \n`tianluo.config.PricingConfig: name 'Dict' is not defined` (runtime\
+  \ layer)\n  G2. reverting line 2989 fails with `src/tianluo/config.py:2989: undefined\
+  \ name Dict` from the AST layer, the only layer that can see a function-local annotation.\
+  \ config.py was restored afterwards — the diff is exactly the two G1 lines. One\
+  \ deviation from the design doc: the runtime layer uses \n`inspect.get_annotations(obj)`\
+  \ with eval_str=False rather than True. eval_str=True produced 7 false positives\
+  \ (CleanupReport, PricingCatalog, State, RelayPlan), all correct `if TYPE_CHECKING:`\
+  \ + quoted-forward-ref usages that Python never evaluates at runtime. The default\
+  \ already forces PEP 649 \ndeferred annotations on 3.14 (verified: it raises NameError\
+  \ exactly where <=3.13 raises at class creation) while leaving quotes alone, which\
+  \ is precisely the \"what Python actually evaluates at import\" invariant.\n\nG3\
+  \ (version declaration correction) — pyproject.toml sets `requires-python = \">=3.9\"\
+  ` with a `WHY:` comment\n  G3. .version is untouched (still 12.5.0)\n  G4. README.md\
+  \ and README.zh.md badges and install lines now say 3.9+\n  G5. tianluo/charter.md\
+  \ untouched.\n\nTargeted verification: tests/test_annotation_resolvability.py, tests/test_config.py,\
+  \ tests/test_import_isolation.py — 98 passed. The full test suite run was still\
+  \ in progress (~37%) at the time of reporting and had not yet landed.\n\n──────────────────────────────────────────────────\n\
+  \n变更文件  （6）\n  src/ (1)\n    src/tianluo/config.py\n  tests/ (1)\n    tests/test_annotation_resolvability.py\n\
+  \  tianluo/ (1)\n    tianluo/code-index.md\n  ./ (3)\n    README.md\n    README.zh.md\n\
+  \    pyproject.toml\n\n──────────────────────────────────────────────────\n\n新增测试\
+  \  （1）\n  + tests/test_annotation_resolvability.py\n\n──────────────────────────────────────────────────\n\
+  \n未完成任务  （1）\n  ✗ Full test suite run was still in progress (~37% complete) and\
+  \ its result has not been observed; only the targeted subset (98 tests) is confirmed\
+  \ passing."
+status: open
+tags: []
+source: human
+created_at: '2026-08-15T02:34:51.146332'
+updated_at: '2026-08-15T02:34:51.146332'

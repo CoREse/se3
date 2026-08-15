@@ -19,7 +19,7 @@ charter 只收录**代码说不出、且全项目每个 step 都需要全量看�
   控制平面（`tianluo[server]`，依赖隔离、独立部署）。代码是唯一权威真相源，通过
   code-index、本 charter 与同位 why-comments 向人类与 agent 暴露其当前状态（已退役
   `tianluo/specs/` 的 spec 镜像治理）。
-- 主要语言/框架: Python 3.8+、Typer（CLI）、PyYAML、Rich、prompt-toolkit
+- 主要语言/框架: Python 3.9+、Typer（CLI）、PyYAML、Rich、prompt-toolkit
 
 ### Requirement: Top-Level Architecture
 顶层架构的全局图景——主要子系统是什么、它们如何拼合、跨子系统的边界在哪里。
@@ -120,6 +120,14 @@ treated as local, preserving pre-upgrade behaviour.
   语言』——charter 与 code-index 的书写语言。语言设置变更只影响此后新生成/更新的内容，
   不回溯翻译既有知识资产。
 - 类型注解采用 `from __future__ import annotations` 风格。
+  In a module that does not carry that import, annotations are evaluated eagerly at
+  import time, so every such annotation MUST resolve on the `requires-python` floor
+  declared in `pyproject.toml` — that declared floor is the authoritative statement of
+  the interpreter this package actually runs on, and it moves only in step with what
+  the code really requires. A repo-side hard guard checks this across the whole
+  package, because a newer development interpreter (lazy annotation evaluation) will
+  not surface a violation on its own. Where an annotation cannot resolve on the floor,
+  deferring that module's annotations is the accepted fix.
 - 测试放在 `tests/` 目录，命名 `test_*.py`，使用 pytest。受控例外：
   `src/tianluo/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎
   内部行为（私有 helper、状态机内部分支、step 内部细节）。

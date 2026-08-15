@@ -2959,7 +2959,7 @@ class PricingConfig:
     must not block a run, but it must also never silently become a wrong price.
     """
 
-    overrides: Dict[str, Dict[str, float]] = field(default_factory=dict)
+    overrides: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, project_root: Path) -> "PricingConfig":
@@ -2986,7 +2986,7 @@ class PricingConfig:
             )
             return cls()
 
-        overrides: Dict[str, Dict[str, float]] = {}
+        overrides: dict[str, dict[str, float]] = {}
         for raw_model, raw_categories in raw_models.items():
             if not isinstance(raw_categories, dict):
                 logger.warning(

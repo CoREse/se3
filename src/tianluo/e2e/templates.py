@@ -137,13 +137,14 @@ def _read_resource(name: str) -> Optional[str]:
     imported the package. Joining a path onto ``__file__`` would work in a source
     checkout and silently report "template missing" for a package imported from
     a zip — for files that are demonstrably there. ``importlib.resources.files``
-    is the modern spelling; ``pkgutil.get_data`` is its Python 3.8 equivalent
-    (this package supports 3.8) and delegates the read to the same loader, so
-    neither path assumes the package was materialized as loose files.
+    is the modern spelling; ``pkgutil.get_data`` is the older equivalent, kept
+    as a fallback for loaders where ``files()`` is unavailable or cannot resolve
+    the package. It delegates the read to the same loader, so neither path
+    assumes the package was materialized as loose files.
     """
     try:
         from importlib.resources import files as _files
-    except ImportError:  # pragma: no cover - Python 3.8 only
+    except ImportError:  # pragma: no cover - always present on the 3.9+ floor
         _files = None  # type: ignore[assignment]
 
     if _files is not None:

@@ -3,7 +3,7 @@
 # tianluo (田螺) — the Software Engineering 3.0 flow engine
 
 ![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FCoREse%2Ftianluo%2Fmaster%2Fpyproject.toml&query=%24.project.version&label=version&color=blue)
-![Python](https://img.shields.io/badge/python-3.8+-green)
+![Python](https://img.shields.io/badge/python-3.9+-green)
 ![License](https://img.shields.io/badge/license-Apache--2.0-lightgrey)
 
 **English** | [中文](README.zh.md)
@@ -143,7 +143,7 @@ This is exactly the **coverage > depth** bet cashing out: the map's job is to te
 ## Installation
 
 ```bash
-# Core CLI (Python 3.8+)
+# Core CLI (Python 3.9+)
 pip install tianluo
 
 # With the central server / web console

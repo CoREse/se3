@@ -1,5 +1,13 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.5.1 - 2026-08-15
+
+- Fix a `NameError: name 'Dict' is not defined` crash on importing `tianluo.config`, which made `tianluo-server` fail to start on Python 3.9–3.13; the two offending annotations in `PricingConfig` now use PEP 585 builtin generics.
+- Fix `tianluo.engine.json_modes` failing to import on Python 3.9–3.10, where its PEP 604 `JsonMode | None` signature annotations could not be evaluated, by deferring annotation evaluation in that module.
+- Add `tests/test_annotation_resolvability.py`, a static guard that force-evaluates every module-, class-, function-signature- and local-level annotation under `src/tianluo/` and asserts all referenced names resolve on the declared Python floor — catching this whole class of import-time defect even on Python 3.14, where PEP 649 lazy annotations hide it from ordinary test runs.
+- Correct `requires-python` from the inaccurate `>=3.8` to `>=3.9`, so pip refuses to install on an interpreter where the package cannot import instead of installing successfully and failing on first use.
+- Align every published statement of the supported Python floor to 3.9+ — the badges and install instructions in both READMEs, the project charter, and the in-source comments that still described 3.8 compatibility.
+- Make `tianluo.__version__` degrade to `"unknown"` instead of raising when no TOML reader is available in a source checkout, so a missing `tomllib`/`tomli` can never break `import tianluo`.
 ## 12.5.0 - 2026-08-14
 
 - Add `workflow.implementation_strategy` config and `--implementation-strategy` CLI/Web override (auto|direct|planned, default planned), with the effective strategy and its reason persisted per flow and honored across worktree, from-issue, preset, daemon spawn and resume paths.
