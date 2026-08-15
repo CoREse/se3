@@ -540,6 +540,7 @@
   "tool.detail.empty": "(no details available)",
   "tool.detail.truncated": "… (output truncated)",
   "tool.detail.stderr": "stderr",
+  "tool.detail.noContent": "(no file content reported)",
   "tool.detail.noMatches": "(no matches)",
   "tool.detail.noFiles": "(no files)",
   "tool.detail.patternPath": "pattern={pattern} path={path}",

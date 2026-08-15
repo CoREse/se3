@@ -1,0 +1,20 @@
+{
+  "flow_id": "20260815-194036_ec0eea16",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] src/tianluo/codex_runner.py\n- [modified] src/tianluo/engine/tool_formatters.py\n- [modified] src/tianluo/server/static/app.js\n- [modified] src/tianluo/server/static/i18n/en-US.json\n- [modified] src/tianluo/server/static/i18n/zh-CN.json\n- [modified] tests/engine/test_tool_formatters.py\n- [modified] tests/frontend/tool_chip_state.test.mjs\n- [modified] tests/test_codex_runner.py\n- [modified] tests/test_tool_formatters.py\n- [modified] tianluo/code-index.md\n\n### Implementation Groups:\n- item 生命周期骨架与按 id 去重: 在不改动任何字段读取语义的前提下，先把 CodexEventConverter 的事件生命周期改造到位：新增 item.started 分派、引入按 id 的 tool_use/tool_result 去重状态、agent_message 改为按 id 保序映射、turn 终止时对 in-flight id 补发合成 tool_result，并同步更新 _agent_messages 的全部消费点。此组完成后行为上应保持既有测试通过（旧字段读法暂不动），为 G2 的字段修正提供安全的落点。\n- 真实 schema 字段对齐与新增 item 类型: 在 G1 建立的生命周期骨架上，把各类 item 的字段读取改为按 codex 真实 schema 并配以宽容多 key 回落；新增 web_search / todo_list 处理；重写 _handle_item_event 的 docstring 并补齐 WHY: 注释。\n- 渲染层键缺失处理: 修正 tool_formatters 在 content / new_string 键整体缺失时的显示：只显示路径，不再输出误导性的 0 行计数或 (empty)；键存在（含空串）时行为完全不变。\n- 真实 schema fixture 与回归测试: 新增按实证 schema 手写的完整 fixture 与回归用例，钉死本次修复的每一条缺陷；把既有旧形状用例改标注为向后兼容回落路径的覆盖（保留不删）；运行全量测试确认无回归。\n\n## Spec Changes\n\nNo spec changes recorded.\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix codex command_execution chips rendering as '<command> · 0 lines output' by reading the real aggregated_output field, with fallback to output and stdout/stderr for older codex builds",
+    "Restore codex-side file dependency tracking by parsing file_change items from the real changes[] array, mapping add/update/delete to Write/Edit/Delete and recording every path as touched",
+    "Fix MCP tool calls from codex showing as 'unknown' and never emitting a result: tool names now render as mcp__{server}__{tool}, arguments and results are parsed with tolerant key fallbacks, and a tool_result is always emitted",
+    "Handle codex web_search and todo_list items instead of silently dropping them, mapping them to WebSearch and TodoWrite; items with missing keys are skipped rather than rendered as broken chips",
+    "Show an in-flight tool chip as soon as a codex item starts, and emit exactly one tool_use/tool_result pair per item id so a single command no longer produces duplicate or truncated chips",
+    "Stop duplicating the final answer text when codex reports an agent message in both item.updated and item.completed",
+    "Close out any still-running tool chips with a synthetic interrupted result when a turn completes or fails, so chips no longer hang forever",
+    "Show only the file path for Write/Edit tool chips when the tool provides no content, instead of a misleading 0-line count"
+  ],
+  "bump_type": "patch",
+  "is_tag": false,
+  "pre_session_baseline": "12.5.1",
+  "provisional_suggested_version": "12.5.2",
+  "consumed": false,
+  "consumed_by": null
+}

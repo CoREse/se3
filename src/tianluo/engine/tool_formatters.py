@@ -156,7 +156,13 @@ def _generic_tool_use_preview(tool_name: str, input_data: dict) -> str:
             break
 
         if isinstance(value, str):
-            val_preview = truncate_preview(value, max_length=30)
+            # WHY: unregistered file tools (codex's "Delete", for one) carry only
+            # a file_path; a blind mid-string truncation would cut the filename
+            # off, so paths get path-aware shortening that always keeps the tail.
+            if key == "file_path":
+                val_preview = truncate_path(value)
+            else:
+                val_preview = truncate_preview(value, max_length=30)
             params.append(f"{key}={val_preview}")
         elif isinstance(value, (int, float, bool)):
             params.append(f"{key}={value}")
@@ -204,12 +210,20 @@ def _generic_tool_result_preview(result_data: Any) -> str:
 
 def _format_edit_use(input_data: dict) -> str:
     file_path = input_data.get("file_path", "?")
-    old_string = input_data.get("old_string", "")
-    new_string = input_data.get("new_string", "")
+    path_preview = truncate_path(file_path)
+    # WHY: key absence and an empty value mean different things. Some upstreams
+    # (e.g. codex file_change items) report *that* a file changed without ever
+    # carrying its text, and omit the keys entirely — there is no line count to
+    # show, so only the path is rendered. A present-but-empty value is a real
+    # "edited to nothing" and keeps its existing rendering.
+    if "old_string" not in input_data and "new_string" not in input_data:
+        return f"Edit: {path_preview}"
+
+    old_string = input_data.get("old_string") or ""
+    new_string = input_data.get("new_string") or ""
     old_lines = len(old_string.splitlines()) if old_string else 0
     new_lines = len(new_string.splitlines()) if new_string else 0
 
-    path_preview = truncate_path(file_path)
     if old_lines or new_lines:
         return f"Edit: {path_preview} ({old_lines} lines \u2192 {new_lines} lines)"
     return f"Edit: {path_preview}"
@@ -232,9 +246,15 @@ def _format_edit_result(result_data: Any) -> str:
 
 def _format_write_use(input_data: dict) -> str:
     file_path = input_data.get("file_path", "?")
-    content = input_data.get("content", "")
-    n_lines = len(content.splitlines()) if content else 0
     path_preview = truncate_path(file_path)
+    # WHY: see _format_edit_use — a missing "content" key means the upstream has
+    # no content information at all, so "(empty)" would be a false claim about
+    # the file; a present-but-empty content really is an empty file.
+    if "content" not in input_data:
+        return f"Write: {path_preview}"
+
+    content = input_data.get("content") or ""
+    n_lines = len(content.splitlines()) if content else 0
     if n_lines:
         return f"Write: {path_preview} ({n_lines} lines)"
     return f"Write: {path_preview} (empty)"
@@ -494,14 +514,20 @@ def _error_preview(result_data: Any, max_length: int = 80) -> str:
 
 def _success_combined_edit(use_input: dict, result_data: Any) -> str:
     file_path = use_input.get("file_path", "?")
-    old_lines = len(use_input.get("old_string", "").splitlines())
-    new_lines = len(use_input.get("new_string", "").splitlines())
+    # WHY: keys absent = upstream carries no text (see _format_edit_use); showing
+    # "0 lines → 0 lines" there would assert a line count nobody measured.
+    if "old_string" not in use_input and "new_string" not in use_input:
+        return truncate_path(file_path)
+    old_lines = len((use_input.get("old_string") or "").splitlines())
+    new_lines = len((use_input.get("new_string") or "").splitlines())
     return f"{truncate_path(file_path)} ({old_lines} lines → {new_lines} lines)"
 
 
 def _success_combined_write(use_input: dict, result_data: Any) -> str:
     file_path = use_input.get("file_path", "?")
-    n_lines = len(use_input.get("content", "").splitlines())
+    if "content" not in use_input:
+        return truncate_path(file_path)
+    n_lines = len((use_input.get("content") or "").splitlines())
     return f"{truncate_path(file_path)} ({n_lines} lines)"
 
 
@@ -640,8 +666,30 @@ def _maybe_truncate_lines(
     return lines[:max_items], True
 
 
+def _build_file_path_only_detail(file_path: str) -> dict:
+    """Detail payload for "a file changed, but no text was reported".
+
+    WHY: synthesising a diff from an absent key would claim something nobody
+    measured — with the post-write file on disk as the old side, an absent
+    ``content`` renders as *every line deleted*, i.e. the exact opposite of
+    what happened. Carrying only the path lets the renderer say "no content
+    information" instead of inventing one.
+    """
+    return {
+        "kind": "file_path_only",
+        "file_path": file_path,
+        "truncated": False,
+    }
+
+
 def _build_edit_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
     file_path = use_input.get("file_path", "?")
+    # WHY: key absence and an empty value differ (see _format_edit_use); both
+    # keys absent means the upstream carries no text at all, so there is no
+    # diff to show. A present-but-empty value is a real "edited to nothing".
+    if "old_string" not in use_input and "new_string" not in use_input:
+        return _build_file_path_only_detail(file_path)
+
     old_string = use_input.get("old_string", "")
     new_string = use_input.get("new_string", "")
     diff_lines = generate_edit_diff(old_string, new_string, file_path)
@@ -660,6 +708,13 @@ def _build_edit_detail(use_input: dict, result_data: Any, old_content: Optional[
 
 def _build_write_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
     file_path = use_input.get("file_path", "?")
+    # WHY: same rule as _build_edit_detail — an absent "content" key carries no
+    # file text, and the tracker's old-content snapshot is taken *after* the
+    # upstream already wrote the file, so diffing against "" would render the
+    # freshly created file as fully deleted.
+    if "content" not in use_input:
+        return _build_file_path_only_detail(file_path)
+
     content = use_input.get("content", "")
     if old_content is None:
         truncated_text, truncated = _maybe_truncate_text(content)
@@ -783,8 +838,13 @@ def build_tool_detail_payload(
     """Build a JSON-safe structured detail dict for the web chip's panel.
 
     The returned dict always carries a ``kind`` discriminator drawn from:
-    ``edit_diff`` / ``write_full`` / ``write_diff`` / ``read_text`` /
-    ``bash_output`` / ``grep_matches`` / ``glob_matches`` / ``text``.
+    ``edit_diff`` / ``write_full`` / ``write_diff`` / ``file_path_only`` /
+    ``read_text`` / ``bash_output`` / ``grep_matches`` / ``glob_matches`` /
+    ``text``.
+
+    ``file_path_only`` is the Edit/Write payload for an upstream that reports
+    *that* a file changed without carrying its text (codex ``file_change``
+    items omit the ``content`` / ``old_string`` / ``new_string`` keys entirely).
 
     Per-tool builders return a richer shape than the 60-char preview so the
     frontend can render diffs with line numbers, full file content, command
@@ -828,6 +888,20 @@ def format_tool_diff(
         return
 
     try:
+        # WHY: keys absent = the upstream never reported the file text (codex
+        # file_change items). There is nothing to diff, and old_content here is
+        # the *post-write* file, so diffing would print the new file as fully
+        # deleted — and the "Created … (N lines)" fallback would print a line
+        # count nobody measured. Rendering nothing is the only truthful option.
+        if tool_name == "Write" and "content" not in input_data:
+            return
+        if (
+            tool_name == "Edit"
+            and "old_string" not in input_data
+            and "new_string" not in input_data
+        ):
+            return
+
         if tool_name == "Edit":
             old_string = input_data.get("old_string", "")
             new_string = input_data.get("new_string", "")

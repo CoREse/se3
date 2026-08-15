@@ -11391,6 +11391,20 @@ registerToolDetailRenderer("write_full", (detail) => {
   return frag;
 });
 
+// A file changed but its text was never reported (codex `file_change` items).
+// The panel shows the path and says so, rather than rendering a diff or an
+// empty file body that would misstate what happened to the file.
+registerToolDetailRenderer("file_path_only", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.file_path) {
+    frag.appendChild(el("div", "tool-marker-diff-path", detail.file_path));
+  }
+  frag.appendChild(
+    el("p", "tool-detail-empty", tf("tool.detail.noContent", "(no file content reported)")),
+  );
+  return frag;
+});
+
 registerToolDetailRenderer("read_text", (detail) => {
   const frag = document.createDocumentFragment();
   if (detail.file_path) {
@@ -11528,6 +11542,28 @@ function _toolTruncatePreview(text, max) {
   return s.slice(0, Math.max(1, limit - 3)) + "...";
 }
 
+// JS mirror of `truncate_path` in tool_formatters.py: shorten the middle,
+// never the tail. WHY: an unregistered file tool (codex's `Delete`) carries a
+// file_path as its only key, so the generic key=value fallback below would cut
+// the string mid-path at 30 chars and drop the very filename the chip exists to
+// name. Relativization against the project root is Python-side only — the
+// frontend has no project root on the raw_json path — so a path that fits is
+// passed through whole.
+function _toolTruncatePath(path, max) {
+  if (!path) return "";
+  const s = String(path);
+  const limit = max || 160;
+  if (s.length <= limit) return s;
+  const parts = s.replace(/\\/g, "/").split("/");
+  if (parts.length <= 1) return s;
+  return `${parts[0]}/.../${parts[parts.length - 1]}`;
+}
+
+function _toolHasKey(input, key) {
+  return !!input && typeof input === "object" &&
+    Object.prototype.hasOwnProperty.call(input, key);
+}
+
 // Body-only header for in-flight (tool_use without result yet). Mirrors
 // `_format_*_use` in tool_formatters.py, stripping the leading `<name>: `
 // prefix since the chip frame adds the name span separately.
@@ -11543,6 +11579,10 @@ function _toolInFlightBody(toolName, input) {
   }
   if (toolName === "Edit") {
     const p = String(input.file_path || "?");
+    // Key absence ≠ empty value (mirrors `_format_edit_use`): an upstream that
+    // reports only *that* a file changed (codex file_change) omits the keys, so
+    // there is no line count to show; a present-but-empty value keeps its count.
+    if (!_toolHasKey(input, "old_string") && !_toolHasKey(input, "new_string")) return p;
     const oldS = String(input.old_string || "");
     const newS = String(input.new_string || "");
     const ol = oldS ? oldS.split("\n").length : 0;
@@ -11552,6 +11592,7 @@ function _toolInFlightBody(toolName, input) {
   }
   if (toolName === "Write") {
     const p = String(input.file_path || "?");
+    if (!_toolHasKey(input, "content")) return p;
     const c = String(input.content || "");
     const n = c ? c.split("\n").length : 0;
     if (n) return `${p} (${n} lines)`;
@@ -11577,9 +11618,11 @@ function _toolInFlightBody(toolName, input) {
     if (i++ >= 3) { parts.push("..."); break; }
     const v = input[k];
     let vs;
-    if (typeof v === "string") vs = _toolTruncatePreview(v, 30);
-    else if (typeof v === "number" || typeof v === "boolean") vs = String(v);
-    else {
+    if (typeof v === "string") {
+      vs = k === "file_path" ? _toolTruncatePath(v) : _toolTruncatePreview(v, 30);
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      vs = String(v);
+    } else {
       try { vs = _toolTruncatePreview(JSON.stringify(v), 30); }
       catch (_) { vs = _toolTruncatePreview(String(v), 30); }
     }
@@ -11604,12 +11647,16 @@ function _toolSuccessBody(toolName, input, resultData) {
   }
   if (toolName === "Edit") {
     const p = String(input.file_path || "?");
+    // Mirrors `_success_combined_edit`: keys absent = no text was reported, so
+    // "0 lines → 0 lines" would assert a count nobody measured.
+    if (!_toolHasKey(input, "old_string") && !_toolHasKey(input, "new_string")) return p;
     const ol = String(input.old_string || "").split("\n").length;
     const nl = String(input.new_string || "").split("\n").length;
     return `${p} (${ol} lines → ${nl} lines)`;
   }
   if (toolName === "Write") {
     const p = String(input.file_path || "?");
+    if (!_toolHasKey(input, "content")) return p;
     const n = String(input.content || "").split("\n").length;
     return `${p} (${n} lines)`;
   }
@@ -11692,9 +11739,16 @@ function _toolUnifiedDiff(oldStr, newStr, filePath) {
 function _toolDetailPayload(toolName, input, resultData) {
   input = input || {};
   if (toolName === "Edit") {
+    const fp = String(input.file_path || "?");
+    // Keys absent = the upstream reported no text at all (codex file_change).
+    // Synthesising a diff from "" would render the file as emptied, so the
+    // panel says "path, no content information" instead — mirrors
+    // `_build_edit_detail`.
+    if (!_toolHasKey(input, "old_string") && !_toolHasKey(input, "new_string")) {
+      return { kind: "file_path_only", file_path: fp, truncated: false };
+    }
     const oldS = String(input.old_string || "");
     const newS = String(input.new_string || "");
-    const fp = String(input.file_path || "?");
     const diff = _toolUnifiedDiff(oldS, newS, fp);
     return {
       kind: "edit_diff",
@@ -11706,10 +11760,14 @@ function _toolDetailPayload(toolName, input, resultData) {
     };
   }
   if (toolName === "Write") {
+    const fp = String(input.file_path || "?");
+    if (!_toolHasKey(input, "content")) {
+      return { kind: "file_path_only", file_path: fp, truncated: false };
+    }
     const content = String(input.content || "");
     return {
       kind: "write_full",
-      file_path: String(input.file_path || "?"),
+      file_path: fp,
       content: content,
       start_line: 1,
       truncated: false,
