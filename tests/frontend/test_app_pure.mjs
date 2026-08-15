@@ -7469,4 +7469,18 @@ await fileUploadMod.registerFileUploadTests({
 const inlineUploadImagesMod = await import("./inline_upload_images.test.mjs");
 inlineUploadImagesMod.registerInlineUploadImagesTests({ app, check, findOne, findAll });
 
+// ---------------------------------------------------------------------------
+// Rendering a record the daemon had to shrink before sending it
+// ---------------------------------------------------------------------------
+//
+// An oversized history record is water-filled down to the wire budget instead
+// of being cut off, precisely because the console reconciles chips by
+// stepId#ordinal and a chip missing from one frame never returns. These checks
+// hold the browser end of that: every tool call still renders and still pairs,
+// the count markers standing in for tens of thousands of folded telemetry
+// events render nothing at all, and a shrunken body shows its preview WITH the
+// truncation marker so it cannot be mistaken for the whole payload.
+const compactedChipsMod = await import("./compacted_record_chips.test.mjs");
+compactedChipsMod.registerCompactedRecordChipTests({ app, check, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

@@ -55,6 +55,7 @@ from .disk_json_cache import (
     read_json_cached,
 )
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+from .record_budget import compact_record, needs_compaction
 from .supervisor import resolve_worktree_main_root
 
 logger = logging.getLogger(__name__)
@@ -1724,6 +1725,83 @@ class DaemonHistoryReader:
         )
         self._prefix_hashers[jsonl_key] = hasher
 
+    def _build_record(
+        self,
+        flow_id: str,
+        step_id: str,
+        step_type: Optional[str],
+        ordinal: int,
+        message: Dict[str, Any],
+        raw_len: int,
+    ) -> Tuple[Dict[str, Any], int]:
+        """Turn one parsed line into a delivery record and its billed byte size.
+
+        Returns ``(record, billed_bytes)``. *raw_len* is the record's on-disk
+        line size, which both read branches already hold for free, and it is the
+        only input the fast-path gate looks at.
+
+        WHY both branches funnel through here: the two branches (incremental
+        seek-read and full re-read) deliver the SAME physical lines under the
+        same ``step_id#ordinal`` identity, so a record that is compacted on one
+        path and shipped whole on the other would make the frontend's idempotent
+        reconcile flip a chip's body back and forth depending on which path
+        happened to redeliver it. One entry point is what makes the degradation
+        a property of the record rather than of the read that found it.
+
+        WHY the billed size is the COMPACTED size: the byte budget exists to
+        bound what goes on the *wire* within one connection window (see
+        :data:`MAX_BYTES_PER_REPORT`). Billing a 16 MB line that leaves here as
+        ~1 MB would trip the chunk cap on a frame that is nowhere near it and
+        spend a whole round-trip per record, which is the very livelock the cap
+        was added to end.
+        """
+        if not needs_compaction(raw_len):
+            # The ~99 % path: one integer comparison, no raw_json traversal, no
+            # re-serialisation — the record is shipped exactly as written.
+            return (
+                {
+                    "step_id": step_id,
+                    "step_type": step_type,
+                    "ordinal": ordinal,
+                    "message": message,
+                },
+                raw_len,
+            )
+
+        compacted, stats = compact_record(message, raw_len)
+        if stats.compacted:
+            # INFO, not DEBUG: an online degradation silently changes what the
+            # user sees in the WebUI, so the one place it happens has to leave a
+            # trace that ties the shrunken record back to its exact line.
+            logger.info(
+                "history: compacted oversized record flow=%s step=%s ordinal=%s "
+                "%d -> %d bytes (raw_json=%d folded=%d shrunk=%d dropped=%d "
+                "watermark=%s%s)",
+                flow_id, step_id, ordinal,
+                stats.original_bytes, stats.compacted_bytes,
+                stats.raw_json_bytes, stats.folded_events, stats.shrunk_events,
+                stats.dropped_bytes, stats.watermark,
+                " OVERFLOW" if stats.overflow else "",
+            )
+        elif stats.overflow:
+            # Every event is already at its structural floor, so the record
+            # stays over budget rather than losing events. Worth a line: it is
+            # the only shape compaction cannot help with.
+            logger.warning(
+                "history: record over budget and not compactable flow=%s "
+                "step=%s ordinal=%s raw_json=%d bytes",
+                flow_id, step_id, ordinal, stats.raw_json_bytes,
+            )
+        return (
+            {
+                "step_id": step_id,
+                "step_type": step_type,
+                "ordinal": ordinal,
+                "message": compacted,
+            },
+            stats.compacted_bytes,
+        )
+
     def read_flow(
         self,
         flow_id: str,
@@ -2097,21 +2175,22 @@ class DaemonHistoryReader:
                             # snapshot tag the same logical line with the same
                             # ordinal — the invariant the frontend's idempotent
                             # reconcile relies on.
-                            records.append(
-                                {
-                                    "step_id": step_id,
-                                    "step_type": step_type,
-                                    "ordinal": consumed - 1,
-                                    "message": message,
-                                }
+                            record, billed = self._build_record(
+                                flow_id,
+                                step_id,
+                                step_type,
+                                consumed - 1,
+                                message,
+                                len(body),
                             )
-                            # Count the raw jsonl line bytes (a faithful proxy for
-                            # the record's wire size) toward the byte budget. Both
-                            # caps are checked AFTER appending, so the record that
-                            # crosses a limit is still emitted — the returned frame
-                            # may exceed the cap by at most one record, which is
-                            # the intended small overshoot.
-                            byte_count += len(body)
+                            records.append(record)
+                            # Count the record's post-compaction wire size toward
+                            # the byte budget. Both caps are checked AFTER
+                            # appending, so the record that crosses a limit is
+                            # still emitted — the returned frame may exceed the
+                            # cap by at most one record, which is the intended
+                            # small overshoot.
+                            byte_count += billed
                             if (
                                 len(records) >= MAX_RECORDS_PER_REPORT
                                 or byte_count >= MAX_BYTES_PER_REPORT
@@ -2253,9 +2332,11 @@ class DaemonHistoryReader:
                         """Append a parsed record for *line_bytes*; return truncation.
 
                         *line_bytes* is the line's raw on-disk bytes WITHOUT its
-                        newline delimiter — the same span the byte budget bills,
-                        parsed straight from bytes so the line is never decoded
-                        and re-encoded just to be measured.
+                        newline delimiter, parsed straight from bytes so the
+                        line is never decoded and re-encoded just to be measured.
+                        Its length is also the compaction fast-path gate; what
+                        the byte budget bills is the size that comes back out of
+                        :meth:`_build_record`.
 
                         *ordinal* is the record's 0-based physical line position in
                         its step file. A full read reproduces the SAME ordinal an
@@ -2274,19 +2355,20 @@ class DaemonHistoryReader:
                             return False
                         if not isinstance(message, dict):
                             return False
-                        records.append(
-                            {
-                                "step_id": step_id,
-                                "step_type": step_type,
-                                "ordinal": ordinal,
-                                "message": message,
-                            }
+                        record, billed = self._build_record(
+                            flow_id,
+                            step_id,
+                            step_type,
+                            ordinal,
+                            message,
+                            len(line_bytes),
                         )
+                        records.append(record)
                         # Byte budget applied alongside the record-count cap (same
-                        # after-append semantics as the incremental path): the
-                        # record that crosses either limit is emitted, then the
-                        # read stops.
-                        byte_count += len(line_bytes)
+                        # after-append semantics as the incremental path, and the
+                        # same post-compaction billing): the record that crosses
+                        # either limit is emitted, then the read stops.
+                        byte_count += billed
                         return (
                             len(records) >= MAX_RECORDS_PER_REPORT
                             or byte_count >= MAX_BYTES_PER_REPORT
