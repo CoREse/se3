@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.5.3 - 2026-08-16
+
+- Fix codex command_execution chips rendering as '<command> · 0 lines output' by reading the real aggregated_output field, with fallback to output and stdout/stderr for older codex builds
+- Restore codex-side file dependency tracking by parsing file_change items from the real changes[] array, mapping add/update/delete to Write/Edit/Delete and recording every path as touched
+- Fix MCP tool calls from codex showing as 'unknown' and never emitting a result: tool names now render as mcp__{server}__{tool}, arguments and results are parsed with tolerant key fallbacks, and a tool_result is always emitted
+- Handle codex web_search and todo_list items instead of silently dropping them, mapping them to WebSearch and TodoWrite; items with missing keys are skipped rather than rendered as broken chips
+- Show an in-flight tool chip as soon as a codex item starts, and emit exactly one tool_use/tool_result pair per item id so a single command no longer produces duplicate or truncated chips
+- Stop duplicating the final answer text when codex reports an agent message in both item.updated and item.completed
+- Close out any still-running tool chips with a synthetic interrupted result when a turn completes or fails, so chips no longer hang forever
+- Show only the file path for Write/Edit tool chips when the tool provides no content, instead of a misleading 0-line count
 ## 12.5.2 - 2026-08-16
 
 - Fix quadratic history read cost by replacing full-tail/full-file `fh.read()` with bounded line-by-line binary reads, preserving ordinal, cursor, and partial-tail semantics byte-for-byte

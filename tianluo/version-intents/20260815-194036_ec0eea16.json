@@ -15,6 +15,6 @@
   "is_tag": false,
   "pre_session_baseline": "12.5.1",
   "provisional_suggested_version": "12.5.2",
-  "consumed": false,
+  "consumed": true,
   "consumed_by": null
 }
