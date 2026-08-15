@@ -1,8 +1,8 @@
 id: '293'
 description: 聊天记录太多的话，比如tianluo/history/20260812-142556_990dd0fa这个session，在webui里点进去会让server挂掉，界面显示：加载对话时网络错误。需要重启tianluo-server才行。
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-08-14T14:07:16.589790'
-updated_at: '2026-08-15T19:40:18.381801'
+updated_at: '2026-08-16T03:52:56.929747'
 type: bug
