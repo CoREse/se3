@@ -354,9 +354,12 @@ class TestWriteFormatter:
         assert "empty" in result.lower()
 
     def test_use_no_content_key(self):
+        # Key absent = no content information upstream (not an empty file), so
+        # neither a line count nor "(empty)" may be claimed — path only.
         result = format_tool_use_preview("Write", {"file_path": "x.py"})
         assert "Write:" in result
-        assert "empty" in result.lower()
+        assert "x.py" in result
+        assert "empty" not in result.lower()
 
     def test_use_single_line_content(self):
         data = {"file_path": "one.py", "content": "print('hi')"}

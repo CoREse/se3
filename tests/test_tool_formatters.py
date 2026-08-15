@@ -183,10 +183,13 @@ class TestWriteFormatter:
         assert "empty" in result.lower()
 
     def test_use_no_content_key(self):
+        # A missing "content" key means the upstream carried no content at all,
+        # which is not the same as writing an empty file — only the path shows.
         data = {"file_path": "x.py"}
         result = format_tool_use_preview("Write", data)
         assert "Write:" in result
-        assert "empty" in result.lower()
+        assert "x.py" in result
+        assert "empty" not in result.lower()
 
     def test_result(self):
         result = format_tool_result_preview("Write", "Created out.txt")
@@ -1157,3 +1160,127 @@ class TestDetailPayloadJsonSafe:
             blob = json.dumps(payload)
             restored = json.loads(blob)
             assert restored["kind"] == payload["kind"]
+
+
+# ---------------------------------------------------------------------------
+# Missing content keys vs. present-but-empty content
+#
+# Upstreams that only report *that* a file changed (codex's file_change items)
+# omit the content keys entirely; upstreams that really wrote an empty file
+# send the key with "". These must render differently — the first has no line
+# count to show, the second does.
+# ---------------------------------------------------------------------------
+
+class TestMissingContentKeyRendering:
+    def test_write_use_key_missing_shows_path_only(self):
+        result = format_tool_use_preview("Write", {"file_path": "src/new.py"})
+        assert result == "Write: src/new.py"
+        assert "lines" not in result
+        assert "empty" not in result.lower()
+
+    def test_write_use_key_empty_string_unchanged(self):
+        result = format_tool_use_preview("Write", {"file_path": "src/new.py", "content": ""})
+        assert result == "Write: src/new.py (empty)"
+
+    def test_write_use_missing_and_empty_differ(self):
+        missing = format_tool_use_preview("Write", {"file_path": "a.py"})
+        empty = format_tool_use_preview("Write", {"file_path": "a.py", "content": ""})
+        assert missing != empty
+
+    def test_write_use_with_content_unchanged(self):
+        result = format_tool_use_preview("Write", {"file_path": "a.py", "content": "x\ny"})
+        assert result == "Write: a.py (2 lines)"
+
+    def test_edit_use_both_keys_missing_shows_path_only(self):
+        result = format_tool_use_preview("Edit", {"file_path": "src/mod.py"})
+        assert result == "Edit: src/mod.py"
+        assert "lines" not in result
+
+    def test_edit_use_keys_empty_strings_unchanged(self):
+        result = format_tool_use_preview("Edit", {"file_path": "a.py", "old_string": "", "new_string": ""})
+        assert result == "Edit: a.py"
+
+    def test_edit_use_one_key_present_keeps_line_counts(self):
+        result = format_tool_use_preview("Edit", {"file_path": "a.py", "new_string": "x\ny"})
+        assert result == "Edit: a.py (0 lines → 2 lines)"
+
+    def test_edit_use_both_keys_present_unchanged(self):
+        result = format_tool_use_preview(
+            "Edit", {"file_path": "a.py", "old_string": "x", "new_string": "y\nz"}
+        )
+        assert result == "Edit: a.py (1 lines → 2 lines)"
+
+    def test_combined_write_key_missing_shows_path_only(self):
+        header = format_tool_chip_header("Write", {"file_path": "src/new.py"}, "ok", is_error=False)
+        assert header == "Write ✓ src/new.py"
+        assert "0 lines" not in header
+
+    def test_combined_write_key_empty_string_unchanged(self):
+        header = format_tool_chip_header(
+            "Write", {"file_path": "src/new.py", "content": ""}, "ok", is_error=False
+        )
+        assert header == "Write ✓ src/new.py (0 lines)"
+
+    def test_combined_write_missing_and_empty_differ(self):
+        missing = format_tool_chip_header("Write", {"file_path": "a.py"}, "ok", is_error=False)
+        empty = format_tool_chip_header(
+            "Write", {"file_path": "a.py", "content": ""}, "ok", is_error=False
+        )
+        assert missing != empty
+
+    def test_combined_edit_keys_missing_shows_path_only(self):
+        header = format_tool_chip_header("Edit", {"file_path": "src/mod.py"}, "ok", is_error=False)
+        assert header == "Edit ✓ src/mod.py"
+        assert "0 lines" not in header
+
+    def test_combined_edit_keys_empty_strings_unchanged(self):
+        header = format_tool_chip_header(
+            "Edit",
+            {"file_path": "src/mod.py", "old_string": "", "new_string": ""},
+            "ok",
+            is_error=False,
+        )
+        assert header == "Edit ✓ src/mod.py (0 lines → 0 lines)"
+
+    def test_combined_edit_missing_and_empty_differ(self):
+        missing = format_tool_chip_header("Edit", {"file_path": "a.py"}, "ok", is_error=False)
+        empty = format_tool_chip_header(
+            "Edit", {"file_path": "a.py", "old_string": "", "new_string": ""}, "ok", is_error=False
+        )
+        assert missing != empty
+
+    def test_combined_edit_with_strings_unchanged(self):
+        header = format_tool_chip_header(
+            "Edit",
+            {"file_path": "a.py", "old_string": "x", "new_string": "y\nz"},
+            "ok",
+            is_error=False,
+        )
+        assert header == "Edit ✓ a.py (1 lines → 2 lines)"
+
+
+# ---------------------------------------------------------------------------
+# Unregistered file tools (e.g. codex's "Delete") through the generic formatter
+# ---------------------------------------------------------------------------
+
+class TestDeleteViaGenericFormatter:
+    def test_use_preview_contains_file_path(self):
+        result = format_tool_use_preview("Delete", {"file_path": "src/gone.py"})
+        assert "Delete" in result
+        assert "src/gone.py" in result
+
+    def test_in_flight_chip_contains_file_path(self):
+        header = format_tool_chip_in_flight_header("Delete", {"file_path": "src/gone.py"})
+        assert "Delete" in header
+        assert "src/gone.py" in header
+
+    def test_success_chip_contains_file_path(self):
+        header = format_tool_chip_header("Delete", {"file_path": "src/gone.py"}, "", is_error=False)
+        assert header.startswith("Delete ✓")
+        assert "src/gone.py" in header
+
+    def test_long_file_path_keeps_filename(self):
+        long_path = "src/" + "deeply/" * 10 + "gone.py"
+        result = format_tool_use_preview("Delete", {"file_path": long_path})
+        # path-aware shortening never truncates the filename itself
+        assert "gone.py" in result
