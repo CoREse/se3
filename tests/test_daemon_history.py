@@ -1499,8 +1499,8 @@ def test_meta_cache_after_invalidate_skips_reparsing(tmp_path, monkeypatch):
 def _tracking_open_factory():
     """Return ``(patch_fn, get_bytes)`` where ``patch_fn`` is a monkeypatch-
     compatible replacement for ``builtins.open`` that tracks the total bytes
-    read via ``.read()`` and ``.readline()`` calls, and ``get_bytes()``
-    returns the cumulative count and resets it to zero.
+    read via ``.read()`` / ``.readline()`` calls and line iteration, and
+    ``get_bytes()`` returns the cumulative count and resets it to zero.
 
     Only tracks reads on files under ``tmp_path`` whose suffix is ``.jsonl``.
     """
@@ -1529,6 +1529,20 @@ def _tracking_open_factory():
             if self._tracked:
                 nonlocal total_bytes
                 total_bytes += len(data) if isinstance(data, (bytes, str)) else 0
+            return data
+
+        def __iter__(self):
+            # The read paths stream their jsonl line by line off a binary
+            # handle, so line iteration — not just ``read``/``readline`` — is
+            # the surface that actually delivers bytes to the reader and must
+            # be billed here, or the byte-budget assertions would see zero.
+            return self
+
+        def __next__(self):
+            data = next(self._fh)
+            if self._tracked:
+                nonlocal total_bytes
+                total_bytes += len(data)
             return data
 
         def seek(self, offset, whence=0):

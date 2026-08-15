@@ -1527,18 +1527,23 @@ class DaemonHistoryReader:
         offset: int,
         mtime: float,
         size: int,
-        base_hasher: Optional["hashlib._Hash"],
-        new_consumed_bytes: bytes,
+        hasher: "hashlib._Hash",
     ) -> None:
         """Persist the per-file read position plus all rewrite fingerprints.
 
         Updates :attr:`_read_offsets` with the bounded head and boundary
-        signatures (the two cheap grow-case guards) and advances the running
-        full-prefix hash in :attr:`_prefix_hashers` by *new_consumed_bytes* — the
-        raw bytes consumed in this read, taken from the bytes already in memory so
-        the running hash is maintained WITHOUT any extra disk read.  *base_hasher*
-        is the prior running hasher to extend (for an incremental read) or ``None``
-        to start a fresh hash over a from-scratch full read.
+        signatures (the two cheap grow-case guards) and installs *hasher* — the
+        running full-prefix hash over ``[0, offset)`` — as the file's new prefix
+        hash.  Ownership of *hasher* transfers here; the caller must not mutate
+        it afterwards.
+
+        WHY the caller hands over a ready hasher rather than the raw bytes it
+        just consumed: the read loops stream their file line by line and never
+        hold the consumed region in memory, so there is no consumed byte string
+        left to hand over.  Each line is folded into the running hash at the
+        moment it is consumed, which keeps the hash byte-exact (it still covers
+        precisely ``[0, offset)``, truncated reads included) while the read's
+        peak memory stays bounded by one line instead of by the file.
         """
         self._read_offsets[jsonl_key] = (
             consumed,
@@ -1548,11 +1553,6 @@ class DaemonHistoryReader:
             self._head_signature(jsonl, offset),
             self._boundary_signature(jsonl, offset),
         )
-        hasher = base_hasher.copy() if base_hasher is not None else hashlib.blake2b(
-            digest_size=16
-        )
-        if new_consumed_bytes:
-            hasher.update(new_consumed_bytes)
         self._prefix_hashers[jsonl_key] = hasher
 
     def read_flow(
@@ -1833,11 +1833,31 @@ class DaemonHistoryReader:
 
             # --- Read lines ------------------------------------------------
             if can_incremental:
-                # Incremental: seek past already-consumed bytes.
+                # Incremental: seek past already-consumed bytes, then stream the
+                # appended tail LINE BY LINE and stop the moment a cap trips.
+                #
+                # WHY not ``fh.read()`` on the seeked handle: that pulls the
+                # ENTIRE appended tail into memory before a single record is
+                # built, so a step file that grew by hundreds of MB (or a first
+                # incremental read over a long-idle flow) costs O(tail) memory
+                # and O(tail) decode work even though this frame may only ship
+                # MAX_BYTES_PER_REPORT of it — and the rest is re-read from
+                # scratch next round, making a full drain quadratic in the file
+                # size.  Iterating the binary handle is bounded forward reading:
+                # the buffered reader hands over one line at a time and nothing
+                # past the truncation point is ever touched.
+                #
+                # Reading BINARY (not text) also collapses what used to be three
+                # passes over the same bytes into zero: each ``line`` is already
+                # the on-disk byte string, so its length advances the offset
+                # directly, it feeds the running prefix hash directly, and
+                # ``json.loads`` decodes it directly — no whole-buffer decode,
+                # no re-``encode`` per line.  A line that is not valid UTF-8 now
+                # fails its own ``json.loads`` (UnicodeDecodeError is a
+                # ValueError) and is skipped like any other unparseable line,
+                # instead of aborting the whole flow read at decode time.
                 try:
-                    with open(jsonl, "r", encoding="utf-8") as fh:
-                        fh.seek(prev[1])
-                        new_bytes = fh.read()
+                    fh = open(jsonl, "rb")
                 except OSError:
                     continue
                 # consumed_lines so far from prior reads.
@@ -1845,257 +1865,78 @@ class DaemonHistoryReader:
                 offset = prev[1]
                 # This delta resumes exactly where the last one stopped.
                 base_cursor[jsonl.name] = prev[0]
-                # The running full-prefix hash is extended from the bytes we just
-                # read (no extra disk read): the bytes consumed THIS round are the
-                # leading ``offset - prev_offset_start`` bytes of ``new_bytes``.
-                prev_offset_start = prev[1]
+                # The running full-prefix hash is extended from the bytes we
+                # read (no extra disk read), one consumed line at a time.
                 prev_hasher = self._prefix_hashers.get(jsonl_key)
-                new_bytes_encoded = new_bytes.encode("utf-8")
-                raw_lines = new_bytes.split("\n")
-                # The last element may be a partial line (no trailing \n).
-                # Only process elements that end with a newline — i.e. all
-                # but the last element when it is non-empty (partial).
-                if raw_lines and raw_lines[-1] != "":
-                    # Last element is a partial line — don't consume it.
-                    complete_lines = raw_lines[:-1]
-                    # Adjust the raw_lines buffer so the offset calculation
-                    # below doesn't count the partial tail.
-                else:
-                    # Last element is "" (file ends with \n) — all lines
-                    # are complete.  The trailing "" is an artifact of
-                    # split("\n") and doesn't correspond to a real line.
-                    complete_lines = raw_lines[:-1] if raw_lines else []
-                for line_text in complete_lines:
-                    consumed += 1
-                    offset += len(line_text.encode("utf-8")) + 1  # +1 for \n
-                    stripped = line_text.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        message = json.loads(stripped)
-                    except (ValueError, TypeError):
-                        continue
-                    if not isinstance(message, dict):
-                        continue
-                    # ``ordinal`` is the record's 0-based physical line position
-                    # in its step file. ``consumed`` counts every physical line
-                    # (blank lines included, so it stays a true line number), and
-                    # was just incremented for THIS line, so ``consumed - 1`` is
-                    # the 0-based index. It is the stable identity a full read of
-                    # the same file reproduces exactly (see the full-read ``_emit``
-                    # ordinal below), so an append delta and a later full snapshot
-                    # tag the same logical line with the same ordinal — the
-                    # invariant the frontend's idempotent reconcile relies on.
-                    records.append(
-                        {
-                            "step_id": step_id,
-                            "step_type": step_type,
-                            "ordinal": consumed - 1,
-                            "message": message,
-                        }
-                    )
-                    # Count the raw jsonl line bytes (a faithful proxy for the
-                    # record's wire size) toward the byte budget. Both caps are
-                    # checked AFTER appending, so the record that crosses a limit
-                    # is still emitted — the returned frame may exceed the cap by
-                    # at most one record, which is the intended small overshoot.
-                    byte_count += len(line_text.encode("utf-8"))
-                    if (
-                        len(records) >= MAX_RECORDS_PER_REPORT
-                        or byte_count >= MAX_BYTES_PER_REPORT
-                    ):
-                        truncated = True
-                        # Only advance the offset table to the truncation
-                        # point.  The caller's cursor will match consumed
-                        # and the next read continues from here.
-                        self._record_offset(
-                            jsonl_key,
-                            jsonl,
-                            consumed,
-                            offset,
-                            cur_mtime,
-                            cur_size,
-                            prev_hasher,
-                            new_bytes_encoded[: offset - prev_offset_start],
-                        )
-                        new_cursor[jsonl.name] = consumed
-                        break
-                else:
-                    # No truncation — update offset table with full state.
-                    self._record_offset(
-                        jsonl_key,
-                        jsonl,
-                        consumed,
-                        offset,
-                        cur_mtime,
-                        cur_size,
-                        prev_hasher,
-                        new_bytes_encoded[: offset - prev_offset_start],
-                    )
-                    new_cursor[jsonl.name] = consumed
-            else:
-                # Full read: first read, cursor rollback, or file replaced.
-                try:
-                    with open(jsonl, "r", encoding="utf-8") as fh:
-                        raw = fh.read()
-                except OSError:
-                    continue
-                raw_lines = raw.split("\n")
-                # ``split("\n")`` always yields a trailing element after the
-                # final byte: ``""`` when the file ends with ``\n`` (every real
-                # line is newline-terminated), or the bytes of the last line
-                # when the file has NO trailing newline.  That un-terminated
-                # tail is ambiguous: it is either
-                #   (a) a COMPLETE record written atomically without a newline
-                #       (``write_text(json.dumps(record))`` — terminal step
-                #       files, sidecars), which MUST be read; or
-                #   (b) a record caught MID-WRITE while the agent streams (a
-                #       worktree / discovery first snapshot landing on a
-                #       half-flushed line), which must be left for the next
-                #       round.
-                # The two are told apart by parseability: a complete record is
-                # valid JSON, a half-written one is truncated and is not.  The
-                # previous code unconditionally consumed the tail — for case (b)
-                # the truncated JSON failed ``json.loads`` and was dropped, yet
-                # ``consumed``/the byte offset still advanced past it, so the
-                # record was never re-read once completed (the "first assistant
-                # body empty, no further records" symptom).  Now an unparseable
-                # tail is left intact; a parseable one is still consumed.
-                if raw_lines and raw_lines[-1] == "":
-                    # File ends with a newline: the trailing "" is a split
-                    # artifact; every remaining element is a complete line.
-                    complete_lines = raw_lines[:-1]
-                    tail = None
-                else:
-                    # No trailing newline: hold the last element aside and
-                    # decide whether to consume it by parseability below.
-                    complete_lines = raw_lines[:-1] if raw_lines else []
-                    tail = raw_lines[-1] if raw_lines else None
-
-                consumed = 0
-                offset = 0
-                start = cursor_lines
-
-                # Detect a truncated / replaced file.  The full-read fallback is
-                # entered (among other reasons) when the file has shrunk below
-                # its recorded byte offset, which happens when a step's jsonl is
-                # rewritten in place — e.g. a FAILED step retried, replacing the
-                # old records with a fresh, shorter batch.  In that case the
-                # caller's line-count cursor refers to lines of the *old* file
-                # and is meaningless against the replacement: honouring it as
-                # ``start`` would skip every replacement line whose index is
-                # below it (old cursor 20, replacement of 5 records → all 5
-                # skipped, an empty append recorded, the cursor advanced to 5),
-                # silently dropping the retry batch from the live conversation
-                # until a separate full reload runs.  Two independent signals
-                # mark a stale cursor: (a) the file was rewritten in place — its
-                # bounded head fingerprint changed (grow case), its whole-prefix
-                # hash diverged (equal-size case), or it shrank below the size we
-                # last saw — even when the replacement is the same size as, or larger
-                # than, the old consumed byte offset (``rewritten``, computed
-                # above; a pure size/offset comparison cannot detect this and the
-                # incremental path would otherwise either record no new bytes or
-                # read only the suffix past the stale offset); and (b) the cursor
-                # points past the end of the file's current content (covers the
-                # daemon cold-start case where ``prev`` is ``None`` but the
-                # on-disk file was already replaced while the daemon was down).
-                # Either way reset ``start`` to 0 so the full replacement content
-                # is delivered from the beginning rather than skipped.
-                total_physical_lines = len(complete_lines) + (
-                    1 if tail is not None else 0
+                hasher = (
+                    prev_hasher.copy()
+                    if prev_hasher is not None
+                    else hashlib.blake2b(digest_size=16)
                 )
-                # A copy switch (this bare filename now resolves to a different
-                # physical file) makes the by-name cursor refer to the OTHER
-                # copy's line numbering, so it MUST NOT be honoured as ``start``:
-                # reset to 0 and re-emit the new copy from the beginning. The
-                # frontend reconciles by ``step_id#ordinal``, so re-emitting lines
-                # it already has is idempotent while the genuinely new later rounds
-                # (higher ordinals) finally arrive.
-                if rewritten or copy_switched or start > total_physical_lines:
-                    start = 0
-                # ``start`` is the first line index this read emits from, so it
-                # is the file's coverage lower bound — 0 whenever the cursor was
-                # discarded above, which is what tells the peer this file is
-                # re-delivered from its head rather than jumping forward.
-                base_cursor[jsonl.name] = start
-
-                def _emit(line_text: str, ordinal: int) -> bool:
-                    """Append a parsed record for *line_text*; return truncation.
-
-                    *ordinal* is the record's 0-based physical line position in
-                    its step file. A full read reproduces the SAME ordinal an
-                    append delta assigned the same logical line (both derive it
-                    from the physical line index), so the frontend can dedupe /
-                    update in place by ``step_id#ordinal`` regardless of which
-                    read path delivered the record.
-                    """
-                    nonlocal byte_count
-                    stripped = line_text.strip()
-                    if not stripped:
-                        return False
+                with fh:
                     try:
-                        message = json.loads(stripped)
-                    except (ValueError, TypeError):
-                        return False
-                    if not isinstance(message, dict):
-                        return False
-                    records.append(
-                        {
-                            "step_id": step_id,
-                            "step_type": step_type,
-                            "ordinal": ordinal,
-                            "message": message,
-                        }
-                    )
-                    # Byte budget applied alongside the record-count cap (same
-                    # after-append semantics as the incremental path): the record
-                    # that crosses either limit is emitted, then the read stops.
-                    byte_count += len(line_text.encode("utf-8"))
-                    return (
-                        len(records) >= MAX_RECORDS_PER_REPORT
-                        or byte_count >= MAX_BYTES_PER_REPORT
-                    )
-
-                for idx, line_text in enumerate(complete_lines):
-                    consumed = idx + 1
-                    # Every complete line is newline-terminated, so the on-disk
-                    # span is its UTF-8 byte length plus the one ``\n`` delimiter.
-                    offset += len(line_text.encode("utf-8")) + 1
-                    if idx < start:
-                        continue
-                    if _emit(line_text, idx):
-                        truncated = True
-                        break
-
-                if not truncated and tail is not None:
-                    # The un-terminated final line.  Consume it ONLY when it is
-                    # a parseable, complete record; an unparseable (mid-write)
-                    # tail is left untouched so the next read re-reads it once
-                    # the writer finishes the line.
-                    stripped_tail = tail.strip()
-                    parsed_tail = None
-                    if stripped_tail:
-                        try:
-                            parsed_tail = json.loads(stripped_tail)
-                        except (ValueError, TypeError):
-                            parsed_tail = None
-                    if not stripped_tail or isinstance(parsed_tail, dict):
-                        tail_idx = len(complete_lines)
-                        consumed = tail_idx + 1
-                        # No trailing newline for the tail line.
-                        offset += len(tail.encode("utf-8"))
-                        if tail_idx >= start and _emit(tail, tail_idx):
-                            truncated = True
-                    # else: leave consumed/offset at the last complete line so
-                    # the partial tail is re-read next round.
-
-                # Record a fresh bounded head fingerprint and start a fresh
-                # running full-prefix hash over the newly consumed prefix (this
-                # was a from-scratch full read, so the prior hash — if any — is
-                # discarded).  The consumed prefix is exactly ``raw[:offset]``
-                # in bytes, taken from the bytes already read (no extra disk
-                # read).  The next round can then tell an append (prefix
-                # unchanged) from another rewrite (prefix changed).
+                        fh.seek(prev[1])
+                        for line in fh:
+                            if not line.endswith(b"\n"):
+                                # Partial line (no trailing ``\n``) — the writer
+                                # is mid-flush.  Leave it entirely unconsumed so
+                                # the next round re-reads it once complete.
+                                break
+                            consumed += 1
+                            offset += len(line)
+                            hasher.update(line)
+                            body = line[:-1]
+                            stripped = body.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                message = json.loads(stripped)
+                            except (ValueError, TypeError):
+                                continue
+                            if not isinstance(message, dict):
+                                continue
+                            # ``ordinal`` is the record's 0-based physical line
+                            # position in its step file. ``consumed`` counts every
+                            # physical line (blank lines included, so it stays a
+                            # true line number), and was just incremented for THIS
+                            # line, so ``consumed - 1`` is the 0-based index. It is
+                            # the stable identity a full read of the same file
+                            # reproduces exactly (see the full-read ``_emit``
+                            # ordinal below), so an append delta and a later full
+                            # snapshot tag the same logical line with the same
+                            # ordinal — the invariant the frontend's idempotent
+                            # reconcile relies on.
+                            records.append(
+                                {
+                                    "step_id": step_id,
+                                    "step_type": step_type,
+                                    "ordinal": consumed - 1,
+                                    "message": message,
+                                }
+                            )
+                            # Count the raw jsonl line bytes (a faithful proxy for
+                            # the record's wire size) toward the byte budget. Both
+                            # caps are checked AFTER appending, so the record that
+                            # crosses a limit is still emitted — the returned frame
+                            # may exceed the cap by at most one record, which is
+                            # the intended small overshoot.
+                            byte_count += len(body)
+                            if (
+                                len(records) >= MAX_RECORDS_PER_REPORT
+                                or byte_count >= MAX_BYTES_PER_REPORT
+                            ):
+                                truncated = True
+                                break
+                    except OSError:
+                        # An I/O failure mid-stream still leaves
+                        # consumed/offset/hasher exactly describing the lines
+                        # already handed out, so commit that prefix rather than
+                        # dropping records this read already emitted.
+                        pass
+                # Both the truncated and the drained-to-EOF paths commit the SAME
+                # way: the offset table advances only to where reading actually
+                # stopped, so the caller's cursor matches ``consumed`` and the
+                # next read resumes from exactly here.
                 self._record_offset(
                     jsonl_key,
                     jsonl,
@@ -2103,8 +1944,223 @@ class DaemonHistoryReader:
                     offset,
                     cur_mtime,
                     cur_size,
-                    None,
-                    raw.encode("utf-8")[:offset],
+                    hasher,
+                )
+                new_cursor[jsonl.name] = consumed
+            else:
+                # Full read: first read, cursor rollback, or file replaced.
+                #
+                # WHY binary + two streaming passes over one handle instead of
+                # ``read().split("\n")``: the split materialises a whole second
+                # copy of the file as a ``str`` PLUS one ``str`` object per
+                # physical line, so a several-hundred-MB step file (the shape
+                # that motivated this path's rework) spikes the daemon's heap by
+                # a multiple of the file size before a single record is built —
+                # and this branch is precisely the one a first read and every
+                # post-rewrite read enter.  Pass 1 is a chunked C-level
+                # ``bytes.count(b"\n")`` that yields the same physical line total
+                # with zero per-line allocation; pass 2 iterates the rewound
+                # handle line by line and stops at the first cap, so nothing past
+                # the truncation point is decoded or parsed.  The full branch is
+                # inherently O(file) — it must walk the file to honour the
+                # cursor — but it now runs at that bound with a tiny constant and
+                # O(1) memory.
+                try:
+                    fh = open(jsonl, "rb")
+                except OSError:
+                    continue
+                with fh:
+                    # Pass 1: physical line total (only ever used to decide
+                    # whether the caller's cursor points past the end of file)
+                    # and whether the file ends with a newline.
+                    try:
+                        total_physical_lines = 0
+                        last_chunk = b""
+                        while True:
+                            chunk = fh.read(SIGNATURE_CHUNK_BYTES)
+                            if not chunk:
+                                break
+                            total_physical_lines += chunk.count(b"\n")
+                            last_chunk = chunk
+                        fh.seek(0)
+                    except OSError:
+                        continue
+                    # An un-terminated final line is a physical line too, and is
+                    # ambiguous: it is either
+                    #   (a) a COMPLETE record written atomically without a
+                    #       newline (``write_text(json.dumps(record))`` —
+                    #       terminal step files, sidecars), which MUST be read; or
+                    #   (b) a record caught MID-WRITE while the agent streams (a
+                    #       worktree / discovery first snapshot landing on a
+                    #       half-flushed line), which must be left for the next
+                    #       round.
+                    # The two are told apart by parseability below: a complete
+                    # record is valid JSON, a half-written one is truncated and
+                    # is not.  Older code unconditionally consumed the tail — for
+                    # case (b) the truncated JSON failed ``json.loads`` and was
+                    # dropped, yet ``consumed``/the byte offset still advanced
+                    # past it, so the record was never re-read once completed
+                    # (the "first assistant body empty, no further records"
+                    # symptom).  An unparseable tail is left intact; a parseable
+                    # one is still consumed.
+                    if last_chunk and not last_chunk.endswith(b"\n"):
+                        total_physical_lines += 1
+
+                    consumed = 0
+                    offset = 0
+                    start = cursor_lines
+
+                    # Detect a truncated / replaced file.  The full-read fallback
+                    # is entered (among other reasons) when the file has shrunk
+                    # below its recorded byte offset, which happens when a step's
+                    # jsonl is rewritten in place — e.g. a FAILED step retried,
+                    # replacing the old records with a fresh, shorter batch.  In
+                    # that case the caller's line-count cursor refers to lines of
+                    # the *old* file and is meaningless against the replacement:
+                    # honouring it as ``start`` would skip every replacement line
+                    # whose index is below it (old cursor 20, replacement of 5
+                    # records → all 5 skipped, an empty append recorded, the
+                    # cursor advanced to 5), silently dropping the retry batch
+                    # from the live conversation until a separate full reload
+                    # runs.  Two independent signals mark a stale cursor: (a) the
+                    # file was rewritten in place — its bounded head fingerprint
+                    # changed (grow case), its whole-prefix hash diverged
+                    # (equal-size case), or it shrank below the size we last saw —
+                    # even when the replacement is the same size as, or larger
+                    # than, the old consumed byte offset (``rewritten``, computed
+                    # above; a pure size/offset comparison cannot detect this and
+                    # the incremental path would otherwise either record no new
+                    # bytes or read only the suffix past the stale offset); and
+                    # (b) the cursor points past the end of the file's current
+                    # content (covers the daemon cold-start case where ``prev`` is
+                    # ``None`` but the on-disk file was already replaced while the
+                    # daemon was down).  Either way reset ``start`` to 0 so the
+                    # full replacement content is delivered from the beginning
+                    # rather than skipped.
+                    #
+                    # A copy switch (this bare filename now resolves to a
+                    # different physical file) makes the by-name cursor refer to
+                    # the OTHER copy's line numbering, so it MUST NOT be honoured
+                    # as ``start``: reset to 0 and re-emit the new copy from the
+                    # beginning. The frontend reconciles by ``step_id#ordinal``,
+                    # so re-emitting lines it already has is idempotent while the
+                    # genuinely new later rounds (higher ordinals) finally arrive.
+                    if rewritten or copy_switched or start > total_physical_lines:
+                        start = 0
+                    # ``start`` is the first line index this read emits from, so
+                    # it is the file's coverage lower bound — 0 whenever the
+                    # cursor was discarded above, which is what tells the peer this
+                    # file is re-delivered from its head rather than jumping
+                    # forward.
+                    base_cursor[jsonl.name] = start
+                    # A from-scratch full read, so the prior running hash (if any)
+                    # is discarded and a fresh one is accumulated line by line
+                    # over the newly consumed prefix.
+                    hasher = hashlib.blake2b(digest_size=16)
+
+                    def _emit(line_bytes: bytes, ordinal: int) -> bool:
+                        """Append a parsed record for *line_bytes*; return truncation.
+
+                        *line_bytes* is the line's raw on-disk bytes WITHOUT its
+                        newline delimiter — the same span the byte budget bills,
+                        parsed straight from bytes so the line is never decoded
+                        and re-encoded just to be measured.
+
+                        *ordinal* is the record's 0-based physical line position in
+                        its step file. A full read reproduces the SAME ordinal an
+                        append delta assigned the same logical line (both derive it
+                        from the physical line index), so the frontend can dedupe /
+                        update in place by ``step_id#ordinal`` regardless of which
+                        read path delivered the record.
+                        """
+                        nonlocal byte_count
+                        stripped = line_bytes.strip()
+                        if not stripped:
+                            return False
+                        try:
+                            message = json.loads(stripped)
+                        except (ValueError, TypeError):
+                            return False
+                        if not isinstance(message, dict):
+                            return False
+                        records.append(
+                            {
+                                "step_id": step_id,
+                                "step_type": step_type,
+                                "ordinal": ordinal,
+                                "message": message,
+                            }
+                        )
+                        # Byte budget applied alongside the record-count cap (same
+                        # after-append semantics as the incremental path): the
+                        # record that crosses either limit is emitted, then the
+                        # read stops.
+                        byte_count += len(line_bytes)
+                        return (
+                            len(records) >= MAX_RECORDS_PER_REPORT
+                            or byte_count >= MAX_BYTES_PER_REPORT
+                        )
+
+                    # Pass 2: stream the rewound handle.  Lines below ``start``
+                    # are still walked so ``offset``/``consumed``/the prefix hash
+                    # describe the file from byte 0, but they emit nothing.
+                    idx = 0
+                    tail = None
+                    try:
+                        for line in fh:
+                            if not line.endswith(b"\n"):
+                                tail = line
+                                break
+                            consumed = idx + 1
+                            offset += len(line)
+                            hasher.update(line)
+                            line_idx = idx
+                            idx += 1
+                            if line_idx < start:
+                                continue
+                            if _emit(line[:-1], line_idx):
+                                truncated = True
+                                break
+                    except OSError:
+                        tail = None
+
+                    if not truncated and tail is not None:
+                        # The un-terminated final line.  Consume it ONLY when it
+                        # is a parseable, complete record; an unparseable
+                        # (mid-write) tail is left untouched so the next read
+                        # re-reads it once the writer finishes the line.
+                        stripped_tail = tail.strip()
+                        parsed_tail = None
+                        if stripped_tail:
+                            try:
+                                parsed_tail = json.loads(stripped_tail)
+                            except (ValueError, TypeError):
+                                parsed_tail = None
+                        if not stripped_tail or isinstance(parsed_tail, dict):
+                            tail_idx = idx
+                            consumed = tail_idx + 1
+                            # No trailing newline for the tail line.
+                            offset += len(tail)
+                            hasher.update(tail)
+                            if tail_idx >= start and _emit(tail, tail_idx):
+                                truncated = True
+                        # else: leave consumed/offset at the last complete line so
+                        # the partial tail is re-read next round.
+
+                # Record a fresh bounded head fingerprint and install the running
+                # full-prefix hash accumulated above, which covers exactly the
+                # consumed prefix ``[0, offset)`` — built from the bytes already
+                # streamed, with no extra disk read.  The next round can then tell
+                # an append (prefix unchanged) from another rewrite (prefix
+                # changed).
+                self._record_offset(
+                    jsonl_key,
+                    jsonl,
+                    consumed,
+                    offset,
+                    cur_mtime,
+                    cur_size,
+                    hasher,
                 )
                 new_cursor[jsonl.name] = consumed
 
