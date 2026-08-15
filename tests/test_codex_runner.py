@@ -73,20 +73,35 @@ class TestCodexEventConverterMapping:
         assert parsed["message"]["content"][0]["text"] == "Hello world"
 
     def test_agent_message_via_item_updated(self):
-        """item.updated should also work for agent_message."""
+        """item.updated buffers agent_message text without emitting it.
+
+        A mid-stream fragment must not become an assistant event (it would be
+        recorded as if it were the complete answer), but it is still buffered
+        so the text survives if no item.completed ever arrives.
+        """
         conv = CodexEventConverter()
         event = {
             "type": "item.updated",
             "item": {
                 "type": "agent_message",
+                "id": "msg_1",
                 "text": "Streaming text...",
             },
         }
-        result = conv.convert_line(json.dumps(event))
-        assert len(result) == 1
-        parsed = json.loads(result[0])
+        assert conv.convert_line(json.dumps(event)) == []
+
+        completed = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "id": "msg_1",
+                "text": "Streaming text... done.",
+            },
+        }))
+        assert len(completed) == 1
+        parsed = json.loads(completed[0])
         assert parsed["type"] == "assistant"
-        assert parsed["message"]["content"][0]["text"] == "Streaming text..."
+        assert parsed["message"]["content"][0]["text"] == "Streaming text... done."
 
     def test_command_execution_produces_tool_use_and_result(self):
         """command_execution produces a Bash tool_use + tool_result pair."""
@@ -324,8 +339,8 @@ class TestCodexEventConverterMapping:
         """When usage is null, the result text from accumulated agent messages
         must still be present in the emitted result event."""
         conv = CodexEventConverter()
-        # Simulate prior agent_message accumulation
-        conv._agent_messages = ["Hello from the agent"]
+        # Simulate prior agent_message accumulation (keyed by item id)
+        conv._agent_messages = {"msg_1": "Hello from the agent"}
         event = {"type": "turn.completed", "data": {"usage": None}}
         result = conv.convert_line(json.dumps(event))
         assert len(result) == 1
@@ -1240,21 +1255,342 @@ class TestItemCompletedEventType:
         assert "Done via completed." in parsed["message"]["content"][0]["text"]
 
     def test_command_execution_via_item_updated(self):
-        """item.updated should also work for command_execution."""
+        """item.updated opens the chip; only the terminal event closes it.
+
+        A non-terminal event carries half-finished output, so it produces the
+        tool_use alone — the tool_result waits for item.completed.
+        """
         conv = CodexEventConverter()
         event = {
             "type": "item.updated",
             "item": {
                 "type": "command_execution",
+                "id": "cmd_1",
                 "command": "pwd",
-                "output": "/tmp",
+                "output": "/tm",
                 "exit_code": 0,
             },
         }
         result = conv.convert_line(json.dumps(event))
-        assert len(result) == 2
+        assert len(result) == 1
         tool_use = json.loads(result[0])
         assert tool_use["message"]["content"][0]["name"] == "Bash"
+
+        completed = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_1",
+                "command": "pwd",
+                "output": "/tmp",
+                "exit_code": 0,
+            },
+        }))
+        assert len(completed) == 1
+        tool_result = json.loads(completed[0])
+        assert tool_result["message"]["content"][0]["content"] == "/tmp"
+
+
+# =============================================================================
+# Item lifecycle — per-id dedup, terminal gating, in-flight closeout
+# =============================================================================
+
+def _content_blocks(lines):
+    """Flatten converter output into its message content blocks."""
+    blocks = []
+    for line in lines:
+        parsed = json.loads(line)
+        message = parsed.get("message")
+        if isinstance(message, dict):
+            blocks.extend(message.get("content", []))
+    return blocks
+
+
+def _blocks_of_type(lines, block_type):
+    return [b for b in _content_blocks(lines) if b.get("type") == block_type]
+
+
+class TestItemLifecycle:
+    """One codex item spans started/updated/completed events under one id;
+    it must yield exactly one tool_use and one tool_result."""
+
+    def test_started_updated_completed_yields_one_pair(self):
+        conv = CodexEventConverter()
+        lines = []
+        for event_type, output in (
+            ("item.started", ""),
+            ("item.updated", "partial"),
+            ("item.completed", "partial output"),
+        ):
+            lines.extend(conv.convert_line(json.dumps({
+                "type": event_type,
+                "item": {
+                    "type": "command_execution",
+                    "id": "cmd_lifecycle",
+                    "command": "make",
+                    "output": output,
+                    "exit_code": 0,
+                },
+            })))
+
+        tool_uses = _blocks_of_type(lines, "tool_use")
+        tool_results = _blocks_of_type(lines, "tool_result")
+        assert len(tool_uses) == 1
+        assert len(tool_results) == 1
+        assert tool_uses[0]["id"] == "cmd_lifecycle"
+        assert tool_results[0]["content"] == "partial output"
+
+    def test_item_started_emits_inflight_tool_use(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_started",
+                "command": "sleep 10",
+            },
+        }))
+        assert len(_blocks_of_type(lines, "tool_use")) == 1
+        assert _blocks_of_type(lines, "tool_result") == []
+
+    def test_terminal_status_on_item_updated_closes_the_pair(self):
+        """A terminal ``status`` closes the item even without item.completed."""
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.updated",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_status",
+                "command": "false",
+                "output": "boom",
+                "status": "failed",
+                "exit_code": 1,
+            },
+        }))
+        results = _blocks_of_type(lines, "tool_result")
+        assert len(results) == 1
+        assert results[0]["is_error"] is True
+
+    def test_in_progress_status_stays_open(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.updated",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_running",
+                "command": "make",
+                "output": "half",
+                "status": "in_progress",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_result") == []
+
+    def test_completed_without_started_still_emits_pair(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_only_completed",
+                "command": "ls",
+                "output": "a\nb",
+                "exit_code": 0,
+            },
+        }))
+        assert len(_blocks_of_type(lines, "tool_use")) == 1
+        assert len(_blocks_of_type(lines, "tool_result")) == 1
+
+    def test_repeated_completed_does_not_duplicate(self):
+        conv = CodexEventConverter()
+        event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_repeat",
+                "command": "ls",
+                "output": "a",
+                "exit_code": 0,
+            },
+        })
+        lines = conv.convert_line(event) + conv.convert_line(event)
+        assert len(_blocks_of_type(lines, "tool_use")) == 1
+        assert len(_blocks_of_type(lines, "tool_result")) == 1
+
+    def test_agent_message_same_id_is_not_duplicated_in_result(self):
+        conv = CodexEventConverter()
+        for event_type in ("item.updated", "item.completed"):
+            conv.convert_line(json.dumps({
+                "type": event_type,
+                "item": {
+                    "type": "agent_message",
+                    "id": "msg_dup",
+                    "text": "All done.",
+                },
+            }))
+        result = conv.convert_line(json.dumps({"type": "turn.completed", "data": {}}))
+        parsed = json.loads(result[-1])
+        assert parsed["result"].count("All done.") == 1
+
+    def test_agent_messages_join_in_arrival_order(self):
+        conv = CodexEventConverter()
+        for item_id, text in (("m1", "first"), ("m2", "second")):
+            conv.convert_line(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "id": item_id, "text": text},
+            }))
+        result = conv.convert_line(json.dumps({"type": "turn.completed", "data": {}}))
+        assert json.loads(result[-1])["result"] == "first\nsecond"
+
+    def test_reasoning_never_reaches_result_text(self):
+        conv = CodexEventConverter()
+        assert conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "reasoning",
+                "id": "think_1",
+                "text": "internal deliberation",
+            },
+        })) == []
+        result = conv.convert_line(json.dumps({"type": "turn.completed", "data": {}}))
+        parsed = json.loads(result[-1])
+        assert "internal deliberation" not in parsed["result"]
+
+    def test_turn_completed_closes_inflight_item(self):
+        conv = CodexEventConverter()
+        conv.convert_line(json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_hanging",
+                "command": "sleep 100",
+            },
+        }))
+        lines = conv.convert_line(json.dumps({"type": "turn.completed", "data": {}}))
+        results = _blocks_of_type(lines, "tool_result")
+        assert len(results) == 1
+        assert results[0]["tool_use_id"] == "cmd_hanging"
+        assert "interrupted" in results[0]["content"]
+        # The synthetic close must precede the terminal result event.
+        assert json.loads(lines[-1])["type"] == "result"
+
+    def test_turn_failed_closes_inflight_item(self):
+        conv = CodexEventConverter()
+        conv.convert_line(json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_hanging",
+                "command": "sleep 100",
+            },
+        }))
+        lines = conv.convert_line(json.dumps({
+            "type": "turn.failed",
+            "data": {"error": "boom"},
+        }))
+        results = _blocks_of_type(lines, "tool_result")
+        assert len(results) == 1
+        assert results[0]["tool_use_id"] == "cmd_hanging"
+        assert json.loads(lines[-1])["subtype"] == "error"
+
+    def test_completed_item_is_not_closed_again(self):
+        conv = CodexEventConverter()
+        conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_done",
+                "command": "ls",
+                "output": "a",
+                "exit_code": 0,
+            },
+        }))
+        lines = conv.convert_line(json.dumps({"type": "turn.completed", "data": {}}))
+        assert _blocks_of_type(lines, "tool_result") == []
+
+    def test_finalize_closes_inflight_item(self):
+        conv = CodexEventConverter()
+        conv.convert_line(json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_dead",
+                "command": "sleep 100",
+            },
+        }))
+        lines = conv.finalize()
+        results = _blocks_of_type(lines, "tool_result")
+        assert len(results) == 1
+        assert results[0]["tool_use_id"] == "cmd_dead"
+        assert json.loads(lines[-1])["type"] == "result"
+        # Still idempotent — a second finalize adds nothing.
+        assert conv.finalize() == []
+
+    def test_state_is_reset_between_turns(self):
+        """The same item id in a following turn opens a fresh chip."""
+        conv = CodexEventConverter()
+        item_event = json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_reused",
+                "command": "ls",
+                "output": "a",
+                "exit_code": 0,
+            },
+        })
+        turn_event = json.dumps({"type": "turn.completed", "data": {}})
+        conv.convert_line(item_event)
+        conv.convert_line(turn_event)
+
+        second = conv.convert_line(item_event)
+        assert len(_blocks_of_type(second, "tool_use")) == 1
+        assert len(_blocks_of_type(second, "tool_result")) == 1
+        # And the previous turn's text does not leak into the next result.
+        conv._agent_messages["m"] = "second turn"
+        assert json.loads(conv.convert_line(turn_event)[-1])["result"] == "second turn"
+
+    def test_items_without_id_do_not_collide(self):
+        """Two id-less items must get distinct synthetic ids (two chips)."""
+        conv = CodexEventConverter()
+        lines = []
+        for command in ("ls", "pwd"):
+            lines.extend(conv.convert_line(json.dumps({
+                "type": "item.completed",
+                "item": {
+                    "type": "command_execution",
+                    "command": command,
+                    "output": "out",
+                    "exit_code": 0,
+                },
+            })))
+        tool_uses = _blocks_of_type(lines, "tool_use")
+        assert len(tool_uses) == 2
+        assert tool_uses[0]["id"] != tool_uses[1]["id"]
+
+    def test_resolve_item_id_is_stable_for_the_same_item(self):
+        conv = CodexEventConverter()
+        item = {"type": "command_execution", "command": "ls"}
+        first = conv._resolve_item_id(item)
+        assert conv._resolve_item_id(item) == first
+        assert conv._resolve_item_id(item) == first
+
+    def test_resolve_item_id_tolerates_non_dict_item(self):
+        conv = CodexEventConverter()
+        assert isinstance(conv._resolve_item_id("not-a-dict"), str)
+        assert isinstance(conv._resolve_item_id(None), str)
+
+    def test_is_terminal_item_tolerates_bad_types(self):
+        conv = CodexEventConverter()
+        assert conv._is_terminal_item("item.updated", None) is False
+        assert conv._is_terminal_item("item.updated", {"status": 42}) is False
+        assert conv._is_terminal_item("item.completed", "junk") is True
+
+    def test_non_dict_item_produces_no_output(self):
+        conv = CodexEventConverter()
+        assert conv.convert_line(json.dumps({
+            "type": "item.started",
+            "item": "unexpected string",
+        })) == []
 
 
 # =============================================================================
