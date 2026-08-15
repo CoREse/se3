@@ -1844,18 +1844,22 @@ def test_read_flow_truncation_offset_table_consistency(tmp_path, monkeypatch):
 
 def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
     """When the file has not changed since the last read, the idle re-read
-    delivers no records and reads at most the bounded boundary-fingerprint
-    window — never the whole file.
+    delivers no records and settles at a bounded per-poll cost — never the whole
+    file, and never zero.
 
-    The reader can NOT skip the file with a zero-byte ``stat``-only fast path:
-    under a coarse-mtime filesystem (e.g. tmpfs / overlayfs, whose timestamps
-    only advance every jiffy) an in-place rewrite of the *same byte size* that
-    lands within the same mtime tick is indistinguishable from "untouched" by
-    ``stat`` alone.  Trusting ``stat`` there silently drops the rewrite batch
-    (issue #209's equal-size retry-rewrite regression).  The reader therefore
-    always confirms the consumed boundary via the cheap (≤
-    ``BOUNDARY_SIGNATURE_BYTES``) fingerprint, which is what keeps the idle
-    re-read off the full-file path while staying rewrite-safe."""
+    Two constraints meet here. The reader can NOT skip the file with a zero-byte
+    ``stat``-only fast path: under a coarse-mtime filesystem (e.g. tmpfs /
+    overlayfs, whose timestamps only advance every jiffy) an in-place rewrite of
+    the *same byte size* that lands within the same mtime tick is
+    indistinguishable from "untouched" by ``stat`` alone.  Trusting ``stat``
+    there silently drops the rewrite batch (issue #209's equal-size
+    retry-rewrite regression).  Nor may it re-hash the whole consumed prefix on
+    every poll: a flow's every step file sits in exactly this idle state for the
+    whole remaining drain of the others, which is what turned a long drain into
+    hundreds of GB of reads (issue #287).  So a settled poll re-reads the bounded
+    head and boundary windows (≤ ``BOUNDARY_SIGNATURE_BYTES`` each) and reuses
+    the cached prefix digest — bounded, rewrite-safe, and independent of file
+    size."""
     import builtins
     from tianluo.daemon import history as history_mod
 
@@ -1864,25 +1868,38 @@ def test_read_flow_incremental_no_read_when_no_new_bytes(tmp_path, monkeypatch):
 
     reader = _make_reader(tmp_path)
     jsonl = tmp_path / "tianluo" / "history" / "f1" / "01_analyze.jsonl"
-    _write_jsonl(jsonl, [_msg("user", "q1")])
+    # Large enough that a whole-prefix re-hash is unmistakably distinguishable
+    # from the bounded windows.
+    _write_jsonl(jsonl, [_msg("user", f"q{i}" + "x" * 200) for i in range(40)])
 
     first = reader.read_flow("f1")
     full_bytes = get_bytes()
     assert full_bytes > 0
 
-    # Read again with same cursor — no new records, and at most the small
-    # bounded boundary window is read (NOT the whole file again).
+    # The first idle poll faces a cold verifier (a full read installs the
+    # consumed-side hash but no disk-side cache), so it re-anchors by hashing the
+    # prefix once. From the second idle poll on the file is settled: no fresh
+    # span exists, and the cost must stay at the bounded windows however long the
+    # poll loop runs.
     second = reader.read_flow("f1", cursor=first.cursor)
-    delta_bytes = get_bytes()
     assert len(second.records) == 0
-    assert delta_bytes <= history_mod.BOUNDARY_SIGNATURE_BYTES, (
-        f"Idle re-read must stay within the bounded boundary window "
-        f"(≤{history_mod.BOUNDARY_SIGNATURE_BYTES}), got {delta_bytes}"
-    )
-    assert delta_bytes < full_bytes, (
-        f"Idle re-read must not re-read the whole file: "
-        f"delta={delta_bytes} full={full_bytes}"
-    )
+    get_bytes()
+
+    bound = 3 * history_mod.BOUNDARY_SIGNATURE_BYTES
+    for poll in range(5):
+        settled = reader.read_flow("f1", cursor=second.cursor)
+        delta_bytes = get_bytes()
+        assert len(settled.records) == 0
+        assert delta_bytes <= bound, (
+            f"Idle poll {poll} must stay within the bounded windows "
+            f"(≤{bound}), got {delta_bytes} — the per-poll whole-prefix "
+            f"re-hash of a {full_bytes}-byte file is back"
+        )
+        assert delta_bytes > 0, (
+            "Idle poll must still confirm the content on disk: a zero-read "
+            "stat-only fast path cannot see an equal-size, same-mtime-tick "
+            "in-place rewrite (issue #209)"
+        )
 
 
 def test_read_flow_incremental_multi_step_deltas(tmp_path):

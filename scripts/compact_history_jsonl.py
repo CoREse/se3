@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, List, Optional, Tuple
 
 _CHUNK_BYTES = 1024 * 1024
-_TMP_SUFFIX = ".compact-tmp"
+_TMP_PREFIX = ".compact-tmp-"
 
 
 def _project_root() -> Path:
@@ -253,6 +253,31 @@ def _stream(path: Path, writer: Optional[BinaryIO], report: FileReport) -> None:
                 report.failed_lines += 1
 
 
+def _tmp_path(path: Path) -> Path:
+    """Scratch path for *path*'s rewrite, named so nothing reads it as history.
+
+    INVARIANT: the temp file must be invisible to every name-based history
+    stream discovery -- the daemon reader's ``_iter_history_jsonl``
+    (``src/tianluo/daemon/history.py``) globs ``*.jsonl`` *and*
+    ``*.jsonl.from-*``, and so does :func:`_step_files` here. Appending a
+    suffix to the source name is not enough: a sidecar's temp would still carry
+    the ``.jsonl.from-`` substring, so a daemon running during the rewrite
+    window would deliver the temp as an *extra* step stream (a phantom
+    duplicate step in the WebUI, cached server-side under a step_id that stops
+    existing the moment ``os.replace`` lands), and a temp orphaned by a killed
+    run would be treated as a real target -- scanned, rewritten and counted --
+    on the next pass.
+
+    Percent-escaping every ``.`` leaves no ``.jsonl`` anywhere in the name while
+    keeping the mapping injective, so two source files in one directory can
+    never map onto the same temp, and deterministic, so a re-run reuses an
+    orphan instead of accumulating a new one. It stays a sibling of the source
+    because ``os.replace`` is only atomic within a single filesystem.
+    """
+    escaped = path.name.replace("%", "%25").replace(".", "%2E")
+    return path.with_name(_TMP_PREFIX + escaped)
+
+
 def process_file(path: Path, apply: bool) -> FileReport:
     """Scan (and with *apply*, rewrite) one history jsonl file."""
     report = FileReport(path=path)
@@ -273,7 +298,7 @@ def process_file(path: Path, apply: bool) -> FileReport:
             report.error = "read failed: %s" % exc
         return report
 
-    tmp_path = path.with_name(path.name + _TMP_SUFFIX)
+    tmp_path = _tmp_path(path)
     try:
         with open(tmp_path, "wb") as writer:
             _stream(path, writer, report)
@@ -330,15 +355,37 @@ def _unlink(path: Path) -> None:
         pass
 
 
+def _step_files(directory: Path) -> List[Path]:
+    """Physical history streams inside one directory, in reader order.
+
+    INVARIANT: this target set must match the daemon reader's
+    ``_iter_history_jsonl`` (``src/tianluo/daemon/history.py``). The reader
+    delivers a step's primary ``*.jsonl`` *and* its ``*.jsonl.from-<branch>``
+    sidecars -- the shape ``luo merge``'s runtime sync writes when a --worktree
+    flow's per-step history collides with the main project on merge-back -- as
+    distinct streams. A plain ``*.jsonl`` glob misses the sidecars, so an
+    oversized record parked in one would be invisible to the report and left on
+    disk by ``--apply``, i.e. exactly the stored-size cost this backfill exists
+    to remove. Sorting by name keeps a step's primary file ahead of its
+    sidecars and orders steps by their ``NN_`` sequence prefix.
+    """
+    if not directory.is_dir():
+        return []
+    files = set(directory.glob("*.jsonl"))
+    files.update(directory.glob("*.jsonl.from-*"))
+    return sorted(files, key=lambda p: p.name)
+
+
 def iter_targets(history_dir: Path, flow_id: Optional[str]) -> List[Path]:
     """History step files to consider, in a stable order."""
     if flow_id:
-        flow_dir = history_dir / flow_id
-        if not flow_dir.is_dir():
-            return []
-        return sorted(flow_dir.glob("*.jsonl"))
-    targets = sorted(history_dir.glob("*/*.jsonl"))
-    targets.extend(sorted(history_dir.glob("*.jsonl")))
+        return _step_files(history_dir / flow_id)
+    if not history_dir.is_dir():
+        return []
+    targets: List[Path] = []
+    for flow_dir in sorted(p for p in history_dir.iterdir() if p.is_dir()):
+        targets.extend(_step_files(flow_dir))
+    targets.extend(_step_files(history_dir))
     return targets
 
 

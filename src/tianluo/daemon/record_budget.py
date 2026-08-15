@@ -266,6 +266,60 @@ def _fold_marker(kinds: Sequence[Tuple[Optional[str], Optional[str]]]) -> Dict[s
     }
 
 
+def _fold_runs(
+    raw_json: Sequence[Any], sizes: Sequence[int]
+) -> Tuple[List[Any], List[int], int]:
+    """Fold telemetry runs, keeping the pre-measured size of every event.
+
+    WHY sizes are threaded through instead of re-measured: a run is only folded
+    when the marker is strictly cheaper than the run it replaces. A marker costs
+    ~106 B, while a bare ``thinking_tokens`` event can be as small as 74 B, so a
+    run of one such event would *grow* the array by ~32 B — and a record whose
+    telemetry is interleaved one-by-one with tool events is all runs of one.
+    Folding it there would push the record further from the 1 MB budget it is
+    supposed to reach. Deciding per run needs each run's serialised cost, and
+    the caller already has every event's size for the water level, so the two
+    passes share one measurement rather than serialising the record twice.
+    """
+    folded: List[Any] = []
+    folded_sizes: List[int] = []
+    run_kinds: List[Tuple[Optional[str], Optional[str]]] = []
+    run_events: List[Any] = []
+    run_sizes: List[int] = []
+    folded_count = 0
+
+    def flush() -> None:
+        nonlocal folded_count
+        if not run_events:
+            return
+        marker = _fold_marker(run_kinds)
+        marker_size = event_size(marker)
+        # ", " separators between run members disappear with the run itself.
+        run_cost = sum(run_sizes) + (len(run_sizes) - 1) * 2
+        if marker_size < run_cost:
+            folded.append(marker)
+            folded_sizes.append(marker_size)
+            folded_count += len(run_events)
+        else:
+            folded.extend(run_events)
+            folded_sizes.extend(run_sizes)
+        run_kinds.clear()
+        run_events.clear()
+        run_sizes.clear()
+
+    for event, size in zip(raw_json, sizes):
+        if is_foldable_event(event):
+            run_kinds.append(_event_kind(event))
+            run_events.append(event)
+            run_sizes.append(size)
+            continue
+        flush()
+        folded.append(event)
+        folded_sizes.append(size)
+    flush()
+    return folded, folded_sizes, folded_count
+
+
 def fold_telemetry_events(raw_json: Sequence[Any]) -> Tuple[List[Any], int]:
     """Collapse consecutive whitelisted telemetry runs into count markers.
 
@@ -273,27 +327,11 @@ def fold_telemetry_events(raw_json: Sequence[Any]) -> Tuple[List[Any], int]:
     Folding acts on *runs*, so it is applied evenly across the whole record and
     never favours the head over the tail: a run that sits between two tool calls
     is replaced in place by one marker, leaving the surrounding events — and
-    their relative order — untouched.
+    their relative order — untouched. A run whose marker would not be smaller
+    than the run itself is left alone (see :func:`_fold_runs`).
     """
-    folded: List[Any] = []
-    run: List[Tuple[Optional[str], Optional[str]]] = []
-    folded_count = 0
-
-    def flush() -> None:
-        nonlocal folded_count
-        if not run:
-            return
-        folded.append(_fold_marker(run))
-        folded_count += len(run)
-        run.clear()
-
-    for event in raw_json:
-        if is_foldable_event(event):
-            run.append(_event_kind(event))
-            continue
-        flush()
-        folded.append(event)
-    flush()
+    sizes = [event_size(event) for event in raw_json]
+    folded, _, folded_count = _fold_runs(raw_json, sizes)
     return folded, folded_count
 
 
@@ -441,20 +479,22 @@ def compact_record(
     if not isinstance(raw_json, list) or not raw_json:
         return message, stats
 
+    sizes = [event_size(event) for event in raw_json]
+    # Brackets plus ", " between elements — the array's own structural cost.
+    original_raw_json_bytes = sum(sizes) + 2 + max(0, len(raw_json) - 1) * 2
+
     # WHY: folding is skipped below the record budget because it cannot be
     # needed there — a raw_json array nested inside a sub-budget record is
     # itself under budget, so only the per-event cap can bite, and that is
     # handled by the water level alone. Skipping keeps records in the
     # 64 KB–1 MB band byte-identical to what the step wrote.
     if original > MAX_RECORD_RAW_JSON_BYTES:
-        events, folded_count = fold_telemetry_events(raw_json)
+        events, sizes, folded_count = _fold_runs(raw_json, sizes)
     else:
         events, folded_count = list(raw_json), 0
     stats.folded_events = folded_count
 
-    sizes = [event_size(event) for event in events]
     immune = [is_immune_event(event) for event in events]
-    # Brackets plus ", " between elements — the array's own structural cost.
     overhead = 2 + max(0, len(events) - 1) * 2
     immune_total = sum(size for size, is_im in zip(sizes, immune) if is_im)
     budget = MAX_RECORD_RAW_JSON_BYTES - overhead - immune_total
@@ -483,13 +523,28 @@ def compact_record(
         # floor case — thousands of events whose strings are all too short to be
         # worth cutting — where the honest answer is to keep every event and
         # report the overshoot rather than start deleting events to hit a number.
-        stats.raw_json_bytes = sum(sizes) + overhead
+        stats.raw_json_bytes = original_raw_json_bytes
         stats.overflow = stats.raw_json_bytes > MAX_RECORD_RAW_JSON_BYTES
+        return message, stats
+
+    raw_json_bytes = _byte_len(_dumps(compacted_events))
+    if raw_json_bytes >= original_raw_json_bytes:
+        # INVARIANT: a degradation pass may never move a record *away* from the
+        # budget. Marker and truncation-marker bytes are not free, so a shape
+        # they cannot pay for (one-event telemetry runs, an event a hair over
+        # the level) can come out larger; when it does, the honest product is
+        # the record as written. This mirrors the same no-size-gain guard the
+        # offline backfill applies, which is what keeps the online-degraded and
+        # the stored shape identical instead of letting them diverge.
+        stats.folded_events = 0
+        stats.shrunk_events = 0
+        stats.dropped_bytes = 0
+        stats.raw_json_bytes = original_raw_json_bytes
+        stats.overflow = original_raw_json_bytes > MAX_RECORD_RAW_JSON_BYTES
         return message, stats
 
     compacted = dict(message)
     compacted["raw_json"] = compacted_events
-    raw_json_bytes = _byte_len(_dumps(compacted_events))
     stats.compacted = True
     stats.raw_json_bytes = raw_json_bytes
     stats.compacted_bytes = record_size(compacted)

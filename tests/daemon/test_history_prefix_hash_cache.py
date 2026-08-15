@@ -75,15 +75,29 @@ def _keys(records):
 
 @pytest.fixture()
 def hash_io(monkeypatch):
-    """Record every prefix-verification disk read (the ``_hash_span`` seam)."""
+    """Record every prefix-verification disk read.
+
+    Both seams are billed: ``_hash_span`` (the span reads whose cost tracks the
+    prefix size) and ``_window_signatures`` (the constant-cost head/boundary
+    windows a no-fresh-span round re-checks). ``bytes`` is the span total —
+    what the quadratic assertions are about — while ``total_bytes`` adds the
+    windows, so no verification read escapes the cost budget.
+    """
     calls = []
+    window_calls = []
     real = history_mod._hash_span
+    real_windows = history_mod._window_signatures
 
     def spying(path, start, end, hasher):
         calls.append((str(path), start, end))
         return real(path, start, end, hasher)
 
+    def spying_windows(path, offset):
+        window_calls.append((str(path), offset))
+        return real_windows(path, offset)
+
     monkeypatch.setattr(history_mod, "_hash_span", spying)
+    monkeypatch.setattr(history_mod, "_window_signatures", spying_windows)
 
     class _Spy:
         @property
@@ -91,16 +105,40 @@ def hash_io(monkeypatch):
             return list(calls)
 
         @property
+        def window_calls(self):
+            return list(window_calls)
+
+        @property
         def bytes(self):
             return sum(end - start for _p, start, end in calls)
+
+        @property
+        def window_bytes(self):
+            return sum(
+                2 * min(offset, history_mod.HEAD_SIGNATURE_BYTES)
+                for _p, offset in window_calls
+            )
+
+        @property
+        def total_bytes(self):
+            return self.bytes + self.window_bytes
 
         @property
         def full_offsets(self):
             """Offsets at which a from-byte-0 re-hash ran."""
             return [end for _p, start, end in calls if start == 0]
 
+        def full_offsets_for(self, path):
+            return [
+                end for p, start, end in calls if start == 0 and p == str(path)
+            ]
+
+        def bytes_for(self, path):
+            return sum(end - start for p, start, end in calls if p == str(path))
+
         def reset(self):
             calls.clear()
+            window_calls.clear()
 
     return _Spy()
 
@@ -115,8 +153,31 @@ def _read_all(reader, flow_id, cursor=None, project_root=None):
 # --------------------------------------------------------------------------
 
 
+def _write_step_file(flow_dir, name, records, payload=4096):
+    jsonl = flow_dir / name
+    with jsonl.open("wb") as fh:
+        for i in range(records):
+            fh.write(_line(f"{name[:2]}{i:06d}", payload=payload))
+    return jsonl
+
+
+def _drain(reader, flow_id, limit=4000):
+    """Run ``read_flow`` until a frame is no longer truncated."""
+    cursor = None
+    rounds = 0
+    records = []
+    while True:
+        frame = reader.read_flow(flow_id, cursor=cursor)
+        records.extend(frame.records)
+        cursor = frame.cursor
+        rounds += 1
+        if not frame.truncated:
+            return rounds, records
+        assert rounds < limit, "drain did not terminate"
+
+
 def test_long_drain_verification_io_stays_linear(tmp_path, monkeypatch, hash_io):
-    """A ~500-round drain verifies with ~3n of disk reads, not ~n·rounds/2.
+    """A many-hundred-round multi-file drain verifies with ~3n, not ~n·rounds/2.
 
     The byte budget is shrunk so a small fixture still produces the many-hundred
     -round drain shape a multi-hundred-MB step file has in production — that
@@ -124,43 +185,91 @@ def test_long_drain_verification_io_stays_linear(tmp_path, monkeypatch, hash_io)
     quadratic term. With the verifier, each round re-reads only the span the
     previous round consumed (~n in total) and the periodic from-scratch re-hashes
     follow a doubling schedule (~2n in total).
+
+    The flow deliberately holds TWO step files. ``read_flow`` runs the rewrite
+    check for EVERY step file of the flow before it decides that file has no new
+    bytes, so once ``01_discovery`` has drained it spends the entire remaining
+    drain of ``06_implement`` in the no-fresh-span state. A fixture with a single
+    file cannot observe that term at all — and it is the DOMINANT one: on the
+    real 50-file flow of issue #287 the already-drained files turned a 490-round
+    drain into 215 GB of verification reads (255x the flow's own size).
     """
     monkeypatch.setattr(history_mod, "MAX_BYTES_PER_REPORT", 4096)
 
     flow_dir = _flow_dir(tmp_path, "big")
-    jsonl = flow_dir / "06_implement.jsonl"
-    with jsonl.open("wb") as fh:
-        for i in range(500):
-            fh.write(_line(f"{i:06d}", payload=4096))
-    size = jsonl.stat().st_size
+    first = _write_step_file(flow_dir, "01_discovery.jsonl", 250)
+    second = _write_step_file(flow_dir, "06_implement.jsonl", 250)
+    size = first.stat().st_size + second.stat().st_size
 
     reader = _make_reader(tmp_path)
     hash_io.reset()
 
-    cursor = None
-    rounds = 0
-    records = []
-    while True:
-        frame = _read_all(reader, "big", cursor=cursor)
-        records.extend(frame.records)
-        cursor = frame.cursor
-        rounds += 1
-        if not frame.truncated:
-            break
-        assert rounds < 2000, "drain did not terminate"
+    rounds, records = _drain(reader, "big")
 
     assert rounds > 400, "fixture must reproduce the many-round drain shape"
     assert len(records) == 500
 
-    # What the per-round whole-prefix re-hash would have cost: the sum of the
-    # consumed offsets, i.e. ~size·rounds/2.
+    # What the per-round whole-prefix re-hash would have cost: every file's
+    # consumed offset, every round — i.e. ~size·rounds/2 overall.
     quadratic = size * rounds / 2
-    assert hash_io.bytes <= 3.5 * size, (
-        f"{rounds}-round drain verified with {hash_io.bytes} bytes over a "
-        f"{size}-byte file (a per-round whole-prefix re-hash would spend "
-        f"~{int(quadratic)})"
+    assert hash_io.total_bytes <= 3.5 * size, (
+        f"{rounds}-round drain verified with {hash_io.total_bytes} bytes "
+        f"({hash_io.bytes} span + {hash_io.window_bytes} window) over "
+        f"{size} bytes of history (a per-round whole-prefix re-hash would "
+        f"spend ~{int(quadratic)})"
     )
-    assert hash_io.bytes < quadratic / 10
+    assert hash_io.total_bytes < quadratic / 10
+
+    # The already-drained file is the one the defect billed for: it must not
+    # cost more than its own re-verification schedule allows, however many
+    # rounds it spends idle afterwards.
+    assert hash_io.bytes_for(first) <= 3.5 * first.stat().st_size
+
+
+def test_idle_file_is_not_rehashed_once_more_files_are_draining(
+    tmp_path, monkeypatch, hash_io
+):
+    """A drained step file costs O(1) per round, not a whole re-hash per round.
+
+    This pins the exact shape of issue #287's remaining quadratic: the rewrite
+    check runs for every step file before the "no new bytes" short-circuit, so a
+    file that finished draining early is re-verified on every one of the hundreds
+    of rounds the NEXT file still needs.
+    """
+    monkeypatch.setattr(history_mod, "MAX_BYTES_PER_REPORT", 4096)
+
+    flow_dir = _flow_dir(tmp_path, "big")
+    first = _write_step_file(flow_dir, "01_discovery.jsonl", 120)
+    second = _write_step_file(flow_dir, "06_implement.jsonl", 300)
+
+    reader = _make_reader(tmp_path)
+
+    # Drain the first file, then measure only what the rest of the drain spends.
+    cursor = None
+    while True:
+        frame = reader.read_flow("big", cursor=cursor)
+        cursor = frame.cursor
+        if cursor.get("06_implement.jsonl", 0) > 0:
+            break
+    hash_io.reset()
+
+    rounds = 0
+    while frame.truncated:
+        frame = reader.read_flow("big", cursor=cursor)
+        cursor = frame.cursor
+        rounds += 1
+        assert rounds < 4000, "drain did not terminate"
+
+    assert rounds > 100, "fixture must keep the drained file idle for many rounds"
+    idle_cost = hash_io.bytes_for(first)
+    assert idle_cost == 0, (
+        f"the drained file was re-hashed for {idle_cost} bytes over {rounds} "
+        f"idle rounds ({first.stat().st_size} bytes on disk) — the whole-prefix "
+        "re-hash on a no-fresh-span round is back"
+    )
+    # It is still checked every round, just at a bounded constant cost.
+    per_file_windows = [p for p, _o in hash_io.window_calls if p == str(first)]
+    assert len(per_file_windows) >= rounds - 1
 
 
 def test_full_reverifications_follow_a_doubling_schedule(tmp_path, monkeypatch, hash_io):
@@ -169,35 +278,33 @@ def test_full_reverifications_follow_a_doubling_schedule(tmp_path, monkeypatch, 
     This is what bounds BOTH sides of the trade: the whole prefix is still
     re-verified periodically (so an in-place change to an old region cannot hide
     forever), while the geometric spacing keeps their total cost at ~2n instead
-    of one whole prefix per round.
+    of one whole prefix per round. Asserted per file over a two-file flow, so an
+    already-drained file's idle rounds are inside the measured window too.
     """
     monkeypatch.setattr(history_mod, "MAX_BYTES_PER_REPORT", 4096)
 
     flow_dir = _flow_dir(tmp_path, "big")
-    jsonl = flow_dir / "06_implement.jsonl"
-    with jsonl.open("wb") as fh:
-        for i in range(300):
-            fh.write(_line(f"{i:06d}", payload=4096))
+    first = _write_step_file(flow_dir, "01_discovery.jsonl", 150)
+    second = _write_step_file(flow_dir, "06_implement.jsonl", 150)
 
     reader = _make_reader(tmp_path)
     hash_io.reset()
 
-    cursor = None
-    for _ in range(1000):
-        frame = _read_all(reader, "big", cursor=cursor)
-        cursor = frame.cursor
-        if not frame.truncated:
-            break
+    _drain(reader, "big")
 
-    fulls = hash_io.full_offsets
-    assert len(fulls) >= 3, "the whole prefix must still be re-verified regularly"
-    for previous, current in zip(fulls, fulls[1:]):
-        assert current >= 2 * previous, (
-            f"full re-verification at offset {current} followed one at {previous} "
-            "— the doubling schedule that bounds their total cost is broken"
+    for jsonl in (first, second):
+        fulls = hash_io.full_offsets_for(jsonl)
+        assert len(fulls) >= 3, (
+            f"{jsonl.name}: the whole prefix must still be re-verified regularly"
         )
-    # Geometric spacing means logarithmically many of them, not one per round.
-    assert len(fulls) < 30
+        for previous, current in zip(fulls, fulls[1:]):
+            assert current >= 2 * previous, (
+                f"{jsonl.name}: full re-verification at offset {current} followed "
+                f"one at {previous} — the doubling schedule that bounds their "
+                "total cost is broken"
+            )
+        # Geometric spacing means logarithmically many of them, not one per round.
+        assert len(fulls) < 30
 
 
 # --------------------------------------------------------------------------
@@ -331,16 +438,17 @@ def test_middle_of_prefix_rewrite_in_an_old_region_is_caught_by_the_doubling(tmp
     assert frame.records[0]["message"]["content"].startswith("Q0")
 
 
-def test_idle_file_falls_back_to_whole_prefix_hashing(tmp_path, hash_io):
-    """Polling a file that stopped growing re-hashes the whole prefix again.
+def test_idle_file_is_verified_by_bounded_windows(tmp_path, hash_io):
+    """Polling a settled file costs two bounded windows, and still catches a retry.
 
     An idle file is where the #209 equal-size, same-mtime-tick retry hides:
     neither its size nor its stat moves, and it never appends a fresh span for a
     cached round to re-read. Verification lags consumption by one round, so the
     first idle poll still re-reads the span the last consuming round took; from
-    the second idle poll on, the verified offset has caught up and every poll
-    re-hashes from byte 0 — i.e. an idle file is verified exactly as strongly as
-    it was before the cache existed.
+    the second poll on there is no fresh span at all, and re-hashing the whole
+    prefix there is what pinned the daemon (#287). Instead the head and boundary
+    windows are re-read at a fixed cost — which is exactly what a retry moves,
+    since it re-runs the step from record 0.
     """
     jsonl = _flow_dir(tmp_path, "f1") / "01_discovery.jsonl"
     reader = _make_reader(tmp_path)
@@ -349,17 +457,22 @@ def test_idle_file_falls_back_to_whole_prefix_hashing(tmp_path, hash_io):
     hash_io.reset()
     frame = _read_all(reader, "f1", cursor=frame.cursor)  # first idle poll
     assert hash_io.calls and not hash_io.full_offsets
-    hash_io.reset()
-    frame = _read_all(reader, "f1", cursor=frame.cursor)  # second idle poll
-    assert hash_io.full_offsets, "a settled file must be re-hashed in full"
+    for _ in range(5):
+        hash_io.reset()
+        frame = _read_all(reader, "f1", cursor=frame.cursor)
+        assert hash_io.bytes == 0, "a settled file must not be re-hashed"
+        assert hash_io.window_calls, "…but it must still be checked"
+        assert hash_io.window_bytes <= 4 * history_mod.HEAD_SIGNATURE_BYTES
 
-    # An equal-size in-place mutation of an OLD record is therefore caught on the
-    # very next poll, with no growth to trigger a doubling.
+    # An equal-size in-place retry — same size, same line count, rewritten from
+    # the first record — is therefore still caught on the very next poll, with no
+    # growth to trigger a doubling.
     original = jsonl.read_bytes()
-    jsonl.write_bytes(original.replace(b"a3", b"Z3"))
+    jsonl.write_bytes(original.replace(b"a0", b"Z0", 1))
     after = _read_all(reader, "f1", cursor=frame.cursor)
     assert after.cursor_base["01_discovery.jsonl"] == 0
-    assert any(r["message"]["content"].startswith("Z3") for r in after.records)
+    assert any(r["message"]["content"].startswith("Z0") for r in after.records)
+    assert str(jsonl) not in reader._prefix_verifiers
 
 
 # --------------------------------------------------------------------------

@@ -15,6 +15,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 
 import pytest
@@ -137,6 +138,11 @@ def _step_file(history_dir: Path) -> Path:
     return next(history_dir.glob("*/*.jsonl"))
 
 
+def _temp_files(history_dir: Path) -> list:
+    """Every scratch file the script could have left behind, by its prefix."""
+    return sorted(history_dir.glob("**/%s*" % compact_mod._TMP_PREFIX))
+
+
 # --------------------------------------------------------------------------
 # dry-run is the default and writes nothing
 # --------------------------------------------------------------------------
@@ -151,7 +157,7 @@ def test_no_args_is_dry_run_and_writes_nothing(history: Path) -> None:
 
     assert step.read_bytes() == before
     assert step.stat().st_mtime_ns == before_mtime
-    assert list(history.glob("*/*.compact-tmp")) == []
+    assert _temp_files(history) == []
 
 
 def test_dry_run_reports_accurate_statistics(history: Path) -> None:
@@ -298,6 +304,95 @@ def test_flow_id_restricts_the_pass(history: Path) -> None:
     assert _step_file(history).stat().st_size < len(before) * 2
 
 
+def test_merge_back_sidecars_are_targets(history: Path) -> None:
+    """``*.jsonl.from-<branch>`` sidecars are streams the reader delivers.
+
+    ``luo merge``'s runtime sync parks a colliding --worktree step's history in
+    a sidecar next to the primary file, and the daemon reader
+    (``_iter_history_jsonl``) reads both. A backfill that globbed only
+    ``*.jsonl`` would report "0 lines over budget" for an oversized record
+    living in a sidecar and leave it on disk.
+    """
+    flow_id = "20260706-013803_96453dd6"
+    flow = history / flow_id
+    sidecar = flow / "01_discovery_abcd1234.jsonl.from-impl-x"
+    sidecar.write_text(_dump(_oversized_record()) + "\n", encoding="utf-8")
+    loose = history / "99_loose.jsonl.from-impl-y"
+    loose.write_text(_dump(_oversized_record()) + "\n", encoding="utf-8")
+
+    all_flows = compact_mod.iter_targets(history, None)
+    assert sidecar in all_flows
+    assert loose in all_flows
+    assert flow / "01_discovery_abcd1234.jsonl" in all_flows
+    # Primary file first, so a step's records stay in reader order.
+    assert all_flows.index(flow / "01_discovery_abcd1234.jsonl") < all_flows.index(
+        sidecar
+    )
+
+    scoped = compact_mod.iter_targets(history, flow_id)
+    assert scoped == [flow / "01_discovery_abcd1234.jsonl", sidecar]
+
+
+def test_apply_compacts_a_sidecar_in_place(history: Path) -> None:
+    flow = history / "20260706-013803_96453dd6"
+    sidecar = flow / "01_discovery_abcd1234.jsonl.from-impl-x"
+    original = _oversized_record()
+    sidecar.write_text(_dump(original) + "\n", encoding="utf-8")
+    before = sidecar.stat().st_size
+
+    exit_code, run = compact_mod.compact_history(history, apply=True)
+
+    assert exit_code == 0
+    assert sidecar.stat().st_size < before
+    reports = {report.path: report for report in run.files}
+    assert reports[sidecar].oversized_lines == 1
+    assert reports[sidecar].rewritten is True
+    lines = sidecar.read_bytes().split(b"\n")
+    assert lines[-1] == b""
+    assert len(lines) == 2  # 1:1 rewrite -- ordinals unmoved
+    assert _chip_ids(json.loads(lines[0])) == _chip_ids(original)
+    assert _temp_files(history) == []  # os.replace consumed every scratch file
+
+
+def test_temp_file_is_never_discoverable_as_a_history_stream(history: Path) -> None:
+    """The scratch name must escape every name-based stream discovery.
+
+    The daemon reader (``_iter_history_jsonl``) globs ``*.jsonl`` and
+    ``*.jsonl.from-*``; a sidecar temp named by appending a suffix would still
+    match the second pattern, so a live daemon would deliver it as a phantom
+    extra step during the rewrite window, and an orphan left by a killed run
+    would be re-scanned as a real target on the next pass.
+    """
+    flow = history / "20260706-013803_96453dd6"
+    sources = [
+        flow / "01_discovery_abcd1234.jsonl",
+        flow / "01_discovery_abcd1234.jsonl.from-impl-x",
+        flow / "01_discovery_abcd1234.jsonl.from-impl-x.0a1b2c3d",
+    ]
+    temps = [compact_mod._tmp_path(src) for src in sources]
+
+    for src, tmp in zip(sources, temps):
+        assert tmp.parent == src.parent  # same filesystem, so os.replace is atomic
+        for pattern in ("*.jsonl", "*.jsonl.from-*"):
+            assert not fnmatch(tmp.name, pattern), (tmp.name, pattern)
+    # Injective: two sources in one directory can never share a scratch file.
+    assert len({tmp.name for tmp in temps}) == len(sources)
+
+    # An orphan from a killed run is inert: not a target, not in the report.
+    for tmp in temps:
+        tmp.write_text("garbage, not a record\n", encoding="utf-8")
+    assert [p for p in compact_mod.iter_targets(history, None) if p in temps] == []
+
+    exit_code, run = compact_mod.compact_history(history, apply=False)
+    assert exit_code == 0
+    assert [report.path for report in run.files if report.path in temps] == []
+
+
+def test_iter_targets_tolerates_a_missing_dir(tmp_path: Path) -> None:
+    assert compact_mod.iter_targets(tmp_path / "nope", None) == []
+    assert compact_mod.iter_targets(tmp_path / "nope", "some-flow") == []
+
+
 # --------------------------------------------------------------------------
 # guards
 # --------------------------------------------------------------------------
@@ -325,7 +420,7 @@ def test_line_count_guard_blocks_replacement(
 
     assert exit_code != 0
     assert step.read_bytes() == before
-    assert list(history.glob("*/*.compact-tmp")) == []
+    assert _temp_files(history) == []
 
 
 def test_line_count_guard_blocks_dropped_line(

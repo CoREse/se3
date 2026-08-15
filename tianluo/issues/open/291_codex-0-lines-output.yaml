@@ -6,9 +6,9 @@ description: 'codex的工具调用永远显示0 lines output
   /bin/bash -lc "sed -n ''380,965p'' src/tianluo/en... · 0 lines output
 
   ✓'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-08-13T12:53:38.220744'
-updated_at: '2026-08-13T12:53:38.220744'
+updated_at: '2026-08-15T19:40:25.382480'
 type: bug

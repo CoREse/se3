@@ -538,10 +538,12 @@ def _hash_span(
     fewer bytes, so it cannot compare equal and forces a full re-read), while an
     unreadable file yields no digest at all.
 
-    The single seam every prefix-verification disk read goes through, so the
-    cost of rewrite detection is measurable (and mutable in tests) in one place
-    rather than spread across the two verification paths and
-    :meth:`DaemonHistoryReader._consumed_signature`.
+    The single seam every *size-dependent* prefix-verification disk read goes
+    through, so the cost of rewrite detection is measurable (and mutable in
+    tests) in one place rather than spread across the verification paths and
+    :meth:`DaemonHistoryReader._consumed_signature`.  The constant-cost window
+    reads of :func:`_window_signatures` deliberately sit outside it: they are
+    billed separately because their cost does not grow with the prefix.
     """
     remaining = end - start
     if remaining <= 0:
@@ -559,6 +561,40 @@ def _hash_span(
     except OSError:
         return None
     return True
+
+
+def _window_signatures(path: Path, offset: int) -> Optional[Tuple[bytes, bytes]]:
+    """Constant-cost fingerprints of the prefix's head and boundary windows.
+
+    Returns ``(head_digest, boundary_digest)`` over ``[0, W)`` and
+    ``[offset - W, offset)`` with ``W = min(offset, HEAD_SIGNATURE_BYTES)``, or
+    ``None`` when the prefix is empty or the file cannot be read that far.
+
+    Kept separate from :func:`_hash_span` because the two are billed
+    differently: ``_hash_span`` is the seam for the *unbounded* prefix reads
+    whose cost tracks the file size, while this pair is a fixed ~2·128 bytes
+    per call — the price the verifier pays on a round that has no fresh span to
+    re-read, where re-hashing the whole prefix is exactly what made a drain
+    quadratic (issue #287).
+    """
+    window = min(offset, HEAD_SIGNATURE_BYTES)
+    if window <= 0:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(window)
+            if len(head) < window:
+                return None
+            fh.seek(offset - window)
+            boundary = fh.read(window)
+            if len(boundary) < window:
+                return None
+    except OSError:
+        return None
+    return (
+        hashlib.blake2b(head, digest_size=16).digest(),
+        hashlib.blake2b(boundary, digest_size=16).digest(),
+    )
 
 
 class _PrefixVerifier:
@@ -580,39 +616,58 @@ class _PrefixVerifier:
 
     INVARIANT: every consumed byte is re-read from disk and compared against the
     consumed-side running hash exactly once — in the round immediately after the
-    round that consumed it — and the ENTIRE prefix is re-verified from byte 0
-    whenever the offset has doubled since the last full verification.  That is a
-    deliberate weakening of "re-hash the whole prefix every round" (issue #209)
-    with an exactly bounded cost: an in-place rewrite of a region already
-    verified in an earlier round is detected no later than the next doubling
-    point, i.e. after at most the file's current size in further appended bytes,
-    instead of on the very next round.  It is not detected *later* than that, and
-    a rewrite touching the most recently consumed span — the shape a retried step
-    produces, since it re-runs from the start and overwrites its own records — is
-    still caught immediately.  The mitigations that keep the weakening
-    unreachable in the dangerous cases: the cache is dropped outright on a file
-    identity (``st_ino``/``st_dev``) change, on a file shorter than the offset,
-    on any failed verification, and by the caller on a copy switch / detected
-    rewrite / full read; and once the verified offset has caught up with the
-    consumed offset (``offset <= verified``, i.e. a round that had no fresh span
-    to re-read) verification falls back to a full re-hash for as long as that
-    lasts.  That last rule is what keeps an IDLE file — the one an equal-size,
-    same-mtime-tick in-place retry can hide in, since neither its size nor its
-    stat moves (#209) — at exactly today's detection strength: verification lags
-    consumption by one round, so the first poll after a consuming round still
-    re-reads that round's span from disk, and every poll after that re-hashes the
-    whole prefix.  The doubling schedule makes the full re-hashes cost
-    ``n + n/2 + n/4 + … ≤ 2n`` bytes over a whole drain, so total verification
-    I/O stays linear in the file size.
+    round that consumed it — the ENTIRE prefix is re-verified from byte 0
+    whenever the offset has doubled since the last full verification, and a round
+    with NO fresh span (the file consumed nothing) re-checks only the bounded head
+    and boundary windows of the prefix and otherwise reuses the cached digest.
+    That is a deliberate weakening of "re-hash the whole prefix every round"
+    (issue #209) with an exactly bounded cost: an in-place rewrite of a region
+    already verified in an earlier round is detected no later than the next
+    doubling point, i.e. after at most the file's current size in further
+    appended bytes, instead of on the very next round.  It is not detected
+    *later* than that, and a rewrite touching the most recently consumed span —
+    the shape a retried step produces, since it re-runs from the start and
+    overwrites its own records — is still caught immediately.
+
+    WHY a no-fresh-span round must NOT fall back to a full re-hash, even though
+    that is where an equal-size, same-mtime-tick retry hides (#209): a flow's
+    rewrite check runs for EVERY step file each round, and every file that has
+    already drained sits in exactly that state for the whole remaining drain.
+    Re-hashing them all per round is the very quadratic this cache exists to
+    remove, and it dominates: on the 843 MB, ~50-file flow of #287 a 490-round
+    drain re-read 215 GB — 255x the flow — and pinned the daemon, with the
+    already-drained files paying nearly all of it.  The bounded windows keep the
+    dangerous shapes covered at ~256 bytes per file per round instead: a retry
+    re-runs the step from record 0, so the head window changes on the first poll
+    after it lands, and a rewrite that stops short of the consumed offset moves
+    the boundary window.  What is deferred is only a surgical mutation that
+    preserves both windows *and* the offset — no writer produces it — and that is
+    still caught at the next doubling point once the file grows again.
+
+    The other mitigations that keep the weakening unreachable: the cache is
+    dropped outright on a file identity (``st_ino``/``st_dev``) change, on a file
+    shorter than the offset, on an offset that moved backwards, on any failed
+    verification, and by the caller on a copy switch / detected rewrite / full
+    read.  The doubling schedule makes the full re-hashes cost
+    ``n + n/2 + n/4 + … ≤ 2n`` bytes over a whole drain, the fresh spans cost
+    ``n``, and the windows cost a constant per round, so total verification I/O
+    stays linear in the file size no matter how many rounds the drain takes.
     """
 
-    __slots__ = ("_verified_offset", "_hasher", "_identity", "_last_full_offset")
+    __slots__ = (
+        "_verified_offset",
+        "_hasher",
+        "_identity",
+        "_last_full_offset",
+        "_windows",
+    )
 
     def __init__(self) -> None:
         self._verified_offset = 0
         self._hasher: Optional["hashlib._Hash"] = None
         self._identity: Optional[Tuple[int, int]] = None
         self._last_full_offset = 0
+        self._windows: Optional[Tuple[bytes, bytes]] = None
 
     def _drop(self) -> None:
         """Forget the cached prefix so the next verification starts from byte 0."""
@@ -620,6 +675,7 @@ class _PrefixVerifier:
         self._hasher = None
         self._identity = None
         self._last_full_offset = 0
+        self._windows = None
 
     def verify(
         self, path: Path, offset: int, expected: Optional[bytes]
@@ -650,9 +706,15 @@ class _PrefixVerifier:
             self._hasher is None
             or self._identity != identity
             or st.st_size < offset
-            or offset <= self._verified_offset
-            or offset >= 2 * self._last_full_offset
+            or offset < self._verified_offset
         ):
+            return self._verify_full(path, offset, expected, identity)
+        if offset == self._verified_offset:
+            # Nothing was consumed since the last verification, so there is no
+            # fresh span on disk to re-read (see the class WHY: on why this must
+            # stay constant-cost rather than re-hash the whole prefix).
+            return self._verify_idle(path, offset, expected, identity)
+        if offset >= 2 * self._last_full_offset:
             return self._verify_full(path, offset, expected, identity)
         return self._verify_incremental(path, offset, expected, identity)
 
@@ -672,6 +734,7 @@ class _PrefixVerifier:
         self._last_full_offset = offset
         self._hasher = hasher
         self._identity = identity
+        self._windows = _window_signatures(path, offset)
         return True
 
     def _verify_incremental(
@@ -688,6 +751,31 @@ class _PrefixVerifier:
             return False
         self._verified_offset = offset
         self._hasher = hasher
+        self._identity = identity
+        self._windows = _window_signatures(path, offset)
+        return True
+
+    def _verify_idle(
+        self,
+        path: Path,
+        offset: int,
+        expected: bytes,
+        identity: Tuple[int, int],
+    ) -> bool:
+        """Verify a prefix that gained no new consumed bytes since last time.
+
+        Only the bounded head/boundary windows are re-read; the ``[0, offset)``
+        digest is the cached one, which is what keeps an already-drained file
+        off the per-round whole-prefix re-hash. Falls back to a full re-hash when
+        no windows were captured, so an unreadable window can never be mistaken
+        for an unchanged one.
+        """
+        windows = _window_signatures(path, offset)
+        if self._windows is None or windows is None:
+            return self._verify_full(path, offset, expected, identity)
+        if windows != self._windows or self._hasher.digest() != expected:
+            self._drop()
+            return False
         self._identity = identity
         return True
 
@@ -2004,10 +2092,13 @@ class DaemonHistoryReader:
             #      record, or any record in the MIDDLE of a large prefix.  The
             #      disk side of that comparison goes through ``_PrefixVerifier``,
             #      which re-reads only the span consumed since the last
-            #      verification and periodically (on offset doubling) re-hashes
-            #      from byte 0: re-hashing the whole prefix on EVERY round made a
-            #      capped drain quadratic — ~1000 rounds over a 253 MB step file
-            #      re-read ~125 GB and pinned the daemon (issue #287).  The
+            #      verification, periodically (on offset doubling) re-hashes from
+            #      byte 0, and on a round that consumed nothing re-checks only the
+            #      bounded head/boundary windows: re-hashing the whole prefix on
+            #      EVERY round made a capped drain quadratic — and because this
+            #      check runs for EVERY step file, the files that had already
+            #      drained dominated it (a 490-round drain of the 843 MB flow in
+            #      issue #287 re-read 215 GB and pinned the daemon).  The
             #      verifier's own INVARIANT: note states precisely which
             #      detections that defers and by how much.
             #

@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.5.2 - 2026-08-16
+
+- Fix quadratic history read cost by replacing full-tail/full-file `fh.read()` with bounded line-by-line binary reads, preserving ordinal, cursor, and partial-tail semantics byte-for-byte
+- Cache rewrite prefix hashing in the drain loop so re-verification only re-reads the newly consumed segment instead of the entire consumed prefix each round, removing the second quadratic term
+- Add a tiered record budget that keeps records under 256KB per event and 1MB raw_json, with a zero-parse fast path for records below 64KB so roughly 99% of traffic is unaffected
+- Compact oversized records by watermark-filling — trimming preview length from the largest events downward — so all tool chips survive with structure intact instead of trailing events being dropped
+- Keep event count, event order, and usage-related fields byte-identical through compaction, so WebUI tool calls no longer vanish from the second half of large sessions
+- Switch chunked delivery accounting to post-compaction byte sizes so bundle sizing reflects what is actually sent
+- Ship `scripts/compact_history_jsonl.py` for shrinking existing history logs, defaulting to `--dry-run` and rewriting strictly 1:1 per line without deleting or reordering records
 ## 12.5.1 - 2026-08-15
 
 - Fix a `NameError: name 'Dict' is not defined` crash on importing `tianluo.config`, which made `tianluo-server` fail to start on Python 3.9–3.13; the two offending annotations in `PricingConfig` now use PEP 585 builtin generics.

@@ -269,6 +269,41 @@ def test_fold_of_a_pure_telemetry_record_keeps_one_marker():
     assert folded[0]["count"] == 10
 
 
+def _bare_thinking_event(index: int) -> dict:
+    """A telemetry event smaller than the marker that would replace it."""
+    return {"type": "system", "subtype": "thinking_tokens", "estimated_tokens": index}
+
+
+def test_fold_leaves_a_run_alone_when_the_marker_would_be_bigger():
+    """A run of one small telemetry event must not be 'folded' into growth."""
+    events = [_bare_thinking_event(1)]
+    marker = {
+        "type": "system",
+        "subtype": rb.FOLDED_EVENT_SUBTYPE,
+        "count": 1,
+        "kinds": ["system/thinking_tokens"],
+    }
+    assert rb.event_size(marker) > rb.event_size(events[0]), "fixture premise"
+
+    folded, folded_count = rb.fold_telemetry_events(events)
+
+    assert folded_count == 0
+    assert folded[0] is events[0]
+
+
+def test_fold_is_never_a_net_size_loss_when_telemetry_is_interleaved():
+    events = []
+    for index in range(200):
+        events.append(_bare_thinking_event(index))
+        events.append(_tool_result_event(index, "body %d" % index))
+
+    folded, _ = rb.fold_telemetry_events(events)
+
+    before = rb.event_size(events)
+    assert rb.event_size(folded) <= before
+    assert len(folded) == len(events)
+
+
 # ---------------------------------------------------------------- watermark
 
 
@@ -508,6 +543,57 @@ def test_compact_record_reports_overflow_instead_of_dropping_events():
     assert stats.watermark < rb.event_size(events[0])
     assert stats.shrunk_events == 0
     assert _chips(compacted) == _chips(message)
+
+
+def test_compact_record_never_ships_a_bigger_record_than_it_was_given():
+    """Interleaved one-event telemetry runs must not grow the record."""
+    events = []
+    for index in range(9000):
+        events.append(_bare_thinking_event(index))
+        events.append(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "delta %d " % index}],
+                },
+            }
+        )
+    message = {"role": "assistant", "raw_json": events}
+    raw_len = rb.record_size(message)
+    assert raw_len > rb.MAX_RECORD_RAW_JSON_BYTES, "fixture premise"
+
+    compacted, stats = rb.compact_record(message, raw_len=raw_len)
+
+    assert compacted is message
+    assert stats.compacted is False
+    assert stats.compacted_bytes == raw_len
+    assert stats.folded_events == 0
+    assert stats.raw_json_bytes <= raw_len
+    # Still honestly reported as over budget, so the daemon logs the warning
+    # rather than claiming a compaction that did not happen.
+    assert stats.overflow is True
+
+
+def test_compact_record_discards_a_pass_that_did_not_shrink_anything(monkeypatch):
+    """Backstop: even a 'successful' shrink is dropped if the product grew."""
+    message = _build_record(chips=4, body_bytes=400 * 1024, thinking_per_chip=2)
+    raw_len = rb.record_size(message)
+
+    def _inflating_shrink(event, limit):
+        bloated = json.loads(json.dumps(event))
+        bloated["padding"] = "z" * (2 * 1024 * 1024)
+        return bloated, 1
+
+    monkeypatch.setattr(rb, "shrink_event", _inflating_shrink)
+
+    compacted, stats = rb.compact_record(message, raw_len=raw_len)
+
+    assert compacted is message
+    assert stats.compacted is False
+    assert stats.compacted_bytes == raw_len
+    assert stats.shrunk_events == 0
+    assert stats.dropped_bytes == 0
 
 
 def test_compact_record_handles_records_without_raw_json():
