@@ -2897,3 +2897,410 @@ class TestInfraErrorTypeStartupFailure:
         assert InfraErrorType.USAGE_LIMIT.value == "usage_limit"
         assert InfraErrorType.TIMEOUT.value == "timeout"
         assert InfraErrorType.HANG.value == "hang"
+
+
+# =============================================================================
+# Real codex ThreadItem schema — field mapping
+# =============================================================================
+
+class TestRealSchemaFieldMapping:
+    """Fields are read per the real ``codex exec --json`` ThreadItem schema.
+
+    The legacy shapes (``output``, flat ``file_change``, ``name``) stay covered
+    by the older test classes above, which now exercise the fallback chains.
+    """
+
+    # -- command_execution -------------------------------------------------
+
+    def test_aggregated_output_reaches_tool_result(self):
+        """The real output key is ``aggregated_output`` (the "0 lines" bug)."""
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_agg",
+                "command": "ls",
+                "aggregated_output": "a.txt\nb.txt\nc.txt",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }))
+        result = _blocks_of_type(lines, "tool_result")[0]
+        assert result["content"] == "a.txt\nb.txt\nc.txt"
+        assert len(result["content"].splitlines()) == 3
+
+    def test_aggregated_output_wins_over_legacy_output(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_both",
+                "command": "ls",
+                "aggregated_output": "real",
+                "output": "legacy",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_result")[0]["content"] == "real"
+
+    def test_stdout_and_stderr_are_concatenated(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_streams",
+                "command": "make",
+                "stdout": "out line\n",
+                "stderr": "err line",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_result")[0]["content"] == (
+            "out line\nerr line"
+        )
+
+    def test_parsed_cmd_list_is_joined(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_parsed",
+                "parsed_cmd": ["grep", "-n", "foo"],
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["input"]["command"] == (
+            "grep -n foo"
+        )
+
+    def test_status_failed_sets_is_error_without_exit_code(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_failed",
+                "command": "false",
+                "aggregated_output": "boom",
+                "status": "failed",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_result")[0]["is_error"] is True
+
+    def test_missing_exit_code_is_not_an_error(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "cmd_no_exit",
+                "command": "ls",
+                "aggregated_output": "a",
+                "status": "completed",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_result")[0]["is_error"] is False
+
+    # -- file_change -------------------------------------------------------
+
+    def test_changes_list_emits_one_pair_per_change(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "fc_multi",
+                "status": "completed",
+                "changes": [
+                    {"path": "/a.py", "kind": "add"},
+                    {"path": "/b.py", "kind": "update"},
+                    {"path": "/c.py", "kind": "delete"},
+                ],
+            },
+        }))
+        tool_uses = _blocks_of_type(lines, "tool_use")
+        assert [u["name"] for u in tool_uses] == ["Write", "Edit", "Delete"]
+        assert len({u["id"] for u in tool_uses}) == 3
+        assert len(_blocks_of_type(lines, "tool_result")) == 3
+        assert conv.touched_files == {"/a.py", "/b.py", "/c.py"}
+
+    def test_change_kind_create_maps_to_write(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "fc_create",
+                "changes": [{"path": "/new.py", "kind": "create"}],
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["name"] == "Write"
+
+    def test_changes_input_omits_content_keys(self):
+        """codex sends no file content — the keys must be absent, not empty."""
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "fc_keys",
+                "changes": [{"path": "/x.py", "kind": "update"}],
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["input"] == {
+            "file_path": "/x.py"
+        }
+
+    def test_changes_survive_the_item_lifecycle_without_duplicating(self):
+        conv = CodexEventConverter()
+        item = {
+            "type": "file_change",
+            "id": "fc_life",
+            "changes": [{"path": "/a.py", "kind": "add"}],
+        }
+        lines = conv.convert_line(json.dumps({"type": "item.started", "item": item}))
+        lines += conv.convert_line(json.dumps({"type": "item.completed", "item": item}))
+        assert len(_blocks_of_type(lines, "tool_use")) == 1
+        assert len(_blocks_of_type(lines, "tool_result")) == 1
+
+    def test_non_list_changes_degrades_without_chips(self):
+        conv = CodexEventConverter()
+        for bad in ({"path": "/a.py"}, "oops", 7):
+            assert conv.convert_line(json.dumps({
+                "type": "item.completed",
+                "item": {"type": "file_change", "id": "fc_bad", "changes": bad},
+            })) == []
+        assert conv.touched_files == set()
+
+    def test_change_without_path_is_skipped(self):
+        conv = CodexEventConverter()
+        assert conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "fc_nopath",
+                "changes": [{"kind": "update"}, "junk"],
+            },
+        })) == []
+
+    # -- mcp_tool_call -----------------------------------------------------
+
+    def test_server_and_tool_render_as_claude_mcp_name(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "mcp_1",
+                "server": "docs",
+                "tool": "search",
+                "arguments": {"q": "x"},
+                "result": {"text": "found"},
+                "status": "completed",
+            },
+        }))
+        tool_use = _blocks_of_type(lines, "tool_use")[0]
+        assert tool_use["name"] == "mcp__docs__search"
+        assert tool_use["input"] == {"q": "x"}
+        assert "found" in _blocks_of_type(lines, "tool_result")[0]["content"]
+
+    def test_bare_tool_name_without_server(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "mcp_2", "tool": "search"},
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["name"] == "search"
+
+    def test_missing_tool_and_name_is_unknown(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "mcp_3", "server": "docs"},
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["name"] == "unknown"
+
+    def test_invalid_json_arguments_are_wrapped_as_raw(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "mcp_4",
+                "tool": "t",
+                "arguments": "{not json",
+            },
+        }))
+        assert _blocks_of_type(lines, "tool_use")[0]["input"] == {"raw": "{not json"}
+
+    def test_empty_result_still_emits_tool_result(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "mcp_tool_call", "id": "mcp_5", "tool": "t"},
+        }))
+        results = _blocks_of_type(lines, "tool_result")
+        assert len(results) == 1
+        assert results[0]["content"] == ""
+
+    def test_mcp_error_flags(self):
+        conv = CodexEventConverter()
+        failed = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "mcp_6",
+                "tool": "t",
+                "status": "failed",
+            },
+        }))
+        assert _blocks_of_type(failed, "tool_result")[0]["is_error"] is True
+
+        conv2 = CodexEventConverter()
+        is_error = conv2.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "mcp_7",
+                "tool": "t",
+                "result": {"isError": True, "text": "nope"},
+            },
+        }))
+        assert _blocks_of_type(is_error, "tool_result")[0]["is_error"] is True
+
+    # -- web_search / todo_list -------------------------------------------
+
+    def test_web_search_maps_to_websearch_tool(self):
+        conv = CodexEventConverter()
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "web_search",
+                "id": "ws_1",
+                "query": "codex thread item schema",
+                "action": "search",
+            },
+        }))
+        tool_use = _blocks_of_type(lines, "tool_use")[0]
+        assert tool_use["name"] == "WebSearch"
+        assert tool_use["input"]["query"] == "codex thread item schema"
+        assert len(_blocks_of_type(lines, "tool_result")) == 1
+
+    def test_todo_list_maps_to_todowrite_tool(self):
+        conv = CodexEventConverter()
+        todos = [{"text": "step one", "completed": False}]
+        lines = conv.convert_line(json.dumps({
+            "type": "item.completed",
+            "item": {"type": "todo_list", "id": "todo_1", "items": todos},
+        }))
+        tool_use = _blocks_of_type(lines, "tool_use")[0]
+        assert tool_use["name"] == "TodoWrite"
+        assert tool_use["input"]["items"] == todos
+
+    def test_web_search_and_todo_list_degrade_without_expected_keys(self):
+        conv = CodexEventConverter()
+        for item in (
+            {"type": "web_search", "id": "ws_2"},
+            {"type": "web_search", "id": "ws_3", "query": ""},
+            {"type": "todo_list", "id": "todo_2"},
+            {"type": "todo_list", "id": "todo_3", "items": "not a list"},
+        ):
+            assert conv.convert_line(json.dumps({
+                "type": "item.completed", "item": item,
+            })) == []
+
+    # -- end-to-end over the real shapes -----------------------------------
+
+    REAL_SESSION_EVENTS = [
+        json.dumps({"type": "thread.started", "thread_id": "th_1"}),
+        json.dumps({"type": "turn.started"}),
+        json.dumps({
+            "type": "item.started",
+            "item": {
+                "type": "command_execution",
+                "id": "item_0",
+                "command": "pytest -q",
+                "status": "in_progress",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "command_execution",
+                "id": "item_0",
+                "command": "pytest -q",
+                "aggregated_output": "1 passed\n2 passed\n3 passed\n4 passed",
+                "exit_code": 0,
+                "status": "completed",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "file_change",
+                "id": "item_1",
+                "status": "completed",
+                "changes": [
+                    {"path": "src/a.py", "kind": "update"},
+                    {"path": "src/b.py", "kind": "add"},
+                ],
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": "item_2",
+                "server": "ctx7",
+                "tool": "get_docs",
+                "arguments": "{\"lib\": \"typer\"}",
+                "result": "docs body",
+                "status": "completed",
+            },
+        }),
+        json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "id": "item_3", "text": "All green."},
+        }),
+        json.dumps({
+            "type": "turn.completed",
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        }),
+    ]
+
+    def _convert_all(self):
+        conv = CodexEventConverter()
+        lines = []
+        for event in self.REAL_SESSION_EVENTS:
+            lines.extend(conv.convert_line(event))
+        return conv, lines
+
+    def test_real_session_bash_chip_has_line_count(self):
+        _, lines = self._convert_all()
+        bash_results = [
+            b for b in _blocks_of_type(lines, "tool_result")
+            if b["tool_use_id"] == "item_0"
+        ]
+        assert len(bash_results) == 1
+        assert len(bash_results[0]["content"].splitlines()) == 4
+
+    def test_real_session_collects_touched_files(self):
+        conv, _ = self._convert_all()
+        assert conv.touched_files == {"src/a.py", "src/b.py"}
+
+    def test_real_session_has_no_duplicate_or_dangling_chips(self):
+        _, lines = self._convert_all()
+        use_ids = [b["id"] for b in _blocks_of_type(lines, "tool_use")]
+        result_ids = [b["tool_use_id"] for b in _blocks_of_type(lines, "tool_result")]
+        assert len(use_ids) == len(set(use_ids))
+        assert sorted(use_ids) == sorted(result_ids)
+        assert "mcp__ctx7__get_docs" in [
+            b["name"] for b in _blocks_of_type(lines, "tool_use")
+        ]
+
+    def test_real_session_result_text_is_not_duplicated(self):
+        _, lines = self._convert_all()
+        result = json.loads(lines[-1])
+        assert result["type"] == "result"
+        assert result["result"] == "All green."

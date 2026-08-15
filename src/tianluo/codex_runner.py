@@ -428,7 +428,6 @@ class CodexEventConverter:
         result_content: str,
         is_error: bool,
         is_terminal: bool,
-        emit_result: bool = True,
     ) -> List[str]:
         """Emit the tool_use / tool_result pair for one item, deduped by id.
 
@@ -445,11 +444,7 @@ class CodexEventConverter:
             self._inflight_tools[tool_use_id] = tool_name
             lines.append(self._tool_use_line(tool_use_id, tool_name, tool_input))
 
-        if (
-            is_terminal
-            and emit_result
-            and tool_use_id not in self._emitted_tool_result
-        ):
+        if is_terminal and tool_use_id not in self._emitted_tool_result:
             self._emitted_tool_result.add(tool_use_id)
             self._inflight_tools.pop(tool_use_id, None)
             lines.append(
@@ -458,17 +453,210 @@ class CodexEventConverter:
 
         return lines
 
+    @staticmethod
+    def _status_text(item: Dict[str, Any]) -> str:
+        """Lowercased ``status`` of *item*, or ``""`` when absent/non-string."""
+        status = item.get("status")
+        return status.strip().lower() if isinstance(status, str) else ""
+
+    @staticmethod
+    def _stringify(value: Any) -> str:
+        """Render an arbitrary item payload value as chip-displayable text.
+
+        Structured payloads go through ``json.dumps`` rather than ``str`` so a
+        chip shows valid JSON instead of Python ``repr`` punctuation.
+        """
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, (dict, list)):
+            try:
+                return json.dumps(value, ensure_ascii=False)
+            except (TypeError, ValueError):
+                return str(value)
+        return str(value)
+
+    @classmethod
+    def _join_argv(cls, values: List[Any]) -> str:
+        """Flatten a codex argv / ``parsed_cmd`` list into one command string."""
+        parts: List[str] = []
+        for value in values:
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, dict):
+                for key in ("command", "cmd"):
+                    nested = value.get(key)
+                    if isinstance(nested, str):
+                        parts.append(nested)
+                        break
+                    if isinstance(nested, list):
+                        parts.append(cls._join_argv(nested))
+                        break
+        return " ".join(part for part in parts if part)
+
+    @classmethod
+    def _command_text(cls, item: Dict[str, Any]) -> str:
+        """Command string of a ``command_execution`` item.
+
+        WHY: ``command`` → ``parsed_cmd`` rather than a codex-version check.
+        The codex JSON schema is not versioned and does not move with tianluo's
+        releases, so probing ``codex --version`` would buy a mapping table that
+        is still wrong for any version nobody tested; a fallback chain is local,
+        free, and degrades on its own for shapes we have never seen.
+        """
+        command = item.get("command")
+        if isinstance(command, str) and command:
+            return command
+        if isinstance(command, list):
+            joined = cls._join_argv(command)
+            if joined:
+                return joined
+        parsed = item.get("parsed_cmd")
+        if isinstance(parsed, str):
+            return parsed
+        if isinstance(parsed, list):
+            return cls._join_argv(parsed)
+        return command if isinstance(command, str) else ""
+
+    @staticmethod
+    def _command_output(item: Dict[str, Any]) -> str:
+        """Captured output of a ``command_execution`` item.
+
+        WHY: the real codex field is ``aggregated_output`` — there is no
+        ``output`` key in the exec schema at all, and reading it is what made
+        every Bash chip render as "0 lines output".  ``output`` and the
+        stdout/stderr pair are kept behind it as fallbacks for older/other
+        shapes; see :meth:`_command_text` for why this is a fallback chain
+        rather than a version check.
+        """
+        for key in ("aggregated_output", "output"):
+            value = item.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+        stdout = item.get("stdout") if isinstance(item.get("stdout"), str) else ""
+        stderr = item.get("stderr") if isinstance(item.get("stderr"), str) else ""
+        if stdout and stderr:
+            separator = "" if stdout.endswith("\n") else "\n"
+            return f"{stdout}{separator}{stderr}"
+        return stdout or stderr
+
+    @classmethod
+    def _command_is_error(cls, item: Dict[str, Any]) -> bool:
+        """True when a ``command_execution`` item reports failure.
+
+        A missing ``exit_code`` (the item is still running, or codex simply did
+        not report one) is not evidence of failure, so only an explicit
+        non-zero integer counts.
+        """
+        if cls._status_text(item) == "failed":
+            return True
+        exit_code = item.get("exit_code")
+        if isinstance(exit_code, bool):
+            return False
+        return isinstance(exit_code, int) and exit_code != 0
+
+    @staticmethod
+    def _change_path(change: Dict[str, Any]) -> str:
+        for key in ("path", "file_path"):
+            value = change.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return ""
+
+    @staticmethod
+    def _map_change_kind(kind: str) -> str:
+        """Map a codex file-change ``kind`` to the closest Claude tool name.
+
+        ``Delete`` is not a registered Claude tool; the generic formatter
+        renders it by ``file_path``, which is exactly what codex gives us.
+        """
+        normalized = kind.strip().lower()
+        if normalized in ("add", "create", "write"):
+            return "Write"
+        if normalized in ("delete", "remove"):
+            return "Delete"
+        return "Edit"
+
+    def _handle_file_changes(
+        self, item: Dict[str, Any], changes: List[Any], is_terminal: bool
+    ) -> List[str]:
+        """Emit one tool_use/tool_result pair per entry of ``changes``.
+
+        WHY: the ids carry a per-change suffix because all changes of one item
+        share that item's id — without the suffix they would collapse into a
+        single chip and only the first file would ever be shown.
+        """
+        base_id = self._resolve_item_id(item)
+        results: List[str] = []
+
+        for index, change in enumerate(changes):
+            if not isinstance(change, dict):
+                continue
+            path = self._change_path(change)
+            if not path:
+                continue
+            kind = change.get("kind", "")
+            kind_text = kind.strip().lower() if isinstance(kind, str) else ""
+            self._touched_files.add(path)
+
+            results.extend(
+                self._emit_tool_events(
+                    tool_use_id=f"{base_id}#{index}",
+                    tool_name=self._map_change_kind(kind_text),
+                    # WHY: codex never sends file content, and an empty
+                    # ``content``/``new_string`` would be rendered as a real
+                    # zero-line write.  Omitting the key entirely lets the
+                    # formatter tell "no content information" from "empty file".
+                    tool_input={"file_path": path},
+                    result_content=f"File {kind_text or 'change'}: {path}",
+                    is_error=False,
+                    is_terminal=is_terminal,
+                )
+            )
+
+        return results
+
     def _handle_item_event(self, event_type: str, event: Dict[str, Any]) -> List[str]:
         """Handle ``item.started`` / ``item.updated`` / ``item.completed``.
 
-        The codex ``exec --json`` schema nests items under the ``item`` key
-        with types ``agent_message``, ``command_execution``, ``file_change``,
-        and ``mcp_tool_call``::
+        Shapes below are the real ``codex exec --json`` schema, read off the
+        serde string pool of the codex-cli 0.147.0 exec crate — note in
+        particular that the pool contains **no** ``output`` key.
 
-            {"type": "item.completed", "item": {"type": "agent_message", "text": "Hello"}}
-            {"type": "item.completed", "item": {"type": "command_execution", "command": "ls", "output": "...", "exit_code": 0}}
-            {"type": "item.completed", "item": {"type": "file_change", "path": "/tmp/x.py", "content": "x=1"}}
-            {"type": "item.completed", "item": {"type": "mcp_tool_call", "name": "...", ...}}
+        Thread events: ``thread.started``, ``turn.started``, ``turn.completed``,
+        ``turn.failed``, ``item.started``, ``item.updated``, ``item.completed``.
+        Item payloads are nested under the ``item`` key and have one of seven
+        types — ``agent_message``, ``reasoning``, ``command_execution``,
+        ``file_change``, ``mcp_tool_call``, ``web_search``, ``todo_list``::
+
+            {"type": "item.completed", "item": {
+                "id": "item_0", "type": "agent_message", "text": "Hello"}}
+            {"type": "item.completed", "item": {
+                "id": "item_1", "type": "command_execution", "command": "ls",
+                "aggregated_output": "a\\nb", "exit_code": 0,
+                "status": "completed"}}
+            {"type": "item.completed", "item": {
+                "id": "item_2", "type": "file_change", "status": "completed",
+                "changes": [{"path": "/tmp/x.py", "kind": "update"}]}}
+            {"type": "item.completed", "item": {
+                "id": "item_3", "type": "mcp_tool_call", "server": "docs",
+                "tool": "search", "arguments": "{}", "result": {...},
+                "status": "completed"}}
+            {"type": "item.completed", "item": {
+                "id": "item_4", "type": "web_search", "query": "..."}}
+            {"type": "item.completed", "item": {
+                "id": "item_5", "type": "todo_list", "items": [...]}}
+
+        Value domains: ``changes[].kind`` is one of ``add`` / ``delete`` /
+        ``update``; ``status`` is one of ``in_progress`` / ``completed`` /
+        ``failed`` / ``running`` / ``interrupted`` / ``errored`` /
+        ``not_found``.
+
+        Every field is read through a tolerant multi-key fallback chain (real
+        key first, historical key next) — see :meth:`_command_text` for why
+        that is preferred over detecting the codex version.
 
         The same item arrives once per lifecycle stage carrying the same id;
         emission is deduped per id by :meth:`_emit_tool_events`.
@@ -503,77 +691,143 @@ class CodexEventConverter:
                     results.append(json.dumps(assistant_event, ensure_ascii=False))
 
         elif item_type == "command_execution":
-            command = item.get("command", "")
-            output = item.get("output", "")
-            exit_code = item.get("exit_code", 0)
-            is_error = exit_code != 0 if isinstance(exit_code, int) else False
-
             results.extend(
                 self._emit_tool_events(
                     tool_use_id=self._resolve_item_id(item),
                     tool_name="Bash",
-                    tool_input={"command": command},
-                    result_content=output,
-                    is_error=is_error,
+                    tool_input={"command": self._command_text(item)},
+                    result_content=self._command_output(item),
+                    is_error=self._command_is_error(item),
                     is_terminal=is_terminal,
                 )
             )
 
         elif item_type == "file_change":
-            path = item.get("path", item.get("file_path", ""))
-            content = item.get("content", "")
-            change_type = item.get("change_type", "write")
-
-            # Map to the closest Claude tool
-            mapped_name = "Write" if change_type in ("write", "create") else "Edit"
-            tool_input: Dict[str, Any] = {"file_path": path}
-            if change_type in ("write", "create"):
-                tool_input["content"] = content
+            # WHY: the real schema is a `changes` list of {path, kind}; the flat
+            # path/content/change_type reading below it is the historical shape,
+            # kept as a fallback for the same reason the other fields use
+            # fallback chains instead of a codex-version check.
+            if "changes" in item:
+                changes = item.get("changes")
+                if isinstance(changes, list):
+                    results.extend(
+                        self._handle_file_changes(item, changes, is_terminal)
+                    )
+                else:
+                    # A `changes` key of the wrong type carries no usable path;
+                    # a chip built from it would just show wrong information.
+                    logger.debug(
+                        "CodexEventConverter: file_change `changes` is %s, "
+                        "not a list — item skipped",
+                        type(changes).__name__,
+                    )
             else:
-                tool_input["new_string"] = content
+                path = item.get("path", item.get("file_path", ""))
+                content = item.get("content", "")
+                change_type = item.get("change_type", "write")
 
-            # Record touched file for dependency tracking
-            if path:
-                self._touched_files.add(path)
+                mapped_name = "Write" if change_type in ("write", "create") else "Edit"
+                tool_input: Dict[str, Any] = {"file_path": path}
+                if change_type in ("write", "create"):
+                    tool_input["content"] = content
+                else:
+                    tool_input["new_string"] = content
 
-            results.extend(
-                self._emit_tool_events(
-                    tool_use_id=self._resolve_item_id(item),
-                    tool_name=mapped_name,
-                    tool_input=tool_input,
-                    result_content=f"File {change_type}: {path}",
-                    is_error=False,
-                    is_terminal=is_terminal,
+                # Record touched file for dependency tracking
+                if path:
+                    self._touched_files.add(path)
+
+                results.extend(
+                    self._emit_tool_events(
+                        tool_use_id=self._resolve_item_id(item),
+                        tool_name=mapped_name,
+                        tool_input=tool_input,
+                        result_content=f"File {change_type}: {path}",
+                        is_error=False,
+                        is_terminal=is_terminal,
+                    )
                 )
-            )
 
         elif item_type == "mcp_tool_call":
-            tool_name = item.get("name", "unknown")
+            # WHY: `tool` is the real key, `name` the historical one — same
+            # fallback-over-version-detection reasoning as _command_text.  The
+            # mcp__{server}__{tool} spelling is Claude's own MCP naming
+            # convention, so codex MCP calls flow through the existing
+            # rendering and statistics paths without a codex-specific branch.
+            tool_name = ""
+            for key in ("tool", "name"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    tool_name = value.strip()
+                    break
+            server = item.get("server")
+            if isinstance(server, str) and server.strip() and tool_name:
+                tool_name = f"mcp__{server.strip()}__{tool_name}"
+            elif not tool_name:
+                tool_name = "unknown"
+
             arguments = item.get("arguments", item.get("input", {}))
             if isinstance(arguments, str):
                 try:
                     tool_input = json.loads(arguments)
                 except (json.JSONDecodeError, ValueError):
                     tool_input = {"raw": arguments}
-            else:
+                if not isinstance(tool_input, dict):
+                    tool_input = {"raw": arguments}
+            elif isinstance(arguments, dict):
                 tool_input = arguments
+            else:
+                tool_input = {} if arguments is None else {"raw": arguments}
 
-            output = item.get("output", item.get("result", ""))
+            result = item.get("result", item.get("output", ""))
+            is_error = self._status_text(item) == "failed" or (
+                isinstance(result, dict) and bool(result.get("isError"))
+            )
 
             results.extend(
                 self._emit_tool_events(
                     tool_use_id=self._resolve_item_id(item),
                     tool_name=tool_name,
                     tool_input=tool_input,
-                    result_content=str(output),
-                    is_error=False,
+                    # An empty result is a legitimate MCP answer; suppressing
+                    # the tool_result for it would leave the chip in-flight
+                    # until the turn ended.
+                    result_content=self._stringify(result),
+                    is_error=is_error,
                     is_terminal=is_terminal,
-                    # An empty result is indistinguishable from "no result
-                    # reported here" in the current shape, so the item stays
-                    # in-flight and gets closed by the turn terminal instead.
-                    emit_result=bool(output),
                 )
             )
+
+        elif item_type == "web_search":
+            query = item.get("query")
+            # Without the query there is nothing truthful to put on the chip —
+            # a placeholder chip is worse than no chip.
+            if isinstance(query, str) and query:
+                search_result = item.get("results", item.get("action", ""))
+                results.extend(
+                    self._emit_tool_events(
+                        tool_use_id=self._resolve_item_id(item),
+                        tool_name="WebSearch",
+                        tool_input={"query": query},
+                        result_content=self._stringify(search_result),
+                        is_error=self._status_text(item) == "failed",
+                        is_terminal=is_terminal,
+                    )
+                )
+
+        elif item_type == "todo_list":
+            todo_items = item.get("items")
+            if isinstance(todo_items, list) and todo_items:
+                results.extend(
+                    self._emit_tool_events(
+                        tool_use_id=self._resolve_item_id(item),
+                        tool_name="TodoWrite",
+                        tool_input={"items": todo_items},
+                        result_content="",
+                        is_error=False,
+                        is_terminal=is_terminal,
+                    )
+                )
 
         # WHY: `reasoning` is deliberately dropped — it is the model's internal
         # thinking, and letting it reach _agent_messages would pollute the
