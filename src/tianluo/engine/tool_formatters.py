@@ -666,8 +666,30 @@ def _maybe_truncate_lines(
     return lines[:max_items], True
 
 
+def _build_file_path_only_detail(file_path: str) -> dict:
+    """Detail payload for "a file changed, but no text was reported".
+
+    WHY: synthesising a diff from an absent key would claim something nobody
+    measured — with the post-write file on disk as the old side, an absent
+    ``content`` renders as *every line deleted*, i.e. the exact opposite of
+    what happened. Carrying only the path lets the renderer say "no content
+    information" instead of inventing one.
+    """
+    return {
+        "kind": "file_path_only",
+        "file_path": file_path,
+        "truncated": False,
+    }
+
+
 def _build_edit_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
     file_path = use_input.get("file_path", "?")
+    # WHY: key absence and an empty value differ (see _format_edit_use); both
+    # keys absent means the upstream carries no text at all, so there is no
+    # diff to show. A present-but-empty value is a real "edited to nothing".
+    if "old_string" not in use_input and "new_string" not in use_input:
+        return _build_file_path_only_detail(file_path)
+
     old_string = use_input.get("old_string", "")
     new_string = use_input.get("new_string", "")
     diff_lines = generate_edit_diff(old_string, new_string, file_path)
@@ -686,6 +708,13 @@ def _build_edit_detail(use_input: dict, result_data: Any, old_content: Optional[
 
 def _build_write_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
     file_path = use_input.get("file_path", "?")
+    # WHY: same rule as _build_edit_detail — an absent "content" key carries no
+    # file text, and the tracker's old-content snapshot is taken *after* the
+    # upstream already wrote the file, so diffing against "" would render the
+    # freshly created file as fully deleted.
+    if "content" not in use_input:
+        return _build_file_path_only_detail(file_path)
+
     content = use_input.get("content", "")
     if old_content is None:
         truncated_text, truncated = _maybe_truncate_text(content)
@@ -809,8 +838,13 @@ def build_tool_detail_payload(
     """Build a JSON-safe structured detail dict for the web chip's panel.
 
     The returned dict always carries a ``kind`` discriminator drawn from:
-    ``edit_diff`` / ``write_full`` / ``write_diff`` / ``read_text`` /
-    ``bash_output`` / ``grep_matches`` / ``glob_matches`` / ``text``.
+    ``edit_diff`` / ``write_full`` / ``write_diff`` / ``file_path_only`` /
+    ``read_text`` / ``bash_output`` / ``grep_matches`` / ``glob_matches`` /
+    ``text``.
+
+    ``file_path_only`` is the Edit/Write payload for an upstream that reports
+    *that* a file changed without carrying its text (codex ``file_change``
+    items omit the ``content`` / ``old_string`` / ``new_string`` keys entirely).
 
     Per-tool builders return a richer shape than the 60-char preview so the
     frontend can render diffs with line numbers, full file content, command
@@ -854,6 +888,20 @@ def format_tool_diff(
         return
 
     try:
+        # WHY: keys absent = the upstream never reported the file text (codex
+        # file_change items). There is nothing to diff, and old_content here is
+        # the *post-write* file, so diffing would print the new file as fully
+        # deleted — and the "Created … (N lines)" fallback would print a line
+        # count nobody measured. Rendering nothing is the only truthful option.
+        if tool_name == "Write" and "content" not in input_data:
+            return
+        if (
+            tool_name == "Edit"
+            and "old_string" not in input_data
+            and "new_string" not in input_data
+        ):
+            return
+
         if tool_name == "Edit":
             old_string = input_data.get("old_string", "")
             new_string = input_data.get("new_string", "")

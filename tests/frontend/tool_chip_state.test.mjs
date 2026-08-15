@@ -445,4 +445,144 @@ export function registerToolChipStateTests(ctx) {
         "every chip resolved to success/failure");
     }
   });
+
+  // (g1) ------------------------------------------------------------------
+  check("(g1) Write whose input carries no `content` key renders path only, never a delete-everything diff", () => {
+    // Shape emitted by the codex runner for a `file_change` item: codex reports
+    // *that* a file changed and never its text, so the input has `file_path`
+    // alone. Rendering "(empty)" or a diff against the (already written) file
+    // would claim the file was emptied.
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_w", name: "Write",
+          input: { file_path: "src/b.py" } },
+        { type: "tool_result", tool_use_id: "tu_w",
+          content: [{ type: "text", text: "File add: src/b.py" }], is_error: false },
+      ]),
+    ], false);
+    const chips = findAll(container, "tool-marker");
+    assert.equal(chips.length, 1, "one Write chip");
+    const headerSpan = findOne(chips[0], "tool-marker-detail");
+    assert.equal(headerSpan.textContent, "src/b.py",
+      `header is the bare path, got '${headerSpan.textContent}'`);
+    assert.ok(!headerSpan.textContent.includes("lines"),
+      "header carries no line count nobody measured");
+    assert.ok(!headerSpan.textContent.includes("empty"),
+      "header does not claim the file is empty");
+    const panel = findOne(chips[0], "tool-marker-details");
+    assert.ok(panel, "chip still has a detail panel");
+    assert.equal(findAll(panel, "diff-del").length, 0,
+      "detail panel renders no deletion lines");
+    assert.equal(findAll(panel, "diff-add").length, 0,
+      "detail panel renders no addition lines");
+    assert.ok(findOne(panel, "tool-detail-empty"),
+      "detail panel says no content was reported");
+    assert.ok(panel.textContent.includes("src/b.py"),
+      "detail panel still shows the path");
+  });
+
+  // (g2) ------------------------------------------------------------------
+  check("(g2) Write with a present-but-empty `content` keeps its (empty) / 0-line rendering", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_w2", name: "Write",
+          input: { file_path: "src/e.py", content: "" } },
+        { type: "tool_result", tool_use_id: "tu_w2",
+          content: [{ type: "text", text: "ok" }], is_error: false },
+      ]),
+    ], false);
+    const headerSpan = findOne(findAll(container, "tool-marker")[0], "tool-marker-detail");
+    assert.ok(headerSpan.textContent.includes("lines"),
+      `an empty write really is 0 lines, got '${headerSpan.textContent}'`);
+  });
+
+  // (g3) ------------------------------------------------------------------
+  check("(g3) Edit whose input carries neither old_string nor new_string renders path only", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_e2", name: "Edit",
+          input: { file_path: "src/c.py" } },
+        { type: "tool_result", tool_use_id: "tu_e2",
+          content: [{ type: "text", text: "File update: src/c.py" }], is_error: false },
+      ]),
+    ], false);
+    const chip = findAll(container, "tool-marker")[0];
+    const headerSpan = findOne(chip, "tool-marker-detail");
+    assert.equal(headerSpan.textContent, "src/c.py",
+      `header is the bare path, got '${headerSpan.textContent}'`);
+    const panel = findOne(chip, "tool-marker-details");
+    assert.equal(findOne(panel, "tool-marker-diff"), null,
+      "no unified-diff layout when there is no text to diff");
+    assert.ok(findOne(panel, "tool-detail-empty"),
+      "detail panel says no content was reported");
+  });
+
+  // (g4) ------------------------------------------------------------------
+  check("(g4) unregistered file tool (codex Delete) keeps the filename in its header", () => {
+    // codex `file_change` with kind=delete becomes tool_use name="Delete",
+    // input={file_path}. "Delete" has no per-tool formatter, so both the Python
+    // chip header and this JS mirror go through the generic key=value body — a
+    // blind 30-char truncation there would drop the filename, leaving the user
+    // unable to tell which file codex deleted.
+    const longPath = "/data/cre/workspace/se3.0/tianluo/src/tianluo/engine/tool_formatters.py";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_del", name: "Delete",
+          input: { file_path: longPath } },
+        { type: "tool_result", tool_use_id: "tu_del",
+          content: [{ type: "text", text: "File delete: tool_formatters.py" }],
+          is_error: false },
+      ]),
+    ], false);
+    const chip = findAll(container, "tool-marker")[0];
+    const headerSpan = findOne(chip, "tool-marker-detail");
+    assert.ok(headerSpan.textContent.startsWith("file_path="),
+      `generic key=value body, got '${headerSpan.textContent}'`);
+    assert.ok(headerSpan.textContent.includes("tool_formatters.py"),
+      `filename survives, got '${headerSpan.textContent}'`);
+    assert.ok(!headerSpan.textContent.includes("se3.0/t..."),
+      `no mid-path cut, got '${headerSpan.textContent}'`);
+  });
+
+  // (g5) ------------------------------------------------------------------
+  check("(g5) an over-long file_path abbreviates in the middle, never the tail", () => {
+    // Mirrors truncate_path's step 2: first segment + '/.../' + filename.
+    const deep = "/root/" + Array.from({ length: 30 }, (_, i) => `segment_${i}`).join("/") + "/victim.py";
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_del2", name: "Delete",
+          input: { file_path: deep } },
+        { type: "tool_result", tool_use_id: "tu_del2",
+          content: [{ type: "text", text: "ok" }], is_error: false },
+      ]),
+    ], false);
+    const headerSpan = findOne(findAll(container, "tool-marker")[0], "tool-marker-detail");
+    assert.ok(headerSpan.textContent.includes("victim.py"),
+      `filename is never truncated, got '${headerSpan.textContent}'`);
+    assert.ok(headerSpan.textContent.includes("/.../"),
+      `middle is abbreviated, got '${headerSpan.textContent}'`);
+  });
+
+  // (g6) ------------------------------------------------------------------
+  check("(g6) non-path string values in a generic body still truncate at 30 chars", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      finalRecordWithToolBlocks("s1", "implement", [
+        { type: "tool_use", id: "tu_x", name: "SomeTool",
+          input: { note: "x".repeat(80) } },
+        { type: "tool_result", tool_use_id: "tu_x",
+          content: [{ type: "text", text: "ok" }], is_error: false },
+      ]),
+    ], false);
+    const headerSpan = findOne(findAll(container, "tool-marker")[0], "tool-marker-detail");
+    assert.ok(headerSpan.textContent.includes("..."),
+      `long non-path values keep the old preview truncation, got '${headerSpan.textContent}'`);
+    assert.ok(!headerSpan.textContent.includes("x".repeat(40)),
+      `value was shortened, got '${headerSpan.textContent}'`);
+  });
 }

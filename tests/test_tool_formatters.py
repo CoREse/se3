@@ -1260,6 +1260,107 @@ class TestMissingContentKeyRendering:
 
 
 # ---------------------------------------------------------------------------
+# Missing content keys — detail payload and CLI diff
+#
+# The old-content snapshot is taken when the tool_use arrives, i.e. AFTER an
+# upstream like codex already wrote the file. Diffing that snapshot against an
+# absent "content" would render the freshly written file as fully deleted, so
+# both the detail payload and the CLI diff must report "no content info".
+# ---------------------------------------------------------------------------
+
+class TestMissingContentKeyDetail:
+    def test_write_detail_key_missing_is_path_only(self):
+        payload = build_tool_detail_payload(
+            "Write",
+            {"file_path": "src/b.py"},
+            "ok",
+            old_content="line1\nline2\nline3",
+        )
+        assert payload["kind"] == "file_path_only"
+        assert payload["file_path"] == "src/b.py"
+        assert "diff" not in payload
+        assert "content" not in payload
+
+    def test_write_detail_key_missing_no_old_content_is_path_only(self):
+        payload = build_tool_detail_payload("Write", {"file_path": "src/b.py"}, "ok")
+        assert payload["kind"] == "file_path_only"
+
+    def test_write_detail_key_empty_string_unchanged(self):
+        payload = build_tool_detail_payload(
+            "Write", {"file_path": "src/b.py", "content": ""}, "ok"
+        )
+        assert payload["kind"] == "write_full"
+        assert payload["content"] == ""
+
+    def test_write_detail_with_content_still_diffs(self):
+        payload = build_tool_detail_payload(
+            "Write",
+            {"file_path": "src/b.py", "content": "line1\nline2"},
+            "ok",
+            old_content="line1",
+        )
+        assert payload["kind"] == "write_diff"
+        assert "+line2" in payload["diff"]
+
+    def test_edit_detail_keys_missing_is_path_only(self):
+        payload = build_tool_detail_payload("Edit", {"file_path": "src/b.py"}, "ok")
+        assert payload["kind"] == "file_path_only"
+        assert payload["file_path"] == "src/b.py"
+        assert "diff" not in payload
+
+    def test_edit_detail_keys_empty_strings_unchanged(self):
+        payload = build_tool_detail_payload(
+            "Edit", {"file_path": "src/b.py", "old_string": "", "new_string": ""}, "ok"
+        )
+        assert payload["kind"] == "edit_diff"
+
+    def test_edit_detail_one_key_present_still_diffs(self):
+        payload = build_tool_detail_payload(
+            "Edit", {"file_path": "src/b.py", "new_string": "x"}, "ok"
+        )
+        assert payload["kind"] == "edit_diff"
+        assert "+x" in payload["diff"]
+
+    def test_path_only_payload_is_json_safe(self):
+        payload = build_tool_detail_payload("Write", {"file_path": "src/b.py"}, "ok")
+        assert json.loads(json.dumps(payload))["kind"] == "file_path_only"
+
+
+class TestMissingContentKeyDiffRendering:
+    def _capture_diff(self, tool_name, input_data, result_data, old_content=None):
+        from tianluo.engine.display import set_console
+        buf = io.StringIO()
+        set_console(Console(file=buf, force_terminal=True, width=120))
+        try:
+            format_tool_diff(tool_name, input_data, result_data, old_content=old_content)
+        finally:
+            set_console(None)
+        return buf.getvalue()
+
+    def test_write_key_missing_renders_nothing(self):
+        # codex file_change: the file already exists on disk with 3 lines.
+        output = self._capture_diff(
+            "Write", {"file_path": "src/b.py"}, "ok", old_content="line1\nline2\nline3"
+        )
+        assert output == ""
+
+    def test_write_key_missing_no_old_content_has_no_line_count(self):
+        output = self._capture_diff("Write", {"file_path": "src/b.py"}, "ok")
+        assert output == ""
+        assert "0 lines" not in output
+
+    def test_write_key_empty_string_still_reports_created(self):
+        output = self._capture_diff("Write", {"file_path": "src/b.py", "content": ""}, "ok")
+        # Rich wraps the count in style codes, so match the pieces.
+        assert "Created" in output
+        assert "lines" in output
+
+    def test_edit_keys_missing_renders_nothing(self):
+        output = self._capture_diff("Edit", {"file_path": "src/b.py"}, "ok")
+        assert output == ""
+
+
+# ---------------------------------------------------------------------------
 # Unregistered file tools (e.g. codex's "Delete") through the generic formatter
 # ---------------------------------------------------------------------------
 

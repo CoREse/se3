@@ -607,8 +607,11 @@ class CodexEventConverter:
                     tool_name=self._map_change_kind(kind_text),
                     # WHY: codex never sends file content, and an empty
                     # ``content``/``new_string`` would be rendered as a real
-                    # zero-line write.  Omitting the key entirely lets the
-                    # formatter tell "no content information" from "empty file".
+                    # zero-line write.  Omitting the key entirely lets the whole
+                    # render path — chip header, detail panel and CLI diff — tell
+                    # "no content information" from "empty file"; note the
+                    # renderers' old-side snapshot is the *post-write* file, so a
+                    # synthesized diff would show the new file as fully deleted.
                     tool_input={"file_path": path},
                     result_content=f"File {kind_text or 'change'}: {path}",
                     is_error=False,

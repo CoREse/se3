@@ -540,6 +540,7 @@
   "tool.detail.empty": "(无可用详情)",
   "tool.detail.truncated": "…（输出已截断）",
   "tool.detail.stderr": "标准错误",
+  "tool.detail.noContent": "(未提供文件内容)",
   "tool.detail.noMatches": "(无匹配)",
   "tool.detail.noFiles": "(无文件)",
   "tool.detail.patternPath": "模式={pattern} 路径={path}",
