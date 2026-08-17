@@ -55,13 +55,15 @@ llm_caller:
 #   - omitted / null → LLM review via `llm_caller.defaults`
 confirmation:
   steps:
-    # plan-confirm is ALWAYS-ON: a CONFIRM running the dedicated
-    # requirement-coverage review is inserted after every plan step
-    # regardless of this block — even if this `plan` entry (or all of
-    # confirmation.steps) is removed. This entry's scope is now narrowed to
-    # customizing only the reviewer and max_iterations; it no longer gates
-    # whether plan is confirmed. Omitting it falls back to LLM review via
-    # llm_caller.defaults with the default max_iterations.
+    # plan-confirm is opt-in, like every other step: it used to be always-on,
+    # but self_check already verifies requirement→code coverage against the
+    # real code, and under the default coarse-grained capability doctrine a
+    # requirement→task review has lost its discriminating power. Remove this
+    # entry and PLAN is followed by no gate at all. What the review asks
+    # follows the flow's persisted doctrine: capability → the grouping itself
+    # (group count vs. volume of work, forbidden artifact-type splits,
+    # depends_on soundness); granular → the legacy requirement-coverage review.
+    # Use `reviewer: human` here for a manual grouping gate.
     plan:
       # reviewer omitted → LLM review via llm_caller.defaults
       max_iterations: 3
@@ -217,20 +219,38 @@ workflow:
   # (the historical behavior). Default: 0.
   # self_check_defer_fix_threshold: 0
 
-  # Implementation strategy for new flows with a PLAN → IMPLEMENT surface
-  # (feature / bugfix / discovery). Task type still defines the whole flow;
-  # this only shapes the implementation phase. Values:
-  #   planned — PLAN + task_groups + DAG + per-group worktree scheduling (default)
-  #   direct  — skip PLAN/confirm; one holistic autonomous IMPLEMENT call that
-  #             analyses the full requirements, implements them completely and
-  #             runs targeted verification (works with every writable runner;
-  #             a runner's native goal loop is an optional enhancement)
-  #   auto    — ANALYZE recommends direct|planned once and persists it
-  # Priority: CLI/Web request > this config > planned. Decided once in ANALYZE
-  # and persisted; resume always follows the persisted path.
+  # Which decomposition doctrine PLAN follows. feature / bugfix / discovery
+  # always run ANALYZE → PLAN → IMPLEMENT; this only shapes what PLAN emits.
+  # The execution shape is then read off the group count: one group → the whole
+  # task in a single autonomous implement call, two or more → the existing DAG
+  # (independent groups in parallel isolated worktrees, dependent ones ordered).
+  # Values:
+  #   capability — coarse groups sized by "what one autonomous implement call
+  #                can safely carry"; no per-task listing (the runner's own
+  #                planning system decomposes a group against the real code),
+  #                and groups may never be cut along artifact types or code
+  #                layers (no separate test / docs / config group) (default)
+  #   granular   — legacy doctrine, unchanged: fine-grained per-task listing,
+  #                LOC-driven merge/DAG thresholds, requirement→task review
+  # plan_decomposition: capability
+
+  # Group-count pressure. Applies under capability only; ignored by granular.
+  #   auto         — the LLM sizes the group count by its own estimate (default)
+  #   single       — exactly one group, whatever the task's size
+  #   conservative — lower the splitting threshold, err toward more groups
+  # plan_granularity: auto
+
+  # Priority for both keys: CLI (--plan-decomposition / --plan-granularity) or
+  # Web request > this config > capability + auto. Decided once at flow creation
+  # and persisted; a resumed flow keeps the doctrine it already entered and its
+  # groups are never re-judged mid-flow.
+  #
+  # The retired workflow.implementation_strategy key is accepted for one more
+  # version and mapped onto the two keys above with a deprecation warning
+  # (direct → plan_granularity: single, planned → plan_decomposition: granular,
+  # auto → the new defaults); it is removed in the next major version.
   # The retired self_check_convergence_enabled key is accepted for old-config
   # compatibility only and is always normalized to false.
-  # implementation_strategy: planned
 
 # Model pricing overrides for the session usage/cost summary (provider actual
 # cost is always preferred; estimates cover only calls that reported tokens

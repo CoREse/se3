@@ -24,7 +24,8 @@ wins.
    - [`confirmation`](#confirmation)
    - [`language`](#language)
    - [`workflow`](#workflow)
-     - [Implementation strategy for PLAN-to-IMPLEMENT flows](#implementation-strategy-for-plan-to-implement-flows)
+     - [PLAN decomposition doctrine and granularity](#plan-decomposition-doctrine-and-granularity)
+     - [Retired: `workflow.implementation_strategy`](#retired-workflowimplementation_strategy)
      - [Self-check review scope (full-incremental-closure)](#self-check-review-scope-full-incremental-closure)
    - [`pricing`](#pricing)
      - [Usage and cost visibility in history and the web console](#usage-and-cost-visibility-in-history-and-the-web-console)
@@ -346,7 +347,7 @@ confirmation:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `steps` | mapping `<step> → entry` | `{}` | A step is confirmed **iff** it appears as a key here (plus the always-on `plan`, below). |
+| `steps` | mapping `<step> → entry` | `{}` | A step is confirmed **iff** it appears as a key here. No step is exempt from this rule. |
 | `steps.<step>.reviewer` | string or null | `null` | `human` → routes to the `tianluo/calls/` MCP call file + interactive approval. An **agent name** → single-agent LLM review with that agent. Omitted/`null` → LLM review via `llm_caller.defaults`. |
 | `steps.<step>.max_iterations` | positive int | `3` (`_CONFIRM_DEFAULT_MAX_ITERATIONS`) | Cap on the review→modify→re-review cycle. Non-integer or `<= 0` warns and falls back to the default. |
 
@@ -358,13 +359,36 @@ An unknown `reviewer` agent name raises `ValueError` at load time — and the ch
 walks **every** entry, not just the step about to run, so typos under a step that
 happens not to be in this flow's sequence still surface at startup.
 
-**plan-confirm is always-on.** A `CONFIRM` step running the dedicated
-requirement-coverage review is inserted after every `plan` step regardless of
-this block — even if the `plan` entry, or `confirmation.steps` in its entirety,
-is deleted. A `confirmation.steps.plan` entry therefore no longer gates *whether*
-plan is confirmed; its only remaining scope is customizing `reviewer` and
-`max_iterations`. With no entry, plan-confirm resolves to LLM review via
-`llm_caller.defaults` with `max_iterations: 3`.
+**plan-confirm is opt-in, like every other step.** It used to be always-on —
+a `CONFIRM` step was inserted after every `plan` step regardless of this block.
+It no longer is: with no `confirmation.steps.plan` entry, PLAN is followed by
+no gate at all. The reason for the downgrade is that `self_check` is already
+task-description-authoritative and verifies requirement→code coverage against
+the real code, while under the default coarse-grained
+[`capability` doctrine](#plan-decomposition-doctrine-and-granularity) a
+requirement→task coverage review has lost its discriminating power — a group
+that says "implement the export capability" cannot be checked line-by-line
+against a requirement list.
+
+To keep a gate, declare it like any other step:
+
+```yaml
+confirmation:
+  steps:
+    plan:
+      reviewer: human      # manual grouping gate
+```
+
+What the review asks depends on the doctrine the flow was planned under:
+
+- **`capability`** — reviews the *grouping*: whether the group count matches
+  the volume of work, whether any group was cut along a forbidden artifact
+  type or code layer, and whether the `depends_on` declarations hold. It
+  explicitly does not ask for a per-requirement task decomposition.
+- **`granular`** — keeps the legacy requirement→task coverage review verbatim.
+
+The doctrine is read from the persisted flow context, so a resumed flow is
+reviewed under the doctrine it was planned with.
 
 By contrast `adjudicate` is **unconfirmed by default**: with no entry here a
 ruling auto-passes with no gate — including a ruling that rewrites the *task
@@ -407,7 +431,8 @@ Fix-loop and self_check behaviour. Loaded into `WorkflowConfig`.
 | `baseline_fix_max_attempts` | int `>= 0` | `3` | Per-flow cap on looping *inherited* (pre-implement baseline) test failures. Deliberately independent of `max_fix_iterations`, which may be the unlimited sentinel — inherited failures must stay bounded on their own. **`0` disables baseline looping entirely** (inherited failures are surfaced, never looped). Negative → `ConfigError`. |
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | For nested self_check chains: when a non-final pass finds *fewer* than this many issues and none is critical/high severity, its fix is deferred so the remaining passes run first; their findings are then deduped into one consolidated fix loop. **`0` (or `null`) disables deferral** — every issue-finding pass fixes immediately (the historical behaviour). Negative → `ConfigError`. |
 | `adjudicate_period` | int `>= 0` | `10` | Period, in fix iterations, of the adjudicate step's catch-all safety net: every N fix iterations one adjudicate run is forced even when no structural oscillation signal fired. **`0` (or `null`) disables the periodic net** (adjudicate then runs only on the structural triggers: candidate oscillation / contradiction / recurrence). Unlike its siblings this key is **fail-fast on a bad type**: a bool, a float, or a non-numeric string raises `ConfigError` rather than defaulting, because silently defaulting would enable an interval the user never asked for. A cleanly integer-valued string (`"7"`) still coerces. Negative → `ConfigError`. |
-| `implementation_strategy` | `auto` \| `direct` \| `planned` | `planned` | Default implementation strategy for new flows with a PLAN → IMPLEMENT surface (see below). **Fail-fast on any other value** (it silently changes which steps a flow runs). |
+| `plan_decomposition` | `capability` \| `granular` | `capability` | Which decomposition doctrine PLAN follows (see below). **Fail-fast on any other value** — a typo would otherwise silently pick a different doctrine, invisible until the groups come out the wrong size. |
+| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | Group-count pressure applied **under `capability` only**; meaningless and ignored under `granular`. `auto` = the LLM sizes the group count by its own capability estimate; `single` = pin exactly one group; `conservative` = lower the splitting threshold, err toward more groups. **Fail-fast on any other value.** |
 
 The retired `workflow.self_check_convergence_enabled` key is accepted only for
 configuration compatibility. It is always normalized to `false`, and the
@@ -415,44 +440,99 @@ deprecation warning is emitted **once per process** (a long-lived daemon /
 server that reloads the config repeatedly logs it only on the first load);
 validated findings always enter the fix loop.
 
-#### Implementation strategy for PLAN-to-IMPLEMENT flows
+#### PLAN decomposition doctrine and granularity
 
-**Task type and implementation strategy are different layers.** The task type
-(`feature` / `bugfix` / `small` / `review` / `survey` / discovery) defines the
-whole flow's step sequence and quality gates. The implementation strategy only
-controls the *implementation phase* of flows whose default sequence contains a
-PLAN → IMPLEMENT segment (`feature`, `bugfix`, discovery):
+**There is one path, not two.** `feature`, `bugfix` and discovery flows always
+run ANALYZE → PLAN → IMPLEMENT; no configuration key removes PLAN from a
+sequence any more. What varies is *what PLAN emits* and *how many groups* it
+emits — and the execution shape of the PLAN → IMPLEMENT segment is then read
+off that group count, not off a routing flag:
 
-- **`planned`** (default) — keeps the existing PLAN step, `task_groups`, the
-  dependency DAG, the per-group worktree scheduling and the PLAN confirm gate.
-- **`direct`** — drops PLAN and its confirm gate; ANALYZE / INVESTIGATE /
-  IMPLEMENT and every other quality gate of the task type stay. The single
-  IMPLEMENT step carries the full effective requirements and hands the whole
-  implementation to one autonomous caller run, which must analyse the
-  requirements itself, implement them completely, and run targeted verification
-  before returning the structured implementation summary. A partial result or
-  non-empty `incomplete_tasks` never advances to TEST — the flow re-enters
-  IMPLEMENT through the normal retry / resume machinery (a later caller always
-  continues in the existing workspace and never switches back to `planned`).
-  `direct` works with **every** writable AgentRunner; a runner's native goal
-  loop (e.g. Claude Code's `/goal` in print mode) is an optional per-call
-  enhancement, never an entry requirement and never flow-authoritative state.
-- **`auto`** — the ANALYZE step requests a structured `direct|planned`
-  recommendation (task size, module coupling, dependency chains, worktree
-  isolation value, recovery granularity, single-call feasibility) and persists
-  it as the flow's effective strategy. A missing or invalid recommendation
-  deterministically falls back to `planned`.
+- **one group** → IMPLEMENT runs the whole task as a single autonomous
+  implement call (what the retired `direct` path used to select explicitly);
+- **two or more groups** → the existing DAG scheduling applies: groups with no
+  dependency between them run in parallel in isolated worktrees and are merged
+  back, groups with declared dependencies run in order.
 
-Priority for a new flow: explicit CLI (`--implementation-strategy`) / web
-request → `workflow.implementation_strategy` → `planned`. The requested value
-is persisted in the flow context; the effective value and its reason are
-decided **exactly once in ANALYZE** and persisted too. A resume recovers the
-persisted path — later configuration changes never alter a running flow.
-Flows without a PLAN → IMPLEMENT surface (`small`, `review`, `survey`) record
-`effective_implementation_strategy = not_applicable` and keep their exact step
-sequences; legacy flows infer their strategy read-only from the persisted
-`selected_steps` (PLAN present → `planned`, `small`-style no-PLAN flows →
-`not_applicable`) without rewriting history.
+Task type and decomposition remain different layers: the task type
+(`feature` / `bugfix` / `small` / `review` / `survey` / discovery) decides the
+whole flow's step composition and quality gates, while these two keys only
+shape the PLAN → IMPLEMENT segment. Sequences that never had a PLAN step
+(`small`, `review`, `survey`) are unaffected.
+
+**`plan_decomposition: capability`** (default) — PLAN cuts the work into coarse
+groups whose *only* sizing criterion is "can a single autonomous implement call
+safely carry this?":
+
+1. one capability that one call can complete → **one group** (the group's
+   content is simply "implement that capability");
+2. one capability one call cannot carry → **two or more groups**;
+3. two naturally distinct capabilities one call could still complete together
+   → **still one group** — distinctness alone is not a reason to split;
+4. on the edge between "can" and "cannot" → **one capability per group**. The
+   more a group aggregates, the *lower* the threshold at which PLAN splits it.
+
+A hard guardrail forbids cutting groups along artifact types or code layers:
+no separate test group, docs group or config group, and no group defined by a
+file set, module boundary or layer. Testing and verification are part of what
+each group itself delivers. (A group whose *capability* happens to concern the
+test or docs system — "fix the flaky retry in the test runner" — is of course
+legitimate; what is forbidden is carving one capability's tests out into a
+group of their own.)
+
+Under `capability`, PLAN emits **no per-task listing**. A group carries only
+the scheduling fields `group_id` / `name` / `description` / `group_order` /
+`depends_on`; the in-group breakdown is left to the implement runner's own
+planning / sub-agent system, which decomposes against the real code at
+execution time. PLAN still produces its coarse proposal / design output, which
+is what a human gate reviews and what is injected as `{design_section}` context
+during fix iterations.
+
+**`plan_granularity`** applies only under `capability`:
+
+- **`auto`** (default) — PLAN estimates how many autonomous implement calls the
+  task actually needs and emits exactly that many groups.
+- **`single`** — exactly one group, whatever the task's size. This is the
+  configuration-forced equivalent of the retired `direct` path.
+- **`conservative`** — lower the splitting threshold: whenever there is *any*
+  doubt that one call can carry the work, split it. Errs toward more groups,
+  on the reasoning that an under-sized group costs little while a group that
+  overflows the call it was sized for costs a failed implementation.
+
+**`plan_decomposition: granular`** is the retained legacy doctrine: the
+fine-grained per-task listing (`tasks` arrays with `complexity` /
+`estimated_loc` / `files`), the LOC-driven merge and DAG thresholds, and the
+requirement→task coverage review at the plan gate — all unchanged from before
+this model existed. `plan_granularity` is ignored in this mode.
+
+Priority for a new flow: explicit CLI (`--plan-decomposition` /
+`--plan-granularity`) / web request → the two config keys → `capability` +
+`auto`. **The decision is made once, at flow creation, and persisted** in the
+flow context together with its reason; a resumed flow keeps executing the
+doctrine it already entered, whatever the configuration says later, and the
+groups PLAN already emitted are never re-judged mid-flow. Flows created before
+this model existed carry no new keys: they are *described* read-only by the
+retired strategy value they recorded, and their on-disk state is never
+rewritten.
+
+#### Retired: `workflow.implementation_strategy`
+
+The `implementation_strategy` routing axis (`auto` / `direct` / `planned`) is
+retired. Both `workflow.implementation_strategy` and the
+`--implementation-strategy` CLI option are still accepted for **one version**
+and mapped onto the new keys, with a deprecation warning emitted once per
+process. **They will be removed in the next major version.**
+
+| Legacy value | Maps to | Because it meant |
+|--------------|---------|------------------|
+| `direct` | `plan_granularity: single` | "do the whole thing in one call" = force a single group |
+| `planned` | `plan_decomposition: granular` | "I want fine-grained task groups + DAG scheduling" = keep the legacy doctrine |
+| `auto` | the new defaults (`capability` + `auto`) | "let the flow decide" |
+
+The mapping happens at the config-object boundary (and, for the CLI, through
+the same table), so nothing downstream carries two dialects. A new key you
+actually wrote always wins: the legacy key is a fallback for un-migrated
+projects, never an override. An out-of-range legacy value is still fail-fast.
 
 #### Self-check review scope (full-incremental-closure)
 
@@ -560,8 +640,9 @@ never re-sums provider sessions, cached tokens or pricing itself.
   five-field records are flagged `legacy` rather than guessed at.
 - `luo history show <flow_id>` prints the per-call, per-step and flow totals
   (with `--json` emitting the same structured payload), and the web console's
-  history view and live-flow sidebar show the same figures plus the
-  implementation strategy and the self-check scope audit. Active, archived and
+  history view and live-flow sidebar show the same figures plus the plan mode
+  (decomposition / granularity / group count) and the self-check scope audit.
+  Active, archived and
   history-only flows are all recoverable; flows predating the unified records
   are marked incomplete instead of being rewritten.
 
@@ -919,8 +1000,22 @@ Failure routing is deliberately split in two:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `group_loc_threshold` | int | `300` | Total estimated LOC at or below which a multi-group task plan is merged into a **single** LLM call instead of being farmed out per group. Also feeds the sequential-vs-DAG-parallel decision above the threshold. **Fail-fast, not clamp-and-warn** (see below). |
+| `group_loc_threshold` | int | `300` | **[`plan_decomposition: granular` only]** Total estimated LOC at or below which a multi-group task plan is merged into a **single** LLM call instead of being farmed out per group. Also feeds the sequential-vs-DAG-parallel decision above the threshold. **Fail-fast, not clamp-and-warn** (see below). |
 | `use_worktree` | bool | `true` | Whether implement groups run in isolated git worktrees. Accepts the usual boolean spellings; an unrecognised string falls back to the default rather than flipping behaviour. **Overridable at runtime by the `SE3_IMPLEMENT_USE_WORKTREE` environment variable**, which wins over the YAML value. |
+
+**`group_loc_threshold` applies to `granular` plans only.** Under the default
+[`capability` doctrine](#plan-decomposition-doctrine-and-granularity) the
+threshold takes no part in either decision: a coarse capability group carries
+no per-task `estimated_loc`, so the total would always be `0` — and `0` reads
+as *both* "small enough to merge" and "not worth parallelising", which would
+silently serialize groups the plan declared independent. Capability mode
+dispatches on group count and topology instead: one group → the whole-task
+implement call, two or more → the DAG path, still subject to the existing
+`use_worktree`, linear-dependency-chain and no-commits short-circuits. A
+capability group is by definition already sized at the ceiling of one
+autonomous call, well past any 300-LOC merge threshold, so re-judging it by
+LOC would add no information. Under `granular` the threshold behaves exactly
+as it always has.
 
 `group_loc_threshold` is one of the explicit exceptions to the clamp-and-warn
 rule: `ImplementConfig.from_dict` calls bare `int(...)` on the value with no

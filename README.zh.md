@@ -21,7 +21,7 @@ tianluo（曾以 *se3* 之名发布；方法论仍叫 **SE 3.0**）不是单次�
 五条承重的押注，每条附一行让它成为既成事实、而非愿景的证据。
 
 **1. 省下的是人的注意力，不是 token。** 一条 flow 的好坏，度量单位是"逼一个人去读、去判、去决策"的次数，而不是 LLM 调用有多便宜。
-*证据：* 结构上真正需要 attention 的只有两处——开场那句 prompt，和 `plan` 的确认闸口；从 `implement` 到 `commit` 全程无人盯着。
+*证据：* 结构上真正需要 attention 的只有一处——开场那句 prompt；从 `plan` 到 `commit` 全程无人盯着，连 `plan` 之后的分组闸口都要你自己选择开启。
 
 **2. 程序当监工，人 out-of-the-loop。** 决定"下一步干什么"的是一台确定性的 Python 状态机，既不是模型，也不是坐在终端前的人。
 *证据：* `tianluo/state/engine.json` 持久化 step / attempt / 上下文 / fix-loop 历史，因此一条 flow 能跨终端退出、机器重启、跨机器接管而存活，并用 `luo run --resume` 从确切的中断点续跑。
@@ -38,7 +38,7 @@ tianluo（曾以 *se3* 之名发布；方法论仍叫 **SE 3.0**）不是单次�
 - **`test.critical_tests` 挡住"用 skip 冒充通过"。** 被配置为关键的测试若是 skip 而非真跑，test 步骤判失败，而不是报绿。
 - **测试基线在 `implement` 落笔之前被确定性地捕获。** 它由引擎冻结，因此一条历史既存的红测试永远不会被改写成"本次改动引入的"，反之亦然。
 - **`investigate` 的净零 diff 由引擎校验，而非由模型承诺。** 引擎在该步骤前后各拍一次工作区快照并比对，不一致即判失败。引擎自身从不 reset 或 checkout 任何东西——工作树里可能还有与本任务无关的未提交改动。
-- **plan-confirm 常开。** `plan` 之后插入 `CONFIRM` 不依赖配置里是否存在 `confirmation.steps.plan` 条目——它是机械插入的，与配置解耦。
+- **PLAN 的分解决策只做一次。** flow 运行在哪套分解学说与粒度之下，在 flow 创建时解析并持久化；续跑的 flow 沿用它已经进入的分组，无论此后配置如何变化，引擎也绝不中途重判。
 - **`version_analyze` 缺 `suggested_version` 即报错。** 没有静默 patch bump 的兜底；流程就地停下并请人介入。
 
   *一句话收口：* 凡是原本只靠"LLM 应该会记得"才成立的，这里都被改写成靠代码成立。
@@ -233,7 +233,8 @@ stateDiagram-v2
     analyze --> plan: 根因已明确
     investigate --> plan: 根因报告
 
-    plan --> confirm: 常开闸口
+    plan --> confirm: 配置了闸口
+    plan --> implement: 未配置闸口
     confirm --> plan: 要求修订
     confirm --> implement: 已批准
 
@@ -257,8 +258,9 @@ stateDiagram-v2
   `bugfix` *且*报出 `root_cause_clear = false` 时，它才被插到 `plan` 之前。
   （`survey` 任务类型是另一条进入通道——它的默认序列无条件带着 `investigate`。）
   该步骤跑在一份**净零 diff** 契约之下，由引擎比对它前后各拍一次的工作区快照来校验。
-- **`plan` 之后的 `confirm` 常开。** 它是机械插入的，与你的配置里有没有
-  `confirmation.steps.plan` 无关。被驳回时流程回到 `plan`，而不是向前推进。
+- **`plan` 之后的 `confirm` 是可选的。** 只有配置里出现 `confirmation.steps.plan`
+  时才会插入（写 `reviewer: human` 即人工分组 gate）；配置了之后，被驳回时流程
+  回到 `plan`，而不是向前推进。
 - **fix loop 是共用的。** `test`、`self_check`、`invariant_check` 的失败/finding
   一律路由回 `implement`。check 类步骤的 finding 没有别的去向——不能豁免、不能延后、
   不能降级。
@@ -276,35 +278,58 @@ stateDiagram-v2
 |---|---|---|
 | `feature` | analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | 完整链路；也是持久化类型无法识别时的兜底。 |
 | `bugfix` | 与 `feature` 相同，另在 `plan` 前条件插入 `investigate` | 唯一会条件性获得 `investigate` 的类型。 |
-| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | 无 `plan`（因而无 confirm 闸口）、无 `self_check`、无 `invariant_check`。 |
+| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | 无 `plan`、无 `self_check`、无 `invariant_check`。 |
 | `review` | analyze → invariant_check → summarize | 只读只判：不 implement、不 test、不 commit。 |
 | `survey` | analyze → investigate → summarize | 交付物是结论而非 diff——因此无 implement/test/commit，也无 `version_analyze`。 |
 | *（`--discover`）* | discovery → *`feature` 链路* | 经 `--discover` 进入，而非 `--type`。 |
 
-上表列的是 `models.py` 里字面声明的默认序列，其中并不含 `confirm` 条目。**引擎随后
-会在每个 `plan` step 之后无条件插入一个 `confirm` step** —— 无论
-`confirmation.steps` 是否提到 `plan`，`plan` 一律要过确认闸口，因此所有带 `plan`
-的类型实际跑的是 `plan → confirm → implement`。这也正是没有 `plan` 的 `small`
-同时也没有 confirm 闸口的原因。
+上表列的是 `models.py` 里字面声明的默认序列，其中并不含 `confirm` 条目。`confirm`
+**只会**插在 `confirmation.steps` 列出的那些 step 之后 —— `plan` 也不例外：它和
+其他步骤一样是可选的 per-step 确认，因此没有 `confirmation.steps.plan` 条目时，
+带 `plan` 的类型实际跑的是 `plan → implement`，中间没有闸口。
 
 `analyze` 仍可能调整选定的序列；上表是起点，不是冻结的契约。
 
-#### 实现策略：PLAN → IMPLEMENT 阶段如何运行
+#### PLAN 的分解：PLAN → IMPLEMENT 阶段如何运行
 
-在 task type 之上，默认序列包含 PLAN → IMPLEMENT 区间的 flow（`feature`、
-`bugfix`、discovery）会选择一个**实现策略**，它只塑造这一阶段 —— `planned`
-（默认：PLAN、task groups、依赖 DAG 与逐 group 的 worktree 调度）、`direct`
-（跳过 PLAN 及其 confirm 关口；一次整体自主 IMPLEMENT 调用，自主分析完整需求、
-完整实现并运行针对性验证）或 `auto`（ANALYZE 一次性推荐 `direct` 或 `planned`
-并持久化该选择）。通过 `luo run --implementation-strategy auto|direct|planned`
-或 `workflow.implementation_strategy` 配置选择；优先级为显式请求 → 项目配置 →
-`planned`。有效值与理由在 ANALYZE 中只决策一次并持久化 —— resume 永远沿用已
-持久化的路径，`small` / `review` / `survey` 记录 `not_applicable` 且序列不变。
+只有一条路径，不再是两条。`feature`、`bugfix` 与 discovery 流程一律运行
+ANALYZE → PLAN → IMPLEMENT，没有任何配置能把 PLAN 从序列里裁掉。变化的只是
+PLAN 产出什么，而**执行形态由组数读出**：
 
-`direct` 适用于所有可写 agent runner；runner 的原生 goal 循环（例如 Claude Code
-print 模式下的 `/goal`）只是单次调用内的可选增强，不是准入条件，也绝非 flow 级
-权威状态。partial 结果或非空 `incomplete_tasks` 绝不会前进到 TEST —— flow 经
-正常 retry/resume 机制重入 IMPLEMENT，后继 caller 在现有工作区继续。
+- **单组** —— IMPLEMENT 把整个任务作为一次自治 implement 调用执行；
+- **两组及以上** —— 沿用依赖 DAG：互相独立的组在隔离 worktree 中并行执行并
+  合并回来，声明了依赖的组顺序执行。
+
+`workflow.plan_decomposition` 选择 PLAN 遵循哪套学说：
+
+- **`capability`**（默认）—— 粗粒度的组，切分的唯一依据是*一次自治 implement
+  调用能否安全承载*。一个功能一次调用能完成 → 一个组；扛不下 → 拆成两个或多个；
+  天然两个功能但一次调用合起来也能完成 → 仍是一个组；处于边缘 → 一个功能一组
+  （组内聚合得越多，触发切分的阈值越低）。禁止按制品类型或代码分层切分：不得有
+  独立的 test 组、docs 组、config 组——测试是每个组自身交付的组成部分。该模式下
+  PLAN 不输出逐条 task 列表，组只携带 `group_id` / `name` / `description` /
+  `group_order` / `depends_on`，组内细化分解交给 implement runner 已有的
+  planning / sub-agent 体系在执行时对着真实代码去做。
+- **`granular`** —— 保留下来的 legacy 学说：细粒度逐条 task 列表、LOC 驱动的
+  合并与 DAG 阈值、关口上的 requirement→task 覆盖审查。
+
+`workflow.plan_granularity` 仅在 `capability` 下生效：`auto`（默认）由 PLAN 自行
+估算组数，`single` 无论任务多大都只出一个组，`conservative` 降低切分阈值、更倾向
+拆分。
+
+优先级：显式 CLI（`--plan-decomposition` / `--plan-granularity`）或 Web 请求 →
+项目配置 → `capability` + `auto`。决策在 flow 创建时只做一次并连同理由持久化 ——
+续跑的 flow 沿用它已经进入的学说，其分组也绝不中途重判。
+
+整体单次调用的形态适用于所有可写 agent runner；runner 的原生 goal 循环（例如
+Claude Code print 模式下的 `/goal`）只是单次调用内的可选增强，不是准入条件，
+也绝非 flow 级权威状态。partial 结果或非空 `incomplete_tasks` 绝不会前进到
+TEST —— flow 经正常 retry/resume 机制重入 IMPLEMENT，后继 caller 在现有工作区
+继续。
+
+想为分组加一道闸口，就在 `confirmation.steps` 里声明 `plan`（`reviewer: human`
+即人工分组 gate）。`capability` 下这道 review 审的是：组数是否与任务体量匹配、
+有没有哪个组是按被禁止的制品类型切出来的、`depends_on` 是否成立。
 
 SELF_CHECK 以**有效任务描述**为验收权威（原始任务或 discovery 精化、用户
 interjection、裁决后的描述），外加 charter 与 `WHY:`/`INVARIANT:` 约束 —— PLAN、
@@ -417,9 +442,15 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 - **`--from-issue <id>`** — 以 `tianluo/issues/` 中一条既有 issue 作为输入发起 flow，
   并在 flow 结束时把结果写回该 issue（成功完成的 flow 会解决它）。这正是
   `luo salvage` 为未完成工作补完 issue 之后的预期跟进路径。
-- **`--implementation-strategy auto|direct|planned`** — 新 flow 的显式实现策略
-  请求（见上文的实现策略一节）。省略时读项目配置、再回落 `planned`；resume 时
-  忽略该参数，恢复已持久化的策略。
+- **`--plan-decomposition capability|granular`** — 新 flow 的显式分解学说请求
+  （见上文 PLAN 的分解一节）。省略时读项目配置、再回落 `capability`。
+- **`--plan-granularity auto|single|conservative`** — 新 flow 的显式组数粒度
+  请求，仅在 `capability` 下生效。省略时读项目配置、再回落 `auto`。
+  两个参数在 resume 时都会被忽略：flow 沿用它创建时的那套学说。
+- **`--implementation-strategy auto|direct|planned`** — **已退役，将在下一个主
+  版本移除。**保留一个版本，按兼容映射翻译为上面两个选项（`direct` →
+  `--plan-granularity single`，`planned` → `--plan-decomposition granular`，
+  `auto` → 新的默认值），并打印弃用提示。显式写下的新选项胜过该映射。
 
 ### `luo code-index` — 结构地图
 
@@ -443,8 +474,8 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 
 `luo history show <flow_id>` 还会打印一块独立的**用量 / 成本**区域 —— 逐 LLM
 call/attempt、逐 step 与 flow 合计（输入 / 输出 / 缓存 tokens、供应商 actual
-cost、估算成本、unknown 计数与完整性），外加该 flow 的实现策略与 self-check
-scope audit。供应商 actual cost 保持权威并与估算分列；用量、模型或价格缺失时
+cost、估算成本、unknown 计数与完整性），外加该 flow 的 plan mode（分解学说、
+粒度、组数）与 self-check scope audit。供应商 actual cost 保持权威并与估算分列；用量、模型或价格缺失时
 显示 `unknown`/partial，绝不显示误导性的 `$0`。`--json` 输出同一份结构化汇总。
 网页控制台的 history 视图与 live-flow 侧栏展示同一后端数字。
 

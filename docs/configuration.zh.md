@@ -23,7 +23,8 @@
    - [`confirmation`](#confirmation)
    - [`language`](#language)
    - [`workflow`](#workflow)
-     - [实现策略(PLAN-to-IMPLEMENT 流程)](#实现策略plan-to-implement-流程)
+     - [PLAN 的分解学说与粒度](#plan-的分解学说与粒度)
+     - [已退役:`workflow.implementation_strategy`](#已退役workflowimplementation_strategy)
      - [Self-check 审查范围(full-incremental-closure)](#self-check-审查范围full-incremental-closure)
    - [`pricing`](#pricing)
      - [history 与 Web 控制台的用量与成本可见性](#history-与-web-控制台的用量与成本可见性)
@@ -319,7 +320,7 @@ confirmation:
 
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
-| `steps` | mapping `<step> → 条目` | `{}` | **当且仅当**某个 step 作为 key 出现在这里时,它才被确认(外加下文永远开启的 `plan`)。 |
+| `steps` | mapping `<step> → 条目` | `{}` | **当且仅当**某个 step 作为 key 出现在这里时,它才被确认。没有任何 step 是这条规则的例外。 |
 | `steps.<step>.reviewer` | string 或 null | `null` | `human` → 走 `tianluo/calls/` 的 MCP call 文件 + 交互式批准。填**某个 agent 名** → 由该 agent 做单 agent 的 LLM review。省略 / `null` → 由 `llm_caller.defaults` 做 LLM review。 |
 | `steps.<step>.max_iterations` | 正 int | `3`(`_CONFIRM_DEFAULT_MAX_ITERATIONS`) | review→修改→再 review 循环的上限。非整数或 `<= 0` 会告警并回落到默认值。 |
 
@@ -330,11 +331,32 @@ confirmation:
 条目,而不只是即将运行的那个 step,因此写在本次流程序列之外的 step 下的笔误,同样
 会在启动时暴露出来。
 
-**plan-confirm 永远开启。**每个 `plan` step 之后都会插入一个执行专门的需求覆盖度
-review 的 `CONFIRM` step,与本配置块无关 —— 即使删掉 `plan` 条目、甚至删掉整个
-`confirmation.steps` 也照样插入。因此 `confirmation.steps.plan` 条目不再决定 plan
-*是否*被确认;它剩下的唯一作用是定制 `reviewer` 与 `max_iterations`。没有该条目时,
-plan-confirm 解析为由 `llm_caller.defaults` 做 LLM review、`max_iterations: 3`。
+**plan-confirm 与其他 step 一样,是可选的。**它曾经永远开启 —— 每个 `plan` step
+之后都会插入一个 `CONFIRM` step,与本配置块无关。现在不再如此:没有
+`confirmation.steps.plan` 条目时,PLAN 之后不会有任何闸口。降级的理由是:
+`self_check` 已是 task-description-authoritative,requirement→code 的覆盖校验由
+它对着真实代码执行;而在默认的粗粒度
+[`capability` 学说](#plan-的分解学说与粒度)下,requirement→task 的覆盖审查已经
+失去判别力 —— 一个写着『实现导出功能』的组,没法逐条对着需求清单核对。
+
+想保留这道闸口,就像声明其他 step 一样声明它:
+
+```yaml
+confirmation:
+  steps:
+    plan:
+      reviewer: human      # 人工分组 gate
+```
+
+审查什么,取决于该 flow 当初是在哪套学说下做的 plan:
+
+- **`capability`** —— 审*分组*:组数是否与任务体量匹配、有没有哪个组是按被禁止
+  的制品类型或代码分层切出来的、`depends_on` 的依赖声明是否成立。它明确不再
+  要求逐条需求的任务分解。
+- **`granular`** —— 原样保留 legacy 的 requirement→task 覆盖审查。
+
+学说是从持久化的 flow context 读出的,因此续跑的 flow 会在它当初做 plan 时的
+那套学说下接受审查。
 
 与之相对,`adjudicate` **默认不确认**:这里没有条目时,裁决自动通过、没有任何闸口
 —— 包括那种会改写*任务描述*的裁决。如果一次无人值守的运行绝不能悄悄改写自己的任务,
@@ -373,43 +395,91 @@ fix loop 与 self_check 的行为。加载进 `WorkflowConfig`。
 | `baseline_fix_max_attempts` | int `>= 0` | `3` | 每个 flow 针对*继承而来*的(implement 之前的 baseline)测试失败所做循环的上限。刻意与 `max_fix_iterations` 独立 —— 后者可能是表示无限的哨兵值,而继承来的失败必须自己有界。**`0` 完全禁用 baseline 循环**(继承来的失败只上报,不循环)。负数 → `ConfigError`。 |
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | 用于嵌套 self_check 链路:当某个非最后一遍发现的问题*少于*此数量、且其中没有 critical / high 严重级时,推迟其修复,让剩余各遍先跑完;随后把各遍的发现去重合并进一次统一的 fix loop。**`0`(或 `null`)禁用推迟** —— 每一遍只要发现问题就立刻修(历史行为)。负数 → `ConfigError`。 |
 | `adjudicate_period` | int `>= 0` | `10` | adjudicate step 那张兜底安全网的周期,单位是 fix 迭代次数:每 N 次 fix 迭代,即使没有任何结构性震荡信号触发,也强制跑一次 adjudicate。**`0`(或 `null`)禁用这张周期性的网**(adjudicate 此后只在结构性触发条件下运行:候选震荡 / 相互矛盾 / 反复复发)。与它的同类不同,这个 key 在**类型错误时快速失败**:bool、浮点或非数字字符串会抛 `ConfigError` 而非回落默认值 —— 因为悄悄回落等于启用了一个用户从未要求过的周期。能干净取整的字符串(`"7"`)仍会被强制转换。负数 → `ConfigError`。 |
-| `implementation_strategy` | `auto` \| `direct` \| `planned` | `planned` | 新流程在具备 PLAN → IMPLEMENT 选择面时的默认实现策略(见下)。**其他任何取值都是快速失败**(它会静默改变一个 flow 实际执行的步骤)。 |
+| `plan_decomposition` | `capability` \| `granular` | `capability` | PLAN 遵循哪套分解学说(见下)。**其他任何取值都是快速失败** —— 否则一个笔误会静默选中另一套学说,直到分组尺寸出错才被发现。 |
+| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | 组数压力,**仅在 `capability` 下生效**,`granular` 下无意义且被忽略。`auto` = 由 LLM 依自身能力估计定组数;`single` = 强制单组;`conservative` = 降低切分阈值,更倾向拆分。**其他任何取值都是快速失败。** |
 
 已退役的 `workflow.self_check_convergence_enabled` 仅为旧配置兼容而继续
 接受；加载时始终归一化为 `false`，弃用警告**每进程只输出一次**(长驻的 daemon /
 server 反复加载配置时，只在首次加载记录一次)。任何通过验证的 finding 都会进入
 fix loop。
 
-#### 实现策略(PLAN-to-IMPLEMENT 流程)
+#### PLAN 的分解学说与粒度
 
-**task type 与实现策略是两个不同层级。**task type(`feature` / `bugfix` /
-`small` / `review` / `survey` / discovery)定义整条 flow 的步骤组合与质量关口;
-实现策略只控制默认序列中包含 PLAN → IMPLEMENT 区间的流程(`feature`、
-`bugfix`、discovery)的*实现阶段*:
+**只有一条路径,不再是两条。**`feature`、`bugfix` 与 discovery 流程一律运行
+ANALYZE → PLAN → IMPLEMENT;不再有任何配置 key 能把 PLAN 从序列里裁掉。变化的
+只是 *PLAN 产出什么*与*产出几个组*——PLAN → IMPLEMENT 区间的执行形态随后由组数
+读出,而不是由某个路由标志决定:
 
-- **`planned`**(默认)—— 保留现有 PLAN step、`task_groups`、依赖 DAG、逐 group
-  的 worktree 调度和 PLAN confirm 关口。
-- **`direct`** —— 移除 PLAN 及其 confirm 关口;ANALYZE / INVESTIGATE / IMPLEMENT
-  以及原 task type 的其余质量关口全部保留。唯一的 IMPLEMENT step 承载完整有效
-  需求,把整个实现交给一次自主 caller 运行:caller 必须自行分析需求、完整实现、
-  运行针对性验证,并返回现有结构化 implementation summary。partial 结果或非空
-  `incomplete_tasks` 绝不会前进到 TEST —— flow 经现有 retry / resume 机制重入
-  IMPLEMENT(后继 caller 总是在现有工作区继续,且绝不自动切回 `planned`)。
-  `direct` 适用于**所有**可写 AgentRunner;runner 的原生 goal 循环(例如 Claude
-  Code print 模式下的 `/goal`)只是单次调用内的可选增强,既不是准入条件,也不是
-  flow 级权威状态。
-- **`auto`** —— ANALYZE step 请求一条结构化的 `direct|planned` 建议(综合任务规模、
-  模块耦合、依赖链、worktree 隔离价值、细粒度恢复价值与单次自主调用可行性),
-  并将其持久化为 flow 的有效策略。建议缺失或非法时确定性回落到 `planned`。
+- **单组** → IMPLEMENT 把整个任务作为一次自治 implement 调用执行(即已退役的
+  `direct` 路径当年需要显式选择的那条路);
+- **两组及以上** → 沿用现有 DAG 调度:互相之间没有依赖的组在隔离 worktree 中
+  并行执行并合并回来,声明了依赖的组顺序执行。
 
-新 flow 的取值优先级:显式 CLI(`--implementation-strategy`)/ Web 请求 →
-`workflow.implementation_strategy` → `planned`。请求值持久化进 flow context;
-有效值与理由在 ANALYZE 中**只决策一次**并持久化。resume 恢复已持久化的路径 ——
-之后的配置变化绝不改变正在执行的 flow。没有 PLAN → IMPLEMENT 选择面的 flow
-(`small`、`review`、`survey`)记录 `effective_implementation_strategy =
-not_applicable`,步骤序列完全不变;旧 flow 根据已持久化的 `selected_steps`
-只读推断策略(有 PLAN → `planned`,small 类无 PLAN flow → `not_applicable`),
-不改写历史。
+task type 与分解仍是两个不同层级:task type(`feature` / `bugfix` / `small` /
+`review` / `survey` / discovery)决定整条 flow 的步骤组成与质量关口,而这两个
+key 只塑造 PLAN → IMPLEMENT 区间。本来就没有 PLAN step 的序列(`small`、
+`review`、`survey`)不受影响。
+
+**`plan_decomposition: capability`**(默认)—— PLAN 把工作切成粗粒度的组,
+切分的*唯一*依据是『一次自治 implement 调用能否安全承载』:
+
+1. 一个功能,一次调用能完成 → **一个组**(组内容即『实现该功能』);
+2. 一个功能,一次调用扛不下 → 拆成**两个或多个组**;
+3. 天然两个(或更多)不同的功能,一次调用合起来也能完成 → **仍是一个组**,
+   仅仅『不同』不构成切分理由;
+4. 处于能与不能的边缘 → **一个功能一组**。组内聚合的功能越多,触发切分的阈值
+   *越低*。
+
+一条硬禁令禁止按制品类型或代码层次切分:不得出现独立的 test 组、docs 组、
+config 组,也不得出现以文件集合、模块边界或代码分层定义的组。测试与验证是每个
+组自身交付的组成部分。(某个组的*功能本身*就与测试或文档系统有关——例如『修复
+测试运行器里的随机重试』——当然合法;被禁止的是把某一个功能的测试单独刨出来
+自成一组。)
+
+`capability` 下 PLAN **不输出逐条 task 列表**。组只携带调度所需字段
+`group_id` / `name` / `description` / `group_order` / `depends_on`;组内的细化
+分解交给 implement runner 已有的 planning / sub-agent 体系,由它在执行时对着
+真实代码做。PLAN 仍产出粗颗粒的 proposal / design,供人工 gate 审阅,以及 fix
+迭代时作为 `{design_section}` 上下文注入。
+
+**`plan_granularity`** 仅在 `capability` 下生效:
+
+- **`auto`**(默认)—— 由 PLAN 估计这个任务实际需要几次自治 implement 调用,
+  就产出几个组。
+- **`single`** —— 无论任务多大,只产出一个组。这是配置强制的、已退役 `direct`
+  路径的等价形态。
+- **`conservative`** —— 降低切分阈值:只要对『一次调用能否扛下』有**任何**怀疑
+  就切分。它更倾向多产出组,理由是一个偏小的组代价很小,而一个撑爆了它所对应
+  调用的组,代价是一次失败的实现。
+
+**`plan_decomposition: granular`** 是保留下来的 legacy 学说:细粒度的逐条 task
+列表(带 `complexity` / `estimated_loc` / `files` 的 `tasks` 数组)、由 LOC 驱动
+的合并与 DAG 阈值,以及 plan 关口上的 requirement→task 覆盖审查——全部与本模型
+出现之前完全一致。该模式下 `plan_granularity` 被忽略。
+
+新 flow 的取值优先级:显式 CLI(`--plan-decomposition` / `--plan-granularity`)
+/ Web 请求 → 这两个配置键 → `capability` + `auto`。**决策在 flow 创建时只做
+一次**,连同理由一并持久化进 flow context;续跑的 flow 沿用它已经进入的学说,
+无论此后配置如何变化,PLAN 已产出的分组也绝不中途重判。本模型出现之前创建的
+flow 不带新 key:它们按当年记录的那个已退役策略值被**只读地描述**,磁盘状态
+绝不被改写。
+
+#### 已退役:`workflow.implementation_strategy`
+
+`implementation_strategy` 这条路由轴(`auto` / `direct` / `planned`)已退役。
+`workflow.implementation_strategy` 配置键与 `--implementation-strategy` CLI
+选项仍被接受**一个版本**,按下表映射到新键,并每进程发出一次弃用警告。
+**它们将在下一个主版本中移除。**
+
+| 旧取值 | 映射为 | 因为它当年的意图是 |
+|--------|--------|--------------------|
+| `direct` | `plan_granularity: single` | 『一次调用做完』= 强制单组 |
+| `planned` | `plan_decomposition: granular` | 『我要细粒度任务组 + DAG 调度』= 保留旧学说 |
+| `auto` | 新的默认值(`capability` + `auto`) | 『交给流程决定』 |
+
+映射发生在配置对象构造边界(CLI 侧也走同一张表),因此下游不会同时携带两套
+词汇。用户真正写下的新 key 永远胜出:旧 key 只是未迁移项目的兜底,绝不覆盖新
+key。旧取值超出范围时仍是快速失败。
 
 #### Self-check 审查范围(full-incremental-closure)
 
@@ -497,7 +567,8 @@ daemon history payload 与 Web 控制台渲染的都是**同一份后端聚合�
   `legacy` 而不是被猜测。
 - `luo history show <flow_id>` 打印逐 call、逐 step 与 flow 合计(`--json` 输出
   同一结构化 payload);Web 控制台的 history 视图与 live-flow 侧栏展示同样数字,
-  外加实现策略与 self-check scope audit。active、archived 与 history-only flow
+  外加 plan mode(分解学说 / 粒度 / 组数)与 self-check scope audit。active、
+  archived 与 history-only flow
   均可恢复;早于统一记录的 flow 标记为不完整,而不是被改写。
 
 ### `investigation`
@@ -786,8 +857,17 @@ driver 属于配置错误,在任何镜像构建之前即报出 —— 否则这�
 
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
-| `group_loc_threshold` | int | `300` | 估算 LOC 总量在此值及以下时,多 group 的任务计划会被合并成**单次** LLM 调用,而不是逐 group 分发。超过阈值时,它还参与『顺序 vs DAG 并行』的判定。**属于 fail-fast,而非 clamp-and-warn**(见下)。 |
+| `group_loc_threshold` | int | `300` | **【仅 `plan_decomposition: granular` 生效】**估算 LOC 总量在此值及以下时,多 group 的任务计划会被合并成**单次** LLM 调用,而不是逐 group 分发。超过阈值时,它还参与『顺序 vs DAG 并行』的判定。**属于 fail-fast,而非 clamp-and-warn**(见下)。 |
 | `use_worktree` | bool | `true` | implement 的各 group 是否在隔离的 git worktree 中运行。接受常见的布尔写法;无法识别的字符串回落到默认值,而不是反转行为。**可在运行时被 `SE3_IMPLEMENT_USE_WORKTREE` 环境变量覆盖**,该变量胜过 YAML 中的值。 |
+
+**`group_loc_threshold` 只对 `granular` 计划生效。**在默认的
+[`capability` 学说](#plan-的分解学说与粒度)下,这个阈值不参与上述任何一项判定:
+粗粒度的 capability 组不携带逐条 `estimated_loc`,总量必然是 `0` —— 而 `0` 会同时
+被读成『小到该合并』和『不值得并行』,把计划里明确声明为互相独立的组静默压成
+顺序执行。capability 模式改为按组数与拓扑分发:单组 → 整体实现调用,两组及以上
+→ DAG 路径,并仍受既有的 `use_worktree`、线性依赖链与 no-commits 三条短路约束。
+一个 capability 组按定义就已经是『一次自治调用扛得住的上限体量』,远超 300 LOC
+的合并阈值,再用 LOC 判一次不会带来任何信息量。`granular` 下阈值行为一如既往。
 
 `group_loc_threshold` 是 clamp-and-warn 规则的显式例外之一:`ImplementConfig.from_dict`
 对该值直接调用裸的 `int(...)`,既没有 `try`/`except`,implement step 里的调用方也没有

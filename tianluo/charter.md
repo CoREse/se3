@@ -40,14 +40,20 @@ tianluo 由若干子系统拼合而成；以下只记录需要主观判断、无
 这一『程序驱动、LLM 只填思考空位』的边界是核心架构决策：步骤路由、上下文流转、
 流程的可中断/可续跑都由代码确定性掌控；任何 flow 都可在确切的中断点恢复。
 
-**Task type vs. implementation strategy — two distinct levels.** Task type
+**Task type vs. PLAN decomposition — two distinct levels.** Task type
 (feature / bugfix / small / review / survey …) decides the step composition and
-type semantics of a whole flow; implementation strategy is a narrower axis that
-only selects the execution shape of the segment which originally contains both
-PLAN and IMPLEMENT, and is simply not applicable to flows that never had that
-surface. The strategy is decided once, persisted together with its reason, and
-never re-decided mid-flow: a resumed flow keeps executing the path it already
-entered, whatever the configuration says later. Where a runner owns a native
+type semantics of a whole flow; there is no second routing axis that adds or
+removes steps. Every flow whose type carries a PLAN step runs it — what varies
+is the *decomposition doctrine and granularity* PLAN works under, and those
+decide only the execution shape of the PLAN → IMPLEMENT segment. The doctrine
+sizes coarse groups by what one autonomous implement call can safely carry, and
+the shape downstream is read off the resulting group count rather than off a
+flag: one group is executed as a single whole-task call, two or more enter the
+dependency DAG. Flows whose type has no PLAN step have no such surface at all.
+The doctrine and granularity are decided once, at flow creation, persisted
+together with their reason, and never re-decided mid-flow: a resumed flow keeps
+executing the grouping it already entered, whatever the configuration says
+later. Where a runner owns a native
 continuous-execution loop, that loop only enhances execution *inside* a single
 implementation call; it never becomes authoritative state — tianluo's persisted
 flow state, workspace, history and quality gates remain the only authority on

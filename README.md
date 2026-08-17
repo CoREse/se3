@@ -21,7 +21,7 @@ tianluo (formerly published as *se3*; the methodology is still called **SE 3.0**
 Five load-bearing bets, each with the one line of evidence that makes it real rather than aspirational.
 
 **1. What it saves is human attention, not tokens.** A flow is measured by how few times it makes a person read, judge, and decide — not by how cheap the LLM calls were.
-*Evidence:* the only two points where attention is structurally required are the opening prompt and the `plan` confirmation gate; everything from `implement` through `commit` runs with nobody watching.
+*Evidence:* the only point where attention is structurally required is the opening prompt — everything from `plan` through `commit` runs with nobody watching, and even the grouping gate after `plan` is something you opt into.
 
 **2. The program is the supervisor; the human is out of the loop.** The thing that decides what happens next is a deterministic Python state machine, not the model and not a person at a terminal.
 *Evidence:* `tianluo/state/engine.json` persists step / attempt / context / fix-loop history, so a flow survives terminal exits, machine restarts, and hand-offs between machines — and resumes at the exact interruption point with `luo run --resume`.
@@ -38,7 +38,7 @@ Five load-bearing bets, each with the one line of evidence that makes it real ra
 - **`test.critical_tests` blocks skips masquerading as passes.** If a configured critical test is skipped rather than run, the test step fails instead of reporting green.
 - **The test baseline is captured deterministically before `implement` writes anything.** It is frozen by the engine, so an inherited red test can never be re-labelled as "caused by this change" — nor the reverse.
 - **`investigate`'s net-zero diff is verified by the engine, not promised by the model.** The workspace is snapshotted before and after the step and compared; a mismatch fails the step. The engine never resets or checks out anything itself, because the tree may hold unrelated uncommitted work.
-- **plan-confirm is always-on.** The `CONFIRM` insertion after `plan` does not depend on a `confirmation.steps.plan` entry existing — it is mechanical, decoupled from configuration.
+- **The PLAN decomposition decision is write-once.** The doctrine and granularity a flow runs under are resolved at flow creation and persisted; a resumed flow keeps executing the grouping it already entered, whatever the configuration says later, and the engine never re-judges it mid-flow.
 - **`version_analyze` errors out when `suggested_version` is missing.** There is no silent patch-bump fallback; the flow stops and asks for a human.
 
   *In short:* anything that would otherwise hold only because "the LLM should remember to" has been rewritten to hold because the code makes it hold.
@@ -236,7 +236,8 @@ stateDiagram-v2
     analyze --> plan: root cause already clear
     investigate --> plan: root-cause report
 
-    plan --> confirm: always-on gate
+    plan --> confirm: gate configured
+    plan --> implement: no gate configured
     confirm --> plan: revision requested
     confirm --> implement: approved
 
@@ -262,9 +263,10 @@ Three things in that picture are easy to miss:
   carries `investigate` in its default sequence unconditionally.) The step runs
   under a **net-zero-diff** contract that the engine verifies by comparing a
   workspace snapshot taken before it against one taken after.
-- **`confirm` after `plan` is always on.** It is inserted mechanically, whether
-  or not `confirmation.steps.plan` appears in your config. A rejection sends the
-  flow back to `plan`, not forward.
+- **`confirm` after `plan` is opt-in.** It is inserted only when
+  `confirmation.steps.plan` appears in your config — declare it (with
+  `reviewer: human` for a manual grouping gate) and a rejection sends the flow
+  back to `plan`, not forward.
 - **The fix loop is shared.** `test`, `self_check`, and `invariant_check` all
   route failures/findings back into `implement`. A check-step finding has no
   other destination — it cannot be waived, deferred, or downgraded.
@@ -284,43 +286,71 @@ sequence.
 |---|---|---|
 | `feature` | analyze → plan → implement → test → self_check → invariant_check → charter_freshness → version_analyze → commit → summarize | The full chain; also the fallback for an unknown persisted type. |
 | `bugfix` | same as `feature`, plus a conditional `investigate` before `plan` | The only type that can gain `investigate` conditionally. |
-| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | No `plan` (so no confirm gate), no `self_check`, no `invariant_check`. |
+| `small` | analyze → implement → test → charter_freshness → version_analyze → commit → summarize | No `plan`, no `self_check`, no `invariant_check`. |
 | `review` | analyze → invariant_check → summarize | Read-and-judge only: no implement, no test, no commit. |
 | `survey` | analyze → investigate → summarize | Deliverable is a conclusion, not a diff — so no implement/test/commit, and no `version_analyze`. |
 | *(`--discover`)* | discovery → *the `feature` chain* | Entered via `--discover`, not `--type`. |
 
 The sequences above are the literal defaults declared in `models.py`, which
-contain no `confirm` entry. **The engine then inserts a `confirm` step after
-every `plan` step, unconditionally** — `plan` is always confirmed regardless of
-whether `confirmation.steps` mentions it, so every plan-bearing type really runs
-`plan → confirm → implement`. That is why `small`, which has no `plan`, also has
-no confirm gate.
+contain no `confirm` entry. A `confirm` step is inserted **only** after the
+steps listed under `confirmation.steps` — `plan` included: it is an ordinary
+opt-in gate like any other, so with no `confirmation.steps.plan` entry a
+plan-bearing type runs `plan → implement` with no gate between them.
 
 `analyze` may still adjust the selected sequence; the table is the starting
 point, not a frozen contract.
 
-#### Implementation strategy: how the PLAN → IMPLEMENT phase runs
+#### PLAN decomposition: how the PLAN → IMPLEMENT phase runs
 
-On top of the task type, flows whose default sequence contains a PLAN →
-IMPLEMENT segment (`feature`, `bugfix`, discovery) pick an **implementation
-strategy** that shapes only that phase — `planned` (default: PLAN, task groups,
-the dependency DAG and per-group worktree scheduling), `direct` (skip PLAN and
-its confirm gate; one holistic autonomous IMPLEMENT call that analyses the full
-requirements, implements them completely and runs targeted verification), or
-`auto` (ANALYZE recommends `direct` or `planned` once and persists the choice).
-Choose it with `luo run --implementation-strategy auto|direct|planned` or the
-`workflow.implementation_strategy` config key; explicit request → project
-config → `planned`. The effective value and its reason are decided exactly once
-in ANALYZE and persisted — a resume always follows the persisted path, and
-`small` / `review` / `survey` record `not_applicable` without changing their
-sequences.
+There is one path, not two. `feature`, `bugfix` and discovery flows always run
+ANALYZE → PLAN → IMPLEMENT; no configuration removes PLAN from a sequence. What
+varies is what PLAN emits, and **the execution shape is read off the group
+count**:
 
-`direct` works with every writable agent runner; a runner's native goal loop
-(e.g. Claude Code's `/goal` in print mode) is an optional per-call enhancement,
-not an entry requirement and never flow-authoritative state. A partial result
-or non-empty `incomplete_tasks` never advances to TEST — the flow re-enters
-IMPLEMENT through the normal retry/resume machinery and a later caller continues
-in the existing workspace.
+- **one group** → IMPLEMENT runs the whole task as a single autonomous
+  implement call;
+- **two or more groups** → the dependency DAG applies: independent groups run
+  in parallel in isolated worktrees and are merged back, dependent ones run in
+  order.
+
+`workflow.plan_decomposition` picks the doctrine PLAN follows:
+
+- **`capability`** (default) — coarse groups whose only sizing criterion is
+  *can a single autonomous implement call safely carry this?* One capability
+  one call can finish is one group; one it cannot becomes two or more; two
+  distinct capabilities one call could still finish together stay one group;
+  and on the edge, one capability per group — the more a group aggregates, the
+  lower the threshold at which PLAN splits it. Groups may never be cut along
+  artifact types or code layers (no separate test, docs or config group):
+  testing is part of what each group itself delivers. PLAN emits no per-task
+  listing — a group carries only `group_id` / `name` / `description` /
+  `group_order` / `depends_on`, and the runner's own planning system
+  decomposes it against the real code at execution time.
+- **`granular`** — the retained legacy doctrine: fine-grained per-task listing,
+  LOC-driven merge and DAG thresholds, requirement→task review at the gate.
+
+`workflow.plan_granularity` applies under `capability` only: `auto` (default)
+lets PLAN size the group count itself, `single` pins exactly one group whatever
+the task's size, and `conservative` lowers the splitting threshold and errs
+toward more groups.
+
+Priority: explicit CLI (`--plan-decomposition` / `--plan-granularity`) or web
+request → project config → `capability` + `auto`. The decision is made once at
+flow creation and persisted with its reason — a resumed flow keeps the doctrine
+it already entered and its groups are never re-judged mid-flow.
+
+The whole-task single-call shape works with every writable agent runner; a
+runner's native goal loop (e.g. Claude Code's `/goal` in print mode) is an
+optional per-call enhancement, not an entry requirement and never
+flow-authoritative state. A partial result or non-empty `incomplete_tasks`
+never advances to TEST — the flow re-enters IMPLEMENT through the normal
+retry/resume machinery and a later caller continues in the existing workspace.
+
+An optional gate on the grouping is available by declaring `plan` under
+`confirmation.steps`; `reviewer: human` makes it a manual grouping gate. Under
+`capability` that review asks whether the group count matches the volume of
+work, whether any group was cut along a forbidden artifact type, and whether
+the `depends_on` declarations hold.
 
 SELF_CHECK is judged against the **effective task description** (original task or
 discovery refinement, user interjections, adjudicated description) plus the
@@ -456,11 +486,19 @@ sub-typers.
   `tianluo/issues/`, and write the outcome back to that issue when the flow
   finishes (a completed flow resolves it). This is the intended follow-up path
   after `luo salvage` files issues for unfinished work.
-- **`--implementation-strategy auto|direct|planned`** — The explicit
-  implementation-strategy request for a new flow (see the implementation
-  strategy section above). Omitted, it falls back to the project config and
-  then to `planned`; on a resume it is ignored and the persisted strategy is
-  restored.
+- **`--plan-decomposition capability|granular`** — The explicit decomposition
+  doctrine for a new flow (see the PLAN decomposition section above). Omitted,
+  it falls back to the project config and then to `capability`.
+- **`--plan-granularity auto|single|conservative`** — The explicit group-count
+  pressure for a new flow; effective under `capability` only. Omitted, it falls
+  back to the project config and then to `auto`.
+  Both options are ignored on a resume: the flow keeps the doctrine it was
+  created with.
+- **`--implementation-strategy auto|direct|planned`** — **Deprecated, removed
+  in the next major version.** Kept for one version and mapped onto the two
+  options above (`direct` → `--plan-granularity single`, `planned` →
+  `--plan-decomposition granular`, `auto` → the new defaults), with a
+  deprecation warning. An explicitly-typed new option wins over the mapping.
 
 ### `luo code-index` — the structure map
 
@@ -485,7 +523,8 @@ sub-typers.
 `luo history show <flow_id>` also prints a dedicated **usage / cost** region —
 per LLM call/attempt, per step and flow totals (input / output / cache tokens,
 provider actual cost, estimated cost, unknown counters and completeness), plus
-the flow's implementation strategy and the self-check scope audit. Provider
+the flow's plan mode (decomposition, granularity, group count) and the
+self-check scope audit. Provider
 actual cost stays authoritative and separate from the estimate column; missing
 usage, models or prices show as `unknown`/partial, never a misleading `$0`.
 `--json` emits the same structured summary. The web console's history view and
