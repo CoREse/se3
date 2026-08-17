@@ -407,13 +407,16 @@ fix loop。
 
 **只有一条路径,不再是两条。**`feature`、`bugfix` 与 discovery 流程一律运行
 ANALYZE → PLAN → IMPLEMENT;不再有任何配置 key 能把 PLAN 从序列里裁掉。变化的
-只是 *PLAN 产出什么*与*产出几个组*——PLAN → IMPLEMENT 区间的执行形态随后由组数
-读出,而不是由某个路由标志决定:
+只是 *PLAN 产出什么*与*产出几个组*——在粒度把组数留给 PLAN 决定时,PLAN →
+IMPLEMENT 区间的执行形态由组数读出,而不是由某个路由标志决定:
 
 - **单组** → IMPLEMENT 把整个任务作为一次自治 implement 调用执行(即已退役的
   `direct` 路径当年需要显式选择的那条路);
 - **两组及以上** → 沿用现有 DAG 调度:互相之间没有依赖的组在隔离 worktree 中
   并行执行并合并回来,声明了依赖的组顺序执行。
+
+唯一的例外是 `plan_granularity: single`(见下文):它把单次调用形态钉死为配置
+保证——无论 PLAN 产出几个组,整个任务都由一次自治调用交付。
 
 task type 与分解仍是两个不同层级:task type(`feature` / `bugfix` / `small` /
 `review` / `survey` / discovery)决定整条 flow 的步骤组成与质量关口,而这两个
@@ -447,7 +450,9 @@ config 组,也不得出现以文件集合、模块边界或代码分层定义的
 - **`auto`**(默认)—— 由 PLAN 估计这个任务实际需要几次自治 implement 调用,
   就产出几个组。
 - **`single`** —— 无论任务多大,只产出一个组。这是配置强制的、已退役 `direct`
-  路径的等价形态。
+  路径的等价形态,且是**保证**而非请求:PLAN 被要求只产出一个组,但即使它仍
+  产出了多个,IMPLEMENT 也照样把整个任务交给那一次自治调用,多出来的组只作为
+  提纲一并传入。因此 `single` 下的 flow 绝不会散开成 worktree 并行 DAG。
 - **`conservative`** —— 降低切分阈值:只要对『一次调用能否扛下』有**任何**怀疑
   就切分。它更倾向多产出组,理由是一个偏小的组代价很小,而一个撑爆了它所对应
   调用的组,代价是一次失败的实现。
@@ -865,7 +870,8 @@ driver 属于配置错误,在任何镜像构建之前即报出 —— 否则这�
 粗粒度的 capability 组不携带逐条 `estimated_loc`,总量必然是 `0` —— 而 `0` 会同时
 被读成『小到该合并』和『不值得并行』,把计划里明确声明为互相独立的组静默压成
 顺序执行。capability 模式改为按组数与拓扑分发:单组 → 整体实现调用,两组及以上
-→ DAG 路径,并仍受既有的 `use_worktree`、线性依赖链与 no-commits 三条短路约束。
+→ DAG 路径(`plan_granularity: single` 钉死整体实现调用、不看组数),并仍受既有的
+`use_worktree`、线性依赖链与 no-commits 三条短路约束。
 一个 capability 组按定义就已经是『一次自治调用扛得住的上限体量』,远超 300 LOC
 的合并阈值,再用 LOC 判一次不会带来任何信息量。`granular` 下阈值行为一如既往。
 

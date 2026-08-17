@@ -71,11 +71,11 @@ The ideal tianluo session looks like this:
 
 1. **Prompt** — you type `luo run "…"` (or open a discovery session with `--discover`).
 2. **Discover** — the engine asks a few targeted clarifying questions until requirements converge.
-3. **Confirm the plan** — one always-on gate: you approve the plan, or send it back for revision.
+3. **Confirm the plan — opt-in, off by default** — with no `confirmation.steps.plan` entry the flow runs `plan → implement` with no gate at all. Add `confirmation.steps.plan: {reviewer: human}` and you get a manual grouping gate: you approve how `plan` carved the work into task groups, or send it back for revision.
 4. **Fire-and-forget** — you walk away. The engine implements, tests, self-checks, checks the diff against recorded invariants, flags any charter drift, decides the version, and commits.
 5. **Pick up the deliverable** — you come back to a clean commit on a branch, with the version, history, and code-index already aligned.
 
-Steps 1–3 are the only places where human attention is genuinely required. Everything else is the program's job.
+Steps 1–2, plus the optional gate in step 3 if you turn it on, are the only places where human attention is genuinely required. Everything else is the program's job.
 
 ### 3. The four moats that make this paradigm work
 
@@ -304,14 +304,18 @@ point, not a frozen contract.
 
 There is one path, not two. `feature`, `bugfix` and discovery flows always run
 ANALYZE → PLAN → IMPLEMENT; no configuration removes PLAN from a sequence. What
-varies is what PLAN emits, and **the execution shape is read off the group
-count**:
+varies is what PLAN emits, and — wherever the granularity left the group count
+to PLAN — **the execution shape is read off the group count**:
 
 - **one group** → IMPLEMENT runs the whole task as a single autonomous
   implement call;
 - **two or more groups** → the dependency DAG applies: independent groups run
   in parallel in isolated worktrees and are merged back, dependent ones run in
   order.
+
+`plan_granularity: single` is the one pin that is a guarantee, not a hint to
+PLAN: however many groups PLAN emits, the whole task is delivered by one
+autonomous call.
 
 `workflow.plan_decomposition` picks the doctrine PLAN follows:
 

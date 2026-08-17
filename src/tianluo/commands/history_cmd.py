@@ -227,12 +227,16 @@ def _plan_mode_display_value(plan_mode: Dict[str, Any]) -> str:
         return value
     legacy = plan_mode.get("legacy_strategy")
     if legacy:
-        value = t(
-            "history.field.plan_mode_legacy",
-            value=_legacy_strategy_label(legacy),
-        )
-        if plan_mode.get("inferred"):
-            value = t("history.field.plan_mode_inferred", value=value)
+        value = _legacy_strategy_label(legacy)
+        if legacy != "not_applicable":
+            # "not applicable" names the absence of a PLAN -> IMPLEMENT segment,
+            # which reads the same in both models — and both notes below
+            # describe legacy provenance, so attaching them would date a
+            # current small/review/survey flow to a model it never ran under.
+            # Only a real recorded path (direct/planned) carries them.
+            value = t("history.field.plan_mode_legacy", value=value)
+            if plan_mode.get("inferred"):
+                value = t("history.field.plan_mode_inferred", value=value)
         return value
     return ""
 
@@ -246,7 +250,7 @@ def _plan_mode_reason_text(plan_mode: Dict[str, Any]) -> str:
     verbatim.
     """
     key = str(plan_mode.get("reason_key") or "").strip()
-    if key in ("legacy_inference", "legacy_strategy"):
+    if key in ("legacy_inference", "legacy_strategy", "no_plan_surface"):
         return t(f"history.field.plan_mode_reason_{key}")
     return str(plan_mode.get("reason") or "")
 

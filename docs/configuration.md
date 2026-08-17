@@ -445,14 +445,19 @@ validated findings always enter the fix loop.
 **There is one path, not two.** `feature`, `bugfix` and discovery flows always
 run ANALYZE → PLAN → IMPLEMENT; no configuration key removes PLAN from a
 sequence any more. What varies is *what PLAN emits* and *how many groups* it
-emits — and the execution shape of the PLAN → IMPLEMENT segment is then read
-off that group count, not off a routing flag:
+emits — and, wherever the granularity left the group count to PLAN, the
+execution shape of the PLAN → IMPLEMENT segment is read off that count, not
+off a routing flag:
 
 - **one group** → IMPLEMENT runs the whole task as a single autonomous
   implement call (what the retired `direct` path used to select explicitly);
 - **two or more groups** → the existing DAG scheduling applies: groups with no
   dependency between them run in parallel in isolated worktrees and are merged
   back, groups with declared dependencies run in order.
+
+The one exception is `plan_granularity: single` (described below), which pins
+the one-call shape as a configured guarantee: however many groups PLAN emits,
+the whole task is delivered by a single autonomous call.
 
 Task type and decomposition remain different layers: the task type
 (`feature` / `bugfix` / `small` / `review` / `survey` / discovery) decides the
@@ -493,7 +498,11 @@ during fix iterations.
 - **`auto`** (default) — PLAN estimates how many autonomous implement calls the
   task actually needs and emits exactly that many groups.
 - **`single`** — exactly one group, whatever the task's size. This is the
-  configuration-forced equivalent of the retired `direct` path.
+  configuration-forced equivalent of the retired `direct` path, and it is a
+  guarantee rather than a request: PLAN is instructed to emit one group, but if
+  it emits several anyway, IMPLEMENT still runs the whole task through the one
+  autonomous call and passes the groups in only as an outline. Under `single`
+  a flow therefore never fans out into a parallel worktree DAG.
 - **`conservative`** — lower the splitting threshold: whenever there is *any*
   doubt that one call can carry the work, split it. Errs toward more groups,
   on the reasoning that an under-sized group costs little while a group that
@@ -1010,7 +1019,8 @@ no per-task `estimated_loc`, so the total would always be `0` — and `0` reads
 as *both* "small enough to merge" and "not worth parallelising", which would
 silently serialize groups the plan declared independent. Capability mode
 dispatches on group count and topology instead: one group → the whole-task
-implement call, two or more → the DAG path, still subject to the existing
+implement call, two or more → the DAG path (`plan_granularity: single` pins
+the whole-task call regardless of the count), still subject to the existing
 `use_worktree`, linear-dependency-chain and no-commits short-circuits. A
 capability group is by definition already sized at the ceiling of one
 autonomous call, well past any 300-LOC merge threshold, so re-judging it by

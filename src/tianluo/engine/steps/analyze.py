@@ -255,12 +255,18 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         effective_type = effective_task_type(flow.state.context, resolved_task_type)
         needs_investigation = effective_type == "bugfix" and not root_cause_clear
 
-        # WHY no snapshot/restore around the rebuild any more: the retired
-        # strategy axis rewrote the sequence, so its decision and the sequence
-        # it implied had to be persisted as one unit or a failed rebuild could
-        # strand a 'direct' flag beside a sequence still holding PLAN. The plan
-        # mode writes nothing into the sequence — the rebuild below is a pure
-        # function of task type — so there is no coupled state to unwind.
+        # INVARIANT: the step sequence stays a pure function of the task type;
+        # no execution-shape decision may be folded back into it. This replaces
+        # the retired invariant that the finalized strategy and the sequence it
+        # implied be persisted atomically — that one existed only because the
+        # strategy axis rewrote the sequence, so a failed rebuild could leave
+        # effective='direct' stamped beside a sequence still containing PLAN,
+        # and a later Skip of this step would execute that dangling PLAN inside
+        # a 'direct' flow. Plan decomposition/granularity write nothing into the
+        # sequence, so the rebuild below has no coupled state to unwind and
+        # needs no snapshot/restore. Keep it that way: reintroducing any
+        # sequence-shaping decision here brings the atomicity requirement — and
+        # the unwind path — back with it.
         # Update flow's selected steps based on task_type (fixed sequences).
         # Note: discover mode is handled via --discover, not by analyze.
         _update_flow_steps(

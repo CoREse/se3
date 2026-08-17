@@ -573,6 +573,7 @@
   "plan.inferredNote": "根据旧记录推断",
   "plan.reason.legacy_inference": "根据已持久化的旧 task type 与 selected_steps 推断。",
   "plan.reason.legacy_strategy": "该流程运行于已退役的实现策略模型，此处展示它当年记录的路径。",
+  "plan.reason.no_plan_surface": "该 task type 不含 PLAN 步骤，因此不存在分解模式。",
   "plan.decomposition.capability": "capability（按能力切分的粗粒度组）",
   "plan.decomposition.granular": "granular（旧版细粒度任务列表）",
   "plan.granularity.auto": "auto（由 PLAN 定组数）",

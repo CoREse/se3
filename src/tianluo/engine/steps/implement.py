@@ -36,9 +36,11 @@ from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..plan_decomposition import (
+    HOLISTIC_MODE_LEGACY_DIRECT,
     HOLISTIC_MODE_SINGLE_GROUP,
     holistic_execution_mode,
     is_capability_decomposition,
+    is_forced_single_group,
 )
 from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
@@ -444,6 +446,77 @@ IMPLEMENT_GROUP_PROMPT = inject_boundary(
 FIX_PROMPT = inject_boundary(FIX_PROMPT, "## Task Description\n")
 
 
+CAPABILITY_GROUP_DOCTRINE = """
+### What this group is
+This is a **coarse capability group**, not a task list. Under the capability
+decomposition doctrine PLAN sizes every group by what one autonomous
+implementation call can safely carry, and deliberately emits no per-task
+breakdown for it — the fields above (group_id, name, description, group_order,
+depends_on) are the whole of what PLAN produced. There is no enumerated task
+list here and none is coming.
+
+Producing that breakdown is your job: decompose this capability yourself, using
+your own planning and sub-agent machinery, then implement it end to end.
+
+The group is delivered only when its capability actually works **and** is
+covered by the tests it needs. Testing and verification are part of this
+group's own delivery — they are never split out into a group of their own.
+"""
+
+# WHY the capability doctrine gets its own group prompt: the template above
+# points the agent at an enumeration ("Implement the tasks listed in Current
+# Group Tasks above") that a capability group deliberately does not carry, so
+# rendering it unchanged instructs the agent to execute an empty list — on the
+# default doctrine's primary multi-group path (DAG-parallel and sequential
+# alike). Derived from the base by anchored substitution rather than written
+# out as a second template so the parts that are not doctrine-specific (safety
+# section, guardrails, JSON response contract, marker boundaries) keep exactly
+# one source; a base edit that moves an anchor fails at import instead of
+# silently dropping the capability wording.
+def _substitute_anchor(template: str, anchor: str, replacement: str) -> str:
+    if anchor not in template:
+        raise ValueError(
+            "IMPLEMENT_GROUP_PROMPT no longer contains the anchor "
+            f"{anchor!r}; the capability group prompt cannot be derived from "
+            "it. Update the anchor together with the base template."
+        )
+    return template.replace(anchor, replacement)
+
+
+IMPLEMENT_CAPABILITY_GROUP_PROMPT = _substitute_anchor(
+    _substitute_anchor(
+        _substitute_anchor(
+            _substitute_anchor(
+                IMPLEMENT_GROUP_PROMPT,
+                "You are an expert software engineer. Implement the tasks for "
+                "this specific group by writing code.",
+                "You are an expert software engineer. Implement one coarse "
+                "capability group of this task by writing code.",
+            ),
+            "## Current Group Tasks\n{current_group}",
+            "## Current Capability Group\n{current_group}\n"
+            + CAPABILITY_GROUP_DOCTRINE,
+        ),
+        "2. Implement the tasks listed in Current Group Tasks above.",
+        "2. Decompose the capability described in Current Capability Group "
+        "above into whatever steps it needs — that breakdown is your own "
+        "planning / sub-agent job — then implement it end to end.",
+    ),
+    "4. Write tests if the task requires them.",
+    "4. Cover this capability with its own tests; the group is not delivered "
+    "until they pass.",
+)
+
+
+def _group_prompt_template(capability_mode: bool) -> str:
+    """Pick the per-group prompt matching the flow's decomposition doctrine."""
+    return (
+        IMPLEMENT_CAPABILITY_GROUP_PROMPT
+        if capability_mode
+        else IMPLEMENT_GROUP_PROMPT
+    )
+
+
 def _holistic_execution_mode(
     step: Step, flow: FlowInstance,
 ) -> str | None:
@@ -468,19 +541,94 @@ def _run_holistic_implement(
     project_root: Path,
     task_description: str,
     task_type: str,
+    design_section: str,
     spec_summary: str,
     root_cause_section: str,
     injection: str,
     retry_count: int,
 ) -> StepStatus:
-    """Execute one whole-task implementation for single-group or small flows."""
-    if mode == HOLISTIC_MODE_SINGLE_GROUP:
+    """Execute one whole-task implementation.
+
+    Covers every shape that runs the requirement through a single autonomous
+    call: a small task, a single capability group (or one forced by
+    ``plan_granularity: single``), and a resumed legacy ``direct`` flow.
+    """
+    # WHY the design survives into the whole-task call: a single capability
+    # group is not "no plan" — PLAN still produced the proposal/design that a
+    # configured `confirmation.steps.plan` gate may have had a human approve,
+    # and the grouped and fix-iteration paths both carry it. Only the legacy
+    # `direct` mode below genuinely holds no plan, so it alone renders empty.
+    rendered_design = design_section
+    if mode == HOLISTIC_MODE_LEGACY_DIRECT:
+        rendered_design = ""
+        # WHY a distinct wording rather than reusing the single-group text: this
+        # mode is reported only for a legacy `direct` flow that holds no groups
+        # at all, so telling the agent "PLAN sized this as a single capability
+        # group" would describe a plan it can see does not exist. The execution
+        # contract is identical; only the reason the flow is in it differs. Such
+        # a flow that did reach PLAN after the upgrade is classified as
+        # `single_group` instead, so its groups reach the prompt below.
         execution_mode = (
-            "PLAN sized this task as a single capability group, i.e. one "
-            "autonomous implement call can carry the whole of it. There is no "
-            "per-group split to follow; deliver the complete effective "
-            "requirement in this one autonomous implementation path."
+            "This flow was created under the retired direct implementation "
+            "strategy: it carries no plan and no task groups, and the whole "
+            "requirement is delivered in this one autonomous implementation "
+            "path."
         )
+        invocation_intent = AgentInvocationIntent.DIRECT_IMPLEMENTATION
+    elif mode == HOLISTIC_MODE_SINGLE_GROUP:
+        planned_groups = step.inputs.get("task_groups")
+        collapsed = (
+            isinstance(planned_groups, list)
+            and len(planned_groups) > 1
+            and is_forced_single_group(step.inputs, flow.state.context)
+        )
+        if collapsed:
+            # WHY the groups are still shown: forced-single fixes the execution
+            # *shape*, it does not discard what PLAN reasoned out. Stating the
+            # collapse plainly also keeps the prompt truthful — claiming "PLAN
+            # sized this as one group" would contradict a plan the reader can
+            # see has several.
+            execution_mode = (
+                "This flow is configured for forced single-call execution "
+                "(plan_granularity=single): the whole requirement is delivered "
+                "in this one autonomous implementation path. PLAN still listed "
+                "several capability groups; treat them as an outline of the "
+                "work rather than a split to execute separately — every one of "
+                "them is yours to complete in this call.\n\n"
+                "### Planned capability groups (outline only)\n"
+                + json.dumps(
+                    planned_groups, indent=2, ensure_ascii=False, default=str,
+                )
+            )
+        else:
+            execution_mode = (
+                "PLAN sized this task as a single capability group, i.e. one "
+                "autonomous implement call can carry the whole of it. There is "
+                "no per-group split to follow; deliver the complete effective "
+                "requirement in this one autonomous implementation path."
+            )
+            # WHY the description is rendered while the group's identity
+            # (group_id / name / ordering) is not: the capability schema
+            # requires a group's description to be written in enough detail
+            # that one autonomous implement call can execute it end to end, so
+            # for a single-group plan that description *is* PLAN's statement of
+            # this call's scope — dropping it would make this the only path
+            # that discards what PLAN said about the work it executes. The
+            # scheduling fields around it exist to order groups against each
+            # other, which is meaningless with one group, and printing them
+            # would reintroduce the per-group split this mode just denied.
+            single_description = (
+                planned_groups[0].get("description")
+                if isinstance(planned_groups, list)
+                and len(planned_groups) == 1
+                and isinstance(planned_groups[0], dict)
+                else None
+            )
+            if single_description:
+                execution_mode += (
+                    "\n\n### What PLAN scoped this single group to deliver\n"
+                    f"{single_description}"
+                )
         invocation_intent = AgentInvocationIntent.DIRECT_IMPLEMENTATION
     else:
         execution_mode = (
@@ -501,7 +649,7 @@ def _run_holistic_implement(
     prompt = HOLISTIC_IMPLEMENT_PROMPT.format(
         task_description=task_description,
         task_type=task_type,
-        design_section="",
+        design_section=rendered_design,
         execution_mode=execution_mode,
         analysis_context=json.dumps(
             analysis_context, indent=2, ensure_ascii=False, default=str,
@@ -686,6 +834,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root=project_root,
             task_description=task_description,
             task_type=task_type,
+            design_section=design_section,
             spec_summary=spec_summary,
             root_cause_section=root_cause_section,
             injection=injection,
@@ -893,6 +1042,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         injection=injection,
                         retry_count=retry_count,
                         root_cause_section=root_cause_section,
+                        capability_mode=capability_mode,
                         prior_outputs={
                             "files_changed": list(step.outputs.get("files_changed", [])),
                             "tests_added": list(step.outputs.get("tests_added", [])),
@@ -928,6 +1078,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             injection=injection,
             retry_count=retry_count,
             root_cause_section=root_cause_section,
+            capability_mode=capability_mode,
             prior_outputs=prior_outputs,
         )
         step.outputs["session_commits"] = _collect_session_commits(
@@ -998,7 +1149,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             previous_results, indent=2, ensure_ascii=False,
         )
 
-        prompt = IMPLEMENT_GROUP_PROMPT.format(
+        prompt = _group_prompt_template(capability_mode).format(
             task_description=task_description,
             task_type=task_type,
             design_section=design_section,
@@ -1250,6 +1401,7 @@ def _make_execute_fn(
     retry_count: int,
     group_agent_info: dict[str, tuple[str, str | None]] | None = None,
     root_cause_section: str = "",
+    capability_mode: bool = False,
 ) -> Callable[[dict, dict[str, GroupResult], RelayContext], GroupResult]:
     """Build the execute_fn closure for relay-based DAG parallel execution.
 
@@ -1263,6 +1415,10 @@ def _make_execute_fn(
     emits live ``running`` ``group_status`` records carrying that agent (then
     "agent · model"); ``_run_dag_parallel``'s coarse status sink reads it back
     so the ``completed`` / ``failed`` records carry the final agent/model too.
+
+    ``capability_mode`` selects the per-group prompt: a coarse capability group
+    carries no per-task enumeration, so it must be told to decompose itself
+    rather than to work through a task list it does not have.
     """
     git_lock = threading.Lock()
 
@@ -1389,7 +1545,7 @@ def _make_execute_fn(
                 prev_ctx = "No previous groups."
 
             # Step 4: Format prompt
-            prompt = IMPLEMENT_GROUP_PROMPT.format(
+            prompt = _group_prompt_template(capability_mode).format(
                 task_description=task_description,
                 task_type=task_type,
                 design_section=design_section,
@@ -2156,6 +2312,7 @@ def _run_dag_parallel(
     retry_count: int,
     prior_outputs: dict[str, Any] | None = None,
     root_cause_section: str = "",
+    capability_mode: bool = False,
 ) -> StepStatus:
     """DAG parallel execution path for implement step.
 
@@ -2167,6 +2324,9 @@ def _run_dag_parallel(
         prior_outputs: Optional dict with keys files_changed, tests_added,
             test_mapping, implemented_groups from a previous (resumed) run.
             These are merged into the final aggregated outputs.
+        capability_mode: True when PLAN emitted coarse capability groups;
+            selects the per-group prompt that asks the agent to decompose its
+            group rather than to execute a task enumeration it does not have.
     """
     original_branch = get_current_branch(project_root)
 
@@ -2340,6 +2500,7 @@ def _run_dag_parallel(
         retry_count=retry_count,
         group_agent_info=group_agent_info,
         root_cause_section=root_cause_section,
+        capability_mode=capability_mode,
     )
 
     results: list[GroupResult] = []

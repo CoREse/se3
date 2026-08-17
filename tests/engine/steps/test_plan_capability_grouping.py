@@ -263,6 +263,11 @@ class TestCapabilitySchema:
     def test_schema_explains_that_independent_groups_run_in_parallel(self):
         assert "run in parallel" in CAPABILITY_JSON_SCHEMA
 
+    def test_schema_requires_acyclic_dependencies(self):
+        # The parse guard rejects a cycle, which costs a whole re-plan; saying
+        # so up front is cheaper than the retry.
+        assert "acyclic" in CAPABILITY_JSON_SCHEMA
+
     def test_schema_hint_carries_no_tasks_key(self):
         assert '"tasks"' not in plan_mod.CAPABILITY_JSON_SCHEMA_HINT
         assert '"tasks"' in plan_mod.GRANULAR_JSON_SCHEMA_HINT
@@ -460,6 +465,564 @@ class TestPlanHandlerDispatch:
 
         assert step.outputs["plan_decomposition"] == "granular"
         assert ARTIFACT_SPLIT_GUARDRAIL not in caller.call.call_args.kwargs["prompt"]
+
+    def test_empty_capability_plan_fails_instead_of_completing(self, tmp_path):
+        """Zero groups is a failed capability plan, not a coarser one.
+
+        Storing it would let IMPLEMENT read an execution shape off a count of
+        zero, which is neither the whole-task contract nor a DAG.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        response = dict(_CAPABILITY_RESPONSE, task_groups=[])
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "task_groups" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "groups",
+        [
+            {"G1": {"name": "Export", "description": "deliver export"}},
+            "G1: deliver export",
+        ],
+        ids=["dict", "string"],
+    )
+    def test_non_list_capability_groups_fail_instead_of_completing(
+        self, tmp_path, groups,
+    ):
+        """A group enumeration IMPLEMENT cannot read a count off is a failure.
+
+        `plan_group_count` only trusts a list, so a dict of one group would
+        project as a count of 1 to history/WebUI while IMPLEMENT sees no shape
+        and falls through to the grouped path with zero groups.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "task_groups" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "groups",
+        [
+            ["deliver export", "deliver import"],
+            [_CAPABILITY_RESPONSE["task_groups"][0], "deliver import"],
+            [{"description": "deliver export", "group_order": 1}],
+            [{"group_id": "  ", "description": "deliver export"}],
+            [{"group_id": 1, "description": "deliver export"}],
+        ],
+        ids=[
+            "all-strings",
+            "mixed",
+            "no-identity",
+            "blank-identity",
+            "non-string-identity",
+        ],
+    )
+    def test_capability_groups_that_are_not_group_objects_fail(
+        self, tmp_path, groups,
+    ):
+        """Entries IMPLEMENT cannot schedule are a failed plan, not a coarse one.
+
+        `_extract_sorted_groups` drops every non-dict entry, so a list of bare
+        strings records a count of 2 while IMPLEMENT collapses it into one
+        legacy call — neither the declared DAG nor the whole-task contract.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "task_groups" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    def test_capability_group_named_but_without_group_id_fails(self, tmp_path):
+        """`name` is not an identity: `transitive_reduce` indexes `group_id`.
+
+        The linear-chain preview swallows the resulting KeyError and leaves DAG
+        selected, so accepting such a plan aborts IMPLEMENT with a traceback
+        instead of failing here where the step can retry.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            {"name": "Export", "description": "deliver export", "group_order": 1},
+            {
+                "name": "Import",
+                "description": "deliver import",
+                "group_order": 2,
+                "depends_on": [],
+            },
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "group_id" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "description",
+        [None, "", "   "],
+        ids=["missing", "empty", "blank"],
+    )
+    def test_capability_group_without_a_description_fails(
+        self, tmp_path, description,
+    ):
+        """A coarse group's description is its whole work statement.
+
+        Capability plans carry no per-task list, so a group reduced to bare
+        scheduling metadata gives its isolated implement call nothing to work
+        from — every such call falls back to the overall task description and
+        implements the whole task, producing conflicting leaf merges.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        second = {"group_id": "G2", "group_order": 2, "depends_on": []}
+        if description is not None:
+            second["description"] = description
+        groups = [_CAPABILITY_RESPONSE["task_groups"][0], second]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "description" in (step.error_message or "")
+        assert "G2" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "repeated_id",
+        ["G1", "G1 "],
+        ids=["exact", "whitespace-variant"],
+    )
+    def test_capability_groups_with_a_repeated_group_id_fail(
+        self, tmp_path, repeated_id,
+    ):
+        """A duplicate id is unrecoverable once persisted, so PLAN must reject it.
+
+        The two topologies fail differently and neither can be retried out of:
+        on the DAG path `DAGScheduler._build_dag` raises a raw
+        `ValueError: Duplicate group_id`, and re-running IMPLEMENT re-reads the
+        same groups; on the sequential path the repeat collapses into one node
+        and both groups share `group_step_id` and the `impl/<flow>/G1` branch.
+        Only PLAN's own retry can produce a different plan.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            _CAPABILITY_RESPONSE["task_groups"][0],
+            {
+                "group_id": repeated_id,
+                "name": "Import",
+                "description": "deliver import with its tests",
+                "group_order": 2,
+                "depends_on": [],
+            },
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "group_id" in (step.error_message or "")
+        assert "G1" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    def test_capability_duplicate_survives_a_forked_dependency_shape(self, tmp_path):
+        """The reported shape: a forked DAG whose last two groups share an id.
+
+        The fork keeps the relay preview non-linear, so this plan reaches the
+        DAG builder rather than collapsing to sequential — the path where the
+        raw scheduler ValueError surfaces.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, order, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid}",
+                "description": f"deliver {gid} with its tests",
+                "group_order": order,
+                "depends_on": depends_on,
+            }
+
+        groups = [
+            group("G1", 1, []),
+            group("G2", 2, ["G1"]),
+            group("G3", 3, ["G1"]),
+            group("G3", 4, ["G1"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "G3" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "group_order",
+        ["1", None, ["1"], True],
+        ids=["quoted-int", "null", "list", "bool"],
+    )
+    def test_capability_unorderable_group_order_fails(self, tmp_path, group_order):
+        """A group_order the sort cannot compare must bounce back into PLAN.
+
+        `_extract_sorted_groups` sorts on the raw value at the very top of the
+        grouped IMPLEMENT dispatch, before any path branches, comparing the
+        groups' orders against each other and against the `0` default of a group
+        that omits the field. A quoted order beside a plain one — a routine JSON
+        typing slip — raises a raw `TypeError` there, and a Retry re-reads the
+        same persisted values and dies identically.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            dict(_CAPABILITY_RESPONSE["task_groups"][0], group_order=group_order),
+            _CAPABILITY_RESPONSE["task_groups"][1],
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "group_order" in (step.error_message or "")
+        assert "G1" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    def test_capability_quoted_group_order_would_abort_implement(self, tmp_path):
+        """Pin the divergence the guard closes: the sort really does die on it."""
+        from tianluo.engine.steps.implement import _extract_sorted_groups
+
+        groups = [
+            dict(_CAPABILITY_RESPONSE["task_groups"][0], group_order="1"),
+            _CAPABILITY_RESPONSE["task_groups"][1],
+        ]
+        with pytest.raises(TypeError):
+            _extract_sorted_groups(groups)
+
+    def test_capability_missing_group_order_is_accepted(self, tmp_path):
+        """An omitted order is orderable: every group takes the same `0` default."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = []
+        for raw in _CAPABILITY_RESPONSE["task_groups"]:
+            group = dict(raw)
+            group.pop("group_order", None)
+            groups.append(group)
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["plan_group_count"] == 2
+
+    def test_capability_distinct_group_ids_are_accepted(self, tmp_path):
+        """The uniqueness guard must not fire on a well-formed multi-group plan."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        status, _ = _run_plan(flow, step, _CAPABILITY_RESPONSE)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["plan_group_count"] == 2
+
+    def test_capability_dependency_cycle_fails(self, tmp_path):
+        """A cycle is unrecoverable once persisted, so PLAN must reject it.
+
+        Under the capability doctrine every multi-group plan reaches
+        `DAGScheduler`, whose `_build_dag` raises a raw
+        `ValueError: Cycle detected in DAG`; the linear-chain preview that runs
+        first swallows its own exception and leaves DAG selected. A Retry
+        re-reads the same edges and dies identically — only a new plan breaks
+        the cycle.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            dict(_CAPABILITY_RESPONSE["task_groups"][0], depends_on=["G2"]),
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=["G1"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "cycle" in (step.error_message or "").lower()
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    def test_capability_self_dependency_fails(self, tmp_path):
+        """A group depending on itself is a one-node cycle, not an ordering."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [dict(_CAPABILITY_RESPONSE["task_groups"][0], depends_on=["G1"])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "cycle" in (step.error_message or "").lower()
+
+    def test_capability_cycle_behind_a_fork_fails(self, tmp_path):
+        """The cycle need not involve every group to abort the whole schedule."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid}",
+                "description": f"deliver {gid} with its tests",
+                "group_order": 1,
+                "depends_on": depends_on,
+            }
+
+        groups = [
+            group("G1", []),
+            group("G2", ["G1", "G4"]),
+            group("G3", ["G1"]),
+            group("G4", ["G2"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "cycle" in (step.error_message or "").lower()
+
+    @pytest.mark.parametrize(
+        "depends_on",
+        ["G1", 3, {"G1": True}],
+        ids=["string", "int", "mapping"],
+    )
+    def test_capability_non_list_depends_on_fails(self, tmp_path, depends_on):
+        """The scheduler iterates the edges directly; any other shape aborts it."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            _CAPABILITY_RESPONSE["task_groups"][0],
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=depends_on),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "depends_on" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+
+    @pytest.mark.parametrize(
+        "dep",
+        [{"group_id": "G1"}, None, "", "  "],
+        ids=["object", "null", "empty", "blank"],
+    )
+    def test_capability_non_id_depends_on_entry_fails(self, tmp_path, dep):
+        """An edge that is not an id string can neither be matched nor ordered.
+
+        `DAGScheduler` tests membership with `dep not in all_ids`, so an
+        unhashable entry raises before any ordering happens.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [dict(_CAPABILITY_RESPONSE["task_groups"][0], depends_on=[dep])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "depends_on" in (step.error_message or "")
+
+    def test_capability_acyclic_edges_are_accepted(self, tmp_path):
+        """A well-formed chain (including a redundant edge) must still pass."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid}",
+                "description": f"deliver {gid} with its tests",
+                "group_order": 1,
+                "depends_on": depends_on,
+            }
+
+        groups = [group("G1", []), group("G2", ["G1"]), group("G3", ["G1", "G2"])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["plan_group_count"] == 3
+
+    def test_capability_missing_depends_on_is_accepted(self, tmp_path):
+        """An omitted (or null) depends_on is "no edges", not a malformed plan."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        first = dict(_CAPABILITY_RESPONSE["task_groups"][0])
+        first.pop("depends_on")
+        groups = [first, dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=None)]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["plan_group_count"] == 2
+
+    def test_capability_dangling_edge_fails(self, tmp_path):
+        """An edge naming no declared group is a mistyped reference, not an order.
+
+        A fresh plan's enumeration is complete — nothing has been completed or
+        pre-merged — so no edge can legitimately point outside it. Left to
+        `DAGScheduler`, the edge is dropped as "already satisfied" with only a
+        log warning and the dependent group gets in_degree 0, running
+        concurrently in a worktree that lacks its prerequisite's code.
+        `DAGScheduler`'s tolerance is for the *reduced* to-run set of a recovery
+        run, which never flows through this check.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            _CAPABILITY_RESPONSE["task_groups"][0],
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=["G0"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "depends_on" in (step.error_message or "")
+        assert "G0" in (step.error_message or "")
+        assert "task_groups" not in step.outputs
+        assert "plan_group_count" not in step.outputs
+
+    def test_capability_dangling_edge_alongside_a_valid_one_fails(self, tmp_path):
+        """One resolvable edge does not excuse an unresolvable sibling edge."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid}",
+                "description": f"deliver {gid} with its tests",
+                "group_order": 1,
+                "depends_on": depends_on,
+            }
+
+        groups = [group("G1", []), group("G2", ["G1", "G7"])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "G7" in (step.error_message or "")
+
+    def test_padded_ids_and_edges_are_persisted_stripped(self, tmp_path):
+        """Validation and scheduling must key on the same strings.
+
+        The guard resolves edges against stripped ids, but `DAGScheduler`
+        builds `all_ids` from whatever the persisted groups carry. If only the
+        validation stripped, `"G1 "` would resolve here and then miss `all_ids`
+        there, dropping the edge as already satisfied.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid.strip()}",
+                "description": f"deliver {gid.strip()} with its tests",
+                "group_order": 1,
+                "depends_on": depends_on,
+            }
+
+        groups = [group("G1", []), group(" G2 ", ["G1 "])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        stored = step.outputs["task_groups"]
+        assert [g["group_id"] for g in stored] == ["G1", "G2"]
+        assert stored[1]["depends_on"] == ["G1"]
+
+        # The whole point: the scheduler now sees the declared ordering.
+        from tianluo.engine.dag_scheduler import DAGScheduler
+
+        assert DAGScheduler(stored)._in_degree == {"G1": 0, "G2": 1}
+
+    def test_a_rejected_plan_is_not_rewritten(self, tmp_path):
+        """Normalization applies only once the whole enumeration passes.
+
+        A failed plan is discarded and re-planned, so half-rewriting it would
+        only obscure what the model actually emitted.
+        """
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+
+        def group(gid, depends_on):
+            return {
+                "group_id": gid,
+                "name": f"Capability {gid.strip()}",
+                "description": f"deliver {gid.strip()} with its tests",
+                "group_order": 1,
+                "depends_on": depends_on,
+            }
+
+        groups = [group("G1 ", []), group("G2", ["G9"])]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert groups[0]["group_id"] == "G1 "
+
+    def test_a_padded_id_still_collides_with_its_unpadded_twin(self, tmp_path):
+        """Stripping ids must not turn a duplicate into two accepted groups."""
+        flow, step = _flow_and_step(tmp_path, decomposition="capability")
+        groups = [
+            dict(_CAPABILITY_RESPONSE["task_groups"][0], group_id="G1"),
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], group_id="G1 ", depends_on=[]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.FAILED
+        assert "G1" in (step.error_message or "")
+
+    def test_granular_plan_tolerates_a_dangling_edge(self, tmp_path):
+        """The edge guard is capability-only; legacy behaviour is unchanged."""
+        flow, step = _flow_and_step(tmp_path, decomposition="granular")
+        groups = [
+            _CAPABILITY_RESPONSE["task_groups"][0],
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=["G0"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+
+    def test_granular_plan_tolerates_a_dependency_cycle(self, tmp_path):
+        """The edge guard is capability-only; legacy behaviour is intact."""
+        flow, step = _flow_and_step(tmp_path, decomposition="granular")
+        groups = [
+            dict(_CAPABILITY_RESPONSE["task_groups"][0], depends_on=["G2"]),
+            dict(_CAPABILITY_RESPONSE["task_groups"][1], depends_on=["G1"]),
+        ]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert len(step.outputs["task_groups"]) == 2
+
+    def test_granular_plan_tolerates_duplicate_group_ids(self, tmp_path):
+        """The uniqueness guard is capability-only; legacy behaviour is intact."""
+        flow, step = _flow_and_step(tmp_path, decomposition="granular")
+        duplicate = dict(_CAPABILITY_RESPONSE["task_groups"][1], group_id="G1")
+        groups = [_CAPABILITY_RESPONSE["task_groups"][0], duplicate]
+        response = dict(_CAPABILITY_RESPONSE, task_groups=groups)
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert len(step.outputs["task_groups"]) == 2
+
+    def test_granular_plan_tolerates_non_object_groups(self, tmp_path):
+        """The per-entry guard is capability-only; legacy behaviour is intact."""
+        flow, step = _flow_and_step(tmp_path, decomposition="granular")
+        response = dict(
+            _CAPABILITY_RESPONSE, task_groups=["deliver export", "deliver import"],
+        )
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["task_groups"] == ["deliver export", "deliver import"]
+
+    def test_empty_granular_plan_keeps_its_legacy_behaviour(self, tmp_path):
+        """The guard is capability-only; `granular` stays byte-for-byte legacy."""
+        flow, step = _flow_and_step(tmp_path, decomposition="granular")
+        response = dict(_CAPABILITY_RESPONSE, task_groups=[])
+        status, _ = _run_plan(flow, step, response)
+
+        assert status == StepStatus.COMPLETED
+        assert step.outputs["task_groups"] == []
 
     def test_step_inputs_override_the_context_lookup(self, tmp_path):
         flow, step = _flow_and_step(tmp_path, decomposition="capability")

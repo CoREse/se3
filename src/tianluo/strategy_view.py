@@ -61,6 +61,16 @@ LEGACY_STRATEGY_REASON = (
 #: Companion key for :data:`LEGACY_STRATEGY_REASON` (same UI-chrome rule).
 LEGACY_STRATEGY_REASON_KEY = "legacy_strategy"
 
+NO_PLAN_SURFACE_REASON = (
+    "Task type runs no PLAN step, so no decomposition applies."
+)
+#: Companion key for :data:`NO_PLAN_SURFACE_REASON` (same UI-chrome rule).
+#: WHY ``not_applicable`` gets its own sentence rather than reusing the legacy
+#: ones: it is the single answer for a flow with no PLAN -> IMPLEMENT segment in
+#: *either* model, so describing it as a retired-model record would date a
+#: current small/review/survey flow to a model it never ran under.
+NO_PLAN_SURFACE_REASON_KEY = "no_plan_surface"
+
 
 def has_choice_surface(task_type: Optional[str]) -> bool:
     """Whether *task_type*'s step table ever contained a PLAN -> IMPLEMENT segment.
@@ -281,15 +291,36 @@ def plan_mode_view(
     fabricated value as recorded state.  Such a flow is described by
     ``legacy_strategy`` alone — recovered from its persisted
     ``effective_implementation_strategy``, or, failing that, inferred from its
-    recorded ``task_type`` + ``selected_steps`` (PLAN present -> planned,
-    small/review/survey -> not_applicable, a choice-surface flow with IMPLEMENT
-    but no PLAN -> direct).  Everything stays ``None`` only when nothing at all
-    can be recovered (empty context and empty steps).
+    recorded ``selected_steps`` (PLAN present -> planned, a choice-surface flow
+    with IMPLEMENT but no PLAN -> direct).  Everything stays ``None`` only when
+    nothing at all can be recovered (empty context and empty steps).
+
+    A task type with no PLAN -> IMPLEMENT segment at all (small / review /
+    survey) answers ``not_applicable`` before either read — see the comment
+    below.
     """
     context = context or {}
     group_count = _optional_int(plan_group_count)
     if group_count is None:
         group_count = _optional_int(context.get(PLAN_GROUP_COUNT_KEY))
+
+    task_type = _optional_str(task_type) or ""
+    if task_type in NO_SURFACE_TASK_TYPES:
+        # WHY this precedes the persisted read: ``create_flow`` initializes the
+        # plan-mode context for every flow, whatever its type, because the type
+        # is not yet known at creation time (ANALYZE decides it).  A
+        # small/review/survey flow therefore carries a persisted doctrine whose
+        # step sequence contains no PLAN step at all, and projecting it would
+        # advertise a decomposition that can never run — the one thing this
+        # projection must not do.  Answering from the task type keeps every
+        # no-surface flow reading "not applicable" whether or not its context
+        # was ever initialized.
+        return _legacy_projection(
+            "not_applicable",
+            group_count,
+            NO_PLAN_SURFACE_REASON,
+            NO_PLAN_SURFACE_REASON_KEY,
+        )
 
     decomposition = _optional_str(context.get(PLAN_DECOMPOSITION_KEY))
     if decomposition in VALID_DECOMPOSITIONS:
@@ -318,17 +349,10 @@ def plan_mode_view(
         step.value if not isinstance(step, str) else step
         for step in selected_steps
     }
-    task_type = _optional_str(task_type) or ""
     if not steps:
-        # Nothing on disk to infer from (degraded header read); a no-surface
-        # task type is still determinable, anything else stays unknown.
-        if task_type in NO_SURFACE_TASK_TYPES:
-            return _legacy_projection(
-                "not_applicable",
-                group_count,
-                LEGACY_INFER_REASON,
-                LEGACY_INFER_REASON_KEY,
-            )
+        # Nothing on disk to infer from (degraded header read) and the task
+        # type is not one of the no-surface ones (those returned above), so the
+        # path stays unknown rather than fabricated.
         return {
             "decomposition": None,
             "granularity": None,
@@ -338,9 +362,7 @@ def plan_mode_view(
             "legacy_strategy": None,
             "inferred": False,
         }
-    if task_type in NO_SURFACE_TASK_TYPES:
-        inferred_strategy = "not_applicable"
-    elif "plan" in steps and "implement" in steps:
+    if "plan" in steps and "implement" in steps:
         inferred_strategy = "planned"
     elif has_choice_surface(task_type) and "implement" in steps:
         inferred_strategy = "direct"

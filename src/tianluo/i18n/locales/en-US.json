@@ -597,6 +597,7 @@
   "history.field.plan_mode_reason": "Plan Mode Reason",
   "history.field.plan_mode_reason_legacy_inference": "Inferred from persisted legacy task type and selected steps.",
   "history.field.plan_mode_reason_legacy_strategy": "Flow ran under the retired implementation-strategy model; showing the path it recorded.",
+  "history.field.plan_mode_reason_no_plan_surface": "Task type runs no PLAN step, so no decomposition applies.",
   "history.plan.decomposition.capability": "capability",
   "history.plan.decomposition.granular": "granular",
   "history.plan.granularity.auto": "auto",

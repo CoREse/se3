@@ -52,6 +52,7 @@ from ..config import (
     insert_confirmation_steps,
     load_pricing_catalog,
     resolve_confirm_inputs,
+    resolve_retired_always_on_confirm_inputs,
     WorkflowConfig,
 )
 from .. import __version__ as se3_version
@@ -465,8 +466,10 @@ class StateMachine:
         # is now a function of task type alone — PLAN is unconditional wherever
         # the default table has it, and the execution shape of the
         # PLAN -> IMPLEMENT segment is read downstream off the group count PLAN
-        # actually emitted. Nothing below may remove a step for plan-mode
-        # reasons; a one-group plan is a legitimate, fully-planned flow.
+        # actually emitted, except that a persisted ``plan_granularity:
+        # single`` pins the one-call shape regardless of the count. Nothing
+        # below may remove a step for plan-mode reasons; a one-group plan is a
+        # legitimate, fully-planned flow.
         selected_steps = get_default_step_sequence(task_type)
 
         # Append optional steps from tianluo.yaml (e.g. summarize)
@@ -3162,6 +3165,11 @@ class StateMachine:
         # the injection block near the end of this method.
         investigation_reports: List[Dict[str, Any]] = []
 
+        # The doctrine/granularity PLAN recorded when it ran, harvested from its
+        # own outputs. Held in a local so the forwarding block below can prefer
+        # it over the flow context — see there for why the record wins.
+        planned_mode: Dict[str, Any] = {}
+
         # Gather outputs from previous steps
         for step_id in flow.state.step_history:
             step = flow.state.steps.get(step_id)
@@ -3197,6 +3205,10 @@ class StateMachine:
                     inputs["design_doc"] = plan.get("design", {})
                     inputs["task_groups"] = step.outputs.get("task_groups")
                     inputs["spec_changes"] = step.outputs.get("spec_changes", [])
+                    for _mode_key in (PLAN_DECOMPOSITION_KEY, PLAN_GRANULARITY_KEY):
+                        _recorded = step.outputs.get(_mode_key)
+                        if _recorded:
+                            planned_mode[_mode_key] = _recorded
                 # Deprecated step types (backward compat for persisted flows)
                 elif step.step_type == StepType.PROPOSE:
                     inputs["proposal"] = step.outputs.get("proposal")
@@ -3270,13 +3282,20 @@ class StateMachine:
             # The doctrine/granularity a flow entered, forwarded so neither step
             # re-decides anything: PLAN emits under the doctrine the flow was
             # created with, and IMPLEMENT's execution shape follows from that
-            # doctrine plus the group count PLAN already emitted.
-            inputs[PLAN_DECOMPOSITION_KEY] = flow.state.context.get(
-                PLAN_DECOMPOSITION_KEY
-            )
-            inputs[PLAN_GRANULARITY_KEY] = flow.state.context.get(
-                PLAN_GRANULARITY_KEY
-            )
+            # doctrine plus either the forced granularity or, when the group
+            # count was left to PLAN, the count it already emitted.
+            #
+            # INVARIANT: PLAN's own record wins over the flow context. A flow
+            # created before this model existed has no doctrine in its context
+            # at all, so PLAN resolved one by projection and wrote it to its
+            # outputs; feeding IMPLEMENT the (empty) context instead would let
+            # it re-project independently and reach a different answer for the
+            # very same plan — coarse capability groups judged by the granular
+            # per-task contract they deliberately do not carry.
+            for _mode_key in (PLAN_DECOMPOSITION_KEY, PLAN_GRANULARITY_KEY):
+                inputs[_mode_key] = planned_mode.get(
+                    _mode_key,
+                ) or flow.state.context.get(_mode_key)
 
         if step_type == StepType.IMPLEMENT:
             inputs["analysis_context"] = {
@@ -3346,6 +3365,26 @@ class StateMachine:
                 resolved = resolve_confirm_inputs(
                     self.project_root, reviewed_type,
                 )
+
+                if resolved is None:
+                    # A flow created while this step's CONFIRM was still
+                    # always-on carries it in its persisted sequence with no
+                    # config entry behind it. Resolve it the way the retired
+                    # rule did (unattended LLM review) rather than through the
+                    # human fallback below — retiring a gate must not turn an
+                    # in-flight automated review into a blocking human one.
+                    # The pre-model marker is required so this stays confined to
+                    # those flows: on a flow created after the degrade the same
+                    # unresolved CONFIRM is config drift (the entry was deleted
+                    # mid-flow), and drift must reach the warning + human
+                    # fallback below instead of silently buying an LLM review.
+                    resolved = resolve_retired_always_on_confirm_inputs(
+                        self.project_root,
+                        reviewed_type,
+                        flow_predates_degrade=(
+                            PLAN_DECOMPOSITION_KEY not in flow.state.context
+                        ),
+                    )
 
                 if resolved is None:
                     # Defensive fallback — insert_confirmation_steps is

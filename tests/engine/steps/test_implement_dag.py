@@ -106,6 +106,10 @@ class TestLocThresholdRouting:
             "task_type": "feature",
             "task_groups": groups,
             "spec_content": {},
+            # The LOC gate is granular / legacy scheduling by definition: only
+            # that doctrine emits the per-task estimated_loc it reads. Coarse
+            # capability groups carry none, so they bypass it.
+            "plan_decomposition": "granular",
         })
         flow = _make_flow(tmp_path)
 

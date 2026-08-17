@@ -98,7 +98,14 @@ SINGLE_GROUP = [
 ]
 
 
-def _make_step_flow(tmp_path, groups):
+def _make_step_flow(tmp_path, groups, decomposition="granular"):
+    """Build an IMPLEMENT step/flow pair for the LOC-gate edge cases.
+
+    Pinned to ``granular`` because these groups carry per-task
+    ``estimated_loc`` and the LOC gate is granular / legacy scheduling by
+    definition; the capability doctrine bypasses it (coarse groups carry no
+    per-task LOC at all), so an unset key would silently test the other path.
+    """
     step = Step(
         step_type=StepType.IMPLEMENT,
         step_id="test-dispatch-edge",
@@ -108,6 +115,7 @@ def _make_step_flow(tmp_path, groups):
             "task_groups": groups,
             "spec_content": {},
             "design_doc": {},
+            "plan_decomposition": decomposition,
         },
     )
     flow = FlowInstance(

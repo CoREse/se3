@@ -512,6 +512,197 @@ def test_context_projection_of_a_planless_new_flow_has_no_group_count():
 
 
 # ---------------------------------------------------------------------------
+# Execution shape predicate
+# ---------------------------------------------------------------------------
+
+
+def _shape(**inputs):
+    return plan_mode_mod.holistic_execution_mode(
+        task_type=inputs.pop("task_type", "feature"),
+        inputs=inputs,
+        context=inputs.pop("context", {}),
+    )
+
+
+def test_single_group_is_the_whole_task_shape():
+    assert _shape(
+        plan_decomposition="capability",
+        plan_granularity="auto",
+        task_groups=[{"group_id": "G1"}],
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+
+
+def test_auto_granularity_lets_the_group_count_decide():
+    assert _shape(
+        plan_decomposition="capability",
+        plan_granularity="auto",
+        task_groups=[{"group_id": "G1"}, {"group_id": "G2"}],
+    ) is None
+
+
+@pytest.mark.parametrize("group_count", [0, 1, 2, 5])
+def test_forced_single_pins_one_call_whatever_plan_emitted(group_count):
+    """`single` cannot be contingent on the LLM obeying a prompt sentence.
+
+    A plan that ignores the forced-single directive must still run as one
+    autonomous call — otherwise the guarantee migrating users had from the
+    retired ``direct`` strategy silently becomes a multi-worktree DAG.
+    """
+    assert _shape(
+        plan_decomposition="capability",
+        plan_granularity="single",
+        task_groups=[{"group_id": f"G{i}"} for i in range(group_count)],
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+
+
+def test_forced_single_is_honoured_from_persisted_context_alone():
+    assert plan_mode_mod.holistic_execution_mode(
+        task_type="feature",
+        inputs={"task_groups": [{"group_id": "G1"}, {"group_id": "G2"}]},
+        context={
+            PLAN_DECOMPOSITION_KEY: "capability",
+            PLAN_GRANULARITY_KEY: "single",
+        },
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+
+
+def test_forced_single_does_not_apply_to_the_granular_doctrine():
+    assert _shape(
+        plan_decomposition="granular",
+        plan_granularity="single",
+        task_groups=[{"group_id": "G1"}, {"group_id": "G2"}],
+    ) is None
+
+
+def test_a_flow_with_no_doctrine_key_falls_back_the_way_plan_does():
+    """The doctrine fallback must be the one PLAN itself used.
+
+    ``PlanModeResolver.view`` projects a missing doctrine onto the current
+    default, so PLAN emitted coarse capability groups for such a flow. Reading
+    the same decision differently downstream would hand those groups to the
+    granular per-task contract they deliberately do not carry.
+    """
+    assert _shape(
+        plan_granularity="single",
+        task_groups=[{"group_id": "G1"}, {"group_id": "G2"}],
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+    assert _shape(
+        task_groups=[{"group_id": "G1"}],
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+    # ...but the one legacy marker that genuinely means "granular" still wins.
+    assert _shape(
+        effective_implementation_strategy="planned",
+        task_groups=[{"group_id": "G1"}],
+    ) is None
+
+
+def test_legacy_direct_flow_keeps_the_whole_task_shape_on_resume():
+    """A `direct` flow has no PLAN and no groups — grouped work is impossible.
+
+    Classifying it as grouped would hand IMPLEMENT an empty group list and drop
+    the whole-task prompt, the DIRECT_IMPLEMENTATION intent and the PARTIAL
+    auto-continuation gate the flow was already running under.
+    """
+    assert plan_mode_mod.holistic_execution_mode(
+        task_type="feature",
+        inputs={},
+        context={LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"},
+    ) == plan_mode_mod.HOLISTIC_MODE_LEGACY_DIRECT
+
+
+def test_legacy_direct_is_recognised_from_step_inputs_too():
+    """A step whose inputs were built before the axis retired still carries it."""
+    assert _shape(
+        effective_implementation_strategy="Direct",
+    ) == plan_mode_mod.HOLISTIC_MODE_LEGACY_DIRECT
+
+
+@pytest.mark.parametrize("group_count", [1, 2, 3])
+def test_legacy_direct_flow_that_did_run_plan_reads_its_shape_off_the_plan(
+    group_count,
+):
+    """Such a flow *can* acquire a plan: ANALYZE rebuilds the sequence.
+
+    Once it has, the legacy branch's prompt ("carries no plan and no task
+    groups") is a lie its own history contradicts, so the single-group branch
+    must take over — same one-call contract, groups kept as planning context.
+    """
+    assert _shape(
+        effective_implementation_strategy="direct",
+        task_groups=[{"group_id": f"G{i}"} for i in range(group_count)],
+    ) == plan_mode_mod.HOLISTIC_MODE_SINGLE_GROUP
+
+
+def test_legacy_direct_projects_onto_capability_and_forced_single():
+    """The projection is what keeps a planned `direct` flow on one call."""
+    inputs = {"task_groups": [{"group_id": "G1"}, {"group_id": "G2"}]}
+    context = {LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"}
+    assert plan_mode_mod.is_capability_decomposition(inputs, context)
+    assert plan_mode_mod.is_forced_single_group(inputs, context)
+
+
+def test_legacy_planned_flow_stays_grouped():
+    assert _shape(
+        effective_implementation_strategy="planned",
+        task_groups=[{"group_id": "G1"}],
+    ) is None
+
+
+def test_persisted_doctrine_wins_over_a_stale_legacy_strategy_key():
+    """Once the new model owns the decision, the retired key is inert."""
+    assert _shape(
+        plan_decomposition="granular",
+        plan_granularity="auto",
+        effective_implementation_strategy="direct",
+        task_groups=[{"group_id": "G1"}, {"group_id": "G2"}],
+    ) is None
+
+
+def test_small_type_outranks_a_legacy_direct_marker():
+    assert _shape(
+        task_type="small",
+        effective_implementation_strategy="direct",
+    ) == plan_mode_mod.HOLISTIC_MODE_SMALL
+
+
+def test_is_legacy_direct_flow_predicate():
+    assert plan_mode_mod.is_legacy_direct_flow(
+        {}, {LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"},
+    )
+    assert not plan_mode_mod.is_legacy_direct_flow(
+        {}, {LEGACY_EFFECTIVE_STRATEGY_KEY: "not_applicable"},
+    )
+    assert not plan_mode_mod.is_legacy_direct_flow({}, {})
+    assert not plan_mode_mod.is_legacy_direct_flow(
+        {PLAN_DECOMPOSITION_KEY: "capability"},
+        {LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"},
+    )
+    # A plan the flow acquired on resume ends the legacy classification; an
+    # empty list is still "no groups", so the whole-task branch keeps it.
+    assert not plan_mode_mod.is_legacy_direct_flow(
+        {"task_groups": [{"group_id": "G1"}]},
+        {LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"},
+    )
+    assert plan_mode_mod.is_legacy_direct_flow(
+        {"task_groups": []}, {LEGACY_EFFECTIVE_STRATEGY_KEY: "direct"},
+    )
+
+
+def test_is_forced_single_group_reads_inputs_then_context():
+    assert plan_mode_mod.is_forced_single_group(
+        {PLAN_GRANULARITY_KEY: "single"}, {},
+    )
+    assert plan_mode_mod.is_forced_single_group(
+        {}, {PLAN_GRANULARITY_KEY: "single"},
+    )
+    for granularity in ("auto", "conservative"):
+        assert not plan_mode_mod.is_forced_single_group(
+            {PLAN_GRANULARITY_KEY: granularity}, {},
+        )
+    assert not plan_mode_mod.is_forced_single_group({}, {})
+
+
+# ---------------------------------------------------------------------------
 # ANALYZE no longer carries the routing question
 # ---------------------------------------------------------------------------
 

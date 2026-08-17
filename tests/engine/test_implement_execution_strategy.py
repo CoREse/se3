@@ -91,7 +91,15 @@ SMALL_GROUPS = [
 ]
 
 
-def _make_step_flow(tmp_path, groups):
+def _make_step_flow(tmp_path, groups, decomposition="granular"):
+    """Build an IMPLEMENT step/flow pair for the dispatch tests.
+
+    The doctrine defaults to ``granular`` because every group above carries
+    per-task ``estimated_loc``: the LOC gate these tests exercise is granular /
+    legacy scheduling by definition. Stating it explicitly also keeps the
+    fixture honest — omitting the key entirely no longer means "legacy", it
+    means the current default doctrine (capability), which bypasses that gate.
+    """
     step = Step(
         step_type=StepType.IMPLEMENT,
         step_id="test-dispatch",
@@ -101,6 +109,7 @@ def _make_step_flow(tmp_path, groups):
             "task_groups": groups,
             "spec_content": {},
             "design_doc": {},
+            "plan_decomposition": decomposition,
         },
     )
     flow = FlowInstance(
@@ -270,6 +279,165 @@ class TestExecutionStrategyDispatch:
         mock_single.assert_called_once()
 
 
+# Two coarse capability groups: no per-task breakdown, no estimated_loc, and
+# independent of each other — the default doctrine's primary multi-group shape.
+CAPABILITY_GROUPS = [
+    {
+        "group_id": "G1",
+        "name": "Export pipeline",
+        "description": "Deliver CSV export end to end.",
+        "group_order": 1,
+        "depends_on": [],
+    },
+    {
+        "group_id": "G2",
+        "name": "Import pipeline",
+        "description": "Deliver CSV import end to end.",
+        "group_order": 2,
+        "depends_on": [],
+    },
+]
+
+
+class TestCapabilityGroupPrompt:
+    """A coarse group must be told to decompose itself, not to run a task list."""
+
+    def test_capability_variant_replaces_the_enumeration_wording(self):
+        from tianluo.engine.steps.implement import (
+            IMPLEMENT_CAPABILITY_GROUP_PROMPT,
+            IMPLEMENT_GROUP_PROMPT,
+        )
+
+        fields = dict(
+            task_description="TD",
+            task_type="feature",
+            design_section="",
+            current_group=json.dumps(CAPABILITY_GROUPS[0]),
+            previous_results="No previous groups.",
+            spec_summary="SS",
+            root_cause_section="",
+        )
+        capability = IMPLEMENT_CAPABILITY_GROUP_PROMPT.format(**fields)
+        granular = IMPLEMENT_GROUP_PROMPT.format(**fields)
+
+        # The granular template points at an enumeration a capability group
+        # does not carry; the capability one must not.
+        assert "Implement the tasks listed in Current Group Tasks above." in granular
+        assert (
+            "Implement the tasks listed in Current Group Tasks above."
+            not in capability
+        )
+        assert "## Current Capability Group" in capability
+        assert "Decompose the capability" in capability
+        assert "sub-agent" in capability
+        # Tests belong to the group itself — the artifact-split ban's
+        # execution-side counterpart.
+        assert "own tests" in capability
+
+        # The legacy template is untouched by the derivation.
+        assert "Capability" not in granular
+        # Everything not doctrine-specific keeps a single source.
+        assert "Do Not Bump Version Files" in capability
+        assert "Agent Safety: Process Cleanup" in capability
+        assert '"completion_status"' in capability
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}.parse_json_response", return_value=_SEQ_PARSED)
+    @patch(f"{_IMP}.LLMCaller")
+    @patch(f"{_IMP}._run_dag_parallel")
+    @patch(f"{_IMP}.has_commits", return_value=True)
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(group_loc_threshold=300, use_worktree=False),
+    )
+    def test_sequential_capability_groups_get_the_capability_prompt(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_dag,
+        mock_caller_cls,
+        mock_parse,
+        mock_resolve,
+        tmp_path,
+    ):
+        from tianluo.engine.steps.implement import implement_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
+        mock_caller_cls.return_value = mock_caller
+
+        step, flow = _make_step_flow(
+            tmp_path, CAPABILITY_GROUPS, decomposition="capability",
+        )
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+
+        prompts = [c.kwargs["prompt"] for c in mock_caller.call.call_args_list]
+        assert len(prompts) == len(CAPABILITY_GROUPS)
+        for prompt in prompts:
+            assert "## Current Capability Group" in prompt
+            assert "Decompose the capability" in prompt
+            assert (
+                "Implement the tasks listed in Current Group Tasks above."
+                not in prompt
+            )
+
+    def test_dag_path_forwards_the_doctrine_to_the_group_executor(self):
+        """The DAG path is the capability doctrine's primary multi-group shape."""
+        import inspect
+
+        from tianluo.engine.steps import implement as impl
+
+        assert (
+            "capability_mode"
+            in inspect.signature(impl._run_dag_parallel).parameters
+        )
+        assert (
+            "capability_mode"
+            in inspect.signature(impl._make_execute_fn).parameters
+        )
+        assert (
+            impl._group_prompt_template(True)
+            is impl.IMPLEMENT_CAPABILITY_GROUP_PROMPT
+        )
+        assert impl._group_prompt_template(False) is impl.IMPLEMENT_GROUP_PROMPT
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_dag_parallel", return_value=StepStatus.COMPLETED)
+    @patch(f"{_IMP}.has_commits", return_value=True)
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(group_loc_threshold=300, use_worktree=True),
+    )
+    def test_independent_capability_groups_run_dag_with_capability_mode(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_dag,
+        mock_resolve,
+        tmp_path,
+    ):
+        from tianluo.engine.steps.implement import implement_handler
+
+        step, flow = _make_step_flow(
+            tmp_path, CAPABILITY_GROUPS, decomposition="capability",
+        )
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+        mock_dag.assert_called_once()
+        assert mock_dag.call_args.kwargs["capability_mode"] is True
+
+
 class TestHolisticExecutionStrategy:
     """A single capability group — and ``small`` — run one whole-task executor.
 
@@ -283,6 +451,7 @@ class TestHolisticExecutionStrategy:
         *,
         task_type="feature",
         decomposition="capability",
+        granularity="auto",
         groups=None,
     ):
         flow = FlowInstance(
@@ -292,7 +461,7 @@ class TestHolisticExecutionStrategy:
             change_path=tmp_path / "tianluo",
         )
         flow.state.context["plan_decomposition"] = decomposition
-        flow.state.context["plan_granularity"] = "auto"
+        flow.state.context["plan_granularity"] = granularity
         if groups is None:
             groups = [
                 {
@@ -310,7 +479,7 @@ class TestHolisticExecutionStrategy:
                 "task_description": "Implement the complete requirement",
                 "task_type": task_type,
                 "plan_decomposition": decomposition,
-                "plan_granularity": "auto",
+                "plan_granularity": granularity,
                 "task_groups": groups,
                 "analysis_context": {
                     "scope": "cross-module",
@@ -344,6 +513,92 @@ class TestHolisticExecutionStrategy:
         )
         assert _holistic_execution_mode(step, flow) is None
 
+    def test_forced_single_granularity_is_holistic_despite_many_groups(
+        self, tmp_path,
+    ):
+        """`single` is a guarantee the engine keeps, not a request to PLAN."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            granularity="single",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+                {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            ],
+        )
+        assert _holistic_execution_mode(step, flow) == "single_group"
+
+    def test_forced_single_is_read_off_context_when_inputs_lack_it(
+        self, tmp_path,
+    ):
+        """Persisted state stays authoritative if the input never carried it."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            granularity="single",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        del step.inputs["plan_granularity"]
+        assert _holistic_execution_mode(step, flow) == "single_group"
+
+    def test_forced_single_does_not_reshape_the_granular_doctrine(
+        self, tmp_path,
+    ):
+        """Granularity only applies under capability; legacy stays grouped."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            decomposition="granular",
+            granularity="single",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        assert _holistic_execution_mode(step, flow) is None
+
+    def test_conservative_granularity_still_follows_the_group_count(
+        self, tmp_path,
+    ):
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            granularity="conservative",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        assert _holistic_execution_mode(step, flow) is None
+
+    def test_zero_capability_groups_reach_the_whole_task_shape(self, tmp_path):
+        """A groupless capability plan must not get the per-group contract.
+
+        PLAN now rejects an empty plan, so this can only arrive from a plan
+        persisted before that guard; the whole task still has to be delivered
+        by one autonomous call, which is the one-group shape.
+        """
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path, groups=[])
+        assert _holistic_execution_mode(step, flow) == "single_group"
+
+    def test_a_flow_that_has_not_run_plan_is_not_holistic(self, tmp_path):
+        """No count at all is "unknown", which must not read as "one"."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path)
+        del step.inputs["task_groups"]
+        assert _holistic_execution_mode(step, flow) is None
+
     def test_single_granular_group_is_not_holistic(self, tmp_path):
         """Legacy doctrine keeps its group path even at one group."""
         from tianluo.engine.steps.implement import _holistic_execution_mode
@@ -351,14 +606,203 @@ class TestHolisticExecutionStrategy:
         flow, step = self._flow_step(tmp_path, decomposition="granular")
         assert _holistic_execution_mode(step, flow) is None
 
-    def test_legacy_flow_without_a_doctrine_is_not_holistic(self, tmp_path):
-        """A flow predating the model must not be re-shaped by the default."""
+    def test_a_doctrineless_flow_is_shaped_the_way_plan_planned_it(
+        self, tmp_path,
+    ):
+        """PLAN and IMPLEMENT must not fall back to different doctrines.
+
+        A pre-upgrade ``--type pending`` flow recorded the provisional
+        ``effective_implementation_strategy: not_applicable`` and no doctrine
+        at all. Resumed after the upgrade, ANALYZE rebuilds a sequence with
+        PLAN, and PLAN — reading ``PlanModeResolver.view`` — runs the
+        capability prompt and emits one coarse group with no ``tasks`` and no
+        ``estimated_loc``. IMPLEMENT must therefore reach the whole-task call,
+        not the per-task group prompt for an enumeration that does not exist.
+        """
+        from tianluo.engine.plan_decomposition import PlanModeResolver
         from tianluo.engine.steps.implement import _holistic_execution_mode
 
         flow, step = self._flow_step(tmp_path)
         del flow.state.context["plan_decomposition"]
+        del flow.state.context["plan_granularity"]
         del step.inputs["plan_decomposition"]
+        del step.inputs["plan_granularity"]
+        flow.state.context["requested_implementation_strategy"] = "planned"
+        flow.state.context["effective_implementation_strategy"] = "not_applicable"
+
+        assert (
+            PlanModeResolver.view(flow.state.context).decomposition.value
+            == "capability"
+        )
+        assert _holistic_execution_mode(step, flow) == "single_group"
+
+    def test_a_legacy_planned_flow_still_keeps_its_group_path(self, tmp_path):
+        """The one legacy marker that really means "granular" is honoured.
+
+        A flow planned before the model existed carries per-task
+        ``estimated_loc`` and must keep the LOC-driven scheduling it was
+        planned under; ``planned`` is the marker that says so.
+        """
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path)
+        del flow.state.context["plan_decomposition"]
+        del flow.state.context["plan_granularity"]
+        del step.inputs["plan_decomposition"]
+        del step.inputs["plan_granularity"]
+        flow.state.context["effective_implementation_strategy"] = "planned"
         assert _holistic_execution_mode(step, flow) is None
+
+    @staticmethod
+    def _legacy_direct_flow_step(tmp_path):
+        """A flow created under the retired axis: no PLAN, hence no groups."""
+        flow = FlowInstance(
+            flow_id="legacy-direct-flow",
+            task_description="Implement the complete requirement",
+            task_type="feature",
+            change_path=tmp_path / "tianluo",
+        )
+        flow.state.context["effective_implementation_strategy"] = "direct"
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            step_id="legacy-direct-implement",
+            inputs={
+                "task_description": "Implement the complete requirement",
+                "task_type": "feature",
+                "effective_implementation_strategy": "direct",
+                "analysis_context": {
+                    "scope": "cross-module",
+                    "complexity": "medium",
+                    "reasoning": "one call carries it",
+                    "project_summary": "project-summary-marker",
+                },
+            },
+        )
+        return flow, step
+
+    def test_legacy_direct_flow_is_holistic(self, tmp_path):
+        """Upgrading mid-flow must not reclassify a `direct` run as grouped."""
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._legacy_direct_flow_step(tmp_path)
+        assert _holistic_execution_mode(step, flow) == "legacy_direct"
+        # The auto-continuation gate must see the same shape, or a PARTIAL
+        # result would advance to TEST instead of re-entering IMPLEMENT.
+        assert StateMachine._is_holistic_implement_step(flow, step)
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_legacy_direct_flow_runs_the_whole_task_prompt(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """No empty `## Task Groups` list, and the partial attempt survives."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._legacy_direct_flow_step(tmp_path)
+        step.inputs["previous_output"] = {
+            "summary": "PARTIAL-ATTEMPT-MARKER",
+            "completion_status": "partial",
+        }
+        status = implement_handler(step, flow)
+
+        assert status == StepStatus.COMPLETED
+        prompt = mock_run.call_args.args[0]
+        assert "Task Groups" not in prompt
+        assert "PARTIAL-ATTEMPT-MARKER" in prompt
+        assert "project-summary-marker" in prompt
+        # It never ran PLAN, so the prompt must not claim a sizing verdict.
+        assert "single capability group" not in prompt
+        assert "retired direct implementation strategy" in prompt
+        assert mock_run.call_args.kwargs["implemented_groups_override"] == []
+        assert (
+            mock_run.call_args.kwargs["invocation_intent"]
+            == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+        )
+        assert step.outputs["implemented_groups"] == []
+
+    def test_legacy_direct_flow_that_ran_plan_is_a_single_group(self, tmp_path):
+        """ANALYZE rebuilds the sequence, so such a flow can acquire a plan."""
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._legacy_direct_flow_step(tmp_path)
+        step.inputs["task_groups"] = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": []},
+        ]
+        assert _holistic_execution_mode(step, flow) == "single_group"
+        assert StateMachine._is_holistic_implement_step(flow, step)
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_legacy_direct_flow_that_ran_plan_keeps_its_groups_in_the_prompt(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """The prompt must not deny a plan the flow's own history holds."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._legacy_direct_flow_step(tmp_path)
+        step.inputs["task_groups"] = [
+            {"group_id": "G1", "name": "GROUP-ONE-MARKER", "depends_on": []},
+            {"group_id": "G2", "name": "GROUP-TWO-MARKER", "depends_on": []},
+        ]
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+
+        prompt = mock_run.call_args.args[0]
+        assert "retired direct implementation strategy" not in prompt
+        assert "outline only" in prompt
+        assert "GROUP-ONE-MARKER" in prompt and "GROUP-TWO-MARKER" in prompt
+        assert (
+            mock_run.call_args.kwargs["invocation_intent"]
+            == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+        )
 
     def test_small_is_holistic_regardless_of_group_count(self, tmp_path):
         from tianluo.engine.steps.implement import _holistic_execution_mode
@@ -384,6 +828,10 @@ class TestHolisticExecutionStrategy:
             {"decomposition": "granular"},
             {"task_type": "small"},
             {"groups": [
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ]},
+            {"granularity": "single", "groups": [
                 {"group_id": "G1", "group_order": 1, "depends_on": []},
                 {"group_id": "G2", "group_order": 2, "depends_on": []},
             ]},
@@ -441,6 +889,218 @@ class TestHolisticExecutionStrategy:
         # The execution contract names PLAN's sizing verdict, not a strategy.
         assert "single capability group" in prompt
         assert "implementation_strategy" not in prompt
+        assert mock_run.call_args.kwargs["implemented_groups_override"] == []
+        assert (
+            mock_run.call_args.kwargs["invocation_intent"]
+            == AgentInvocationIntent.DIRECT_IMPLEMENTATION
+        )
+        assert step.outputs["implemented_groups"] == []
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_single_group_prompt_carries_the_design_and_the_group_scope(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """A one-group plan is still a plan: its design must reach the call."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._flow_step(
+            tmp_path,
+            groups=[
+                {
+                    "group_id": "G1",
+                    "name": "MUST_NOT_APPEAR",
+                    "description": "GROUP-SCOPE-MARKER",
+                    "group_order": 1,
+                    "depends_on": [],
+                }
+            ],
+        )
+        step.inputs["design_doc"] = {
+            "overview": "DESIGN-OVERVIEW-MARKER",
+            "architecture_decisions": ["DESIGN-DECISION-MARKER"],
+        }
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+
+        prompt = mock_run.call_args.args[0]
+        assert "## Design Document" in prompt
+        assert "DESIGN-OVERVIEW-MARKER" in prompt
+        assert "DESIGN-DECISION-MARKER" in prompt
+        # PLAN's scope statement for this one call, without reintroducing the
+        # per-group enumeration this mode denies.
+        assert "GROUP-SCOPE-MARKER" in prompt
+        assert "MUST_NOT_APPEAR" not in prompt
+        assert "Task Groups" not in prompt
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_forced_single_collapse_also_carries_the_design(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """Pinning the shape must not drop what PLAN designed for it."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._flow_step(
+            tmp_path,
+            granularity="single",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        step.inputs["design_doc"] = {"overview": "DESIGN-OVERVIEW-MARKER"}
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+
+        prompt = mock_run.call_args.args[0]
+        assert "## Design Document" in prompt
+        assert "DESIGN-OVERVIEW-MARKER" in prompt
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_legacy_direct_prompt_renders_no_design_section(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """The one mode that truly has no plan must not claim to have one."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._legacy_direct_flow_step(tmp_path)
+        # Defensive: such a flow never ran PLAN, so even a design_doc left in
+        # inputs by an unrelated path must not turn into a design section.
+        step.inputs["design_doc"] = {"overview": "MUST_NOT_APPEAR"}
+        assert implement_handler(step, flow) == StepStatus.COMPLETED
+
+        prompt = mock_run.call_args.args[0]
+        assert "## Design Document" not in prompt
+        assert "MUST_NOT_APPEAR" not in prompt
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(
+        "tianluo.engine.context_builder.get_runtime_environment_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_code_index_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_charter_injection",
+        return_value="",
+    )
+    @patch(
+        "tianluo.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    def test_forced_single_collapses_groups_into_one_call_without_losing_them(
+        self,
+        mock_issue,
+        mock_charter,
+        mock_index,
+        mock_runtime,
+        mock_run,
+        mock_resolve,
+        tmp_path,
+    ):
+        """One call runs, and the plan it must cover is still in the prompt."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        flow, step = self._flow_step(
+            tmp_path,
+            granularity="single",
+            groups=[
+                {
+                    "group_id": "G1",
+                    "name": "GROUP-ONE-MARKER",
+                    "group_order": 1,
+                    "depends_on": [],
+                },
+                {
+                    "group_id": "G2",
+                    "name": "GROUP-TWO-MARKER",
+                    "group_order": 2,
+                    "depends_on": ["G1"],
+                },
+            ],
+        )
+        status = implement_handler(step, flow)
+
+        assert status == StepStatus.COMPLETED
+        assert mock_run.call_count == 1
+        prompt = mock_run.call_args.args[0]
+        assert "plan_granularity=single" in prompt
+        assert "GROUP-ONE-MARKER" in prompt
+        assert "GROUP-TWO-MARKER" in prompt
+        # The forced collapse must not claim PLAN sized this as one group.
+        assert "PLAN sized this task as a single capability group" not in prompt
         assert mock_run.call_args.kwargs["implemented_groups_override"] == []
         assert (
             mock_run.call_args.kwargs["invocation_intent"]
@@ -660,6 +1320,54 @@ class TestFlowTypeMatrix:
         inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
         assert inputs["task_groups"][0]["group_id"] == "G1"
         assert inputs["task_groups"][0]["tasks"][0]["estimated_loc"] == 40
+
+    def test_implement_inherits_the_doctrine_plan_recorded(self, tmp_path):
+        """PLAN's own record outranks a flow context that predates it.
+
+        A pre-upgrade flow has no doctrine in its context, so PLAN resolved one
+        by projection and wrote it to its outputs. Handing IMPLEMENT the empty
+        context instead would let it re-project independently and disagree with
+        the plan it is about to execute.
+        """
+        machine, flow = self._flow_with_history(
+            tmp_path,
+            task_type="feature",
+            history_steps=[
+                Step(
+                    step_type=StepType.PLAN,
+                    status=StepStatus.COMPLETED,
+                    outputs={
+                        "task_groups": [{"group_id": "G1"}],
+                        "plan_decomposition": "capability",
+                        "plan_granularity": "auto",
+                    },
+                )
+            ],
+        )
+        del flow.state.context["plan_decomposition"]
+        del flow.state.context["plan_granularity"]
+        flow.state.context["effective_implementation_strategy"] = "not_applicable"
+
+        inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
+        assert inputs["plan_decomposition"] == "capability"
+        assert inputs["plan_granularity"] == "auto"
+
+    def test_context_doctrine_is_used_when_plan_recorded_none(self, tmp_path):
+        """A PLAN step from before the record existed falls back to context."""
+        machine, flow = self._flow_with_history(
+            tmp_path,
+            task_type="feature",
+            decomposition="granular",
+            history_steps=[
+                Step(
+                    step_type=StepType.PLAN,
+                    status=StepStatus.COMPLETED,
+                    outputs={"task_groups": [{"group_id": "G1"}]},
+                )
+            ],
+        )
+        inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
+        assert inputs["plan_decomposition"] == "granular"
 
     def test_planless_inputs_never_carry_plan_task_groups(self, tmp_path):
         machine, flow = self._flow_with_history(

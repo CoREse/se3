@@ -14519,10 +14519,17 @@ function buildPlanModeRows(planMode) {
       ));
     }
   } else if (planMode.legacy_strategy) {
-    let value = legacyStrategyLabel(planMode.legacy_strategy)
-      + " · " + tf("plan.legacyNote", "retired implementation strategy");
-    if (planMode.inferred) {
-      value += " · " + tf("plan.inferredNote", "inferred from legacy records");
+    // "not applicable" names the absence of a PLAN -> IMPLEMENT segment, which
+    // reads the same in both models; both notes below describe legacy
+    // provenance, so attaching them would date a current small/review/survey
+    // flow to a model it never ran under. Only a real recorded path
+    // (direct/planned) carries them.
+    let value = legacyStrategyLabel(planMode.legacy_strategy);
+    if (planMode.legacy_strategy !== "not_applicable") {
+      value += " · " + tf("plan.legacyNote", "retired implementation strategy");
+      if (planMode.inferred) {
+        value += " · " + tf("plan.inferredNote", "inferred from legacy records");
+      }
     }
     frag.appendChild(kv(tf("plan.label", "Plan decomposition"), value));
   } else {

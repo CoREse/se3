@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.6.0 - 2026-08-17
+
+- Unify feature and bugfix flows onto a single ANALYZE → PLAN → IMPLEMENT path, retiring the direct/planned routing split; a one-group plan is the equivalent of the old direct path and still runs IMPLEMENT holistically
+- Add `workflow.plan_decomposition` (`capability` | `granular`, default `capability`) and `workflow.plan_granularity` (`auto` | `single` | `conservative`, default `auto`) with matching CLI overrides; `granular` preserves the previous fine-grained per-task plan output unchanged
+- Group work by what one autonomous implement call can safely carry rather than by task count, and forbid splitting by artifact type — no standalone test, docs or config groups, since tests and verification ship inside each capability group
+- Deprecate `workflow.implementation_strategy` and `--implementation-strategy`: both still work for one more version, mapping `direct` → `plan_granularity: single`, `planned` → `plan_decomposition: granular` and `auto` → the new defaults, with a deprecation warning; the shim is removed in the next major
+- Demote plan confirmation from always-on to an ordinary per-step gate that fires only when `confirmation.steps.plan` is configured, and retarget its reviewer prompt at grouping granularity — group count vs. task size, forbidden artifact-type splits, dependency soundness — instead of requirement→task coverage, which SELF_CHECK already enforces against real code
+- Project the plan decomposition mode, granularity and group count through `luo history`, the daemon aggregator and the WebUI in place of the old implementation strategy, marking pre-upgrade flows as legacy
+- Raise the daemon protocol to version 8 with explicit `supports_spawn_plan_mode` negotiation for the two new spawn fields, refusing with an explainable capability error rather than silently downgrading against an older peer
+- Rewrite the workflow sections of both configuration references, `tianluo.example.yaml`, both READMEs and the charter around the new single-path model, and recalibrate `group_loc_threshold` and related DAG parallelism thresholds for coarse-grained groups
 ## 12.5.3 - 2026-08-16
 
 - Fix codex command_execution chips rendering as '<command> · 0 lines output' by reading the real aggregated_output field, with fallback to output and stdout/stderr for older codex builds

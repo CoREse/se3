@@ -381,6 +381,7 @@ G10_CLI_KEYS = [
     "history.field.scope_full_rounds",
     "history.field.plan_mode_reason_legacy_inference",
     "history.field.plan_mode_reason_legacy_strategy",
+    "history.field.plan_mode_reason_no_plan_surface",
     "history.plan.decomposition.capability",
     "history.plan.decomposition.granular",
     "history.plan.granularity.auto",

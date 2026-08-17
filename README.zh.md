@@ -71,11 +71,11 @@ LLM 不是瓶颈，*人的注意力*才是。任何 agentic 系统的成本，�
 
 1. **Prompt** — 你打一句 `luo run "…"`（或用 `--discover` 开一次 discovery）。
 2. **Discover** — 引擎用少量精准的澄清问题逼近真实需求，直到需求收敛。
-3. **确认方案** — 唯一一道常开的闸口：你批准这份 plan，或把它打回去改。
+3. **确认方案 — 可选，默认关闭** — 配置里没有 `confirmation.steps.plan` 时，流程直接 `plan → implement`，中间没有任何闸口。写上 `confirmation.steps.plan: {reviewer: human}` 才会得到一道人工分组 gate：你批准 plan 把工作切成的这组任务组，或把它打回去改。
 4. **发射后不管** — 你走开。引擎自动 implement、test、self-check、用已记录的不变量校验 diff、标记 charter 漂移、决定版本号、commit。
 5. **拿走交付物** — 回来时，分支上是干净的 commit，版本、history、code-index 已经对齐。
 
-只有第 1–3 步真正需要 attention，其它都是程序应该自己干完的活。
+只有第 1–2 步、以及你主动开启后的第 3 步闸口真正需要 attention，其它都是程序应该自己干完的活。
 
 ### 3. 撑起这种范式的四件套护城河
 
@@ -294,11 +294,14 @@ stateDiagram-v2
 
 只有一条路径，不再是两条。`feature`、`bugfix` 与 discovery 流程一律运行
 ANALYZE → PLAN → IMPLEMENT，没有任何配置能把 PLAN 从序列里裁掉。变化的只是
-PLAN 产出什么，而**执行形态由组数读出**：
+PLAN 产出什么，而在粒度把组数留给 PLAN 决定时，**执行形态由组数读出**：
 
 - **单组** —— IMPLEMENT 把整个任务作为一次自治 implement 调用执行；
 - **两组及以上** —— 沿用依赖 DAG：互相独立的组在隔离 worktree 中并行执行并
   合并回来，声明了依赖的组顺序执行。
+
+`plan_granularity: single` 是唯一的例外钉点：它是配置保证而非对 PLAN 的提示——
+无论 PLAN 产出几个组，整个任务都由一次自治调用交付。
 
 `workflow.plan_decomposition` 选择 PLAN 遵循哪套学说：
 

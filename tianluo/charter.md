@@ -46,10 +46,14 @@ type semantics of a whole flow; there is no second routing axis that adds or
 removes steps. Every flow whose type carries a PLAN step runs it — what varies
 is the *decomposition doctrine and granularity* PLAN works under, and those
 decide only the execution shape of the PLAN → IMPLEMENT segment. The doctrine
-sizes coarse groups by what one autonomous implement call can safely carry, and
-the shape downstream is read off the resulting group count rather than off a
-flag: one group is executed as a single whole-task call, two or more enter the
-dependency DAG. Flows whose type has no PLAN step have no such surface at all.
+sizes coarse groups by what one autonomous implement call can safely carry.
+Where the granularity left the group count to PLAN, the shape downstream is
+read off the resulting count rather than off a routing flag: one group is
+executed as a single whole-task call, two or more enter the dependency DAG.
+`plan_granularity: single` is the one pin that is a configured guarantee rather
+than a hint to PLAN — however many groups PLAN emits, the whole task runs
+through one autonomous call, and the groups survive only as planning context.
+Flows whose type has no PLAN step have no such surface at all.
 The doctrine and granularity are decided once, at flow creation, persisted
 together with their reason, and never re-decided mid-flow: a resumed flow keeps
 executing the grouping it already entered, whatever the configuration says

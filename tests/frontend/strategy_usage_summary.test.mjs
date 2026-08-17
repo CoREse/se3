@@ -350,6 +350,21 @@ export function registerStrategyUsageSummaryTests(ctx) {
       app.tf("plan.inferredNote", "inferred from legacy records")));
   });
 
+  check("G10 buildPlanModeRows leaves not_applicable unannotated", () => {
+    // A planless task type reads "not applicable" in BOTH models, so the
+    // legacy/inferred notes (which describe legacy provenance) must not date a
+    // current review flow to a model it never ran under.
+    const rows = app.buildPlanModeRows({
+      decomposition: null, granularity: null, group_count: null,
+      reason: "", reason_key: "", legacy_strategy: "not_applicable",
+      inferred: true,
+    });
+    assert.ok(!rows.textContent.includes(
+      app.tf("plan.legacyNote", "retired implementation strategy")));
+    assert.ok(!rows.textContent.includes(
+      app.tf("plan.inferredNote", "inferred from legacy records")));
+  });
+
   check("G10 plan reason_key renders through i18n, plain reason verbatim", () => {
     // The legacy-inference sentence is authored by the backend PROJECTION
     // (UI chrome), so it must render from the catalog; a persisted reason is

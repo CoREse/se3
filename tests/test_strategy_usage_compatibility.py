@@ -17,7 +17,11 @@ import pytest
 from tianluo.daemon import protocol
 from tianluo.daemon.aggregator import DaemonAggregator, FlowSnapshot
 from tianluo.daemon.history import DaemonHistoryReader, SessionMeta
-from tianluo.strategy_view import plan_mode_view, scope_view
+from tianluo.strategy_view import (
+    NO_PLAN_SURFACE_REASON,
+    plan_mode_view,
+    scope_view,
+)
 from tianluo.usage import (
     UsageRecord,
     UsageStatus,
@@ -165,6 +169,38 @@ class TestPlanModeView:
             )
             assert view["legacy_strategy"] == "not_applicable", task_type
             assert view["inferred"] is True
+
+    def test_no_surface_type_ignores_an_initialized_context(self):
+        # create_flow initializes the plan-mode context for EVERY flow (the type
+        # is only decided by ANALYZE), so a review flow carries capability/auto
+        # while its sequence contains no PLAN step at all. Projecting those
+        # values would advertise a doctrine that can never run.
+        for task_type in ("small", "review", "survey"):
+            view = plan_mode_view(
+                {
+                    "plan_decomposition": "capability",
+                    "plan_granularity": "auto",
+                    "plan_mode_reason": "left at the project default",
+                },
+                task_type=task_type,
+                selected_steps=["analyze", "invariant_check", "summarize"],
+            )
+            assert view["decomposition"] is None, task_type
+            assert view["granularity"] is None, task_type
+            assert view["legacy_strategy"] == "not_applicable", task_type
+            # Its own sentence: "not applicable" is the answer in BOTH models,
+            # so it must not be described as a retired-model record.
+            assert view["reason_key"] == "no_plan_surface", task_type
+            assert view["reason"] == NO_PLAN_SURFACE_REASON, task_type
+
+    def test_no_surface_gate_does_not_touch_a_planning_type(self):
+        view = plan_mode_view(
+            {"plan_decomposition": "capability", "plan_granularity": "single"},
+            task_type="feature",
+            selected_steps=["analyze", "plan", "implement"],
+        )
+        assert view["decomposition"] == "capability"
+        assert view["legacy_strategy"] is None
 
     def test_empty_state_is_unknown(self):
         view = plan_mode_view({}, task_type="", selected_steps=[])

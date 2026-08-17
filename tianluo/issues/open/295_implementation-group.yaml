@@ -1,0 +1,896 @@
+id: '295'
+description: 'implementation结果有十几个Group：
+
+  ✓
+
+  完成
+
+  │
+
+  6 个组
+
+  │
+
+  76 个文件
+
+  │
+
+  7 个测试
+
+  摘要
+
+  G1. G1 vocabulary layer for the single-path plan model. config.py: added DEFAULT_PLAN_DECOMPOSITION/VALID_PLAN_DECOMPOSITIONS
+  (capability|granular) and DEFAULT_PLAN_GRANULARITY/VALID_PLAN_GRANULARITIES (auto|single|conservative),
+  WorkflowConfig.plan_decomposition/plan_granularity plus *_explicit flags, fail-fast
+  validation naming the config path and legal values, and a one-version LEGACY_STRATEGY_TO_PLAN_MODE
+  mapping table applied at the from_dict boundary (direct->granularity single, planned->decomposition
+  granular, auto->new defaults) that yields to explicitly-written new keys and emits
+  a per-process-deduped deprecation warning
+
+  G2. removed implementation_strategy/implementation_strategy_explicit fields, resolve_implementation_strategy(),
+  and the DEFAULT_/VALID_IMPLEMENTATION_STRATEGIES constants. cli.py: added --plan-decomposition/--plan-granularity
+  with render_full+Exit(1) validation, kept --implementation-strategy as a deprecated
+  alias that prints an i18n notice and translates through the same config-owned mapping
+  table
+
+  G3. all four dispatch sites forward the two new kwargs. commands/run.py: run_flow/_run_flow_impl/run_worktree_mode
+  signatures now carry plan_decomposition/plan_granularity forwarded to create_flow
+
+  G4. the identifier implementation_strategy no longer appears in the module, and
+  a why-comment at the resume dispatch records that plan mode is decided once and
+  never re-decided on resume. i18n: 5 new keys in both catalogs with real zh-CN translations,
+  legacy help text retagged deprecated.
+
+  G5. G2 engine core: retired the implementation_strategy routing axis and unified
+  feature/bugfix/discovery on a single ANALYZE -> PLAN -> IMPLEMENT path. Deleted
+  implementation_strategy.py (552 lines) and added the narrower plan_decomposition.py,
+  which owns only the capability|granular doctrine + auto|single|conservative granularity
+  enums, their three context keys, write-once initialize_context and a read-only legacy-tolerant
+  view -- and deliberately no step-sequence transform, snapshot/restore, or legacy
+  sequence inference, since none of those have a reason to exist once the sequence
+  stops depending on the decision. create_flow no longer trims PLAN
+
+  G6. analyze no longer asks for or persists a direct|planned recommendation and no
+  longer needs the atomic snapshot/restore wrapper around its sequence rebuild
+
+  G7. _build_step_inputs and get_progress and build_context_from_flow project the
+  new keys plus a plan_group_count derived from PLAN''s task_groups. state_machine''s
+  _is_holistic_implement_step now keys on ''capability doctrine + exactly one group''
+  rather than a routing flag. New tests/engine/test_plan_decomposition.py (57 cases)
+  replaces test_implementation_strategy.py, covering resolver priority, write-once
+  persistence and resume-after-config-change, invalid-value fail-fast, legacy read-only
+  projection, PLAN surviving every plan mode across all plan-bearing types, byte-identical
+  planless sequences, and the absence of strategy vocabulary from the ANALYZE prompt/outputs.
+
+  G8. G3: landed the capability decomposition doctrine in PLAN (four sizing criteria
+  keyed on what one autonomous implement call can carry, three mutually-exclusive
+  granularity tiers, an artifact-split guardrail in the same form as VERSION_FILE_GUARDRAIL,
+  and a coarse five-field group schema with no tasks array), with granular preserved
+  as a byte-identical legacy prompt. IMPLEMENT''s holistic decision and the state
+  machine''s auto-continuation gate now share one predicate in plan_decomposition
+  (small type, or capability + exactly one group) instead of reading a routing flag.
+  Capability mode bypasses the LOC gate in both the merge short-circuit and _should_use_dag,
+  since coarse groups carry no estimated_loc and a zero total would silently serialize
+  independent groups
+
+  G9. the use_worktree / linear-chain / no-commits short-circuits and all granular
+  LOC behaviour are unchanged. Every task_groups consumer now tolerates groups without
+  a tasks array: a new TaskDataValidator.validate_groups accepts them while still
+  checking inter-group dependency references and cycles, and the tree/table/summary/dependency
+  views plus the implement-plan panel and plan step renderer fall back to group-level
+  rendering rather than reporting an empty plan.
+
+  G10. G4: degraded plan-confirm from an always-on gate to an ordinary opt-in per-step
+  confirmation, and repointed its reviewer prompt at the grouping. config.py loses
+  _PLAN_STEP_NAME and all three plan special-cases (insertion, synthesized default
+  entry, max_iterations baking), so plan shares the generic confirmation.steps path
+  -- unconfigured means no CONFIRM after PLAN and resolve_confirm_inputs(''plan'')
+  returns None, while confirmation.steps.plan: {reviewer: human} keeps the manual
+  grouping gate. build_plan_confirm_prompt gained a decomposition parameter and dispatches
+  on it: capability yields a new grouping review (group count vs. volume of work,
+  forbidden artifact-type/layer splits, depends_on soundness) that explicitly declines
+  to ask for a per-requirement task decomposition
+
+  G11. granular keeps the legacy requirement-coverage text verbatim
+
+  G12. both share the {approved, feedback} contract so _llm_review is reused untouched.
+  confirm.py reads the doctrine from the persisted flow context so a resumed flow
+  is reviewed under the doctrine it was planned with, and an unrecognized value falls
+  back to capability rather than silently selecting legacy. The three-layer downgrade
+  rationale is recorded as WHY:-prefixed line comments at both sites (line comments,
+  not docstrings, because invariant_check''s hard guard only harvests # / // comments).
+  Deleted tests/test_plan_confirm_always_on.py, whose subject no longer exists, folding
+  its inverted config-layer coverage into the rewritten prompt test file
+
+  G13. fixed three other suites that asserted PLAN is always followed by CONFIRM.
+
+  G14. G5 control plane: replaced the implementation_strategy projection with a plan_mode
+  projection (decomposition / granularity / group_count / legacy_strategy) across
+  strategy_view.py, the daemon aggregator + history reader, server state, CLI history
+  show and the WebUI. plan_mode_view describes a pre-model flow by the retired path
+  it recorded rather than a doctrine it never chose, and never writes back. plan_group_count_from_state
+  resolves an externalized PLAN body through its cold_ref, memoized on the ref''s
+  content hash so the plan document is read once per plan revision instead of once
+  per poll. Protocol bumped to 8 with optional plan_decomposition / plan_granularity
+  spawn fields, SPAWN_PLAN_* value sets and supports_spawn_plan_mode
+
+  G15. the server refuses an explicit plan mode to a pre-8 daemon with an explainable
+  501 instead of a silent downgrade, and the retired implementation_strategy field
+  stays accepted for one version, mapped daemon-side with a deprecation log. Daemon
+  spawner appends --plan-decomposition / --plan-granularity only when set. WebUI:
+  four plan-mode selects (New Task + Issue Launch), new chip / sidebar / history-meta
+  renderers, and full en-US + zh-CN key sets. Tests updated across protocol, daemon,
+  server, CLI history, i18n manifests and the Node frontend suites, including a pre-8-daemon
+  capability-refusal case and cold-ref group-count cases.
+
+  G16. G6 documentation and charter: rewrote the bilingual configuration reference''s
+  workflow section around plan_decomposition / plan_granularity (with a retired-key
+  section carrying the three-row deprecation mapping and the next-major removal date),
+  narrowed group_loc_threshold to granular-only with its rationale, and restated plan-confirm
+  as an ordinary opt-in per-step gate whose reviewer prompt follows the persisted
+  doctrine. Replaced the implementation_strategy comment block in tianluo.example.yaml
+  with commented examples of both new keys plus the compat note, and corrected its
+  always-on plan-confirm comment. Rewrote both READMEs'' strategy sections as ''one
+  path
+
+  G17. the execution shape is read off the group count'', documented the capability
+  doctrine''s four sizing criteria and artifact-split ban, the three granularity tiers
+  and granular-as-legacy, and swapped --implementation-strategy in the command reference
+  for the two new options with the old one marked deprecated
+
+  G18. also corrected the state diagram, the human-attention evidence line and the
+  code-enforced-properties bullet that still asserted always-on plan-confirm. Retitled
+  the charter paragraph to ''Task type vs. PLAN decomposition'', preserving the runner-native-loop
+  passage verbatim. Repo-wide sweep confirms every residual implementation_strategy
+  reference is one of the four deliberate compatibility points
+
+  G19. full tests/ suite green (10302 passed, 1 skipped, 1 deselected, 602s).
+
+  变更文件 (76)
+
+  docs/ (2)
+
+  docs/configuration.md
+
+  docs/configuration.zh.md
+
+  src/ (34)
+
+  src/tianluo/cli.py
+
+  src/tianluo/commands/history_cmd.py
+
+  src/tianluo/commands/run.py
+
+  src/tianluo/config.py
+
+  src/tianluo/daemon/aggregator.py
+
+  src/tianluo/daemon/client.py
+
+  src/tianluo/daemon/daemon.py
+
+  src/tianluo/daemon/history.py
+
+  src/tianluo/daemon/protocol.py
+
+  src/tianluo/daemon/spawner.py
+
+  src/tianluo/engine/__init__.py
+
+  src/tianluo/engine/context_builder.py
+
+  src/tianluo/engine/formatters/task_formatter.py
+
+  src/tianluo/engine/implementation_strategy.py
+
+  src/tianluo/engine/models.py
+
+  src/tianluo/engine/plan_decomposition.py
+
+  src/tianluo/engine/schema.py
+
+  src/tianluo/engine/state_machine.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/engine/steps/analyze.py
+
+  src/tianluo/engine/steps/confirm.py
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/steps/plan.py
+
+  src/tianluo/engine/test_e2e.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  src/tianluo/server/app.py
+
+  src/tianluo/server/state.py
+
+  src/tianluo/server/static/app.js
+
+  src/tianluo/server/static/i18n/en-US.json
+
+  src/tianluo/server/static/i18n/zh-CN.json
+
+  src/tianluo/server/static/index.html
+
+  src/tianluo/server/static/style.css
+
+  src/tianluo/strategy_view.py
+
+  tests/ (33)
+
+  tests/commands/test_cli_i18n.py
+
+  tests/commands/test_run_i18n.py
+
+  tests/commands/test_run_implementation_strategy.py
+
+  tests/commands/test_run_plan_mode_options.py
+
+  tests/daemon/test_protocol.py
+
+  tests/engine/formatters/test_task_formatter.py
+
+  tests/engine/steps/test_plan_capability_grouping.py
+
+  tests/engine/steps/test_plan_confirm_prompt.py
+
+  tests/engine/test_bugfix_conditional_investigate.py
+
+  tests/engine/test_implement_dispatch_edge_cases.py
+
+  tests/engine/test_implement_execution_strategy.py
+
+  tests/engine/test_implementation_strategy.py
+
+  tests/engine/test_plan_decomposition.py
+
+  tests/engine/test_self_check_scope.py
+
+  tests/engine/test_state_machine_partial.py
+
+  tests/frontend/mobile_responsive.test.mjs
+
+  tests/frontend/strategy_usage_summary.test.mjs
+
+  tests/server/test_app_js_rendering.py
+
+  tests/server/test_i18n_manifest.py
+
+  tests/test_config.py
+
+  tests/test_confirmation_flow.py
+
+  tests/test_confirmation_per_step.py
+
+  tests/test_daemon.py
+
+  tests/test_daemon_client.py
+
+  tests/test_daemon_history.py
+
+  tests/test_end_session_protocol_daemon.py
+
+  tests/test_frontend_i18n.py
+
+  tests/test_frontend_token_usage.py
+
+  tests/test_history_cmd.py
+
+  tests/test_plan_confirm_always_on.py
+
+  tests/test_protocol_history.py
+
+  tests/test_server.py
+
+  tests/test_strategy_usage_compatibility.py
+
+  tianluo/ (4)
+
+  tianluo/charter.md
+
+  tianluo/code-index.md
+
+  tianluo/issues/closed/291_codex-0-lines-output.yaml
+
+  tianluo/issues/open/291_codex-0-lines-output.yaml
+
+  ./ (3)
+
+  README.md
+
+  README.zh.md
+
+  tianluo.example.yaml
+
+  新增测试 (7)
+
+  + tests/commands/test_run_plan_mode_options.py
+
+  + tests/engine/test_plan_decomposition.py
+
+  + tests/engine/steps/test_plan_capability_grouping.py
+
+  + tests/engine/test_implement_execution_strategy.py
+
+  + tests/engine/test_implement_dispatch_edge_cases.py
+
+  + tests/engine/formatters/test_task_formatter.py
+
+  + tests/engine/steps/test_plan_confirm_prompt.py
+
+  但plan和implement只有6个group：
+
+  opus · claude-opus-5
+
+  I''ll analyze the codebase to build an accurate plan. Let me start by locating the
+  relevant modules.
+
+
+  Bash
+
+  luo code-index search -i ''implementation_strate... · 60 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  luo code-index search -i ''task_group|plan_confi... · 60 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  wc -l src/tianluo/engine/implementation_strateg... · 11 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -rn "implementation_strategy\|Implementati... · 46 lines output
+
+  ✓
+
+  详情
+
+  Read
+
+  /data/cre/workspace/se3.0/src/tianluo/engine/implementation_strategy.py · 553 lines
+
+  ✓
+
+  详情
+
+  Read
+
+  /data/cre/workspace/se3.0/src/tianluo/strategy_view.py · 231 lines
+
+  ✓
+
+  详情
+
+  Read
+
+  /data/cre/workspace/se3.0/src/tianluo/engine/steps/plan.py · 601 lines
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "implementation_strategy\|Implementatio... · 61 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "plan_confirm\|PLAN_CONFIRM\|always-on\... · 14 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "confirmation\|_should_confirm\|needs_c... · 60 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''60,130p;940,1060p'' src/tianluo/engine/m... · 192 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "insert_confirmation_steps\|ALWAYS_CONF... · 4 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''735,800p;987,1130p'' src/tianluo/config.py · 208 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "_PLAN_STEP_NAME" src/tianluo/config.py... · 126 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''2724,2900p'' src/tianluo/config.py; echo... · 254 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -rn "group_loc_threshold" --include=*.py -... · 30 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "def build_plan_confirm_prompt" -A 90 s... · 91 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''430,480p;700,800p;900,935p'' src/tianluo... · 188 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "implementation_strategy\|implementatio... · 60 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -rn "strategy" src/tianluo/server/static/a... · 18 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''120,205p;240,260p;290,360p;600,630p'' sr... · 209 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  ls src/tianluo/server/static/; echo ---; grep -... · 10 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -rn "strategy\|Strategy" src/tianluo/serve... · 16 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  wc -l src/tianluo/server/static/app.js; grep -c... · 1 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -an "strategy" src/tianluo/server/static/a... · 40 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "_projection_fields" -A 30 src/tianluo/... · 92 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''210,300p'' src/tianluo/cli.py; echo "===... · 102 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n ''455,525p;1310,1330p;3260,3285p;4350,437... · 139 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "_should_use_dag" -A 40 src/tianluo/eng... · 55 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "Task type vs. implementation strategy"... · 24 lines output
+
+  ✓
+
+  详情
+
+  I have the full picture. Here is the plan.
+
+
+  提案
+
+  摘要
+
+  取消 direct/planned 双路径路由：删除 `ImplementationStrategyResolver` 及其全部调用点，feature/bugfix/discovery
+  一律 ANALYZE → PLAN → IMPLEMENT。PLAN 改为默认的 capability 分组学说——按『一次自治 implement 调用能否安全承载』产出粗粒度任务组（组数
+  ≥ 1，单组即今日 direct 的等价形态），并加入与 VERSION_FILE_GUARDRAIL 同形式的『禁止按制品类型/层次切分』硬禁令。新增 `workflow.plan_decomposition`（capability|granular）与
+  `workflow.plan_granularity`（auto|single|conservative）两个配置键及对应 CLI 覆盖选项，`workflow.implementation_strategy`
+  / `--implementation-strategy` 退役并保留一版带 deprecation 警告的兼容映射；plan-confirm 由 always-on
+  降级为与其他步骤一致的可选 per-step 确认，其 reviewer prompt 在 capability 模式下改审分组粒度。
+
+
+  待修改文件 (52)
+
+  src/tianluo/config.py
+
+  src/tianluo/cli.py
+
+  src/tianluo/commands/run.py
+
+  src/tianluo/commands/history_cmd.py
+
+  src/tianluo/strategy_view.py
+
+  src/tianluo/engine/__init__.py
+
+  src/tianluo/engine/models.py
+
+  src/tianluo/engine/schema.py
+
+  src/tianluo/engine/state_machine.py
+
+  src/tianluo/engine/context_builder.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/engine/formatters/task_formatter.py
+
+  src/tianluo/engine/steps/analyze.py
+
+  src/tianluo/engine/steps/plan.py
+
+  src/tianluo/engine/steps/plan_tasks.py
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/steps/adjudicate.py
+
+  src/tianluo/daemon/protocol.py
+
+  src/tianluo/daemon/aggregator.py
+
+  src/tianluo/daemon/client.py
+
+  src/tianluo/daemon/daemon.py
+
+  src/tianluo/daemon/spawner.py
+
+  src/tianluo/daemon/history.py
+
+  src/tianluo/server/app.py
+
+  src/tianluo/server/state.py
+
+  src/tianluo/server/static/index.html
+
+  src/tianluo/server/static/app.js
+
+  src/tianluo/server/static/i18n/en-US.json
+
+  src/tianluo/server/static/i18n/zh-CN.json
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  docs/configuration.md
+
+  docs/configuration.zh.md
+
+  README.md
+
+  README.zh.md
+
+  tianluo.example.yaml
+
+  tianluo/charter.md
+
+  tests/test_config.py
+
+  tests/commands/test_run_i18n.py
+
+  tests/commands/test_cli_i18n.py
+
+  tests/daemon/test_protocol.py
+
+  tests/engine/test_implement_execution_strategy.py
+
+  tests/engine/test_state_machine_partial.py
+
+  tests/engine/steps/test_plan_confirm_prompt.py
+
+  tests/engine/test_implement_dispatch_edge_cases.py
+
+  tests/test_strategy_usage_compatibility.py
+
+  tests/test_history_cmd.py
+
+  tests/test_daemon.py
+
+  tests/test_daemon_client.py
+
+  tests/test_daemon_history.py
+
+  tests/test_server.py
+
+  tests/server/test_app_js_rendering.py
+
+  待创建文件 (4)
+
+  src/tianluo/engine/plan_decomposition.py
+
+  tests/engine/test_plan_decomposition.py
+
+  tests/engine/steps/test_plan_capability_grouping.py
+
+  tests/commands/test_run_plan_mode_options.py
+
+  其他字段
+
+  motivation
+
+  现有 implementation_strategy 是一条与 task type 平行的路由轴：它在 ANALYZE 处一次性决定是否保留 PLAN 步骤，把『整体实现
+  vs 分组实现』这个本质上属于分解粒度的问题，提升成了流程骨架的分叉。代价有三：(1) 步骤序列裁剪（`apply_to_steps`）、快照/回滚（`snapshot_context`
+  / `restore_context`）… (789 字符)
+
+  risks
+
+  [ "存量 flow 的 resume 兼容：老 engine.json 里持久化的 `requested_implementation_strategy` /
+  `effective_implementation_strategy` / `strategy_reason` / `implementation_strategy_finalized`
+  必须仍可读、且 `effective=direct` 的老 flow 续跑时不能因 PLAN 步骤『回来了』而改变已进入的执行路径——`selected_steps`
+  是权威，任何重建路径都不得对老 flow 重新插入 PLAN。", "capability 模式下组内没有逐条 task，`_compute_total_loc`
+  恒为 0，会同时使 `implement_handler` 的 LOC 合并短路与 `_should_use_dag` 判否，导致多组永远退化为 sequential——若不显式处理，会静默丢掉『无依赖则并行』的执行形态。",
+  "plan-confirm 由 always-on 改为可选，会移除 requirement→task 覆盖这一道既有质量门。宪章的 check-step 约束要求
+  finding 唯一去向是当场修复；必须在 why-comment 中固化『覆盖校验已由 self_check 对真实代码执行』的理由，否则后续会被误读为无理由地削弱质量门。",
+  "protocol 版本升到 8 并替换 spawn 字段，会与旧 daemon / 旧 server 混跑：能力协商必须像 `supports_spawn_strategy`
+  一样『拒绝并报可解释的能力错误』，绝不能静默降级成项目默认粒度。", "`plan_decomposition` / `plan_granularity` 必须在
+  PLAN 处一次决策并持久化；若每次读配置重判，续跑中途改配置会让同一 flow 前后两种分组学说混用，违反宪章『粒度决策一次做出、续跑沿用』。", "PLAN
+  的 JSON 契约变化（capability 下无 `tasks`）会波及所有消费 `task_groups` 的表现层：`TaskFormatter` / `TaskDataValidator`
+  / `step_renderers` / `adjudicate._format_task_groups` / `history_cmd._show_plan_artifacts`
+  / WebUI，任一处未放宽都会抛 `TaskValidationError` 或渲染空表。", "i18n 基准语言包 en-US 持有 key 全集：新增
+  CLI 与 WebUI 文案 key 时若 zh-CN 漏配会回落英文，须两侧同步并由既有 i18n 覆盖测试守住。", "改动横跨 engine / config
+  / CLI / daemon / server / WebUI / 文档七个面，单次全量测试 ~530s（约 1 万用例），须预留足够的 estimated_test_duration，避免中途被杀误判为测试失败。"
+  ]
+
+  设计
+
+  概览
+
+  把『执行形态』的决定权从一条独立的策略路由轴，收回到 PLAN 的分解结果里。新增 `src/tianluo/engine/plan_decomposition.py`
+  作为 `implementation_strategy.py` 的替代者，但职责显著收窄：它只承载『分解学说 + 粒度档位』的枚举、context key、一次性初始化与只读投影，不再拥有任何步骤序列变换（`apply_to_steps`
+  整体删除）、不再需要 snapshot/restore（因为不再有『决策与序列必须原子持久化』的耦合），也不再需要 legacy 序列推断来倒推路径。feature/bugfix/discovery
+  的默认序列本来就含 PLAN，删掉裁剪即得单一路径。PLAN 侧新增 capability 模式的 prompt 组：grouping doctrine（唯一依据是『一次自治
+  implement 调用能否安全承载』，聚合越多阈值越低）、artifact-type 切分硬禁令（与 VERSION_FILE_GUARDRAIL 同形式的
+  `## Guardrail:` 段落）、以及只含 `group_id`/`name`/`description`/`group_order`/`depends_on`
+  的粗粒度 JSON schema；proposal / design 照旧产出，供人工 gate 与 fix 迭代的 `{design_section}` 注入使用。granular
+  作为 legacy 值原样保留今日的 prompt 与产物。IMPLEMENT 侧不再读 `effective_implementation_strategy`，改为读『组数』：1
+  组走既有 holistic 单次自治调用契约，≥2 组进入既有 DAG 机制。plan-confirm 去掉 config 层的 plan 特判，回归 `confirmation.steps.plan`
+  存在才确认；其 reviewer prompt 按持久化的分解模式二选一——capability 审分组粒度，granular 保留今日的 requirement→task
+  覆盖审查。控制平面把 `implementation_strategy` 投影整体替换为 `plan_mode` 投影（decomposition + granularity
+  + group_count + reason），protocol 升到 8 并以同样的『拒绝而非静默降级』语义协商新字段。
+
+
+  组件 (8)
+
+  src/tianluo/engine/plan_decomposition.py（新建） — 承载 `PlanDecomposition`（capability|granular）与
+  `PlanGranularity`（auto|single|conservative）枚举、context key 常量（`plan_decomposition`
+  / `plan_granularity` / `plan_mode_reason`）、`PlanModeError`、`PlanModeView` 数据类；提供
+  `resolve_requested`（显式请求 > 项目配置 > 默认）、`initialize_context`（flow 创建时 write-once 持久化）、`view`（只读投影，含老
+  flow 的 legacy 兼容读）。明确不提供任何步骤序列变换。
+
+  src/tianluo/config.py（WorkflowConfig + confirmation） — 解析并校验 `workflow.plan_decomposition`
+  / `workflow.plan_granularity`（非法值 fail-fast 抛 `ConfigError`，与既有 `implementation_strategy`
+  校验同风格）；实现 `workflow.implementation_strategy` 的一版兼容映射与 deprecation 警告（沿用 `_convergence_deprecation_warned`
+  的 per-process 去重模式）；删除 `implementation_strategy` / `implementation_strategy_explicit`
+  字段与 `resolve_implementation_strategy()`；删除 `_PLAN_STEP_NAME` 特判，使 `insert_confirmation_steps`
+  与 `resolve_confirm_inputs` 对 plan 与其他步骤一视同仁。
+
+  src/tianluo/cli.py + src/tianluo/commands/run.py — 新增 `--plan-decomposition` / `--plan-granularity`
+  选项与取值校验，沿用 `--implementation-strategy` 现有的『校验失败 render_full + Exit(1)』形状；`--implementation-strategy`
+  保留但改为映射到新键并打印 deprecation 提示；`run_flow` / `run_worktree_mode` / `resume_run` 的形参由
+  `implementation_strategy` 换成两个新参数，并保持 resume 路径不转发新粒度（沿用既有『resume 不得注入新决策』的不变量）。
+
+  src/tianluo/engine/state_machine.py + steps/analyze.py + schema.py — `create_flow`
+  删除策略解析与 `apply_to_steps` 调用，改为调用 `PlanModeResolver.initialize_context`；analyze 删除
+  `AUTO_IMPLEMENTATION_STRATEGY_PROMPT`、schema hint 的条件拼接、`should_request_auto_recommendation`
+  / `finalize_for_analyze` / snapshot-restore、以及 `requested_/effective_implementation_strategy`
+  两个 step.outputs；`_update_flow_steps` 删除 `effective_strategy` 形参与 `apply_to_steps`；`_build_step_inputs`
+  把三个 strategy 输入换成 `plan_decomposition` / `plan_granularity`；`get_progress` 与 `build_context_from_flow`
+  改用新投影。
+
+  src/tianluo/engine/steps/plan.py — 按持久化的 `plan_decomposition` 分派两套 prompt 组。capability：新增
+  `CAPABILITY_TASKS_SECTION`（分组学说 + 三档粒度指令）、`ARTIFACT_SPLIT_GUARDRAIL`、`CAPABILITY_JSON_SCHEMA`（组只含
+  `group_id`/`name`/`description`/`group_order`/`depends_on`，无 `tasks`），保留 `PROPOSAL_SECTION`
+  / `DESIGN_SECTION` 与 `VERSION_FILE_GUARDRAIL`。granular：现有 `TASKS_SECTION` + `FULL/MEDIUM/SHALLOW_JSON_SCHEMA`
+  原样不变。解析后把组数写入 `step.outputs["plan_group_count"]` 供 IMPLEMENT 与控制平面读取。
+
+  src/tianluo/engine/steps/implement.py — `_holistic_execution_mode` 改为按『capability
+  且组数为 1』返回 holistic 模式（`small` 分支不变），删除对 `effective_implementation_strategy` 的读取；调度入口在
+  capability 模式下跳过 LOC 合并短路与 LOC 版 `_should_use_dag`，直接按组数与拓扑进入既有 DAG / sequential
+  判定（三条既有短路保持不变）。
+
+  src/tianluo/engine/context_builder.py::build_plan_confirm_prompt — 按 `plan_decomposition`
+  分派 reviewer prompt：capability 模式产出分组粒度审查 prompt（三个审查维度：组数与任务体量是否匹配、有无按制品类型/层次切分、`depends_on`
+  是否成立），granular 模式保留现有 requirement→task 覆盖审查文本；两者共用 `{approved, feedback}` 输出契约，`_llm_review`
+  的解析/revision/max_iterations 逻辑完全复用。在函数 docstring 与同位 why-comment 中固化降级理由。
+
+  src/tianluo/strategy_view.py + daemon/protocol.py + daemon/aggregator.py + server
+  + WebUI — `plan_mode_view()` 取代 `strategy_view()` 作为控制平面唯一投影；`DaemonAggregator._projection_fields`
+  与 `daemon/history.py` 的 `FlowSnapshot` / 会话元数据字段由 `implementation_strategy` 改为 `plan_mode`；protocol
+  升到版本 8，`make_spawn_flow` 增加两个新字段与 `SPAWN_PLAN_DECOMPOSITION_VALUES` / `SPAWN_PLAN_GRANULARITY_VALUES`
+  校验，新增 `supports_spawn_plan_mode`；server 的 spawn 请求模型、能力协商与错误文案同步；WebUI 的两个 select（`nt-strategy`
+  / `issue-launch-strategy`）改为分解模式 + 粒度两个下拉，chip 与侧栏行改显示新投影。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "新建 `src/tianluo/engine/plan_decomposition.py` 承载新模型，并整体删除 `src/tianluo/engine/implementation_strategy.py`，而不是在原文件内改名重构。",
+  "rationale": "两者职责集合差异极大：旧模块 552 行里有一半（`apply_to_steps` / `snapshot_context` / `restore_context`
+  / `infer_legacy_effective` / `should_request_auto_recommendation` / `finalize_for_analyze`
+  的 AUTO 解析分支）存在的唯一理由，是『策略会改写步骤序列，因此必须与序列原子持久化、并能从老序列倒推』。新模型不改写序列，这些机制全部消失。新建文件让『新模块没有序列变换能力』成为结构事实而非约定，也避免
+  git 历史上一个同名文件前后语义完全不同。", "alternatives_considered": "(a) 原地重构 `implementation_strategy.py`
+  并保留模块名——省一次 import 面的改动，但会把已死的序列变换 API 留在同一命名空间里，日后极易被误用；(b) 完全不新建模块、把两个配置键直接摊进
+  `WorkflowConfig` 与 flow context——最省代码，但 context key 的读写会散落在 state_machine / plan
+  / confirm / 控制平面五处，且『一次决策、续跑沿用』的 write-once 语义无处集中表达。" }, { "decision": "『整体实现 vs
+  分组实现』一律由 PLAN 产出的组数决定：`_holistic_execution_mode` 与 `_is_holistic_implement_step`
+  的 `effective == \"direct\"` 判定改为『capability 模式且 `len(task_groups) == 1`』，`small`
+  类型的 holistic 判定保持不变。", "rationale": "任务书第 1 条明确要求『组数为 1 时走整体实现路径，不再需要任何策略标志来选择它』。组数是
+  PLAN 输出的自然属性，写进 step.outputs 就已持久化，续跑读回来即得同一形态——不需要额外的 finalized 标志，也不存在决策与序列不一致的窗口。",
+  "alternatives_considered": "保留一个由 PLAN 写入的 `effective_execution_shape: holistic|grouped`
+  context key。多一份必须与组数保持同步的冗余状态，一旦 ADJUDICATE 或 revision 改写了 task_groups 就会漂移；直接以组数为准则天然无漂移。"
+  }, { "decision": "capability 模式下的 IMPLEMENT 调度绕开 LOC 门（既不走 `total_loc <= group_loc_threshold`
+  的单次合并短路，也不用 LOC 参与 `_should_use_dag`），改为『1 组 → holistic；≥2 组 → 进入既有 DAG 判定（含 use_worktree、线性
+  RelayPlan、no-commits 三条既有短路）』。`group_loc_threshold` 的语义收窄为 granular/legacy 模式专用，默认值
+  300 保持不变并在文档中明确其适用范围。", "rationale": "这是任务书第 8 条『按粗粒度组的体量重新校准』在本设计下的落点。capability
+  组不再携带逐条 `estimated_loc`（第 4 条限定了组字段集合），`_compute_total_loc` 必然返回 0，而 0 会同时命中『不合并』和『不并行』两条判断，把多组静默压成
+  sequential——这与第 5 条『无依赖则并行』直接冲突。同时，一个粗粒度组按定义就是『一次自治 implement 调用扛得住的上限体量』，早已远超 300
+  LOC 的合并阈值，用 LOC 再判一次没有任何信息量。让阈值只服务于仍有逐条 LOC 的 granular 模式，既守住第 5 条『DAG 机制不做改动』，又让
+  legacy 路径字节级不变。", "alternatives_considered": "(a) 让 capability 组也输出一个粗粒度 `estimated_loc`
+  并把阈值上调到 ~1500——与第 4 条限定的组字段集合冲突，且粗粒度 LOC 估计的误差量级本就接近阈值本身，判定不可靠；(b) 不动调度、接受多组退化为
+  sequential——违反第 5 条，且丢掉 worktree 隔离带来的并行收益。" }, { "decision": "plan-confirm 的 reviewer
+  prompt 按持久化的 `plan_decomposition` 二选一：capability → 新的分组粒度审查（组数是否与任务体量匹配 / 有无被禁止的按制品类型切分
+  / 依赖声明是否成立），granular → 保留今日的 requirement→task 覆盖审查。", "rationale": "任务书第 7 条要求 granular
+  是行为不变的 legacy 值；覆盖审查在有逐条 task 的 granular 产物下仍然有判别力，砍掉它就不是『行为不变』。第 6 条要求改写的理由是『粗粒度组下覆盖审查已失去判别力』，这个理由本身就是模式相关的，因此按模式分派恰好是这条理由的忠实实现。",
+  "alternatives_considered": "无条件改成粒度审查——实现更简单，但会让 granular 模式的 legacy 语义不完整；反过来无条件保留覆盖审查，则第
+  6 条的降级理由落空。" }, { "decision": "config 的 plan 特判（`_PLAN_STEP_NAME`、`insert_confirmation_steps`
+  的 `steps_to_confirm.add(...)`、`resolve_confirm_inputs` 的默认 entry 合成与 `max_iterations`
+  兜底）整体删除，plan 与其他步骤走同一条 `confirmation.steps` 通路。", "rationale": "第 6 条要求 plan-confirm『回归成与其他步骤一致的可选
+  per-step 确认』。留着特判而在别处再判一次 on/off，会出现两处真相源。删除后 `reviewer: human` 依然可用于人工分组 gate——这正是第
+  6 条保留的能力。", "alternatives_considered": "保留 `_PLAN_STEP_NAME` 但把 always-on 改成读配置——特判常量失去意义，反而留下一个只有历史含义的名字。"
+  }, { "decision": "`workflow.implementation_strategy` 与 `--implementation-strategy`
+  的兼容映射放在 `WorkflowConfig.from_dict` 与 CLI 参数校验两处的最外层，映射为新键后立即发出 deprecation 警告；`direct`
+  → `plan_granularity: single`，`planned` → `plan_decomposition: granular`，`auto` →
+  新默认值（capability + auto）。", "rationale": "映射一次、发生在配置对象构造边界，下游（state_machine / plan
+  / 控制平面）就只见新键，不必到处兼容两套词汇。三条映射各自保存了旧值的用户意图：`direct` 的意图是『一次调用做完』= 强制单组；`planned` 的意图是『要细粒度任务组与
+  DAG 调度』= 保留旧学说；`auto` 的意图是『交给流程决定』= 新默认。", "alternatives_considered": "在 `ImplementationStrategyResolver`
+  里做映射——该模块正在被删除；或在 CLI 层就把旧选项翻译成新选项——漏掉 YAML 侧的同名配置键。" }, { "decision": "`strategy_view.py`
+  保留模块名与文件位置，把 `strategy_view()` 替换为 `plan_mode_view()` 并输出 `{decomposition, granularity,
+  group_count, reason, reason_key, legacy_strategy}`；`legacy_strategy` 仅在读到老 flow
+  的 `effective_implementation_strategy` 时填充，供 UI 标注『历史 flow 的旧路径』。protocol 升到 8，spawn
+  增加 `plan_decomposition` / `plan_granularity` 两字段与 `supports_spawn_plan_mode` 协商，旧
+  `implementation_strategy` 字段在 daemon 侧继续被接受并映射（带 deprecation 日志）。", "rationale":
+  "模块名不变可避免 daemon / server / history_cmd 三处 import 面的连带改动，也不与宪章『daemon 不 import engine』的边界冲突（该模块仍是
+  stdlib-only 的字符串投影）。`legacy_strategy` 让老 flow 在 WebUI 上仍能说清它当年走的是哪条路，而不是显示成一个新模型里不存在的空值。协商沿用
+  `supports_spawn_strategy` 既有的『拒绝并报可解释错误，绝不静默替换』语义——这一点在 protocol 注释里已被明确固化为不变量。",
+  "alternatives_considered": "把文件改名为 `plan_mode_view.py`——语义更贴切，但要动 6 个 import 点与
+  code-index，收益仅是名字；或复用 protocol 版本 7 不升版——旧 daemon 会静默丢弃新字段，正是该协商机制要防的行为降级。" }, {
+  "decision": "分组硬禁令写成与 `VERSION_FILE_GUARDRAIL` 完全同形式的独立 prompt 常量 `ARTIFACT_SPLIT_GUARDRAIL`，作为
+  `## Guardrail:` 段落拼接进 capability 模式的 prompt，且只在 capability 分支拼接。", "rationale":
+  "第 3 条明确要求『同一形式』。同形式意味着同样的可测试性——现有测试可以用同一套断言方式检查段落存在与措辞；也意味着它和版本文件禁令一样，是 prompt
+  层的硬约束而非 schema 校验，因为『按制品类型切分』无法从 JSON 结构上机械判定（一个叫 `G2: tests` 的组和一个叫 `G2: 导出功能（含其测试）`
+  的组结构相同）。", "alternatives_considered": "在解析后加程序化校验（如组名匹配 test/docs/config 关键词就报错）——误杀率高（『修复配置加载的解析
+  bug』是合法的能力单元），且绕过方式过于简单，不如把判定交给 plan-confirm 的粒度审查。" } ]
+
+  data_flow
+
+  ① 配置/CLI：`WorkflowConfig.from_dict` 解析 `workflow.plan_decomposition` / `plan_granularity`，若只见到旧的
+  `workflow.implementation_strategy` 则在此边界完成映射并发 deprecation 警告；CLI 的 `--plan-decomposition`
+  / `--plan-gr… (1573 字符)
+
+  testing_strategy
+
+  分层验证，每组自带测试（不设独立测试组）。① 配置层（tests/test_config.py）：两个新键的默认值、合法值、非法值 fail-fast、`*_explicit`
+  标志；三条 deprecation 映射各一例并断言警告发出且只发一次。② CLI 层（tests/commands/test_run_plan_mode_options.py，替代
+  test_run_implementa… (1963 字符)
+
+  任务组 (6)
+
+  G1 配置与 CLI：新增两个分组配置键并让旧策略键退役 · 6 个任务 · ~590 LOC · 依赖：无
+
+  G2 引擎核心：删除策略路由轴，统一为单一 PLAN 路径 · 6 个任务 · ~885 LOC · 依赖：G1
+
+  G3 PLAN capability 分组学说与 IMPLEMENT 执行形态 · 7 个任务 · ~910 LOC · 依赖：G2
+
+  G4 plan-confirm 降级为可选 per-step 确认并改审分组粒度 · 4 个任务 · ~460 LOC · 依赖：G2
+
+  G5 控制平面：投影、protocol 协商与 WebUI 承载新的分组模式与粒度 · 7 个任务 · ~1305 LOC · 依赖：G2
+
+  G6 文档与宪章：按新模型重写配置参考、README 与 charter 段落 · 6 个任务 · ~350 LOC · 依赖：G3, G4, G5
+
+  这是怎么回事？我知道这种plan模式（学说）已经是legacy的功能了，但正因如此才更应该在现在修好，不然会留下一个有bug的legacy功能）。'
+status: open
+tags: []
+source: human
+created_at: '2026-08-17T13:05:21.776498'
+updated_at: '2026-08-17T13:05:21.776498'

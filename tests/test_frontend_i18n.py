@@ -185,6 +185,7 @@ G10_WEBUI_KEYS = [
     "plan.inferredNote",
     "plan.reason.legacy_inference",
     "plan.reason.legacy_strategy",
+    "plan.reason.no_plan_surface",
     "plan.option.projectDefault",
     "plan.option.capability",
     "plan.option.granular",

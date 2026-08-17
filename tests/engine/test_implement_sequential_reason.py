@@ -94,7 +94,13 @@ _PARSED = {
 _IMP = "tianluo.engine.steps.implement"
 
 
-def _make_step_flow(tmp_path, groups):
+def _make_step_flow(tmp_path, groups, decomposition="granular"):
+    """Build an IMPLEMENT step/flow pair for the sequential-reason cases.
+
+    Pinned to ``granular`` because these groups carry per-task
+    ``estimated_loc``: the LOC-merge reason under test only exists for that
+    doctrine, since a coarse capability group carries no per-task LOC at all.
+    """
     step = Step(
         step_type=StepType.IMPLEMENT,
         step_id="test-reason",
@@ -104,6 +110,7 @@ def _make_step_flow(tmp_path, groups):
             "task_groups": groups,
             "spec_content": {},
             "design_doc": {},
+            "plan_decomposition": decomposition,
         },
     )
     flow = FlowInstance(

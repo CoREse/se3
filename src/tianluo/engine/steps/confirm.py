@@ -229,9 +229,10 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     # subject follows the flow's persisted decomposition doctrine (capability →
     # grouping review, granular → legacy requirement-coverage review); every
     # other step keeps the generic review prompt. The doctrine is read from the
-    # flow context rather than the config so a resumed flow is reviewed under
-    # the doctrine it was planned with.
-    from ..plan_decomposition import PlanModeResolver
+    # reviewed PLAN step's own record (falling back to the flow context) rather
+    # than the config, so a resumed flow is reviewed under the doctrine it was
+    # actually planned with — the same projection IMPLEMENT executes under.
+    from ..plan_decomposition import effective_mode
 
     project_root = resolve_flow_project_root(flow)
     task_description = step.inputs.get("task_description", flow.task_description)
@@ -241,7 +242,10 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             task_description=task_description,
             revision_feedback=revision_feedback,
             project_root=project_root,
-            decomposition=PlanModeResolver.view(flow.state.context).decomposition,
+            decomposition=effective_mode(
+                reviewed_step.outputs if reviewed_step else {},
+                flow.state.context,
+            ).decomposition,
         )
     else:
         prompt = build_llm_review_prompt(

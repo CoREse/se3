@@ -7,7 +7,9 @@ follows the flow's persisted decomposition doctrine. These tests pin:
 - Config layer: with no ``confirmation.steps.plan`` entry no CONFIRM is inserted
   after PLAN and ``resolve_confirm_inputs('plan')`` returns None; with an entry
   present the reviewer (human or LLM chain) resolves through the same generic
-  path every other step uses.
+  path every other step uses. A CONFIRM the retired always-on rule already
+  wrote into a persisted sequence keeps resolving to the unattended LLM review
+  it had before the degrade, instead of falling through to a human gate.
 - ``build_plan_confirm_prompt`` content: the capability doctrine yields a
   grouping review (group count vs. volume, forbidden artifact-type/layer splits,
   ``depends_on`` soundness) and explicitly does NOT ask for a per-requirement
@@ -28,7 +30,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from tianluo.config import insert_confirmation_steps, resolve_confirm_inputs
+from tianluo.config import (
+    insert_confirmation_steps,
+    resolve_confirm_inputs,
+    resolve_retired_always_on_confirm_inputs,
+)
 from tianluo.engine.context_builder import build_plan_confirm_prompt
 from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 from tianluo.engine.plan_decomposition import (
@@ -196,6 +202,123 @@ class TestResolvePlanConfirmInputs:
         # No plan-specific max_iterations baking any more; the state machine
         # applies the generic None -> default fallback like every other step.
         assert resolved["max_iterations"] is None
+
+
+class TestRetiredAlwaysOnPlanConfirm:
+    """A CONFIRM the retired always-on rule already persisted after PLAN.
+
+    ``selected_steps`` is only ever rebuilt by ANALYZE, so a flow created while
+    plan-confirm was always-on resumes with a CONFIRM that has no
+    ``confirmation.steps.plan`` entry behind it. Degrading the gate must not
+    *strengthen* it into a blocking human approval on those in-flight flows.
+    """
+
+    def test_plan_resolves_to_the_default_llm_chain(
+        self, tmp_path, isolated_global_home
+    ):
+        with patch(
+            "tianluo.config.shutil.which",
+            side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+        ):
+            resolved = resolve_retired_always_on_confirm_inputs(
+                tmp_path, "plan", flow_predates_degrade=True,
+            )
+        assert resolved is not None
+        assert resolved["reviewer"] is None
+        assert [a["name"] for a in resolved["agents"]] == ["claude"]
+        # None so the caller applies the same default every LLM reviewer gets.
+        assert resolved["max_iterations"] is None
+
+    @pytest.mark.parametrize("step_type", ["implement", "adjudicate", "test"])
+    def test_steps_that_were_never_always_on_are_untouched(
+        self, tmp_path, isolated_global_home, step_type
+    ):
+        assert resolve_retired_always_on_confirm_inputs(
+            tmp_path, step_type, flow_predates_degrade=True,
+        ) is None
+
+    def test_post_degrade_flow_gets_no_retired_resolution(
+        self, tmp_path, isolated_global_home
+    ):
+        # A flow created after the degrade cannot be holding an unconfigured
+        # CONFIRM for the old reason, so it must fall through to the caller's
+        # drift path instead of buying an unattended LLM review.
+        assert resolve_retired_always_on_confirm_inputs(
+            tmp_path, "plan", flow_predates_degrade=False,
+        ) is None
+
+    @staticmethod
+    def _flow_at_plan(tmp_path, *, plan_decomposition=None):
+        flow = FlowInstance(
+            task_description=TASK_DESCRIPTION,
+            task_type="feature",
+            change_name="t",
+            change_path=tmp_path / "t",
+        )
+        flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
+        plan_step = Step(
+            step_type=StepType.PLAN,
+            status=StepStatus.COMPLETED,
+            step_id="plan-001",
+        )
+        plan_step.outputs["proposal"] = "P"
+        flow.state.add_step(plan_step)
+        flow.state.current_step_id = "plan-001"
+        flow.state.current_step_index = 0
+        if plan_decomposition is not None:
+            flow.state.context["plan_decomposition"] = plan_decomposition
+        return flow
+
+    def test_config_drift_on_a_post_degrade_flow_falls_back_to_human(
+        self, tmp_path, isolated_global_home, caplog
+    ):
+        """Entry deleted mid-flow on a new flow: warn + human, no LLM review."""
+        import logging
+
+        from tianluo.engine.persistence import PersistenceManager
+        from tianluo.engine.state_machine import StateMachine
+
+        (tmp_path / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+        sm = StateMachine(tmp_path, PersistenceManager(tmp_path))
+        flow = self._flow_at_plan(tmp_path, plan_decomposition="capability")
+
+        with caplog.at_level(logging.WARNING, logger="tianluo.engine.state_machine"):
+            with patch(
+                "tianluo.config.shutil.which",
+                side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+            ):
+                next_step = sm.transition_to_next(flow)
+
+        assert next_step is not None
+        assert next_step.step_type == StepType.CONFIRM
+        assert next_step.inputs["reviewer"] == "human"
+        assert "agents" not in next_step.inputs
+        assert "no entry under confirmation.steps" in caplog.text
+
+    def test_persisted_plan_confirm_runs_llm_review_not_a_human_gate(
+        self, tmp_path, isolated_global_home
+    ):
+        """The end-to-end resume path: no config entry, CONFIRM already there."""
+        from tianluo.engine.persistence import PersistenceManager
+        from tianluo.engine.state_machine import StateMachine
+
+        (tmp_path / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+        sm = StateMachine(tmp_path, PersistenceManager(tmp_path))
+
+        # No persisted plan_decomposition — the marker of a pre-degrade flow.
+        flow = self._flow_at_plan(tmp_path)
+
+        with patch(
+            "tianluo.config.shutil.which",
+            side_effect=lambda cmd: "/usr/bin/claude" if cmd == "claude" else None,
+        ):
+            next_step = sm.transition_to_next(flow)
+
+        assert next_step is not None
+        assert next_step.step_type == StepType.CONFIRM
+        assert next_step.inputs["reviewer"] is None
+        assert next_step.inputs["agents"]
+        assert next_step.inputs["max_iterations"] == 3
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +569,59 @@ class TestLlmReviewDispatch:
 
         assert (
             mock_plan.call_args.kwargs["decomposition"] is PlanDecomposition.GRANULAR
+        )
+
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
+    def test_reviewed_step_doctrine_used_when_context_has_none(
+        self, MockLLMCaller, mock_plan
+    ):
+        """PLAN's own record decides the review subject, not the default.
+
+        A flow whose context predates the doctrine keys still records what PLAN
+        ran in the PLAN step's outputs; reading only the context would review a
+        legacy fine-grained plan under the grouping-granularity prompt.
+        """
+        from tianluo.engine.steps.confirm import _llm_review
+
+        mock_plan.return_value = "PLAN_PROMPT"
+        caller = MagicMock()
+        caller.call.return_value = '{"approved": true, "feedback": "ok"}'
+        MockLLMCaller.return_value = caller
+
+        confirm = self._make_confirm("plan")
+        assert PLAN_DECOMPOSITION_KEY not in self.flow.state.context
+        self.flow.state.steps["reviewed-001"].outputs[
+            PLAN_DECOMPOSITION_KEY
+        ] = "granular"
+        _llm_review(confirm, self.flow)
+
+        assert (
+            mock_plan.call_args.kwargs["decomposition"] is PlanDecomposition.GRANULAR
+        )
+
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
+    def test_reviewed_step_doctrine_outranks_flow_context(
+        self, MockLLMCaller, mock_plan
+    ):
+        """The doctrine PLAN actually ran wins over a stale flow context."""
+        from tianluo.engine.steps.confirm import _llm_review
+
+        mock_plan.return_value = "PLAN_PROMPT"
+        caller = MagicMock()
+        caller.call.return_value = '{"approved": true, "feedback": "ok"}'
+        MockLLMCaller.return_value = caller
+
+        self.flow.state.context[PLAN_DECOMPOSITION_KEY] = "granular"
+        confirm = self._make_confirm("plan")
+        self.flow.state.steps["reviewed-001"].outputs[
+            PLAN_DECOMPOSITION_KEY
+        ] = "capability"
+        _llm_review(confirm, self.flow)
+
+        assert (
+            mock_plan.call_args.kwargs["decomposition"] is PlanDecomposition.CAPABILITY
         )
 
     @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")

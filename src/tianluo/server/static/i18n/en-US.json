@@ -573,6 +573,7 @@
   "plan.inferredNote": "inferred from legacy records",
   "plan.reason.legacy_inference": "Inferred from persisted legacy task type and selected steps.",
   "plan.reason.legacy_strategy": "Flow ran under the retired implementation-strategy model; showing the path it recorded.",
+  "plan.reason.no_plan_surface": "Task type runs no PLAN step, so no decomposition applies.",
   "plan.decomposition.capability": "capability",
   "plan.decomposition.granular": "granular",
   "plan.granularity.auto": "auto",

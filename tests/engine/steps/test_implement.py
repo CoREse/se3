@@ -1412,6 +1412,9 @@ class TestStreamPrefixConstruction:
             "design_doc": "",
             "task_groups": [{"group_id": "G1"}, {"group_id": "G2"}],
             "spec_content": "",
+            # The LOC-merge path only exists for the granular doctrine — the
+            # capability doctrine emits no per-task estimated_loc to merge on.
+            "plan_decomposition": "granular",
         }
         flow = FlowInstance(
             flow_id="f1",

@@ -109,6 +109,9 @@ class TestLocThresholdRouting:
                 "task_type": "feature",
                 "task_groups": groups,
                 "spec_content": {},
+                # The LOC gate is granular / legacy scheduling by definition:
+                # only that doctrine emits the per-task estimated_loc it reads.
+                "plan_decomposition": "granular",
             },
         )
         flow = FlowInstance(
@@ -192,6 +195,9 @@ class TestLocThresholdRouting:
                 "task_type": "feature",
                 "task_groups": groups,
                 "spec_content": {},
+                # The LOC gate is granular / legacy scheduling by definition:
+                # only that doctrine emits the per-task estimated_loc it reads.
+                "plan_decomposition": "granular",
             },
         )
         flow = FlowInstance(

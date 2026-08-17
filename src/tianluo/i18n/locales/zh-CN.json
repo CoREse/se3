@@ -596,6 +596,7 @@
   "history.field.plan_mode_reason": "分组模式依据",
   "history.field.plan_mode_reason_legacy_inference": "根据已持久化的旧 task type 与 selected_steps 推断。",
   "history.field.plan_mode_reason_legacy_strategy": "该流程运行于已退役的实现策略模型，此处展示它当年记录的路径。",
+  "history.field.plan_mode_reason_no_plan_surface": "该 task type 不含 PLAN 步骤，因此不存在分解模式。",
   "history.plan.decomposition.capability": "capability（按能力切分的粗粒度组）",
   "history.plan.decomposition.granular": "granular（旧版细粒度任务列表）",
   "history.plan.granularity.auto": "auto（由 PLAN 定组数）",

@@ -1,0 +1,7 @@
+id: '296'
+description: 项目一大，test步骤就会占用很长时间，可以并行化吗？一方面是本项目的test能不能并行化，另一方面是tianluo的test生成框架，要不要把并行化作为某种标准要求。
+status: open
+tags: []
+source: human
+created_at: '2026-08-17T14:35:47.560033'
+updated_at: '2026-08-17T14:35:47.560033'

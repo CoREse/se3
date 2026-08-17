@@ -1046,7 +1046,10 @@ def insert_confirmation_steps(
     # the capability. So the gate degrades to an ordinary opt-in per-step
     # confirmation on the same ``confirmation.steps`` path as every other step;
     # ``confirmation.steps.plan: {reviewer: human}`` remains available as the
-    # manual grouping gate.
+    # manual grouping gate. Flows that already hold an always-on CONFIRM in
+    # their persisted sequence are covered by
+    # ``resolve_retired_always_on_confirm_inputs`` — degrading the gate must
+    # not strengthen it mid-flight.
     config = load_confirmation_config(project_root)
     steps_dict = config.get("steps", {})
 
@@ -2102,7 +2105,10 @@ def resolve_confirm_inputs(
 
     ``plan`` follows that same generic rule — it carries no always-on
     exception (see :func:`insert_confirmation_steps` for why the gate was
-    degraded to opt-in).
+    degraded to opt-in). A CONFIRM the *retired* rule already wrote into a
+    persisted sequence is resolved by
+    :func:`resolve_retired_always_on_confirm_inputs` instead, so this function
+    stays a pure read of ``confirmation.steps``.
 
     Otherwise returns ``{"reviewer": str|None, "max_iterations": int|None,
     "agents": list[dict]|None}``:
@@ -2170,6 +2176,63 @@ def resolve_confirm_inputs(
         "reviewer": reviewer,
         "max_iterations": max_iterations,
         "agents": [registry[reviewer].to_agent_dict()],
+    }
+
+
+#: Step types the engine once inserted a CONFIRM after *unconditionally*. Their
+#: gate is now ordinary opt-in (see :func:`insert_confirmation_steps`), but a
+#: persisted step sequence is never rebuilt on resume — only ANALYZE rebuilds
+#: one — so a flow created under the old rule still carries that CONFIRM.
+#: Membership here is necessary but not sufficient: the flow must also predate
+#: the degrade, see :func:`resolve_retired_always_on_confirm_inputs`.
+_RETIRED_ALWAYS_ON_CONFIRM_STEPS = frozenset({"plan"})
+
+
+def resolve_retired_always_on_confirm_inputs(
+    project_root: Optional[Path],
+    reviewed_step_type: str,
+    *,
+    flow_predates_degrade: bool,
+) -> Optional[dict]:
+    """Resolve a CONFIRM that only the retired always-on rule can explain.
+
+    Returns the same dict shape as :func:`resolve_confirm_inputs`, or ``None``
+    when this CONFIRM cannot be explained by the retired rule — either because
+    ``reviewed_step_type`` was never subject to it, or because the flow was
+    created after it was degraded — so the caller keeps its own unconfigured
+    behavior (the logged human fallback).
+
+    WHY this is not just the caller's generic human fallback: retiring an
+    always-on gate must not *strengthen* it on the flows already holding one.
+    Before the change, an unconfigured ``plan`` CONFIRM ran an unattended LLM
+    review off ``llm_caller.defaults``; falling through to ``reviewer: human``
+    would instead park a mid-flight run on a human approval request in
+    ``tianluo/calls/`` that nobody is waiting to answer.
+
+    WHY ``flow_predates_degrade`` is required rather than inferred from the step
+    name alone: only a flow created under the old rule can hold a CONFIRM nobody
+    configured. On a flow created after it, an unresolvable ``plan`` CONFIRM
+    means the user removed ``confirmation.steps.plan`` mid-flow — genuine config
+    drift, which must surface as the caller's warning plus human approval, not
+    as an unattended LLM review with revision iterations that this project never
+    asked for and pays for. The caller supplies the signal because only it can
+    see the flow; the marker is the same one the execution shape uses (a flow
+    context carrying no persisted ``plan_decomposition`` predates this model).
+
+    ``max_iterations`` is deliberately left ``None`` so the caller applies the
+    same default it applies to every other LLM reviewer.
+    """
+    if not flow_predates_degrade:
+        return None
+    if reviewed_step_type not in _RETIRED_ALWAYS_ON_CONFIRM_STEPS:
+        return None
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    return {
+        "reviewer": None,
+        "max_iterations": None,
+        "agents": _default_chain_from_data(
+            global_data, project_data, project_source_label,
+        ),
     }
 
 
