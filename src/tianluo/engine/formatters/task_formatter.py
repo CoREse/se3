@@ -45,12 +45,145 @@ class TaskValidationError(Exception):
     pass
 
 
+# Execution-strategy descriptions that quote the LOC estimate. Kept as module
+# constants so the sentences stay put while the branch that picks one of them
+# (LOC-bearing plan vs. estimate-free capability plan) reads in one glance.
+_SINGLE_GROUP_LOC_DESC = "Single group → single LLM call ({total_loc} LOC)"
+_SINGLE_MERGED_LOC_DESC = (
+    "Single LLM call ({total_loc} LOC ≤ {loc_threshold} threshold)"
+)
+_DAG_LOC_DESC = (
+    "DAG parallel ({total_loc} LOC > {loc_threshold} threshold, "
+    "{num_groups} groups)"
+)
+
+
+def _group_has_tasks(group: Dict[str, Any]) -> bool:
+    """True when a group carries a per-task breakdown.
+
+    A capability-doctrine group carries none: its in-group decomposition is
+    done by the implement runner at execution time, so every presentation
+    surface has to read "no tasks" as a legitimate shape rather than as
+    missing data.
+    """
+    tasks = group.get("tasks")
+    return isinstance(tasks, list) and bool(tasks)
+
+
+def _any_group_has_tasks(task_groups: List[Dict[str, Any]]) -> bool:
+    """True when at least one group carries a per-task breakdown."""
+    return any(
+        _group_has_tasks(g) for g in task_groups if isinstance(g, dict)
+    )
+
+
 class TaskDataValidator:
     """Validates task data structure before formatting."""
 
     REQUIRED_TASK_FIELDS = {"id", "description"}
     OPTIONAL_FIELDS = {"complexity", "dependencies", "verification_criteria", "files", "depends_on"}
     VALID_COMPLEXITY = {"small", "medium", "large"}
+    REQUIRED_GROUP_FIELDS = {"group_id"}
+
+    @classmethod
+    def validate_groups(cls, task_groups: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Validate a task-group list under either decomposition doctrine.
+
+        A missing or empty ``tasks`` array is valid, not a failure: coarse
+        capability groups carry only their scheduling fields. Inter-group
+        ``depends_on`` references and cycles are still checked — that is the
+        part the scheduler actually depends on, and it is the only structural
+        guarantee a coarse group still offers.
+
+        Raises:
+            TaskValidationError: If validation fails.
+        """
+        if not isinstance(task_groups, list):
+            raise TaskValidationError(
+                f"Expected list of task groups, got {type(task_groups).__name__}"
+            )
+
+        validated: List[Dict[str, Any]] = []
+        group_ids: Set[Any] = set()
+
+        for i, group in enumerate(task_groups):
+            if not isinstance(group, dict):
+                raise TaskValidationError(
+                    f"Task group at index {i}: expected dict, got {type(group).__name__}"
+                )
+            missing = cls.REQUIRED_GROUP_FIELDS - set(group.keys())
+            if missing:
+                raise TaskValidationError(
+                    f"Task group at index {i}: missing required fields: {missing}"
+                )
+            group_id = group["group_id"]
+            if group_id in group_ids:
+                raise TaskValidationError(f"Duplicate group ID: {group_id}")
+            group_ids.add(group_id)
+
+            depends_on = group.get("depends_on", [])
+            if not isinstance(depends_on, list):
+                raise TaskValidationError(
+                    f"Task group {group_id}: depends_on must be a list"
+                )
+
+            raw_tasks = group.get("tasks")
+            if raw_tasks is None:
+                tasks: List[Dict[str, Any]] = []
+            else:
+                try:
+                    tasks = cls.validate(raw_tasks)
+                except TaskValidationError as e:
+                    raise TaskValidationError(f"Task group {group_id}: {e}") from e
+
+            validated.append({
+                "group_id": group_id,
+                "name": group.get("name", ""),
+                "description": group.get("description", ""),
+                "group_order": group.get("group_order", i + 1),
+                "depends_on": list(depends_on),
+                "tasks": tasks,
+            })
+
+        cls._validate_group_dependencies(validated, group_ids)
+        return validated
+
+    @classmethod
+    def _validate_group_dependencies(
+        cls, groups: List[Dict[str, Any]], group_ids: Set[Any],
+    ) -> None:
+        """Check inter-group ``depends_on`` references and detect cycles."""
+        for group in groups:
+            for dep in group["depends_on"]:
+                if dep not in group_ids:
+                    raise TaskValidationError(
+                        f"Task group {group['group_id']}: "
+                        f"dependency '{dep}' not found"
+                    )
+
+        graph = {g["group_id"]: set(g["depends_on"]) for g in groups}
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {gid: WHITE for gid in graph}
+
+        def dfs(node: Any, path: List[Any]) -> None:
+            color[node] = GRAY
+            path.append(node)
+            for neighbor in graph.get(node, set()):
+                if color[neighbor] == GRAY:
+                    cycle_start = path.index(neighbor)
+                    cycle = path[cycle_start:] + [neighbor]
+                    cycle_str = " -> ".join(str(n) for n in cycle)
+                    raise TaskValidationError(
+                        f"Circular group dependency detected: {cycle_str}"
+                    )
+                elif color[neighbor] == WHITE:
+                    dfs(neighbor, path)
+            path.pop()
+            color[node] = BLACK
+
+        for gid in graph:
+            if color[gid] == WHITE:
+                dfs(gid, [])
 
     @classmethod
     def validate(cls, tasks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -290,6 +423,14 @@ class TaskFormatter:
                 deps_str = ", ".join(f"[yellow]{d}[/yellow]" for d in depends_on)
                 group_branch.add(f"[dim]→ Depends on: {deps_str}[/dim]")
 
+            if not tasks:
+                # A coarse capability group is complete without a task list;
+                # saying so beats rendering a branch that looks truncated.
+                group_branch.add(
+                    "[dim]capability group — broken down inside the "
+                    "implement call[/dim]"
+                )
+
             # Add tasks to group
             for task in tasks:
                 total_tasks += 1
@@ -331,7 +472,10 @@ class TaskFormatter:
 
         # Build summary
         summary_parts = []
-        summary_parts.append(f"[bold]{len(task_groups)}[/bold] groups, [bold]{total_tasks}[/bold] tasks")
+        if total_tasks == 0:
+            summary_parts.append(f"[bold]{len(task_groups)}[/bold] capability groups")
+        else:
+            summary_parts.append(f"[bold]{len(task_groups)}[/bold] groups, [bold]{total_tasks}[/bold] tasks")
         complexity_parts = []
         for comp, count in total_complexity.items():
             if count > 0:
@@ -370,6 +514,23 @@ class TaskFormatter:
             group_id = group.get("group_id", "G?")
             tasks = group.get("tasks", [])
 
+            if not tasks:
+                # Coarse capability group: the group itself is the row, so the
+                # table never comes back empty for a valid plan.
+                description = group.get("description") or group.get("name", "")
+                if len(description) > 37:
+                    description = description[:34] + "..."
+                group_deps = group.get("depends_on", [])
+                table.add_row(
+                    "-",
+                    str(group_id),
+                    description,
+                    "-",
+                    str(len(group_deps)) if group_deps else "-",
+                    "-",
+                )
+                continue
+
             for task in tasks:
                 total_tasks += 1
                 task_id = str(task.get("id", "?"))
@@ -395,7 +556,11 @@ class TaskFormatter:
                     str(len(criteria)) if criteria else "-",
                 )
 
-        return _heading_group(f"Task Plan ({total_tasks} tasks)", "blue", table)
+        if total_tasks == 0 and task_groups:
+            title = f"Task Plan ({len(task_groups)} capability groups)"
+        else:
+            title = f"Task Plan ({total_tasks} tasks)"
+        return _heading_group(title, "blue", table)
 
     def format_task_detail(self, task: Dict[str, Any]) -> RenderableType:
         """Format detailed view of a single task.
@@ -493,6 +658,19 @@ class TaskFormatter:
         table.add_column("Value", width=40)
 
         table.add_row("Task Groups", str(total_groups))
+        if total_groups and not _any_group_has_tasks(task_groups):
+            # No per-task breakdown to summarise; report the group-level
+            # dependency shape instead of a column of zeroes.
+            group_deps = sum(
+                len(g.get("depends_on", []) or [])
+                for g in task_groups
+                if isinstance(g, dict)
+            )
+            table.add_row("Breakdown", "in-call (capability groups)")
+            if group_deps:
+                table.add_row("Group Dependencies", str(group_deps))
+            return _heading_group("Task Summary", "green", table)
+
         table.add_row("Total Tasks", str(total_tasks))
 
         # Complexity breakdown with colors
@@ -622,10 +800,12 @@ class TaskFormatter:
             except Exception:
                 logger.debug("Could not render DAG topology", exc_info=True)
 
-        # LOC statistics at bottom
-        loc_summary = self._format_loc_summary(task_groups, total_loc)
-        renderables.append(Text(""))  # blank separator
-        renderables.append(loc_summary)
+        # LOC statistics at bottom — omitted for coarse capability groups,
+        # which carry no per-task estimate and would render as all zeroes.
+        if _any_group_has_tasks(task_groups):
+            loc_summary = self._format_loc_summary(task_groups, total_loc)
+            renderables.append(Text(""))  # blank separator
+            renderables.append(loc_summary)
         renderables.append(Text(""))  # blank separator before footer
         renderables.append(_reverse_footer("blue"))
         renderables.append(Text(""))  # trailing blank
@@ -656,16 +836,38 @@ class TaskFormatter:
                 f"Sequential ({num_groups} groups, reason: {sequential_reason})"
             )
 
+        # total_loc == 0 means the plan carries no per-task estimate at all
+        # (capability groups): quoting "0 LOC > 300 threshold" would describe a
+        # comparison that no longer drives the decision.
+        zero_loc = total_loc == 0
+        if zero_loc:
+            single_desc = f"Single LLM call ({num_groups} groups)"
+            dag_desc = f"DAG parallel ({num_groups} groups)"
+        elif loc_threshold == 0:
+            single_desc = _SINGLE_GROUP_LOC_DESC.format(total_loc=total_loc)
+            dag_desc = _DAG_LOC_DESC.format(
+                total_loc=total_loc,
+                loc_threshold=loc_threshold,
+                num_groups=num_groups,
+            )
+        else:
+            single_desc = _SINGLE_MERGED_LOC_DESC.format(
+                total_loc=total_loc, loc_threshold=loc_threshold,
+            )
+            dag_desc = _DAG_LOC_DESC.format(
+                total_loc=total_loc,
+                loc_threshold=loc_threshold,
+                num_groups=num_groups,
+            )
+
         strategy_map = {
             "single": (
                 "\u26a1",  # ⚡
-                f"Single group \u2192 single LLM call ({total_loc} LOC)"
-                if loc_threshold == 0
-                else f"Single LLM call ({total_loc} LOC \u2264 {loc_threshold} threshold)",
+                single_desc,
             ),
             "dag_parallel": (
                 "\U0001f500",  # 🔀
-                f"DAG parallel ({total_loc} LOC > {loc_threshold} threshold, {num_groups} groups)",
+                dag_desc,
             ),
             "sequential": (
                 "\U0001f4cb",  # 📋
@@ -694,8 +896,16 @@ class TaskFormatter:
             depends_on = group.get("depends_on", [])
             tasks = group.get("tasks", [])
 
-            # Group label with task count
-            group_label = f"[bold]{group_id}[/bold]: {name} [dim]({len(tasks)} tasks)[/dim]"
+            # Group label with task count. A coarse capability group has no
+            # count to show; its description is what tells the reader what the
+            # single implement call is expected to deliver.
+            if tasks:
+                group_label = f"[bold]{group_id}[/bold]: {name} [dim]({len(tasks)} tasks)[/dim]"
+            else:
+                group_label = f"[bold]{group_id}[/bold]: {name}"
+                description = group.get("description", "")
+                if description:
+                    group_label += f"\n[dim]{description}[/dim]"
             group_branch = tree.add(group_label)
 
             if depends_on:
@@ -901,6 +1111,12 @@ class TaskFormatter:
                     }
 
         if not all_tasks:
+            # Coarse capability groups have no tasks to map, but their
+            # inter-group edges are exactly what decides parallel execution —
+            # so the dependency view falls back to the group level rather than
+            # reporting nothing.
+            if task_groups:
+                return self._format_group_dependencies(task_groups)
             return _heading_group(
                 "Dependencies", "blue",
                 Text.from_markup("[dim]No tasks with dependencies[/dim]"),
@@ -939,6 +1155,42 @@ class TaskFormatter:
         total_deps = sum(len(t["deps"]) for t in all_tasks.values())
 
         title = f"Dependencies ({tasks_with_deps} tasks, {total_deps} deps)"
+        return _heading_group(title, "cyan", table)
+
+    def _format_group_dependencies(
+        self, task_groups: List[Dict[str, Any]],
+    ) -> RenderableType:
+        """Render the inter-group dependency map for coarse capability groups."""
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Group", style="bold", width=10)
+        table.add_column("Name", width=30)
+        table.add_column("Depends On", width=25)
+        table.add_column("Dependents", width=20)
+
+        groups = [g for g in task_groups if isinstance(g, dict)]
+        dependents: Dict[Any, List[Any]] = {
+            g.get("group_id"): [] for g in groups
+        }
+        for group in groups:
+            for dep in group.get("depends_on", []) or []:
+                if dep in dependents:
+                    dependents[dep].append(group.get("group_id"))
+
+        groups_with_deps = 0
+        total_deps = 0
+        for group in groups:
+            gid = group.get("group_id", "G?")
+            deps = list(group.get("depends_on", []) or [])
+            groups_with_deps += 1 if deps else 0
+            total_deps += len(deps)
+            table.add_row(
+                str(gid),
+                str(group.get("name", ""))[:30],
+                ", ".join(str(d) for d in deps) if deps else "-",
+                ", ".join(str(d) for d in dependents.get(gid, [])) or "-",
+            )
+
+        title = f"Dependencies ({groups_with_deps} groups, {total_deps} deps)"
         return _heading_group(title, "cyan", table)
 
 

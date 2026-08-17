@@ -16,11 +16,26 @@ from ..display import get_console
 from ..formatters import TaskFormatter
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..plan_decomposition import (
+    PLAN_DECOMPOSITION_KEY,
+    PLAN_GRANULARITY_KEY,
+    PlanDecomposition,
+    PlanGranularity,
+    PlanModeResolver,
+)
 from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
+
+
+def _is_capability(decomposition: Any) -> bool:
+    """True when ``decomposition`` selects the capability doctrine."""
+    return decomposition in (
+        PlanDecomposition.CAPABILITY,
+        PlanDecomposition.CAPABILITY.value,
+    )
 
 
 # --- Prompt sections (composed based on task_type depth) ---
@@ -107,6 +122,143 @@ Complexity guidelines:
 - small: < 30 minutes, typically < 50 LOC
 - medium: 30-90 minutes, typically 50-200 LOC
 - large: > 90 minutes, typically > 200 LOC (break down further if possible)
+"""
+
+# --- Capability doctrine (default): coarse groups, no per-task listing ---
+#
+# WHY a separate section rather than extra rules bolted onto TASKS_SECTION:
+# the two doctrines disagree on the *unit* being produced. TASKS_SECTION asks
+# for cohesive task lists sized to a focused human session; this one asks for
+# the largest unit one autonomous implement call can safely carry, with the
+# in-group breakdown deliberately left to the runner. Mixing both sets of
+# sizing advice into one section would leave the model to guess which unit it
+# is being asked for.
+CAPABILITY_TASKS_SECTION = """## {part_label}: Task Groups (capability units)
+Split the implementation into coarse task groups. The ONLY criterion for
+splitting is: **can a single autonomous implement call safely carry this?**
+Each group becomes exactly one such call.
+
+### Sizing Criteria
+1. One capability, and one call can complete it → **one group**. The group's
+   content is simply "implement that capability".
+2. One capability that a single call cannot carry → split it into **two or
+   more groups**, each of which one call can carry.
+3. Two (or more) naturally distinct capabilities that one call could still
+   complete together → **still one group**. Distinctness alone is not a
+   reason to split.
+4. On the edge between "can" and "cannot" → **one capability per group**. The
+   more capabilities a group aggregates, the LOWER the threshold at which you
+   split it: aggregation makes you more conservative, never less.
+
+### Grouping Principles
+- Groups are cut along **deliverable capability units** only.
+- Use `depends_on` to express real inter-group dependencies. Groups with no
+  dependency between them are executed **in parallel, in isolated worktrees**,
+  so a missing dependency is a real correctness hazard and a spurious one
+  silently serializes work that could have run concurrently.
+- Each group is implemented in a **separate LLM call with isolated context**;
+  a group must therefore be self-contained enough to execute without knowing
+  another group's implementation details.
+- Do NOT enumerate individual tasks inside a group. The implement runner has
+  its own planning / sub-agent system that decomposes a group at execution
+  time, against the real code — a task list written here would only duplicate
+  that at lower fidelity and go stale.
+
+{granularity_directive}"""
+
+CAPABILITY_GRANULARITY_AUTO = """### Group Count: auto
+Estimate how many autonomous implement calls this task actually needs, and
+emit exactly that many groups. Do not inflate the count for the sake of
+structure, and do not compress into one group work that one call cannot carry.
+"""
+
+CAPABILITY_GRANULARITY_SINGLE = """### Group Count: single (forced)
+Emit **exactly one** task group covering the entire task, whatever its size.
+The configuration has forced single-group execution: the whole requirement is
+delivered by one autonomous implement call, so do not split under any
+circumstances.
+"""
+
+CAPABILITY_GRANULARITY_CONSERVATIVE = """### Group Count: conservative
+Lower the splitting threshold: whenever there is **any** doubt that a single
+call can carry the work, split it. Prefer one capability per group, and err
+toward MORE groups than the default sizing would produce. A group that turns
+out to be smaller than one call could have handled costs little; a group that
+overflows the call it was sized for costs a failed implementation.
+"""
+
+ARTIFACT_SPLIT_GUARDRAIL = """## Guardrail: Group by Capability, Never by Artifact Type
+Task groups MUST NOT be cut along artifact types or code layers. The following
+groups are forbidden and must not appear in your output:
+
+- a separate **test** group ("write the tests", "add test coverage")
+- a separate **docs** group ("update the documentation")
+- a separate **config** group ("update the configuration / schema files")
+- any group whose definition is a file set, a module boundary, or a code layer
+  (data layer / service layer / UI layer)
+
+Testing and verification are part of what **each group itself delivers**: a
+group is complete only when its own capability is implemented AND covered by
+its own tests. Groups are cut along deliverable capability units only — never
+along files, modules, or code layers.
+
+A group whose *capability* happens to concern the test system, the docs system
+or the configuration system (e.g. "fix the flaky retry in the test runner") is
+legitimate. What is forbidden is carving one capability's tests, docs or
+config out into a group of their own.
+"""
+
+# Capability-doctrine output schema: groups carry only the scheduling fields.
+CAPABILITY_JSON_SCHEMA = """\
+Respond in JSON format:
+```json
+{
+    "plan": {
+        "proposal": {
+            "summary": "...",
+            "motivation": "...",
+            "files_to_modify": ["file1.py", "file2.py"],
+            "files_to_create": ["new_file.py"],
+            "risks": ["risk1", "risk2"]
+        },
+        "design": {
+            "overview": "...",
+            "architecture_decisions": [
+                {"decision": "...", "rationale": "...", "alternatives_considered": "..."}
+            ],
+            "components": [
+                {"name": "...", "responsibilities": "...", "interfaces": "..."}
+            ],
+            "data_flow": "...",
+            "testing_strategy": "..."
+        }
+    },
+    "task_groups": [
+        {
+            "group_id": "G1",
+            "name": "Capability this group delivers",
+            "description": "What this group delivers, in enough detail that one autonomous implement call can execute it end to end",
+            "group_order": 1,
+            "depends_on": []
+        }
+    ],
+    "total_complexity": "small|medium|large",
+    "estimated_effort": "brief estimate"
+}
+```
+
+Important:
+- `group_id` should be unique (G1, G2, G3...)
+- `group_order` determines execution sequence
+- `depends_on` lists group_ids that must complete before this group;
+  groups with no dependency between them run in parallel
+- Each group will be implemented in a **separate LLM call with isolated context**
+- Do NOT emit a `tasks` array. Groups carry only the five fields above; the
+  in-group breakdown is produced by the implement runner's own planning /
+  sub-agent system at execution time.
+- `plan.proposal` and `plan.design` are still required in full: they are what
+  the human gate reviews and what later fix iterations read back as design
+  context.
 """
 
 # Full depth output schema for feature/discovery
@@ -387,6 +539,57 @@ def _get_prompt_depth(task_type: str) -> str:
         return "shallow"
 
 
+# Phase-1 hints for the two-phase JSON extraction. The capability hint must
+# NOT show a `tasks` array: the hint is what the extractor echoes back as the
+# expected shape, so a stale example would reintroduce the per-task listing the
+# doctrine just removed.
+GRANULAR_JSON_SCHEMA_HINT = (
+    '{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, '
+    '"task_groups": [{"group_id": "G1", "name": "...", '
+    '"tasks": [{"id": 1, "description": "..."}]}], "total_complexity": "..."}'
+)
+
+CAPABILITY_JSON_SCHEMA_HINT = (
+    '{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, '
+    '"task_groups": [{"group_id": "G1", "name": "...", "description": "...", '
+    '"group_order": 1, "depends_on": []}], "total_complexity": "..."}'
+)
+
+
+def _resolve_plan_mode(step: Step, flow: FlowInstance):
+    """Read back the plan mode this flow persisted at creation.
+
+    Step inputs win over flow context only because the state machine copies
+    the same context values into them; an explicitly-set input is still the
+    fresher view of the same single decision. Falls through to
+    ``PlanModeResolver.view`` so a flow created before this model existed is
+    projected from its recorded legacy strategy instead of being silently
+    upgraded to the current default.
+    """
+    lookup = dict(flow.state.context)
+    for key in (PLAN_DECOMPOSITION_KEY, PLAN_GRANULARITY_KEY):
+        value = step.inputs.get(key)
+        if value:
+            lookup[key] = value
+    return PlanModeResolver.view(lookup)
+
+
+_GRANULARITY_DIRECTIVES = {
+    PlanGranularity.AUTO: CAPABILITY_GRANULARITY_AUTO,
+    PlanGranularity.SINGLE: CAPABILITY_GRANULARITY_SINGLE,
+    PlanGranularity.CONSERVATIVE: CAPABILITY_GRANULARITY_CONSERVATIVE,
+}
+
+
+def _granularity_directive(granularity: Any) -> str:
+    """Return exactly one granularity directive for the capability prompt."""
+    try:
+        key = PlanGranularity(granularity)
+    except (TypeError, ValueError):
+        key = PlanGranularity.AUTO
+    return _GRANULARITY_DIRECTIVES[key]
+
+
 def _build_prompt(
     task_description: str,
     task_type: str,
@@ -395,8 +598,16 @@ def _build_prompt(
     revision_section: str,
     depth: str,
     root_cause_section: str = "",
+    decomposition: Any = PlanDecomposition.GRANULAR,
+    granularity: Any = PlanGranularity.AUTO,
 ) -> str:
-    """Build the plan prompt adapted by depth."""
+    """Build the plan prompt adapted by doctrine and depth.
+
+    ``decomposition`` selects the doctrine: the capability branch asks for
+    coarse groups sized to one autonomous implement call, the granular branch
+    reproduces the legacy per-task listing byte for byte. ``granularity`` only
+    applies to the capability branch.
+    """
     parts = []
 
     # Header is always included
@@ -413,6 +624,28 @@ def _build_prompt(
     # joined prompt by one newline for every non-investigated flow.
     if root_cause_section:
         parts.append(root_cause_section.strip("\n"))
+
+    if _is_capability(decomposition):
+        # Proposal / design keep their depth-adapted shape: the human gate and
+        # the fix loop's {design_section} read them regardless of doctrine.
+        if depth == "full":
+            parts.append(PROPOSAL_SECTION)
+            parts.append(DESIGN_SECTION)
+            part_label = "Part 3"
+        elif depth == "medium":
+            parts.append(PROPOSAL_SECTION)
+            parts.append(DESIGN_SECTION_BUGFIX)
+            part_label = "Part 3"
+        else:  # shallow
+            part_label = "Instructions"
+        parts.append(CAPABILITY_TASKS_SECTION.format(
+            part_label=part_label,
+            granularity_directive=_granularity_directive(granularity),
+        ))
+        parts.append(ARTIFACT_SPLIT_GUARDRAIL)
+        parts.append(VERSION_FILE_GUARDRAIL)
+        parts.append(CAPABILITY_JSON_SCHEMA)
+        return "\n".join(parts)
 
     if depth == "full":
         parts.append(PROPOSAL_SECTION)
@@ -472,6 +705,12 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Determine prompt depth
     depth = _get_prompt_depth(task_type)
 
+    # The doctrine/granularity this flow entered. Read back rather than
+    # re-decided: a resumed or revised plan must be produced under the same
+    # model the flow already committed to, so its groups stay comparable to
+    # whatever an earlier round emitted.
+    mode = _resolve_plan_mode(step, flow)
+
     # Build prompt
     prompt = _build_prompt(
         task_description=task_description,
@@ -484,7 +723,10 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.inputs.get("root_cause_report"),
             exhausted=bool(step.inputs.get("investigation_exhausted")),
         ),
+        decomposition=mode.decomposition,
+        granularity=mode.granularity,
     )
+    capability = _is_capability(mode.decomposition)
 
     # Append language instruction if configured
     from ..context_builder import (
@@ -522,7 +764,11 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if runtime_env:
         prompt += runtime_env
 
-    logger.info(f"Generating plan (depth={depth}) for: {task_description[:60]}...")
+    logger.info(
+        "Generating plan (depth=%s, decomposition=%s, granularity=%s) for: %s...",
+        depth, mode.decomposition.value, mode.granularity.value,
+        task_description[:60],
+    )
 
     try:
         retry_count = step.inputs.get("retry_count", 0)
@@ -530,7 +776,9 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, "task_groups": [{"group_id": "G1", "name": "...", "tasks": [{"id": 1, "description": "..."}]}], "total_complexity": "..."}',
+            json_schema_hint=(
+                CAPABILITY_JSON_SCHEMA_HINT if capability else GRANULAR_JSON_SCHEMA_HINT
+            ),
             required_keys=["task_groups"],
         )
 
@@ -556,8 +804,32 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["spec_changes"] = result.get("spec_changes", [])
         step.outputs["total_complexity"] = result.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = result.get("estimated_effort", "")
+        step.outputs[PLAN_DECOMPOSITION_KEY] = mode.decomposition.value
+        step.outputs[PLAN_GRANULARITY_KEY] = mode.granularity.value
+        # The group count is the execution shape: IMPLEMENT reads it to choose
+        # holistic vs. grouped, and the control plane projects it. Recorded as
+        # its own output so a step whose groups get externalized still carries
+        # the shape it produced.
+        step.outputs["plan_group_count"] = len(task_groups)
 
-        total_tasks = sum(len(g.get("tasks", [])) for g in task_groups)
+        if (
+            capability
+            and mode.granularity is PlanGranularity.SINGLE
+            and len(task_groups) > 1
+        ):
+            # Not silently collapsed: merging groups here would discard the
+            # dependency structure the model just reasoned about, and dropping
+            # any of them would lose planned work. The forced-single request is
+            # a prompt-level instruction, so a violation is worth surfacing.
+            logger.warning(
+                "plan_granularity=single requested but PLAN returned %d groups; "
+                "executing all of them",
+                len(task_groups),
+            )
+
+        total_tasks = sum(
+            len(g.get("tasks", [])) for g in task_groups if isinstance(g, dict)
+        )
         logger.info(f"Plan generated (depth={depth}): {len(task_groups)} groups, {total_tasks} tasks")
         logger.info(f"Summary: {plan.get('proposal', {}).get('summary', '')[:80]}...")
 

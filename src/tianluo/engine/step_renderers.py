@@ -710,16 +710,29 @@ def _render_plan(step: Step) -> None:
             ) if isinstance(tasks, list) else 0
             deps = group.get("depends_on", [])
             dep_str = ", ".join(str(d) for d in deps) if deps else t("cli.steprender.plan.deps_none")
-            lines.append(
-                t(
-                    "cli.steprender.plan.group_line",
-                    gid=gid,
-                    name=name,
-                    task_count=task_count,
-                    total_loc=total_loc,
-                    dep_str=dep_str,
+            if task_count:
+                lines.append(
+                    t(
+                        "cli.steprender.plan.group_line",
+                        gid=gid,
+                        name=name,
+                        task_count=task_count,
+                        total_loc=total_loc,
+                        dep_str=dep_str,
+                    )
                 )
-            )
+            else:
+                # Coarse capability group: "0 tasks, ~0 LOC" would read as a
+                # broken plan rather than as the shape this doctrine emits.
+                lines.append(
+                    t(
+                        "cli.steprender.plan.capability_group_line",
+                        gid=gid,
+                        name=name,
+                        description=group.get("description", ""),
+                        dep_str=dep_str,
+                    )
+                )
         if lines:
             render_full("\n".join(lines), title=t("cli.steprender.plan.task_groups_title"))
             rendered_any = True

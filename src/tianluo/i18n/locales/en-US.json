@@ -914,6 +914,7 @@
   "cli.steprender.merge.escalated": "[yellow]Merge escalated to a human (unresolved conflict).[/yellow]",
   "cli.steprender.merge.merged_into": "Merged [bold cyan]{joined}[/bold cyan] into master",
   "cli.steprender.merge.none": "No branches merged",
+  "cli.steprender.plan.capability_group_line": "  [bold]{gid}[/bold] {name}  — {description} (capability group, depends: {dep_str})",
   "cli.steprender.plan.deps_none": "none",
   "cli.steprender.plan.design_line": "[bold]Design:[/bold] {design}",
   "cli.steprender.plan.design_title": "Planning — Design",

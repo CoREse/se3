@@ -484,3 +484,172 @@ class TestFormatTaskGroupsConvenience:
         """Test format_task_groups with dependencies enabled."""
         panel = format_task_groups(sample_task_groups, show_dependencies=True)
         assert panel is not None
+
+
+class TestCoarseCapabilityGroups:
+    """Groups with no ``tasks`` array are a valid shape, not missing data.
+
+    The capability doctrine emits only the scheduling fields and leaves the
+    in-group breakdown to the implement runner, so every presentation surface
+    has to render them rather than degrade to "no tasks to display".
+    """
+
+    @pytest.fixture
+    def console(self):
+        return Console(width=120, force_terminal=False)
+
+    @pytest.fixture
+    def formatter(self, console):
+        return TaskFormatter(console=console)
+
+    @pytest.fixture
+    def coarse_groups(self):
+        return [
+            {
+                "group_id": "G1",
+                "name": "Export capability",
+                "description": "deliver export end to end with its tests",
+                "group_order": 1,
+                "depends_on": [],
+            },
+            {
+                "group_id": "G2",
+                "name": "Import capability",
+                "description": "deliver import end to end with its tests",
+                "group_order": 2,
+                "depends_on": ["G1"],
+            },
+        ]
+
+    def _render(self, console, renderable):
+        with console.capture() as capture:
+            console.print(renderable)
+        return capture.get()
+
+    # --- validation -----------------------------------------------------
+
+    def test_groups_without_tasks_validate(self, coarse_groups):
+        validated = TaskDataValidator.validate_groups(coarse_groups)
+        assert [g["group_id"] for g in validated] == ["G1", "G2"]
+        assert validated[0]["tasks"] == []
+        assert validated[1]["depends_on"] == ["G1"]
+
+    def test_group_dependency_reference_is_still_checked(self):
+        with pytest.raises(TaskValidationError) as exc:
+            TaskDataValidator.validate_groups([
+                {"group_id": "G1", "depends_on": ["NOPE"]},
+            ])
+        assert "NOPE" in str(exc.value)
+
+    def test_group_cycles_are_still_detected(self):
+        with pytest.raises(TaskValidationError) as exc:
+            TaskDataValidator.validate_groups([
+                {"group_id": "G1", "depends_on": ["G2"]},
+                {"group_id": "G2", "depends_on": ["G1"]},
+            ])
+        assert "Circular group dependency" in str(exc.value)
+
+    def test_duplicate_group_ids_rejected(self):
+        with pytest.raises(TaskValidationError):
+            TaskDataValidator.validate_groups([
+                {"group_id": "G1"}, {"group_id": "G1"},
+            ])
+
+    def test_groups_with_tasks_still_validate_their_tasks(self):
+        with pytest.raises(TaskValidationError) as exc:
+            TaskDataValidator.validate_groups([
+                {"group_id": "G1", "tasks": [{"description": "no id"}]},
+            ])
+        assert "G1" in str(exc.value)
+
+    def test_group_without_group_id_rejected(self):
+        with pytest.raises(TaskValidationError):
+            TaskDataValidator.validate_groups([{"name": "nameless"}])
+
+    # --- the four views -------------------------------------------------
+
+    def test_tree_view_renders_every_group(self, formatter, console, coarse_groups):
+        output = self._render(console, formatter.format_tasks(coarse_groups, mode="tree"))
+        assert "G1" in output and "G2" in output
+        assert "Export capability" in output
+        assert "capability groups" in output
+        assert "Depends on" in output
+
+    def test_table_view_falls_back_to_group_rows(self, formatter, console, coarse_groups):
+        output = self._render(console, formatter.format_tasks(coarse_groups, mode="table"))
+        assert "G1" in output and "G2" in output
+        assert "capability groups" in output
+
+    def test_summary_view_reports_the_group_shape(self, formatter, console, coarse_groups):
+        output = self._render(console, formatter.format_summary(coarse_groups))
+        assert "Task Groups" in output
+        assert "in-call" in output
+        assert "Group Dependencies" in output
+
+    def test_dependency_view_falls_back_to_group_edges(
+        self, formatter, console, coarse_groups,
+    ):
+        output = self._render(console, formatter.format_dependencies(coarse_groups))
+        assert "G1" in output and "G2" in output
+        assert "Dependencies" in output
+        assert "No tasks with dependencies" not in output
+
+    def test_implement_plan_panel_renders_without_loc(
+        self, formatter, console, coarse_groups,
+    ):
+        panel = formatter.format_implement_plan(
+            task_groups=coarse_groups,
+            execution_strategy="dag_parallel",
+            total_loc=0,
+            loc_threshold=300,
+        )
+        output = self._render(console, panel)
+        assert "DAG parallel" in output
+        assert "2 groups" in output
+        # A LOC comparison no longer drives the decision, so it is not quoted.
+        assert "threshold" not in output
+        assert "Total: ~0 LOC" not in output
+
+    def test_convenience_wrapper_handles_coarse_groups(self, coarse_groups):
+        assert format_task_groups(
+            coarse_groups, show_summary=True, show_dependencies=True,
+        ) is not None
+
+    # --- granular output is unchanged ------------------------------------
+
+    def test_granular_groups_keep_their_loc_rendering(self, formatter, console):
+        groups = [
+            {
+                "group_id": "G1",
+                "name": "One",
+                "group_order": 1,
+                "depends_on": [],
+                "tasks": [
+                    {"id": 1, "description": "a task", "complexity": "small",
+                     "estimated_loc": 40},
+                ],
+            },
+            {
+                "group_id": "G2",
+                "name": "Two",
+                "group_order": 2,
+                "depends_on": ["G1"],
+                "tasks": [
+                    {"id": 2, "description": "b task", "complexity": "large",
+                     "estimated_loc": 400},
+                ],
+            },
+        ]
+        panel = formatter.format_implement_plan(
+            task_groups=groups,
+            execution_strategy="dag_parallel",
+            total_loc=440,
+            loc_threshold=300,
+        )
+        output = self._render(console, panel)
+        assert "440 LOC" in output
+        assert "300 threshold" in output
+        assert "Total: ~440 LOC" in output
+        tree = self._render(console, formatter.format_tasks(groups, mode="tree"))
+        assert "2 groups, 2 tasks" in tree
+        assert "capability group" not in tree

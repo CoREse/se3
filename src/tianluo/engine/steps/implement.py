@@ -35,6 +35,11 @@ from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
+from ..plan_decomposition import (
+    HOLISTIC_MODE_SINGLE_GROUP,
+    holistic_execution_mode,
+    is_capability_decomposition,
+)
 from ._project_root import resolve_flow_project_root
 from ..utils.json_parser import parse_json_response
 from .plan import VERSION_FILE_GUARDRAIL as _PLAN_VERSION_FILE_GUARDRAIL
@@ -442,16 +447,17 @@ FIX_PROMPT = inject_boundary(FIX_PROMPT, "## Task Description\n")
 def _holistic_execution_mode(
     step: Step, flow: FlowInstance,
 ) -> str | None:
-    """Return ``small``/``direct`` only for persisted whole-task paths."""
-    task_type = step.inputs.get("task_type") or flow.task_type
-    if task_type == "small":
-        return "small"
-    effective = step.inputs.get("effective_implementation_strategy")
-    if effective is None:
-        effective = flow.state.context.get("effective_implementation_strategy")
-    if effective == "direct":
-        return "direct"
-    return None
+    """Return the whole-task execution shape for this step, if it has one.
+
+    Thin adapter over the shared predicate in ``plan_decomposition`` so this
+    handler and the state machine's auto-continuation gate read the shape the
+    same way.
+    """
+    return holistic_execution_mode(
+        task_type=step.inputs.get("task_type") or flow.task_type,
+        inputs=step.inputs,
+        context=flow.state.context,
+    )
 
 
 def _run_holistic_implement(
@@ -467,12 +473,13 @@ def _run_holistic_implement(
     injection: str,
     retry_count: int,
 ) -> StepStatus:
-    """Execute one whole-task implementation for direct or small flows."""
-    if mode == "direct":
+    """Execute one whole-task implementation for single-group or small flows."""
+    if mode == HOLISTIC_MODE_SINGLE_GROUP:
         execution_mode = (
-            "Direct strategy for the current task type. There is no PLAN or "
-            "task-group authority; deliver the complete effective requirement "
-            "in this autonomous implementation path."
+            "PLAN sized this task as a single capability group, i.e. one "
+            "autonomous implement call can carry the whole of it. There is no "
+            "per-group split to follow; deliver the complete effective "
+            "requirement in this one autonomous implementation path."
         )
         invocation_intent = AgentInvocationIntent.DIRECT_IMPLEMENTATION
     else:
@@ -721,8 +728,18 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     from ...config import ImplementConfig
     impl_config = ImplementConfig.load(project_root)
     total_loc = _compute_total_loc(groups)
+    # WHY the LOC gate is bypassed under the capability doctrine: coarse groups
+    # carry no per-task ``estimated_loc``, so ``_compute_total_loc`` is always
+    # 0 for them. Zero satisfies neither "> 0" here nor "> threshold" in
+    # ``_should_use_dag``, which would silently collapse every multi-group
+    # capability plan into a sequential run and throw away the parallelism that
+    # independent groups exist for. The threshold keeps its exact meaning for
+    # granular/legacy plans, which do carry per-task LOC; a capability group is
+    # by definition already sized at "as much as one call can carry", so
+    # re-judging it by lines of code adds no information.
+    capability_mode = is_capability_decomposition(step.inputs, flow.state.context)
 
-    if total_loc > 0 and total_loc <= impl_config.group_loc_threshold:
+    if not capability_mode and total_loc > 0 and total_loc <= impl_config.group_loc_threshold:
         logger.info(
             "Total LOC %d <= threshold %d, merging %d groups into single LLM call",
             total_loc, impl_config.group_loc_threshold, len(groups),
@@ -751,7 +768,12 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return result
 
     # --- Decide DAG parallel vs sequential execution ---
-    want_dag = _should_use_dag(groups, total_loc, impl_config.group_loc_threshold)
+    want_dag = _should_use_dag(
+        groups,
+        total_loc,
+        impl_config.group_loc_threshold,
+        capability_mode=capability_mode,
+    )
     # Short-circuit reason surfaced to the task plan panel when sequential
     # is chosen instead of DAG parallel. Remains None if sequential was
     # simply the natural outcome (e.g. low LOC, no dependencies).
@@ -1182,21 +1204,33 @@ def _compute_total_loc(groups: list[dict]) -> int:
     return total
 
 
-def _should_use_dag(groups: list[dict], total_loc: int = 0, loc_threshold: int = 300) -> bool:
+def _should_use_dag(
+    groups: list[dict],
+    total_loc: int = 0,
+    loc_threshold: int = 300,
+    *,
+    capability_mode: bool = False,
+) -> bool:
     """Check whether to enable DAG parallel execution path.
 
-    Returns True when there are multiple groups AND the total estimated
-    LOC exceeds the configured threshold.  Small multi-group tasks are
-    better served by a single LLM call (the LOC-merge path in
-    ``implement_handler``).
+    Returns True when there are multiple groups AND — for granular/legacy
+    plans — the total estimated LOC exceeds the configured threshold. Small
+    multi-group tasks are better served by a single LLM call (the LOC-merge
+    path in ``implement_handler``).
 
     Args:
         groups: Sorted group dicts.
         total_loc: Pre-computed total estimated LOC across all groups.
         loc_threshold: Configured LOC threshold from ImplementConfig.
+        capability_mode: True when PLAN emitted coarse capability groups. Those
+            carry no per-task ``estimated_loc``, so ``total_loc`` is always 0
+            and the LOC comparison below would answer "not worth parallelising"
+            for every plan; group count and topology decide instead.
     """
     if len(groups) <= 1:
         return False
+    if capability_mode:
+        return True
     # When total_loc is available and below threshold, prefer single call
     if total_loc > 0 and total_loc <= loc_threshold:
         return False

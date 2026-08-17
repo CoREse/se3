@@ -309,6 +309,73 @@ class PlanModeResolver:
         )
 
 
+#: Execution shapes that run the whole task through one autonomous call.
+HOLISTIC_MODE_SMALL = "small"
+HOLISTIC_MODE_SINGLE_GROUP = "single_group"
+
+
+def plan_group_count(inputs: Mapping[str, Any]) -> Optional[int]:
+    """Return how many task groups PLAN handed a downstream step.
+
+    ``task_groups`` is the authority; ``plan_group_count`` is only a fallback
+    for a step whose groups were externalized away from its inputs. ``None``
+    means "PLAN has not been read yet", which callers must not read as "one".
+    """
+    groups = inputs.get("task_groups")
+    if isinstance(groups, list):
+        return len(groups)
+    count = inputs.get("plan_group_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return None
+
+
+def is_capability_decomposition(
+    inputs: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> bool:
+    """True when the flow is running the capability doctrine.
+
+    WHY the raw key rather than :meth:`PlanModeResolver.view`: the view
+    projects a *missing* key onto the current default (capability), which is
+    the right answer for presentation but the wrong one here. A flow created
+    before this model existed carries per-task ``estimated_loc`` and must keep
+    the LOC-driven scheduling it was planned under; only an explicitly
+    persisted ``capability`` may switch that off.
+    """
+    value = inputs.get(PLAN_DECOMPOSITION_KEY) or context.get(
+        PLAN_DECOMPOSITION_KEY
+    )
+    return value == PlanDecomposition.CAPABILITY.value
+
+
+def holistic_execution_mode(
+    *,
+    task_type: Optional[str],
+    inputs: Mapping[str, Any],
+    context: Mapping[str, Any],
+) -> Optional[str]:
+    """Return the whole-task execution shape, or ``None`` for grouped work.
+
+    WHY the group count rather than a routing flag: PLAN's own output is the
+    only authority on the execution shape. A separately persisted "holistic"
+    flag would have to be kept in sync with ``task_groups`` through plan
+    revisions and adjudication; a count derived from the groups themselves
+    cannot drift from them.
+
+    This is the single decision point for both the IMPLEMENT handler (which
+    prompt/executor to run) and the state machine (whether a partial result
+    may be auto-continued), so the two can never disagree about the shape.
+    """
+    if task_type == HOLISTIC_MODE_SMALL:
+        return HOLISTIC_MODE_SMALL
+    if not is_capability_decomposition(inputs, context):
+        return None
+    if plan_group_count(inputs) == 1:
+        return HOLISTIC_MODE_SINGLE_GROUP
+    return None
+
+
 def _coerce(enum_cls, value: Any, *, source: str):
     """Coerce ``value`` into ``enum_cls``, naming the legal set on failure."""
     if isinstance(value, enum_cls):

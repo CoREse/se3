@@ -271,25 +271,47 @@ class TestExecutionStrategyDispatch:
 
 
 class TestHolisticExecutionStrategy:
-    """Direct and small use one whole-task executor without plan groups."""
+    """A single capability group — and ``small`` — run one whole-task executor.
+
+    The shape is read off PLAN's group count, so these fixtures carry a real
+    ``task_groups`` list rather than a routing flag.
+    """
 
     @staticmethod
-    def _flow_step(tmp_path, *, task_type="feature", effective="direct"):
+    def _flow_step(
+        tmp_path,
+        *,
+        task_type="feature",
+        decomposition="capability",
+        groups=None,
+    ):
         flow = FlowInstance(
             flow_id="holistic-flow",
             task_description="Implement the complete requirement",
             task_type=task_type,
             change_path=tmp_path / "tianluo",
         )
-        flow.state.context["effective_implementation_strategy"] = effective
+        flow.state.context["plan_decomposition"] = decomposition
+        flow.state.context["plan_granularity"] = "auto"
+        if groups is None:
+            groups = [
+                {
+                    "group_id": "G1",
+                    "name": "MUST_NOT_APPEAR",
+                    "description": "the whole requirement",
+                    "group_order": 1,
+                    "depends_on": [],
+                }
+            ]
         step = Step(
             step_type=StepType.IMPLEMENT,
             step_id="holistic-implement",
             inputs={
                 "task_description": "Implement the complete requirement",
                 "task_type": task_type,
-                "effective_implementation_strategy": effective,
-                "task_groups": [{"group_id": "MUST_NOT_APPEAR"}],
+                "plan_decomposition": decomposition,
+                "plan_granularity": "auto",
+                "task_groups": groups,
                 "analysis_context": {
                     "scope": "cross-module",
                     "complexity": "medium",
@@ -303,6 +325,73 @@ class TestHolisticExecutionStrategy:
             },
         )
         return flow, step
+
+    def test_single_capability_group_is_holistic(self, tmp_path):
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path)
+        assert _holistic_execution_mode(step, flow) == "single_group"
+
+    def test_two_capability_groups_are_not_holistic(self, tmp_path):
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        assert _holistic_execution_mode(step, flow) is None
+
+    def test_single_granular_group_is_not_holistic(self, tmp_path):
+        """Legacy doctrine keeps its group path even at one group."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path, decomposition="granular")
+        assert _holistic_execution_mode(step, flow) is None
+
+    def test_legacy_flow_without_a_doctrine_is_not_holistic(self, tmp_path):
+        """A flow predating the model must not be re-shaped by the default."""
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(tmp_path)
+        del flow.state.context["plan_decomposition"]
+        del step.inputs["plan_decomposition"]
+        assert _holistic_execution_mode(step, flow) is None
+
+    def test_small_is_holistic_regardless_of_group_count(self, tmp_path):
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        flow, step = self._flow_step(
+            tmp_path,
+            task_type="small",
+            decomposition="granular",
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ],
+        )
+        assert _holistic_execution_mode(step, flow) == "small"
+
+    def test_handler_and_state_machine_agree_on_the_shape(self, tmp_path):
+        """One predicate, two callers: the gate cannot disagree with the run."""
+        from tianluo.engine.state_machine import StateMachine
+        from tianluo.engine.steps.implement import _holistic_execution_mode
+
+        for kwargs in (
+            {},
+            {"decomposition": "granular"},
+            {"task_type": "small"},
+            {"groups": [
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": []},
+            ]},
+        ):
+            flow, step = self._flow_step(tmp_path, **kwargs)
+            assert (
+                _holistic_execution_mode(step, flow) is not None
+            ) is StateMachine._is_holistic_implement_step(flow, step)
 
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
@@ -322,7 +411,7 @@ class TestHolisticExecutionStrategy:
         "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
-    def test_direct_prompt_is_whole_requirement_and_has_full_context(
+    def test_single_group_prompt_is_whole_requirement_and_has_full_context(
         self,
         mock_issue,
         mock_charter,
@@ -349,6 +438,9 @@ class TestHolisticExecutionStrategy:
         assert "CODE-INDEX-MARKER" in prompt
         assert "Task Groups" not in prompt
         assert "MUST_NOT_APPEAR" not in prompt
+        # The execution contract names PLAN's sizing verdict, not a strategy.
+        assert "single capability group" in prompt
+        assert "implementation_strategy" not in prompt
         assert mock_run.call_args.kwargs["implemented_groups_override"] == []
         assert (
             mock_run.call_args.kwargs["invocation_intent"]
@@ -431,7 +523,7 @@ class TestHolisticExecutionStrategy:
         from tianluo.engine.steps.implement import implement_handler
 
         flow, step = self._flow_step(
-            tmp_path, task_type="small", effective="not_applicable",
+            tmp_path, task_type="small", decomposition="granular",
         )
         status = implement_handler(step, flow)
 
@@ -476,12 +568,18 @@ class TestHolisticExecutionStrategy:
 
     @patch(f"{_IMP}._apply_restricted_edits", return_value=([], []))
     @patch(f"{_IMP}.LLMCaller")
-    def test_planned_complete_with_leftover_tasks_stays_complete(
+    def test_grouped_complete_with_leftover_tasks_stays_complete(
         self, mock_caller_cls, mock_apply, tmp_path,
     ):
         from tianluo.engine.steps.implement import _run_single_llm_call
 
-        flow, step = self._flow_step(tmp_path, effective="planned")
+        flow, step = self._flow_step(
+            tmp_path,
+            groups=[
+                {"group_id": "G1", "group_order": 1, "depends_on": []},
+                {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            ],
+        )
         mock_caller_cls.return_value.call.return_value = json.dumps({
             "files_changed": ["second.py"],
             "tests_added": [],
@@ -496,7 +594,7 @@ class TestHolisticExecutionStrategy:
             "prompt", step, flow, tmp_path, [], 0,
         )
 
-        # Planned flows keep their historical recording: an honest
+        # Grouped flows keep their historical recording: an honest
         # complete-with-leftover report still records "complete" — the
         # partial coercion is a holistic-path rule only.
         assert status == StepStatus.COMPLETED
@@ -505,14 +603,16 @@ class TestHolisticExecutionStrategy:
 
 
 class TestFlowTypeMatrix:
-    """End-to-end matrix across planned / direct / small / review / survey.
+    """End-to-end matrix across the plan-bearing and planless task types.
 
-    Planned flows keep their PLAN -> IMPLEMENT scheduling data; direct and
-    small share the whole-task executor without task_groups; review/survey
-    never gain an IMPLEMENT segment and record not_applicable.
+    Multi-group flows keep their PLAN -> IMPLEMENT scheduling data; a flow
+    whose IMPLEMENT never saw a PLAN shares the whole-task executor without
+    task_groups; review/survey never gain an IMPLEMENT segment at all.
     """
 
-    def _flow_with_history(self, tmp_path, *, task_type, effective, history_steps):
+    def _flow_with_history(
+        self, tmp_path, *, task_type, history_steps, decomposition="capability",
+    ):
         from tianluo.engine.state_machine import StateMachine
 
         machine = StateMachine(tmp_path)
@@ -521,7 +621,8 @@ class TestFlowTypeMatrix:
             task_description="matrix task",
             task_type=task_type,
         )
-        flow.state.context["effective_implementation_strategy"] = effective
+        flow.state.context["plan_decomposition"] = decomposition
+        flow.state.context["plan_granularity"] = "auto"
         flow.state.selected_steps = [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
@@ -534,11 +635,11 @@ class TestFlowTypeMatrix:
         )
         return machine, flow
 
-    def test_planned_task_groups_flow_into_implement_inputs(self, tmp_path):
+    def test_granular_task_groups_flow_into_implement_inputs(self, tmp_path):
         machine, flow = self._flow_with_history(
             tmp_path,
             task_type="feature",
-            effective="planned",
+            decomposition="granular",
             history_steps=[
                 Step(
                     step_type=StepType.PLAN,
@@ -560,11 +661,10 @@ class TestFlowTypeMatrix:
         assert inputs["task_groups"][0]["group_id"] == "G1"
         assert inputs["task_groups"][0]["tasks"][0]["estimated_loc"] == 40
 
-    def test_direct_inputs_never_carry_plan_task_groups(self, tmp_path):
+    def test_planless_inputs_never_carry_plan_task_groups(self, tmp_path):
         machine, flow = self._flow_with_history(
             tmp_path,
             task_type="feature",
-            effective="direct",
             history_steps=[
                 Step(
                     step_type=StepType.ANALYZE,

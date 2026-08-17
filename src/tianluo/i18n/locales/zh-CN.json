@@ -913,6 +913,7 @@
   "cli.steprender.merge.escalated": "[yellow]合并已升级由人工处理（存在未解决的冲突）。[/yellow]",
   "cli.steprender.merge.merged_into": "已将 [bold cyan]{joined}[/bold cyan] 合并到 master",
   "cli.steprender.merge.none": "没有分支被合并",
+  "cli.steprender.plan.capability_group_line": "  [bold]{gid}[/bold] {name}  — {description}（能力组，依赖：{dep_str}）",
   "cli.steprender.plan.deps_none": "无",
   "cli.steprender.plan.design_line": "[bold]设计：[/bold] {design}",
   "cli.steprender.plan.design_title": "规划 — 设计",

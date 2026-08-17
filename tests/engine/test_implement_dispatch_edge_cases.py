@@ -301,6 +301,196 @@ class TestSingleGroupNotEligibleForDag:
 
 
 # ---------------------------------------------------------------------------
+# Capability doctrine bypasses the LOC gate
+# ---------------------------------------------------------------------------
+
+
+# Coarse capability groups: scheduling fields only, no tasks and therefore no
+# estimated_loc at all — _compute_total_loc returns 0 for every one of them.
+CAPABILITY_PARALLEL_GROUPS = [
+    {
+        "group_id": "G1",
+        "name": "Export capability",
+        "description": "deliver export end to end, with its tests",
+        "group_order": 1,
+        "depends_on": [],
+    },
+    {
+        "group_id": "G2",
+        "name": "Import capability",
+        "description": "deliver import end to end, with its tests",
+        "group_order": 2,
+        "depends_on": [],
+    },
+]
+
+CAPABILITY_LINEAR_GROUPS = [
+    {
+        "group_id": "G1",
+        "name": "Storage capability",
+        "description": "...",
+        "group_order": 1,
+        "depends_on": [],
+    },
+    {
+        "group_id": "G2",
+        "name": "Query capability",
+        "description": "...",
+        "group_order": 2,
+        "depends_on": ["G1"],
+    },
+]
+
+
+def _make_capability_step_flow(tmp_path, groups):
+    step, flow = _make_step_flow(tmp_path, groups)
+    step.inputs["plan_decomposition"] = "capability"
+    step.inputs["plan_granularity"] = "auto"
+    flow.state.context["plan_decomposition"] = "capability"
+    flow.state.context["plan_granularity"] = "auto"
+    return step, flow
+
+
+class TestCapabilityModeBypassesLocGate:
+    """Coarse groups carry no LOC, so LOC must not decide their scheduling."""
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}._run_dag_parallel", return_value=StepStatus.COMPLETED)
+    @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
+    @patch(f"{_IMP}.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(group_loc_threshold=300, use_worktree=True),
+    )
+    def test_two_independent_capability_groups_run_in_parallel(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_single,
+        mock_dag,
+        mock_resolve,
+        tmp_path,
+    ):
+        """Zero total LOC must not collapse independent groups to sequential."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        step, flow = _make_capability_step_flow(
+            tmp_path, CAPABILITY_PARALLEL_GROUPS,
+        )
+        result = implement_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag.assert_called_once()
+        # The LOC-merge single-call short-circuit must not have fired.
+        mock_single.assert_not_called()
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}.parse_json_response", return_value=_SEQ_PARSED)
+    @patch(f"{_IMP}.LLMCaller")
+    @patch(f"{_IMP}._run_dag_parallel")
+    @patch(f"{_IMP}.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(group_loc_threshold=300, use_worktree=True),
+    )
+    def test_linear_capability_chain_still_short_circuits_to_sequential(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_dag,
+        mock_caller_cls,
+        mock_parse,
+        mock_resolve,
+        tmp_path,
+    ):
+        """The three pre-existing short-circuits are untouched by the bypass."""
+        from tianluo.engine.steps.implement import implement_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
+        mock_caller_cls.return_value = mock_caller
+
+        step, flow = _make_capability_step_flow(
+            tmp_path, CAPABILITY_LINEAR_GROUPS,
+        )
+        result = implement_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag.assert_not_called()
+        assert mock_caller_cls.call_count == len(CAPABILITY_LINEAR_GROUPS)
+
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}.parse_json_response", return_value=_SEQ_PARSED)
+    @patch(f"{_IMP}.LLMCaller")
+    @patch(f"{_IMP}._run_dag_parallel")
+    @patch(f"{_IMP}.has_commits", return_value=True)
+    @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(group_loc_threshold=300, use_worktree=False),
+    )
+    def test_use_worktree_false_still_forces_sequential(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_dag,
+        mock_caller_cls,
+        mock_parse,
+        mock_resolve,
+        tmp_path,
+    ):
+        from tianluo.engine.steps.implement import implement_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps(_SEQ_PARSED)
+        mock_caller_cls.return_value = mock_caller
+
+        step, flow = _make_capability_step_flow(
+            tmp_path, CAPABILITY_PARALLEL_GROUPS,
+        )
+        result = implement_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag.assert_not_called()
+        assert mock_caller_cls.call_count == len(CAPABILITY_PARALLEL_GROUPS)
+
+    def test_threshold_value_is_irrelevant_under_capability(self):
+        """Any threshold, any LOC: capability scheduling is count + topology."""
+        from tianluo.engine.steps.implement import _should_use_dag
+
+        for threshold in (0, 1, 300, 10_000):
+            for total_loc in (0, 50, 5_000):
+                assert _should_use_dag(
+                    CAPABILITY_PARALLEL_GROUPS,
+                    total_loc,
+                    threshold,
+                    capability_mode=True,
+                ) is True
+        # One group is still not DAG-eligible — that rule is doctrine-agnostic.
+        assert _should_use_dag(
+            CAPABILITY_PARALLEL_GROUPS[:1], 0, 300, capability_mode=True,
+        ) is False
+
+    def test_granular_threshold_behaviour_is_unchanged(self):
+        """The legacy LOC gate keeps its exact semantics."""
+        from tianluo.engine.steps.implement import _should_use_dag
+
+        assert _should_use_dag(FORK_GROUPS, 600, 300) is True
+        assert _should_use_dag(FORK_GROUPS, 200, 300) is False
+        # total_loc == 0 means "no estimate available", which historically
+        # meant "do not let LOC veto the DAG".
+        assert _should_use_dag(FORK_GROUPS, 0, 300) is True
+
+
+# ---------------------------------------------------------------------------
 # Log-message assertions
 # ---------------------------------------------------------------------------
 

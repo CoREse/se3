@@ -29,9 +29,9 @@ from .models import (
 from .plan_decomposition import (
     PLAN_DECOMPOSITION_KEY,
     PLAN_GRANULARITY_KEY,
-    PlanDecomposition,
     PlanModeError,
     PlanModeResolver,
+    holistic_execution_mode,
 )
 from . import adjudication
 from ..i18n import t
@@ -99,22 +99,6 @@ class MergeCheckoutResolutionError(StateMachineError):
 # decision path — further attempts then require an explicit user choice. The
 # budget is sticky across resume so an automated resume loop cannot extend it.
 _HOLISTIC_CONTINUATION_LIMIT = 3
-
-
-def _plan_group_count(step: "Step") -> Optional[int]:
-    """Return how many task groups PLAN handed this IMPLEMENT step.
-
-    ``task_groups`` is the authority; ``plan_group_count`` is only a fallback
-    for a step whose groups were externalized away from its inputs. ``None``
-    means "PLAN has not been read yet", which callers must not read as "one".
-    """
-    groups = step.inputs.get("task_groups")
-    if isinstance(groups, list):
-        return len(groups)
-    count = step.inputs.get("plan_group_count")
-    if isinstance(count, int) and not isinstance(count, bool):
-        return count
-    return None
 
 
 def _reset_retry_counter_for_new_call(step: "Step") -> None:
@@ -1328,21 +1312,16 @@ class StateMachine:
     def _is_holistic_implement_step(flow: FlowInstance, step: Step) -> bool:
         """Identify whole-task IMPLEMENT paths (small type, or a single group).
 
-        WHY the group count rather than a routing flag: PLAN's own output is
-        the only authority on the execution shape. A separately persisted
-        "holistic" flag would have to be kept in sync with ``task_groups``
-        through plan revisions and adjudication; a count derived from the
-        groups themselves cannot drift from them.
+        Delegates to ``plan_decomposition.holistic_execution_mode`` — the same
+        predicate the IMPLEMENT handler uses to pick its executor — so the
+        auto-continuation gate here can never disagree with the shape that
+        actually ran.
         """
-        task_type = step.inputs.get("task_type") or flow.task_type
-        if task_type == "small":
-            return True
-        decomposition = step.inputs.get(
-            PLAN_DECOMPOSITION_KEY
-        ) or flow.state.context.get(PLAN_DECOMPOSITION_KEY)
-        if decomposition != PlanDecomposition.CAPABILITY.value:
-            return False
-        return _plan_group_count(step) == 1
+        return holistic_execution_mode(
+            task_type=step.inputs.get("task_type") or flow.task_type,
+            inputs=step.inputs,
+            context=flow.state.context,
+        ) is not None
 
     def transition_to_next(
         self, flow: FlowInstance,
@@ -3287,16 +3266,19 @@ class StateMachine:
             inputs["original_task_description"] = inputs["task_description"]
         inputs["task_description"] = _compose_effective_task_description(flow)
 
-        if step_type == StepType.IMPLEMENT:
-            # The doctrine/granularity a flow entered, forwarded so IMPLEMENT
-            # never has to re-decide anything: the execution shape follows from
-            # these plus the group count PLAN already emitted.
+        if step_type in (StepType.PLAN, StepType.IMPLEMENT):
+            # The doctrine/granularity a flow entered, forwarded so neither step
+            # re-decides anything: PLAN emits under the doctrine the flow was
+            # created with, and IMPLEMENT's execution shape follows from that
+            # doctrine plus the group count PLAN already emitted.
             inputs[PLAN_DECOMPOSITION_KEY] = flow.state.context.get(
                 PLAN_DECOMPOSITION_KEY
             )
             inputs[PLAN_GRANULARITY_KEY] = flow.state.context.get(
                 PLAN_GRANULARITY_KEY
             )
+
+        if step_type == StepType.IMPLEMENT:
             inputs["analysis_context"] = {
                 "scope": inputs.get("scope"),
                 "complexity": inputs.get("complexity"),
