@@ -75,22 +75,6 @@ class StepType(Enum):
     VERSION_RECONCILE = "version_reconcile"  # Derive+apply the final version at merge (reconcile() lib)
 
 
-class RequestedImplementationStrategy(str, Enum):
-    """User-configurable strategy for a PLAN -> IMPLEMENT workflow segment."""
-
-    AUTO = "auto"
-    DIRECT = "direct"
-    PLANNED = "planned"
-
-
-class EffectiveImplementationStrategy(str, Enum):
-    """Persisted implementation path after strategy resolution."""
-
-    DIRECT = "direct"
-    PLANNED = "planned"
-    NOT_APPLICABLE = "not_applicable"
-
-
 class StepStatus(Enum):
     """Status of a step execution."""
 
@@ -869,9 +853,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
             "complexity",
             "reasoning",
             "root_cause_clear",
-            "requested_implementation_strategy",
-            "effective_implementation_strategy",
-            "strategy_reason",
             "project_summary",
             "relevant_specs",
             "spec_content",
@@ -933,8 +914,29 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Unified planning: proposal + design + task breakdown in one LLM call",
         "uses_llm": True,
         "read_only": True,
-        "inputs": ["task_description", "spec_content", "project_summary", "task_type", "scope"],
-        "outputs": ["plan", "task_groups", "spec_changes", "total_complexity", "estimated_effort"],
+        "inputs": [
+            "task_description",
+            "spec_content",
+            "project_summary",
+            "task_type",
+            "scope",
+            # The doctrine/granularity a flow entered, read back from context so
+            # a resumed flow re-plans under the same model it started with.
+            "plan_decomposition",
+            "plan_granularity",
+        ],
+        "outputs": [
+            "plan",
+            "task_groups",
+            "spec_changes",
+            "total_complexity",
+            "estimated_effort",
+            "plan_decomposition",
+            "plan_granularity",
+            # Group count is what IMPLEMENT reads to pick holistic vs. grouped
+            # execution; there is no separate routing flag to keep in sync.
+            "plan_group_count",
+        ],
     },
     # Deprecated step types (kept for backward compatibility with persisted state)
     StepType.PROPOSE: {
@@ -974,7 +976,13 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Write code implementation (task groups)",
         "uses_llm": True,
         "read_only": False,
-        "inputs": ["task_groups", "task_list", "design_doc"],
+        "inputs": [
+            "task_groups",
+            "task_list",
+            "design_doc",
+            "plan_decomposition",
+            "plan_granularity",
+        ],
         "outputs": ["implemented_groups", "files_changed", "total_groups"],
     },
     StepType.TEST: {

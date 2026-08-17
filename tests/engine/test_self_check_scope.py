@@ -636,7 +636,9 @@ class TestCrossProcessScopeResume:
         assert restored is not None
         # Old persisted paths are never rewritten by resume.
         assert restored.state.selected_steps == original_steps
-        assert "implementation_strategy" not in restored.state.context
+        # Describing an old flow must never inject the new model's keys into it.
+        assert "plan_decomposition" not in restored.state.context
+        assert "plan_granularity" not in restored.state.context
         assert "self_check_review" not in restored.state.context
 
         again = restarted._build_step_inputs(restored, StepType.SELF_CHECK)

@@ -128,63 +128,35 @@ class TestStrategyView:
         assert view["inferred"] is False
 
 
-def test_retired_task_type_infers_direct_on_every_surface():
-    # The engine derives choice-surface applicability from
-    # get_default_step_sequence, whose unknown-type fallback is the feature
-    # sequence — so a retired task type persisted in an old flow DOES have a
-    # PLAN -> IMPLEMENT surface. The control-plane view must agree, or the same
-    # flow reads "direct" in engine projections and "not_applicable" here.
-    from tianluo.engine.implementation_strategy import (
-        ImplementationStrategyResolver,
-    )
-
+# WHY these no longer assert an engine-side mirror: the engine's legacy
+# inference existed because the retired strategy axis REWROTE the step
+# sequence, so an old flow's path had to be read back out of its recorded
+# steps. The single-path model rewrites nothing, so the engine has no such
+# inference to agree with — ``strategy_view`` is now the sole surface that
+# describes a pre-model flow, and these pin it on its own.
+def test_retired_task_type_infers_direct_on_the_control_plane():
+    # The unknown-type fallback is the feature sequence, so a retired task type
+    # persisted in an old flow DOES have a recorded PLAN -> IMPLEMENT surface;
+    # a step list without PLAN therefore describes the old direct path.
     view = strategy_view(
         {}, task_type="refactor", selected_steps=["analyze", "implement"],
     )
     assert view["effective"] == "direct"
-    assert ImplementationStrategyResolver.infer_legacy_effective(
-        "refactor", ["analyze", "implement"],
-    ).value == "direct"
 
 
 @pytest.mark.parametrize("task_type", ["feature", "bugfix", "refactor", ""])
-def test_empty_selected_steps_is_unknown_on_every_surface(task_type):
-    # Nothing on disk to infer from: neither projection may fabricate a path,
-    # and the two must agree — otherwise one flow reads 'not_applicable' in the
-    # engine projections and 'unknown' in the daemon/WebUI/history view.
-    from tianluo.engine.implementation_strategy import (
-        ImplementationStrategyResolver,
-    )
-
+def test_empty_selected_steps_is_unknown_on_the_control_plane(task_type):
+    # Nothing on disk to infer from: the projection may not fabricate a path.
     view = strategy_view({}, task_type=task_type, selected_steps=[])
     assert view["effective"] is None
     assert view["requested"] is None
     assert view["inferred"] is False
 
-    engine_view = ImplementationStrategyResolver.view(
-        {}, task_type=task_type or None, selected_steps=[],
-    )
-    assert engine_view.effective is None
-    assert engine_view.requested is None
-    assert engine_view.inferred is False
-    assert (
-        ImplementationStrategyResolver.infer_legacy_effective(task_type, [])
-        is None
-    )
-
 
 @pytest.mark.parametrize("task_type", ["small", "review", "survey"])
-def test_empty_selected_steps_planless_type_agrees_on_not_applicable(task_type):
-    from tianluo.engine.implementation_strategy import (
-        ImplementationStrategyResolver,
-    )
-
+def test_empty_selected_steps_planless_type_reads_not_applicable(task_type):
     view = strategy_view({}, task_type=task_type, selected_steps=[])
     assert view["effective"] == "not_applicable"
-    engine_view = ImplementationStrategyResolver.view(
-        {}, task_type=task_type, selected_steps=[],
-    )
-    assert engine_view.effective.value == "not_applicable"
 
 
 class TestScopeView:

@@ -80,20 +80,19 @@ class FlowStatusValue(str, Enum):
     RECOVERING = "recovering"
 
 
-class RequestedImplementationStrategyValue(str, Enum):
-    """Valid requested implementation-strategy values in flow context."""
+class PlanDecompositionValue(str, Enum):
+    """Valid PLAN decomposition doctrines in flow context."""
+
+    CAPABILITY = "capability"
+    GRANULAR = "granular"
+
+
+class PlanGranularityValue(str, Enum):
+    """Valid group-count pressure values in flow context."""
 
     AUTO = "auto"
-    DIRECT = "direct"
-    PLANNED = "planned"
-
-
-class EffectiveImplementationStrategyValue(str, Enum):
-    """Valid finalized implementation-strategy values in flow context."""
-
-    DIRECT = "direct"
-    PLANNED = "planned"
-    NOT_APPLICABLE = "not_applicable"
+    SINGLE = "single"
+    CONSERVATIVE = "conservative"
 
 
 class ColdRefSchema(TypedDict, total=False):
@@ -310,15 +309,15 @@ ENGINE_JSON_SCHEMA: Dict[str, Any] = {
                 "context": {
                     "type": "object",
                     "properties": {
-                        "requested_implementation_strategy": {
+                        "plan_decomposition": {
                             "type": "string",
-                            "enum": ["auto", "direct", "planned"],
+                            "enum": ["capability", "granular"],
                         },
-                        "effective_implementation_strategy": {
-                            "type": ["string", "null"],
-                            "enum": ["direct", "planned", "not_applicable", None],
+                        "plan_granularity": {
+                            "type": "string",
+                            "enum": ["auto", "single", "conservative"],
                         },
-                        "strategy_reason": {"type": "string"},
+                        "plan_mode_reason": {"type": "string"},
                     },
                 },
                 "selected_steps": {"type": "array", "items": {"type": "string"}},
@@ -423,9 +422,16 @@ class ContextSchema(TypedDict, total=False):
     steps: List[ContextStepInfo]
     key_outputs: Dict[str, Any]
     project_context: Dict[str, Any]
-    requested_implementation_strategy: str
-    effective_implementation_strategy: Optional[str]
-    strategy_reason: str
+    plan_decomposition: str
+    plan_granularity: str
+    plan_mode_reason: str
+    # How many task groups PLAN emitted; ``None`` until PLAN has run. This is
+    # what tells a reader whether the flow's IMPLEMENT ran as one autonomous
+    # call or as a group DAG — there is no separate routing field to consult.
+    plan_group_count: Optional[int]
+    #: Only set for flows created before the plan-decomposition model, so a
+    #: reader can tell an inferred projection from a recorded decision.
+    legacy_strategy: Optional[str]
     timestamp: str
 
 
@@ -458,15 +464,17 @@ CONTEXT_JSON_SCHEMA: Dict[str, Any] = {
         "steps": {"type": "array"},
         "key_outputs": {"type": "object"},
         "project_context": {"type": "object"},
-        "requested_implementation_strategy": {
+        "plan_decomposition": {
             "type": "string",
-            "enum": ["auto", "direct", "planned"],
+            "enum": ["capability", "granular"],
         },
-        "effective_implementation_strategy": {
-            "type": ["string", "null"],
-            "enum": ["direct", "planned", "not_applicable", None],
+        "plan_granularity": {
+            "type": "string",
+            "enum": ["auto", "single", "conservative"],
         },
-        "strategy_reason": {"type": "string"},
+        "plan_mode_reason": {"type": "string"},
+        "plan_group_count": {"type": ["integer", "null"], "minimum": 0},
+        "legacy_strategy": {"type": ["string", "null"]},
         "timestamp": {"type": "string", "format": "date-time"}
     }
 }
@@ -522,16 +530,13 @@ def build_context_from_flow(flow_dict: Dict[str, Any]) -> Dict[str, Any]:
     completed = sum(1 for s in context_steps if s["status"] == "completed")
     total = len(state.get("selected_steps", []))
 
-    # This projection is intentionally read-only for old flows: missing
-    # strategy fields are inferred from their persisted task type/step path but
-    # never written back into engine.json or its cold context payload.
-    from .implementation_strategy import ImplementationStrategyResolver
+    # This projection is intentionally read-only for old flows: a flow that
+    # predates the plan-decomposition model is described from whatever it did
+    # record, never written back into engine.json or its cold context payload.
+    from .plan_decomposition import PlanModeResolver
 
-    strategy = ImplementationStrategyResolver.view(
-        state.get("context", {}),
-        task_type=flow_dict.get("task_type"),
-        selected_steps=state.get("selected_steps", []),
-    )
+    plan_mode = PlanModeResolver.view(state.get("context", {}))
+    plan_group_count = _extract_plan_group_count(key_outputs.get("plan"))
 
     return {
         "type": "se3_context",
@@ -550,7 +555,8 @@ def build_context_from_flow(flow_dict: Dict[str, Any]) -> Dict[str, Any]:
         },
         "steps": context_steps,
         "key_outputs": key_outputs,
-        **strategy.to_dict(),
+        **plan_mode.to_projection(),
+        "plan_group_count": plan_group_count,
         "project_context": {
             "root": str(flow_dict.get("change_path", "")).split("/specs")[0] if flow_dict.get("change_path") else "",
             "change_path": flow_dict.get("change_path"),
@@ -558,6 +564,24 @@ def build_context_from_flow(flow_dict: Dict[str, Any]) -> Dict[str, Any]:
         },
         "timestamp": flow_dict.get("updated_at", "")
     }
+
+
+def _extract_plan_group_count(plan_outputs: Any) -> Optional[int]:
+    """Return the group count PLAN emitted, or ``None`` if PLAN has not run.
+
+    ``task_groups`` wins over the recorded ``plan_group_count`` so an old flow
+    (which never wrote the counter) still projects a usable number, and so a
+    plan revision that rewrote the groups cannot leave a stale count behind.
+    """
+    if not isinstance(plan_outputs, dict):
+        return None
+    groups = plan_outputs.get("task_groups")
+    if isinstance(groups, list):
+        return len(groups)
+    count = plan_outputs.get("plan_group_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return None
 
 
 def _summarize_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, Any]:
@@ -600,7 +624,13 @@ def _extract_key_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, A
     """Extract the most important outputs for each step type."""
     key_map = {
         "analyze": ["task_type", "scope", "complexity"],
-        "plan": ["plan", "task_groups", "total_complexity", "estimated_effort"],
+        "plan": [
+            "plan",
+            "task_groups",
+            "total_complexity",
+            "estimated_effort",
+            "plan_group_count",
+        ],
         "propose": ["proposal", "acceptance_criteria"],
         "design": ["design_doc", "decisions", "architecture"],
         "plan_tasks": ["task_list"],

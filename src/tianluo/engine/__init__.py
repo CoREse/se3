@@ -6,20 +6,20 @@ step, and transitions are controlled by program logic, not LLM decisions.
 """
 
 from .models import (
-    EffectiveImplementationStrategy,
     FlowInstance,
     FlowStatus,
-    RequestedImplementationStrategy,
     State,
     Step,
     StepStatus,
     StepType,
     Transition,
 )
-from .implementation_strategy import (
-    ImplementationStrategyError,
-    ImplementationStrategyResolver,
-    ImplementationStrategyView,
+from .plan_decomposition import (
+    PlanDecomposition,
+    PlanGranularity,
+    PlanModeError,
+    PlanModeResolver,
+    PlanModeView,
 )
 from .state_machine import StateMachine
 from .review_scope import (
@@ -57,11 +57,11 @@ __all__ = [
     "Transition",
     "FlowInstance",
     "FlowStatus",
-    "RequestedImplementationStrategy",
-    "EffectiveImplementationStrategy",
-    "ImplementationStrategyError",
-    "ImplementationStrategyResolver",
-    "ImplementationStrategyView",
+    "PlanDecomposition",
+    "PlanGranularity",
+    "PlanModeError",
+    "PlanModeResolver",
+    "PlanModeView",
     "StateMachine",
     "ReviewBaseline",
     "ReviewScope",

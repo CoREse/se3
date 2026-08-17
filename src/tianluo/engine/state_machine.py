@@ -26,9 +26,12 @@ from .models import (
     get_default_step_sequence,
     get_step_info,
 )
-from .implementation_strategy import (
-    ImplementationStrategyError,
-    ImplementationStrategyResolver,
+from .plan_decomposition import (
+    PLAN_DECOMPOSITION_KEY,
+    PLAN_GRANULARITY_KEY,
+    PlanDecomposition,
+    PlanModeError,
+    PlanModeResolver,
 )
 from . import adjudication
 from ..i18n import t
@@ -88,7 +91,7 @@ class MergeCheckoutResolutionError(StateMachineError):
 
 
 # Cap on automatic PARTIAL → re-run continuations for a holistic IMPLEMENT
-# step (small task type, or feature with --implementation-strategy direct).
+# step (small task type, or a capability-mode plan that produced one group).
 # Each continuation is a fresh paid LLM call and a partial result never
 # reaches the FAILED decision path on its own, so without this bound a caller
 # that keeps reporting "partial" would loop forever. Past the limit the step
@@ -96,6 +99,22 @@ class MergeCheckoutResolutionError(StateMachineError):
 # decision path — further attempts then require an explicit user choice. The
 # budget is sticky across resume so an automated resume loop cannot extend it.
 _HOLISTIC_CONTINUATION_LIMIT = 3
+
+
+def _plan_group_count(step: "Step") -> Optional[int]:
+    """Return how many task groups PLAN handed this IMPLEMENT step.
+
+    ``task_groups`` is the authority; ``plan_group_count`` is only a fallback
+    for a step whose groups were externalized away from its inputs. ``None``
+    means "PLAN has not been read yet", which callers must not read as "one".
+    """
+    groups = step.inputs.get("task_groups")
+    if isinstance(groups, list):
+        return len(groups)
+    count = step.inputs.get("plan_group_count")
+    if isinstance(count, int) and not isinstance(count, bool):
+        return count
+    return None
 
 
 def _reset_retry_counter_for_new_call(step: "Step") -> None:
@@ -423,7 +442,8 @@ class StateMachine:
         task_type: str = "feature",
         change_name: Optional[str] = None,
         is_worktree_mode: bool = False,
-        implementation_strategy: Optional[str] = None,
+        plan_decomposition: Optional[str] = None,
+        plan_granularity: Optional[str] = None,
     ) -> FlowInstance:
         """Create a new flow instance.
 
@@ -433,9 +453,11 @@ class StateMachine:
             change_name: Optional associated change name
             is_worktree_mode: Whether this flow runs in worktree isolation mode
                 (``luo run --worktree``)
-            implementation_strategy: Optional explicit auto/direct/planned
-                request. When absent, project configuration and then the
-                planned default are used.
+            plan_decomposition: Optional explicit capability/granular doctrine
+                for PLAN. When absent, project configuration and then the
+                capability default are used.
+            plan_granularity: Optional explicit auto/single/conservative group
+                pressure, meaningful only under the capability doctrine.
 
         Returns:
             New flow instance
@@ -452,7 +474,15 @@ class StateMachine:
         self._workflow_config_cache = None
         workflow_cfg = self._get_workflow_config()
 
-        # Determine initial step sequence
+        # Determine initial step sequence.
+        # WHY no routing-driven trimming any more: the retired
+        # implementation_strategy axis used to cut PLAN out of a "direct" flow,
+        # which made this sequence a function of two independent decisions. It
+        # is now a function of task type alone — PLAN is unconditional wherever
+        # the default table has it, and the execution shape of the
+        # PLAN -> IMPLEMENT segment is read downstream off the group count PLAN
+        # actually emitted. Nothing below may remove a step for plan-mode
+        # reasons; a one-group plan is a legitimate, fully-planned flow.
         selected_steps = get_default_step_sequence(task_type)
 
         # Append optional steps from tianluo.yaml (e.g. summarize)
@@ -488,33 +518,16 @@ class StateMachine:
         flow.state.context["task_description"] = task_description
         flow.state.context["task_type"] = task_type
         flow.state.context["project_root"] = str(self.project_root)
-        configured_strategy = (
-            workflow_cfg.implementation_strategy
-            if (
-                workflow_cfg.implementation_strategy_explicit
-                or workflow_cfg.implementation_strategy != "planned"
-            )
-            else None
-        )
         try:
-            strategy = ImplementationStrategyResolver.initialize_context(
+            PlanModeResolver.initialize_context(
                 flow.state.context,
-                task_type=task_type,
-                selected_steps=selected_steps,
-                explicit_request=implementation_strategy,
-                configured_strategy=configured_strategy,
+                explicit_decomposition=plan_decomposition,
+                explicit_granularity=plan_granularity,
+                configured_workflow=workflow_cfg,
             )
-        except ImplementationStrategyError as exc:
+        except PlanModeError as exc:
             raise ConfigError(str(exc)) from exc
 
-        # Strategy rewriting is intentionally the final sequence transform
-        # before confirmation insertion.  INVESTIGATE, optional E2E and the
-        # worktree merge tail therefore survive direct mode, while PLAN cannot
-        # acquire an orphaned confirmation gate.
-        selected_steps = ImplementationStrategyResolver.apply_to_steps(
-            selected_steps,
-            strategy.effective,
-        )
         selected_steps = self._insert_confirmation_steps(selected_steps)
         flow.state.selected_steps = selected_steps
         # Stash the main checkout the merge-side steps must run in, resolved once
@@ -1313,16 +1326,23 @@ class StateMachine:
 
     @staticmethod
     def _is_holistic_implement_step(flow: FlowInstance, step: Step) -> bool:
-        """Identify persisted direct and small whole-task IMPLEMENT paths."""
+        """Identify whole-task IMPLEMENT paths (small type, or a single group).
+
+        WHY the group count rather than a routing flag: PLAN's own output is
+        the only authority on the execution shape. A separately persisted
+        "holistic" flag would have to be kept in sync with ``task_groups``
+        through plan revisions and adjudication; a count derived from the
+        groups themselves cannot drift from them.
+        """
         task_type = step.inputs.get("task_type") or flow.task_type
         if task_type == "small":
             return True
-        effective = step.inputs.get("effective_implementation_strategy")
-        if effective is None:
-            effective = flow.state.context.get(
-                "effective_implementation_strategy"
-            )
-        return effective == "direct"
+        decomposition = step.inputs.get(
+            PLAN_DECOMPOSITION_KEY
+        ) or flow.state.context.get(PLAN_DECOMPOSITION_KEY)
+        if decomposition != PlanDecomposition.CAPABILITY.value:
+            return False
+        return _plan_group_count(step) == 1
 
     def transition_to_next(
         self, flow: FlowInstance,
@@ -1389,7 +1409,7 @@ class StateMachine:
 
         # A whole-task IMPLEMENT is complete only when its structured result
         # says complete and carries no unfinished work. Keep the same Step and
-        # workspace live for another autonomous call; planned group execution
+        # workspace live for another autonomous call; multi-group execution
         # retains its historical PARTIAL-forwarding semantics. The gate must
         # not fire when the transition itself IS the user's Skip decision —
         # re-capturing there would either resurrect the identical failure
@@ -3268,19 +3288,20 @@ class StateMachine:
         inputs["task_description"] = _compose_effective_task_description(flow)
 
         if step_type == StepType.IMPLEMENT:
-            inputs["requested_implementation_strategy"] = flow.state.context.get(
-                "requested_implementation_strategy"
+            # The doctrine/granularity a flow entered, forwarded so IMPLEMENT
+            # never has to re-decide anything: the execution shape follows from
+            # these plus the group count PLAN already emitted.
+            inputs[PLAN_DECOMPOSITION_KEY] = flow.state.context.get(
+                PLAN_DECOMPOSITION_KEY
             )
-            inputs["effective_implementation_strategy"] = flow.state.context.get(
-                "effective_implementation_strategy"
+            inputs[PLAN_GRANULARITY_KEY] = flow.state.context.get(
+                PLAN_GRANULARITY_KEY
             )
-            inputs["strategy_reason"] = flow.state.context.get("strategy_reason", "")
             inputs["analysis_context"] = {
                 "scope": inputs.get("scope"),
                 "complexity": inputs.get("complexity"),
                 "reasoning": inputs.get("analysis_reasoning"),
                 "project_summary": inputs.get("project_summary"),
-                "strategy_reason": inputs.get("strategy_reason"),
             }
 
         # Special handling for CONFIRM step
@@ -4356,11 +4377,7 @@ class StateMachine:
 
         current_step = flow.state.get_current_step()
 
-        strategy = ImplementationStrategyResolver.view(
-            flow.state.context,
-            task_type=flow.task_type,
-            selected_steps=flow.state.selected_steps,
-        )
+        plan_mode = PlanModeResolver.view(flow.state.context)
 
         return {
             "flow_id": flow.flow_id,
@@ -4370,5 +4387,5 @@ class StateMachine:
             "percent": (completed / total * 100) if total > 0 else 0,
             "current_step": current_step.step_type.value if current_step else None,
             "current_step_status": current_step.status.value if current_step else None,
-            **strategy.to_dict(),
+            **plan_mode.to_projection(),
         }

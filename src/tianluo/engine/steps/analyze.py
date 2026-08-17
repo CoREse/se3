@@ -22,7 +22,6 @@ from typing import List
 
 from ..context import RUN_MODE_TYPES, effective_task_type
 from ..llm_caller import LLMCaller
-from ..implementation_strategy import ImplementationStrategyResolver
 from ..models import (
     FlowInstance,
     Step,
@@ -123,35 +122,11 @@ Project context:
 ANALYZE_PROMPT = inject_boundary(ANALYZE_PROMPT, "Task description:\n")
 
 
-AUTO_IMPLEMENTATION_STRATEGY_PROMPT = """
-
-6. **implementation_strategy**: This field is conditional. Emit it only when
-   your resolved task_type has a PLAN -> IMPLEMENT choice surface (feature or
-   bugfix; discovery-mode flows are also applicable when the engine preserves
-   that explicit run mode). Choose exactly "direct" or "planned".
-
-7. **strategy_reason**: When and only when you emit
-   implementation_strategy, give a concise reason that explicitly weighs all
-   of these dimensions:
-   - task scale;
-   - module coupling;
-   - dependency-chain depth;
-   - the isolation value of independent worktrees;
-   - the recovery value of fine-grained task groups; and
-   - whether one autonomous implementation call can reasonably carry the
-     complete task.
-
-Prefer direct when one autonomous writable IMPLEMENT call can safely own the
-complete requirement and targeted verification. Prefer planned when task-group
-DAG scheduling, independent worktree isolation, or fine-grained recovery has
-material value. Do not emit either field for small, review, or survey.
-
-Add these conditional fields to the JSON object when applicable:
-{
-    "implementation_strategy": "direct|planned",
-    "strategy_reason": "reason covering all six dimensions"
-}
-"""
+# WHY ANALYZE no longer asks for an execution-path recommendation: the
+# direct|planned routing axis is gone. Every feature/bugfix flow runs PLAN, and
+# how the PLAN -> IMPLEMENT segment executes follows from the groups PLAN
+# actually emits. Asking ANALYZE — which has read no code yet — to pre-commit
+# that shape only added a decision PLAN then had to honor blindly.
 
 
 def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -183,20 +158,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Collect structured project context
     project_summary = _collect_project_summary(project_root)
 
-    recommendation_requested = (
-        ImplementationStrategyResolver.should_request_auto_recommendation(
-            flow.state.context,
-            task_type=flow.task_type,
-        )
-    )
-
     # Build prompt with project context
     prompt = ANALYZE_PROMPT.format(
         task_description=task_description,
         project_context=project_summary,
     )
-    if recommendation_requested:
-        prompt += AUTO_IMPLEMENTATION_STRATEGY_PROMPT
 
     # Append issue discovery injection if applicable
     from ..context_builder import (
@@ -241,13 +207,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             '"reasoning": "explanation", '
             '"root_cause_clear": true}'
         )
-        if recommendation_requested:
-            ANALYZE_SCHEMA_HINT = (
-                ANALYZE_SCHEMA_HINT[:-1]
-                + ', "implementation_strategy": "direct|planned (only for '
-                'feature|bugfix)", "strategy_reason": '
-                '"reason covering all six decision dimensions"}'
-            )
 
         # --- LLM call: task classification ---
         response = caller.call(
@@ -296,37 +255,19 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         effective_type = effective_task_type(flow.state.context, resolved_task_type)
         needs_investigation = effective_type == "bugfix" and not root_cause_clear
 
-        strategy_snapshot = ImplementationStrategyResolver.snapshot_context(
-            flow.state.context
+        # WHY no snapshot/restore around the rebuild any more: the retired
+        # strategy axis rewrote the sequence, so its decision and the sequence
+        # it implied had to be persisted as one unit or a failed rebuild could
+        # strand a 'direct' flag beside a sequence still holding PLAN. The plan
+        # mode writes nothing into the sequence — the rebuild below is a pure
+        # function of task type — so there is no coupled state to unwind.
+        # Update flow's selected steps based on task_type (fixed sequences).
+        # Note: discover mode is handled via --discover, not by analyze.
+        _update_flow_steps(
+            flow,
+            resolved_task_type,
+            needs_investigation=needs_investigation,
         )
-        strategy = ImplementationStrategyResolver.finalize_for_analyze(
-            flow.state.context,
-            task_type=resolved_task_type,
-            analyze_output=result,
-            recommendation_requested=recommendation_requested,
-            selected_steps=flow.state.selected_steps,
-        )
-
-        # INVARIANT: the finalized strategy and the step sequence it implies are
-        # persisted atomically. A rebuild failure that left effective='direct'
-        # stamped beside a sequence still containing PLAN would survive into
-        # engine.json, and a later Skip of this step would then execute that
-        # dangling PLAN inside a 'direct' flow — the exact state the transform
-        # exists to prevent. So a failed rebuild unwinds the decision.
-        try:
-            # Update flow's selected steps based on task_type (fixed sequences).
-            # Note: discover mode is handled via --discover, not by analyze.
-            _update_flow_steps(
-                flow,
-                resolved_task_type,
-                needs_investigation=needs_investigation,
-                effective_strategy=strategy.effective,
-            )
-        except Exception:
-            ImplementationStrategyResolver.restore_context(
-                flow.state.context, strategy_snapshot
-            )
-            raise
 
         # Store outputs. Use the authoritative resolved value (after the
         # --discover preservation and --type override) so step.outputs agrees
@@ -341,13 +282,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
         step.outputs["root_cause_clear"] = root_cause_clear
-        step.outputs["requested_implementation_strategy"] = (
-            strategy.requested.value if strategy.requested is not None else None
-        )
-        step.outputs["effective_implementation_strategy"] = (
-            strategy.effective.value if strategy.effective is not None else None
-        )
-        step.outputs["strategy_reason"] = strategy.reason
         step.outputs["project_summary"] = project_summary
         step.outputs["relevant_specs"] = []
         step.outputs["spec_content"] = ""
@@ -550,7 +484,6 @@ def _update_flow_steps(
     flow: FlowInstance,
     task_type: str,
     needs_investigation: bool = False,
-    effective_strategy=None,
 ) -> None:
     """Update the flow's selected steps based on task type.
 
@@ -563,8 +496,6 @@ def _update_flow_steps(
         task_type: The determined task type (feature, bugfix, small, review, survey)
         needs_investigation: Insert an INVESTIGATE step before PLAN (a bugfix
             whose root cause analyze could not establish)
-        effective_strategy: Finalized direct/planned/not_applicable value. When
-            omitted, use the persisted or legacy-compatible flow view.
     """
     # Get default sequence for task type (fixed sequences per spec)
     selected_steps = get_default_step_sequence(task_type)
@@ -607,17 +538,6 @@ def _update_flow_steps(
     # so re-appending here is what actually makes worktree merges run.
     if getattr(flow, "is_worktree_mode", False):
         selected_steps = append_worktree_merge_steps(selected_steps)
-
-    if effective_strategy is None:
-        effective_strategy = ImplementationStrategyResolver.view(
-            flow.state.context,
-            task_type=task_type,
-            selected_steps=flow.state.selected_steps,
-        ).effective
-    selected_steps = ImplementationStrategyResolver.apply_to_steps(
-        selected_steps,
-        effective_strategy,
-    )
 
     # Insert confirmation steps based on config
     # This ensures CONFIRM steps are added after plan as configured

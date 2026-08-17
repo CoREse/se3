@@ -1,10 +1,10 @@
 """Tests for PARTIAL status handling in state machine.
 
 Tests that:
-1. transition_to_next() allows ordinary/planned PARTIAL steps to flow forward
+1. transition_to_next() allows ordinary multi-group PARTIAL steps to flow forward
 2. _build_step_inputs() forwards implement outputs when status is PARTIAL
-3. PARTIAL does not trigger fix loops; direct/small IMPLEMENT is the explicit
-   exception and re-enters until its whole-task contract is complete
+3. PARTIAL does not trigger fix loops; a single-group/small IMPLEMENT is the
+   explicit exception and re-enters until its whole-task contract is complete
 """
 
 from __future__ import annotations
@@ -129,11 +129,18 @@ class TestPartialTransition:
         assert flow.status == FlowStatus.COMPLETED
 
 
+def _mark_single_capability_group(flow, step):
+    """Put the flow on the single-group capability path (today's holistic shape)."""
+    flow.state.context["plan_decomposition"] = "capability"
+    flow.state.context["plan_granularity"] = "auto"
+    step.inputs["task_groups"] = [{"group_id": "G1", "name": "whole task"}]
+
+
 class TestHolisticPartialContinuation:
-    """Only direct/small partial implementation is forced to continue."""
+    """Only single-group/small partial implementation is forced to continue."""
 
     @patch("tianluo.engine.state_machine.clear_phase1_cache")
-    def test_direct_partial_reenters_same_implement(
+    def test_single_group_partial_reenters_same_implement(
         self, mock_clear_cache, state_machine,
     ):
         flow, impl_step = _make_flow_with_implement(
@@ -145,7 +152,7 @@ class TestHolisticPartialContinuation:
             },
         )
         flow.state.selected_steps = [StepType.IMPLEMENT, StepType.TEST]
-        flow.state.context["effective_implementation_strategy"] = "direct"
+        _mark_single_capability_group(flow, impl_step)
 
         next_step = state_machine.transition_to_next(flow)
 
@@ -170,18 +177,18 @@ class TestHolisticPartialContinuation:
                 "incomplete_tasks": ["still pending"],
             },
         )
-        flow.state.context["effective_implementation_strategy"] = "direct"
+        _mark_single_capability_group(flow, impl_step)
 
         assert state_machine.transition_to_next(flow) is impl_step
         assert impl_step.status == StepStatus.PENDING
 
-    def test_direct_complete_and_empty_advances_to_test(self, state_machine):
-        flow, _ = _make_flow_with_implement(
+    def test_single_group_complete_and_empty_advances_to_test(self, state_machine):
+        flow, impl_step = _make_flow_with_implement(
             StepStatus.COMPLETED,
             {"completion_status": "complete", "incomplete_tasks": []},
         )
         flow.state.selected_steps = [StepType.IMPLEMENT, StepType.TEST]
-        flow.state.context["effective_implementation_strategy"] = "direct"
+        _mark_single_capability_group(flow, impl_step)
 
         next_step = state_machine.transition_to_next(flow)
 

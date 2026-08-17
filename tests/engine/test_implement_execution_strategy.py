@@ -586,9 +586,7 @@ class TestFlowTypeMatrix:
         inputs = machine._build_step_inputs(flow, StepType.IMPLEMENT)
         assert "task_groups" not in inputs
 
-    def test_review_and_survey_never_gain_implement_and_are_not_applicable(
-        self, tmp_path
-    ):
+    def test_review_and_survey_never_gain_implement(self, tmp_path):
         from tianluo.engine.state_machine import StateMachine
 
         machine = StateMachine(tmp_path)
@@ -596,25 +594,17 @@ class TestFlowTypeMatrix:
             flow = machine.create_flow("task", task_type=task_type)
             assert StepType.IMPLEMENT not in flow.state.selected_steps
             assert StepType.PLAN not in flow.state.selected_steps
-            assert (
-                flow.state.context["effective_implementation_strategy"]
-                == "not_applicable"
-            )
 
-    def test_small_keeps_holistic_implement_and_is_not_applicable(self, tmp_path):
+    def test_small_keeps_holistic_implement_without_a_plan(self, tmp_path):
         from tianluo.engine.state_machine import StateMachine
 
         machine = StateMachine(tmp_path)
         flow = machine.create_flow("task", task_type="small")
         assert StepType.IMPLEMENT in flow.state.selected_steps
         assert StepType.PLAN not in flow.state.selected_steps
-        assert (
-            flow.state.context["effective_implementation_strategy"]
-            == "not_applicable"
-        )
-        assert (
-            flow.state.context["requested_implementation_strategy"] == "planned"
-        )
+        # The plan mode is still recorded (it costs nothing and keeps the
+        # projection uniform), but a planless type never consults it.
+        assert flow.state.context["plan_decomposition"] == "capability"
 
     def test_holistic_partial_continuations_are_bounded(self, tmp_path):
         from tianluo.engine.state_machine import (
@@ -628,7 +618,8 @@ class TestFlowTypeMatrix:
             task_description="bounded direct task",
             task_type="feature",
         )
-        flow.state.context["effective_implementation_strategy"] = "direct"
+        flow.state.context["plan_decomposition"] = "capability"
+        flow.state.context["plan_granularity"] = "auto"
         flow.state.selected_steps = [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
@@ -640,7 +631,8 @@ class TestFlowTypeMatrix:
             inputs={
                 "task_description": "task",
                 "task_type": "feature",
-                "effective_implementation_strategy": "direct",
+                # One capability group == today's holistic execution shape.
+                "task_groups": [{"group_id": "G1", "name": "whole task"}],
             },
             outputs={
                 "completion_status": "partial",
@@ -683,7 +675,7 @@ class TestFlowTypeMatrix:
         assert step.status == StepStatus.FAILED
 
     def _make_direct_flow_with_partial_implement(self, tmp_path):
-        """Build a direct flow whose IMPLEMENT step carries a partial record."""
+        """Build a single-group flow whose IMPLEMENT carries a partial record."""
         from tianluo.engine.state_machine import StateMachine
 
         machine = StateMachine(tmp_path)
@@ -692,7 +684,8 @@ class TestFlowTypeMatrix:
             task_description="skip direct task",
             task_type="feature",
         )
-        flow.state.context["effective_implementation_strategy"] = "direct"
+        flow.state.context["plan_decomposition"] = "capability"
+        flow.state.context["plan_granularity"] = "auto"
         flow.state.selected_steps = [
             StepType.ANALYZE,
             StepType.IMPLEMENT,
@@ -704,7 +697,8 @@ class TestFlowTypeMatrix:
             inputs={
                 "task_description": "task",
                 "task_type": "feature",
-                "effective_implementation_strategy": "direct",
+                # One capability group == today's holistic execution shape.
+                "task_groups": [{"group_id": "G1", "name": "whole task"}],
             },
             outputs={
                 "completion_status": "partial",
