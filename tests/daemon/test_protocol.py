@@ -47,6 +47,7 @@ from tianluo.daemon.protocol import (
     make_viewers,
     supports_fetch,
     supports_presence,
+    supports_spawn_plan_mode,
     supports_spawn_strategy,
     supports_traffic_reduction,
     supports_uploads,
@@ -56,20 +57,21 @@ from tianluo.daemon.protocol import (
 # -- version bump ----------------------------------------------------------
 
 
-def test_protocol_version_bumped_to_7():
+def test_protocol_version_bumped_to_8():
     # Revision 5 added the upload channel, revision 6 the fetch channel that
-    # reads those files back, and revision 7 the optional spawn
-    # ``implementation_strategy`` field. Each bump is what lets the server tell
-    # "this daemon can serve the frame" from "this daemon will ignore it", so a
-    # paste (or a thumbnail, or an explicit strategy) against an old daemon
-    # fails immediately with an explainable error instead of waiting out a
-    # timeout — or, for the strategy field, silently running a different
-    # strategy than the operator requested.
-    assert protocol.PROTOCOL_VERSION == "7"
+    # reads those files back, revision 7 the optional spawn
+    # ``implementation_strategy`` field, and revision 8 the
+    # ``plan_decomposition`` / ``plan_granularity`` pair that replaced it. Each
+    # bump is what lets the server tell "this daemon can serve the frame" from
+    # "this daemon will ignore it", so a paste (or a thumbnail, or an explicit
+    # plan mode) against an old daemon fails immediately with an explainable
+    # error instead of waiting out a timeout — or, for the plan-mode fields,
+    # silently running a different flow shape than the operator requested.
+    assert protocol.PROTOCOL_VERSION == "8"
 
 
-def test_revision_7_does_not_regress_earlier_gates():
-    # A revision-7 peer must still satisfy every older gate — a bump adds a
+def test_revision_8_does_not_regress_earlier_gates():
+    # A revision-8 peer must still satisfy every older gate — a bump adds a
     # capability, it never withdraws one.
     assert supports_traffic_reduction("6") is True
     assert supports_presence("6") is True
@@ -79,6 +81,51 @@ def test_revision_7_does_not_regress_earlier_gates():
     assert supports_uploads(protocol.PROTOCOL_VERSION) is True
     assert supports_fetch(protocol.PROTOCOL_VERSION) is True
     assert supports_spawn_strategy(protocol.PROTOCOL_VERSION) is True
+    assert supports_spawn_plan_mode(protocol.PROTOCOL_VERSION) is True
+
+
+# -- spawn plan-mode capability gate ----------------------------------------
+
+
+def test_supports_spawn_plan_mode_gate():
+    assert supports_spawn_plan_mode("8") is True
+    assert supports_spawn_plan_mode(8) is True
+    assert supports_spawn_plan_mode(" 9 ") is True
+
+    # Anything below 8, unparseable, or absent must refuse: a silent drop of
+    # the fields would run the project default under the banner of an explicit
+    # operator choice.
+    assert supports_spawn_plan_mode("7") is False
+    assert supports_spawn_plan_mode(7) is False
+    assert supports_spawn_plan_mode("") is False
+    assert supports_spawn_plan_mode(None) is False
+    assert supports_spawn_plan_mode("not-a-number") is False
+    assert supports_spawn_plan_mode({}) is False
+    assert protocol.MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION == 8
+
+
+def test_spawn_plan_mode_field_validation():
+    msg = protocol.make_spawn_flow(
+        "t", project_root="/p",
+        plan_decomposition="capability", plan_granularity="conservative",
+    )
+    assert msg.payload["plan_decomposition"] == "capability"
+    assert msg.payload["plan_granularity"] == "conservative"
+
+    # Unset fields stay off the wire, so a plain payload is byte-for-byte what
+    # a revision-7 peer already accepts.
+    plain = protocol.make_spawn_flow("t", project_root="/p")
+    assert "plan_decomposition" not in plain.payload
+    assert "plan_granularity" not in plain.payload
+
+    for kwargs in (
+        {"plan_decomposition": "direct"},
+        {"plan_granularity": "granular"},
+    ):
+        with pytest.raises(protocol.ProtocolError) as exc:
+            protocol.make_spawn_flow("t", project_root="/p", **kwargs)
+        # The error names the legal set so an operator can act on it.
+        assert "must be one of" in str(exc.value)
 
 
 # -- supports_presence gate --------------------------------------------------
@@ -191,10 +238,10 @@ def test_project_management_did_not_bump_protocol_version():
     # The pair is additive the way MSG_END_SESSION was: an older peer that does
     # not know the type just ignores the frame, and nothing existing degrades —
     # so it rode on revision 4 without a bump of its own. The revision has since
-    # advanced to 5/6/7 for the (unrelated) upload, fetch and spawn-strategy
-    # channels, so pin only the fact that these types exist below the current
-    # revision.
-    assert protocol.PROTOCOL_VERSION == "7"
+    # advanced to 5/6/7/8 for the (unrelated) upload, fetch, spawn-strategy and
+    # spawn-plan-mode channels, so pin only the fact that these types exist
+    # below the current revision.
+    assert protocol.PROTOCOL_VERSION == "8"
     assert supports_presence(protocol.PROTOCOL_VERSION) is True
 
 

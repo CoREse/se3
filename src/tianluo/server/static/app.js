@@ -521,7 +521,7 @@ function flowsSignature(machine, selectedId, resumeRequests) {
       pending: hasPendingCall(f),
       resumable: isFlowResumable(f),
       resuming: resuming(f && f.flow_id),
-      strategy: (f && f.implementation_strategy) || null,
+      plan_mode: (f && f.plan_mode) || null,
     })),
   });
 }
@@ -1033,7 +1033,7 @@ function uploadErrorKey(code) {
 // the wire carries only codes. An unrecognised code falls back to the
 // backend's own ``detail`` rather than painting a raw token.
 const FLOW_LAUNCH_ERROR_KEYS = {
-  unsupported_daemon: "newTask.errUnsupportedDaemonStrategy",
+  unsupported_daemon: "newTask.errUnsupportedDaemonPlanMode",
 };
 
 function flowLaunchErrorMessage(status, detail) {
@@ -3221,12 +3221,12 @@ function issueLaunchReasonText(model) {
 // Build the ``POST /api/flows`` body for starting a flow from an issue.  The
 // issue's machine/project are passed so the server can reject a target
 // mismatch; the server re-resolves them owner-scoped and ignores the task
-// content (the issue description becomes the task).  ``strategy`` is the
-// explicit auto/direct/planned implementation strategy; when it is empty
-// (project default) the field is OMITTED so the daemon resolves the project
-// configuration / planned default — an explicit empty string would read as a
-// request to override.  Pure.
-function buildIssueFlowBody(iss, discover, worktree, strategy) {
+// content (the issue description becomes the task).  ``planMode`` carries the
+// explicit PLAN decomposition doctrine / group granularity; an empty value
+// (project default) is OMITTED so the daemon resolves the project
+// configuration / default — an explicit empty string would read as a request
+// to override.  Pure.
+function buildIssueFlowBody(iss, discover, worktree, planMode) {
   const id = iss && iss.id != null ? String(iss.id) : "";
   const body = {
     from_issue_id: id,
@@ -3236,16 +3236,38 @@ function buildIssueFlowBody(iss, discover, worktree, strategy) {
     discover: Boolean(discover),
     worktree: Boolean(worktree),
   };
-  if (strategy) body.implementation_strategy = String(strategy);
+  applyPlanModeFields(body, planMode);
+  return body;
+}
+
+// Read the two plan-mode selects into a {decomposition, granularity} pair.
+// A missing element reads as "project default" (empty), so a build that drops
+// the controls degrades to the project configuration rather than throwing.
+function readPlanModeInputs(decompositionId, granularityId) {
+  const read = (id) => {
+    const node = $(id);
+    return (node && node.value && node.value.trim()) || "";
+  };
+  return { decomposition: read(decompositionId), granularity: read(granularityId) };
+}
+
+// Copy the non-empty plan-mode selections onto a ``POST /api/flows`` body.
+// Shared by both builders so the omit-when-empty rule cannot drift between the
+// New Task form and the Issue Launch modal.  Pure.
+function applyPlanModeFields(body, planMode) {
+  const decomposition = (planMode && planMode.decomposition) || "";
+  const granularity = (planMode && planMode.granularity) || "";
+  if (decomposition) body.plan_decomposition = String(decomposition);
+  if (granularity) body.plan_granularity = String(granularity);
   return body;
 }
 
 // Build the ``POST /api/flows`` body for the New Task form.  ``discover``
 // starts the flow from the discovery step; ``worktree`` runs the flow in an
 // isolated worktree that auto-merges back on success (equivalent to the CLI
-// ``se3 run --worktree``).  ``strategy`` follows the same omit-when-empty rule
+// ``luo run --worktree``).  ``planMode`` follows the same omit-when-empty rule
 // as buildIssueFlowBody.  Pure.
-function buildNewFlowBody({ machineId, task, taskType, discover, worktree, projectRoot, strategy }) {
+function buildNewFlowBody({ machineId, task, taskType, discover, worktree, projectRoot, planMode }) {
   const body = {
     machine_id: machineId,
     task: task,
@@ -3254,7 +3276,7 @@ function buildNewFlowBody({ machineId, task, taskType, discover, worktree, proje
     worktree: Boolean(worktree),
     project_root: projectRoot,
   };
-  if (strategy) body.implementation_strategy = String(strategy);
+  applyPlanModeFields(body, planMode);
   return body;
 }
 
@@ -3421,12 +3443,16 @@ function renderFlowCard(flow) {
       : (flow.task_type || "")),
     el("span", null, `${flow.current_step_index || 0}/${flow.total_steps || 0}`),
   );
-  // Effective implementation strategy as a low-key chip (backend projection;
-  // absent on pre-G10 snapshots and for flows with no strategy surface).
-  const strategy = flow.implementation_strategy;
-  if (strategy && strategy.effective) {
-    meta.appendChild(el("span", "flow-strategy-chip strategy-" + strategy.effective,
-      strategyValueLabel(strategy.effective)));
+  // PLAN decomposition mode as a low-key chip (backend projection; absent on
+  // snapshots from daemons that predate it). A flow created under the retired
+  // strategy axis has no doctrine of its own, so it shows what it recorded.
+  const planMode = flow.plan_mode;
+  if (planMode && planMode.decomposition) {
+    meta.appendChild(el("span", "flow-plan-chip plan-" + planMode.decomposition,
+      planDecompositionLabel(planMode.decomposition)));
+  } else if (planMode && planMode.legacy_strategy) {
+    meta.appendChild(el("span", "flow-plan-chip plan-legacy",
+      legacyStrategyLabel(planMode.legacy_strategy)));
   }
 
   card.append(head, bar, meta);
@@ -4441,9 +4467,9 @@ function flowSidebarSignature(flow, machineId, resumeInProgress) {
     machineId: machineId ?? null,
     resumable: isFlowResumable(f),
     resumeInProgress: Boolean(resumeInProgress),
-    // The strategy/scope/usage projections the sidebar now renders (G10):
-    // any change to them must rebuild the sidebar like any other visible field.
-    strategy: f.implementation_strategy ?? null,
+    // The plan-mode/scope/usage projections the sidebar renders: any change to
+    // them must rebuild the sidebar like any other visible field.
+    plan_mode: f.plan_mode ?? null,
     review_scope: f.review_scope ?? null,
     usage_summary: f.usage_summary ?? null,
   });
@@ -4493,12 +4519,12 @@ function renderFlowSidebar(flow, machineId) {
   if (flow.updated_at) overview.appendChild(kv(tf("flowSidebar.updated", "Updated"), formatTime(flow.updated_at)));
   body.appendChild(overview);
 
-  // -- implementation strategy / review scope / usage (G10) --
+  // -- plan decomposition mode / review scope / usage --
   // All three come from the shared backend projections the daemon relays in
   // the flow snapshot; the sidebar only labels them (see the rendering section
-  // above). Absent projections add nothing, so pre-G10 snapshots look exactly
-  // as before.
-  appendStrategySection(body, flow);
+  // above). Absent projections add nothing, so an older daemon's snapshot
+  // looks exactly as it did before.
+  appendPlanModeSection(body, flow);
   const scopeRows = buildScopeRows(flow.review_scope);
   if (scopeRows) {
     const scopeSec = el("div", "detail-section");
@@ -7830,7 +7856,8 @@ function openIssueLaunchModal(iss) {
   const msgNode = $("issue-launch-message");
   const discoverInput = $("issue-launch-discover");
   const worktreeInput = $("issue-launch-worktree");
-  const strategyInput = $("issue-launch-strategy");
+  const decompositionInput = $("issue-launch-decomposition");
+  const granularityInput = $("issue-launch-granularity");
   const errBox = $("issue-launch-error");
   if (titleNode) titleNode.textContent = tf("issueLaunch.title", "Launch Flow from Issue");
   if (msgNode) {
@@ -7840,8 +7867,9 @@ function openIssueLaunchModal(iss) {
   }
   if (discoverInput) discoverInput.checked = false;
   if (worktreeInput) worktreeInput.checked = false;
-  // Same reset-to-project-default rule as the New Task form (G10).
-  if (strategyInput) strategyInput.value = "";
+  // Same reset-to-project-default rule as the New Task form.
+  if (decompositionInput) decompositionInput.value = "";
+  if (granularityInput) granularityInput.value = "";
   if (errBox) errBox.classList.add("hidden");
   modal.dataset.issueKey = issueCompositeKey(iss);
   modal.dataset.machineId = issueMachineId(iss);
@@ -7872,8 +7900,8 @@ async function confirmIssueLaunch() {
     };
   const discover = Boolean($("issue-launch-discover") && $("issue-launch-discover").checked);
   const worktree = Boolean($("issue-launch-worktree") && $("issue-launch-worktree").checked);
-  const strategy = ($("issue-launch-strategy") && $("issue-launch-strategy").value.trim()) || "";
-  const body = buildIssueFlowBody(iss, discover, worktree, strategy);
+  const planMode = readPlanModeInputs("issue-launch-decomposition", "issue-launch-granularity");
+  const body = buildIssueFlowBody(iss, discover, worktree, planMode);
 
   const confirmBtn = $("issue-launch-confirm");
   if (confirmBtn) confirmBtn.disabled = true;
@@ -14419,42 +14447,58 @@ function applyUsageBadge(badge, records, payload) {
 }
 
 // ---------------------------------------------------------------------------
-// Implementation-strategy + review-scope display (G10)
+// Plan-decomposition + review-scope display
 // ---------------------------------------------------------------------------
 //
-// The strategy projection ({requested, effective, reason, inferred}) and the
-// scope audit ({active_round, last_round, last_clean_full_round_id,
+// The plan-mode projection ({decomposition, granularity, group_count, reason,
+// reason_key, legacy_strategy, inferred}) and the scope audit
+// ({active_round, last_round, last_clean_full_round_id,
 // completed_full_rounds}) are computed by the shared backends
 // (strategy_view.py / review_scope) and relayed verbatim; the UI only labels
-// them. A legacy flow's inferred view is displayed with an explicit
-// "inferred" note and never written back.
+// them. A flow created before the plan-decomposition model carries no doctrine
+// of its own, so it is shown as the retired path it actually recorded, marked
+// as such — never as a new-model value it never had, and never written back.
 
-function strategyValueLabel(value) {
+function planDecompositionLabel(value) {
+  return catalogLabel("plan.decomposition.", value);
+}
+
+function planGranularityLabel(value) {
+  return catalogLabel("plan.granularity.", value);
+}
+
+function legacyStrategyLabel(value) {
+  return catalogLabel("plan.legacy.", value);
+}
+
+// Resolve one enum value through the i18n catalog, degrading to the raw value
+// (and to a localized "unknown" for an empty one) so an unrecognized backend
+// value is still displayed rather than swallowed.
+function catalogLabel(prefix, value) {
   const s = String(value || "");
-  if (!s) return tf("strategy.value.unknown", "unknown");
-  const text = I18N.resolve("strategy.value." + s);
+  if (!s) return tf("plan.unknown", "unknown");
+  const text = I18N.resolve(prefix + s);
   if (text != null) return text;
   return s;
 }
 
-// The strategy-reason text. A ``reason_key`` marks a sentence the backend
-// projection itself authored (legacy inference) rather than persisted flow
-// data, so it is rendered through this catalog instead of verbatim English.
-function strategyReasonText(strategy) {
-  const key = String((strategy && strategy.reason_key) || "");
+// The plan-mode reason text. A ``reason_key`` marks a sentence the backend
+// projection itself authored (legacy inference / legacy strategy record)
+// rather than persisted flow data, so it is rendered through this catalog
+// instead of verbatim English.
+function planModeReasonText(planMode) {
+  const key = String((planMode && planMode.reason_key) || "");
   if (key) {
-    const text = I18N.resolve("strategy.reason." + key);
+    const text = I18N.resolve("plan.reason." + key);
     if (text != null) return text;
   }
-  return strategy && strategy.reason ? String(strategy.reason) : "";
+  return planMode && planMode.reason ? String(planMode.reason) : "";
 }
 
-// Build the strategy rows (effective + requested + reason) for a strategy
-// projection dict, or null when nothing is recoverable.
-function buildStrategyRows(strategy) {
-  if (!strategy || typeof strategy !== "object") return null;
-  const effective = strategy.effective;
-  if (!effective) return null;
+// Build the plan-mode rows (doctrine + granularity + group count + reason) for
+// a plan-mode projection dict, or null when nothing is recoverable.
+function buildPlanModeRows(planMode) {
+  if (!planMode || typeof planMode !== "object") return null;
   const frag = document.createDocumentFragment();
   const kv = (k, v, title) => {
     const row = el("div", "kv");
@@ -14463,30 +14507,42 @@ function buildStrategyRows(strategy) {
     row.append(el("span", "k", k), valEl);
     return row;
   };
-  let value = strategyValueLabel(effective);
-  if (strategy.inferred) {
-    value += " · " + tf("strategy.inferredNote", "inferred from legacy records");
+  if (planMode.decomposition) {
+    let value = planDecompositionLabel(planMode.decomposition);
+    if (planMode.granularity) {
+      value += " / " + planGranularityLabel(planMode.granularity);
+    }
+    frag.appendChild(kv(tf("plan.label", "Plan decomposition"), value));
+    if (typeof planMode.group_count === "number") {
+      frag.appendChild(kv(
+        tf("plan.groupsLabel", "Task groups"), String(planMode.group_count),
+      ));
+    }
+  } else if (planMode.legacy_strategy) {
+    let value = legacyStrategyLabel(planMode.legacy_strategy)
+      + " · " + tf("plan.legacyNote", "retired implementation strategy");
+    if (planMode.inferred) {
+      value += " · " + tf("plan.inferredNote", "inferred from legacy records");
+    }
+    frag.appendChild(kv(tf("plan.label", "Plan decomposition"), value));
+  } else {
+    return null;
   }
-  if (strategy.requested && strategy.requested !== "auto" && strategy.requested !== effective) {
-    value += " (" + tf("strategy.requestedLabel", "requested")
-      + " " + strategyValueLabel(strategy.requested) + ")";
-  }
-  frag.appendChild(kv(tf("strategy.label", "Implementation strategy"), value));
-  const reasonText = strategyReasonText(strategy);
+  const reasonText = planModeReasonText(planMode);
   if (reasonText) {
-    frag.appendChild(kv(tf("strategy.reasonLabel", "Strategy reason"), reasonText));
+    frag.appendChild(kv(tf("plan.reasonLabel", "Plan mode reason"), reasonText));
   }
   return frag;
 }
 
-// Render the strategy section into the flow sidebar body. Appended directly
-// (not as its own titled section) so a flow without strategy info keeps the
-// exact pre-G10 sidebar.
-function appendStrategySection(body, flow) {
-  const rows = buildStrategyRows(flow && flow.implementation_strategy);
+// Render the plan-mode section into the flow sidebar body. Appended directly
+// (not as its own titled section) so a flow without plan-mode info keeps the
+// exact sidebar it had before the projection existed.
+function appendPlanModeSection(body, flow) {
+  const rows = buildPlanModeRows(flow && flow.plan_mode);
   if (!rows) return;
   const section = el("div", "detail-section");
-  section.appendChild(el("h4", null, tf("strategy.label", "Implementation strategy")));
+  section.appendChild(el("h4", null, tf("plan.label", "Plan decomposition")));
   section.appendChild(rows);
   body.appendChild(section);
 }
@@ -14566,20 +14622,20 @@ function collectScopeAuditFromRecords(records) {
   return found;
 }
 
-// Render the history detail's strategy + scope meta block (the session-meta
-// strategy projection and the scope audit collected from the records) plus the
+// Render the history detail's plan-mode + scope meta block (the session-meta
+// plan-mode projection and the scope audit collected from the records) plus the
 // backend usage region. Every consumer below shares these renderers, so the
 // live-flow sidebar, the history detail and the badges never diverge.
 function renderHistoryStrategyScope(container, session, records) {
   if (!container) return;
   const frag = document.createDocumentFragment();
-  const strategyRows = buildStrategyRows(session && session.implementation_strategy);
-  if (strategyRows) {
-    const strategySec = el("div", "history-meta-block");
-    strategySec.appendChild(el(
-      "span", "history-meta-label", tf("strategy.label", "Implementation strategy") + ":"));
-    strategySec.appendChild(strategyRows);
-    frag.appendChild(strategySec);
+  const planRows = buildPlanModeRows(session && session.plan_mode);
+  if (planRows) {
+    const planSec = el("div", "history-meta-block");
+    planSec.appendChild(el(
+      "span", "history-meta-label", tf("plan.label", "Plan decomposition") + ":"));
+    planSec.appendChild(planRows);
+    frag.appendChild(planSec);
   }
   const audit = collectScopeAuditFromRecords(records);
   if (audit) {
@@ -15749,10 +15805,12 @@ function openNewTask() {
   $("nt-task").value = "";
   $("nt-discover").checked = false;
   $("nt-worktree").checked = false;
-  // Reset the strategy control to "project default" so a previously chosen
-  // explicit strategy never silently leaks into the next published task.
-  const ntStrategy = $("nt-strategy");
-  if (ntStrategy) ntStrategy.value = "";
+  // Reset the plan-mode controls to "project default" so a previously chosen
+  // explicit doctrine/granularity never silently leaks into the next task.
+  const ntDecomposition = $("nt-decomposition");
+  if (ntDecomposition) ntDecomposition.value = "";
+  const ntGranularity = $("nt-granularity");
+  if (ntGranularity) ntGranularity.value = "";
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
   const manualInput = $("nt-project-manual");
@@ -15911,7 +15969,7 @@ async function submitNewTask(event) {
   const taskType = $("nt-type").value;
   const discover = $("nt-discover").checked;
   const worktree = $("nt-worktree").checked;
-  const strategy = ($("nt-strategy") && $("nt-strategy").value.trim()) || "";
+  const planMode = readPlanModeInputs("nt-decomposition", "nt-granularity");
   const projectSelectValue = $("nt-project").value.trim();
 
   if (!machineId) return showFormError(errBox, tf("newTask.errSelectMachine", "Select a target machine."));
@@ -15958,7 +16016,7 @@ async function submitNewTask(event) {
           discover,
           worktree,
           projectRoot,
-          strategy,
+          planMode,
         }),
       ),
     });
@@ -17187,11 +17245,14 @@ if (typeof module !== "undefined" && module.exports) {
     renderCompactUsageSummary,
     renderUsagePayloadRegion,
     renderHistoryUsageRegion,
-    // Implementation-strategy + review-scope display (G10) — exposed for the
-    // DOM-free / DOM-stub tests in tests/frontend/strategy_usage_summary.test.mjs.
-    strategyValueLabel,
-    buildStrategyRows,
-    appendStrategySection,
+    // Plan-decomposition + review-scope display — exposed for the DOM-free /
+    // DOM-stub tests in tests/frontend/strategy_usage_summary.test.mjs.
+    planDecompositionLabel,
+    planGranularityLabel,
+    legacyStrategyLabel,
+    planModeReasonText,
+    buildPlanModeRows,
+    appendPlanModeSection,
     buildScopeRows,
     collectScopeAuditFromRecords,
     renderHistoryStrategyScope,

@@ -1,5 +1,5 @@
 /*
- * Backend strategy / usage-summary rendering tests (Group G10).
+ * Backend plan-mode / usage-summary rendering tests (Group G10).
  *
  * Loaded by tests/frontend/test_app_pure.mjs after its shared DOM stub
  * (`globalThis.document` / `FakeNode`) is installed. Exposes
@@ -9,9 +9,8 @@
  *
  * Coverage:
  *   (a) buildNewFlowBody / buildIssueFlowBody — project-default OMITS the
- *       implementation_strategy field (the daemon then resolves the project
- *       configuration / planned default); auto/direct/planned are sent
- *       explicitly.
+ *       plan_decomposition / plan_granularity fields (the daemon then resolves
+ *       the project configuration / default); explicit selections are sent.
  *   (b) usageStatusMark / formatUsageTotals — explicit zero with status
  *       "available" renders as real zeros; unavailable / partial /
  *       legacy_ambiguous render their own label, never a misleading 0.
@@ -25,10 +24,10 @@
  *   (f) applyUsageBadge — backend payload first (same schema for history and
  *       live flow), legacy client accumulation only as the pre-payload
  *       fallback.
- *   (g) strategyValueLabel / buildStrategyRows / buildScopeRows /
- *       collectScopeAuditFromRecords / renderHistoryStrategyScope — effective
- *       strategy + reason + inferred note, not_applicable labels, scope audit
- *       round/baseline/changed-paths/full-rounds facts.
+ *   (g) planDecompositionLabel / buildPlanModeRows / buildScopeRows /
+ *       collectScopeAuditFromRecords / renderHistoryStrategyScope — doctrine +
+ *       granularity + group count + reason, the legacy annotation for pre-model
+ *       flows, scope audit round/baseline/changed-paths/full-rounds facts.
  *   (h) renderHistoryUsageRegion — hidden without a payload, populated from
  *       state.historyUsage when present.
  */
@@ -37,39 +36,58 @@ import assert from "node:assert/strict";
 export function registerStrategyUsageSummaryTests(ctx) {
   const { app, check, findOne, findAll } = ctx;
 
-  // -- (a) strategy request bodies ------------------------------------------
+  // -- (a) plan-mode request bodies -----------------------------------------
 
-  check("G10 buildNewFlowBody omits strategy when project-default", () => {
+  check("G10 buildNewFlowBody omits plan mode when project-default", () => {
     const body = app.buildNewFlowBody({
       machineId: "m1", task: "t", taskType: "feature",
-      discover: false, worktree: false, projectRoot: "/p", strategy: "",
+      discover: false, worktree: false, projectRoot: "/p",
+      planMode: { decomposition: "", granularity: "" },
     });
-    assert.equal("implementation_strategy" in body, false,
+    assert.equal("plan_decomposition" in body, false,
       "project default must omit the field so the daemon resolves config");
+    assert.equal("plan_granularity" in body, false);
     assert.equal(body.task_type, "feature");
   });
 
-  check("G10 buildNewFlowBody sends explicit auto/direct/planned", () => {
-    for (const strategy of ["auto", "direct", "planned"]) {
+  check("G10 buildNewFlowBody sends explicit doctrine + granularity", () => {
+    for (const decomposition of ["capability", "granular"]) {
       const body = app.buildNewFlowBody({
         machineId: "m1", task: "t", taskType: "feature",
-        discover: false, worktree: false, projectRoot: "/p", strategy,
+        discover: false, worktree: false, projectRoot: "/p",
+        planMode: { decomposition, granularity: "conservative" },
       });
-      assert.equal(body.implementation_strategy, strategy);
+      assert.equal(body.plan_decomposition, decomposition);
+      assert.equal(body.plan_granularity, "conservative");
     }
   });
 
-  check("G10 buildIssueFlowBody omits strategy when project-default", () => {
+  check("G10 buildNewFlowBody sends only the axis that was chosen", () => {
+    // Half a choice must leave the other axis to the project configuration.
+    const body = app.buildNewFlowBody({
+      machineId: "m1", task: "t", taskType: "feature",
+      discover: false, worktree: false, projectRoot: "/p",
+      planMode: { decomposition: "", granularity: "single" },
+    });
+    assert.equal("plan_decomposition" in body, false);
+    assert.equal(body.plan_granularity, "single");
+  });
+
+  check("G10 buildIssueFlowBody omits plan mode when project-default", () => {
     const body = app.buildIssueFlowBody(
-      { id: "i1", machine_id: "m1", project_root: "/p" }, false, false, "");
-    assert.equal("implementation_strategy" in body, false);
+      { id: "i1", machine_id: "m1", project_root: "/p" }, false, false,
+      { decomposition: "", granularity: "" });
+    assert.equal("plan_decomposition" in body, false);
+    assert.equal("plan_granularity" in body, false);
     assert.equal(body.from_issue_id, "i1");
   });
 
-  check("G10 buildIssueFlowBody sends an explicit strategy", () => {
+  check("G10 buildIssueFlowBody sends an explicit plan mode", () => {
     const body = app.buildIssueFlowBody(
-      { id: "i1", machine_id: "m1", project_root: "/p" }, true, true, "direct");
-    assert.equal(body.implementation_strategy, "direct");
+      { id: "i1", machine_id: "m1", project_root: "/p" }, true, true,
+      { decomposition: "granular", granularity: "auto" });
+    assert.equal(body.plan_decomposition, "granular");
+    assert.equal(body.plan_granularity, "auto");
     assert.equal(body.discover, true);
     assert.equal(body.worktree, true);
   });
@@ -288,45 +306,62 @@ export function registerStrategyUsageSummaryTests(ctx) {
     assert.ok(badge.classList.contains("hidden"));
   });
 
-  // -- (g) strategy + scope display ------------------------------------------
+  // -- (g) plan mode + scope display -----------------------------------------
 
-  check("G10 strategyValueLabel localizes known values, degrades unknowns", () => {
-    assert.equal(app.strategyValueLabel("planned"), "planned");
-    assert.equal(app.strategyValueLabel(""), app.tf("strategy.value.unknown", "unknown"));
+  check("G10 plan labels localize known values, degrade unknowns", () => {
+    assert.equal(app.planDecompositionLabel("capability"), "capability");
+    assert.equal(app.planDecompositionLabel(""), app.tf("plan.unknown", "unknown"));
+    assert.equal(app.legacyStrategyLabel("planned"), "planned");
     // With the shipped dictionary loaded, not_applicable renders its real label;
     // without any dict (the node harness boot state) the raw value is the
     // fixable fallback — never a crash.
     const saved = app.I18N.dicts["en-US"];
-    app.I18N.dicts["en-US"] = { "strategy.value.not_applicable": "not applicable" };
-    assert.equal(app.strategyValueLabel("not_applicable"), "not applicable");
+    app.I18N.dicts["en-US"] = {
+      "plan.legacy.not_applicable": "not applicable",
+      "plan.granularity.single": "single group",
+    };
+    assert.equal(app.legacyStrategyLabel("not_applicable"), "not applicable");
+    assert.equal(app.planGranularityLabel("single"), "single group");
     if (saved === undefined) delete app.I18N.dicts["en-US"];
     else app.I18N.dicts["en-US"] = saved;
   });
 
-  check("G10 buildStrategyRows shows effective + reason + inferred note", () => {
-    const rows = app.buildStrategyRows({
-      requested: "direct", effective: "direct", reason: "chosen by analyze", inferred: false,
+  check("G10 buildPlanModeRows shows doctrine + granularity + groups + reason", () => {
+    const rows = app.buildPlanModeRows({
+      decomposition: "capability", granularity: "single", group_count: 1,
+      reason: "selected by explicit request", reason_key: "",
+      legacy_strategy: null, inferred: false,
     });
-    assert.ok(rows && rows.textContent.includes("direct"));
-    assert.ok(rows.textContent.includes("chosen by analyze"));
-    const inferred = app.buildStrategyRows({
-      requested: "planned", effective: "planned", reason: "", inferred: true,
-    });
-    assert.ok(inferred.textContent.includes(
-      app.tf("strategy.inferredNote", "inferred from legacy records")));
+    assert.ok(rows && rows.textContent.includes("capability"));
+    assert.ok(rows.textContent.includes("single"));
+    assert.ok(rows.textContent.includes("1"), "the group count renders");
+    assert.ok(rows.textContent.includes("selected by explicit request"));
   });
 
-  check("G10 strategy reason_key renders through i18n, plain reason verbatim", () => {
+  check("G10 buildPlanModeRows annotates a pre-model flow as legacy", () => {
+    const rows = app.buildPlanModeRows({
+      decomposition: null, granularity: null, group_count: null,
+      reason: "", reason_key: "", legacy_strategy: "direct", inferred: true,
+    });
+    assert.ok(rows.textContent.includes("direct"));
+    assert.ok(rows.textContent.includes(
+      app.tf("plan.legacyNote", "retired implementation strategy")));
+    assert.ok(rows.textContent.includes(
+      app.tf("plan.inferredNote", "inferred from legacy records")));
+  });
+
+  check("G10 plan reason_key renders through i18n, plain reason verbatim", () => {
     // The legacy-inference sentence is authored by the backend PROJECTION
     // (UI chrome), so it must render from the catalog; a persisted reason is
     // flow data and stays verbatim.
     const saved = app.I18N.dicts["en-US"];
     app.I18N.dicts["en-US"] = {
-      "strategy.reason.legacy_inference": "TRANSLATED LEGACY REASON",
+      "plan.reason.legacy_inference": "TRANSLATED LEGACY REASON",
     };
-    const rows = app.buildStrategyRows({
-      requested: "planned",
-      effective: "not_applicable",
+    const rows = app.buildPlanModeRows({
+      decomposition: null,
+      granularity: null,
+      legacy_strategy: "not_applicable",
       reason: "Inferred from persisted legacy task type and selected_steps.",
       reason_key: "legacy_inference",
       inferred: true,
@@ -336,24 +371,26 @@ export function registerStrategyUsageSummaryTests(ctx) {
     if (saved === undefined) delete app.I18N.dicts["en-US"];
     else app.I18N.dicts["en-US"] = saved;
 
-    const persisted = app.buildStrategyRows({
-      requested: "auto", effective: "direct",
-      reason: "ANALYZE recommended direct.", reason_key: "", inferred: false,
+    const persisted = app.buildPlanModeRows({
+      decomposition: "granular", granularity: "auto",
+      reason: "left at the default", reason_key: "", inferred: false,
     });
-    assert.ok(persisted.textContent.includes("ANALYZE recommended direct."));
+    assert.ok(persisted.textContent.includes("left at the default"));
   });
 
-  check("G10 buildStrategyRows shows a mismatched explicit request", () => {
-    const rows = app.buildStrategyRows({
-      requested: "direct", effective: "planned", reason: "", inferred: false,
+  check("G10 buildPlanModeRows omits the group count until PLAN has run", () => {
+    const rows = app.buildPlanModeRows({
+      decomposition: "capability", granularity: "auto", group_count: null,
+      reason: "", reason_key: "", inferred: false,
     });
-    assert.ok(rows.textContent.includes("requested direct"),
-      "an explicit request differing from the effective value is surfaced");
+    assert.ok(!rows.textContent.includes(
+      app.tf("plan.groupsLabel", "Task groups")),
+      "an unknown count must not be rendered as a number");
   });
 
-  check("G10 buildStrategyRows is null without an effective value", () => {
-    assert.equal(app.buildStrategyRows(null), null);
-    assert.equal(app.buildStrategyRows({}), null);
+  check("G10 buildPlanModeRows is null without any recoverable value", () => {
+    assert.equal(app.buildPlanModeRows(null), null);
+    assert.equal(app.buildPlanModeRows({}), null);
   });
 
   check("G10 buildScopeRows renders round / baseline / changed paths / full rounds", () => {
@@ -401,12 +438,12 @@ export function registerStrategyUsageSummaryTests(ctx) {
     assert.equal(app.collectScopeAuditFromRecords([]), null);
   });
 
-  check("G10 renderHistoryStrategyScope renders strategy + scope meta", () => {
+  check("G10 renderHistoryStrategyScope renders plan mode + scope meta", () => {
     const container = app.el("div");
     app.renderHistoryStrategyScope(container,
-      { implementation_strategy: { requested: "planned", effective: "planned", reason: "r", inferred: false } },
+      { plan_mode: { decomposition: "granular", granularity: "auto", reason: "r", inferred: false } },
       [scopeRecord({ scope_mode: "full", baseline_id: "b9", fix_iteration: 0, self_check_pass_index: 1, scope_changed_paths: ["x.py"] })]);
-    assert.ok(container.textContent.includes("planned"), "strategy renders");
+    assert.ok(container.textContent.includes("granular"), "plan mode renders");
     assert.ok(container.textContent.includes("b9"), "scope baseline renders");
   });
 

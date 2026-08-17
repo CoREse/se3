@@ -158,7 +158,7 @@
         <div id="history-usage-badge" class="flow-usage-badge hidden"
              data-i18n-title="history.usageTitle"
              title="Total tokens and cost consumed by this session"></div>
-        <!-- Implementation strategy + review scope of the open session,
+        <!-- Plan decomposition mode + review scope of the open session,
              rendered from the session meta / step records (G10). Empty until a
              session is opened. -->
         <div id="history-meta" class="history-meta"></div>
@@ -353,14 +353,20 @@
           <span data-i18n="common.worktreeOption">Run in isolation (worktree mode &mdash; flow runs in an isolated
           worktree, then auto-merges back)</span>
         </label>
-        <!-- Same strategy override as the New Task form: empty = project
+        <!-- Same plan-mode override as the New Task form: empty = project
              default (field omitted from the request). -->
-        <label for="issue-launch-strategy" data-i18n="issueLaunch.strategy">Implementation strategy</label>
-        <select id="issue-launch-strategy">
-          <option value="" data-i18n="strategy.option.projectDefault">project default</option>
-          <option value="auto" data-i18n="strategy.option.auto">auto — let the flow decide</option>
-          <option value="direct" data-i18n="strategy.option.direct">direct — single holistic implementation call</option>
-          <option value="planned" data-i18n="strategy.option.planned">planned — PLAN / task groups / worktree scheduling</option>
+        <label for="issue-launch-decomposition" data-i18n="issueLaunch.planDecomposition">Plan decomposition</label>
+        <select id="issue-launch-decomposition">
+          <option value="" data-i18n="plan.option.projectDefault">project default</option>
+          <option value="capability" data-i18n="plan.option.capability">capability — coarse groups, one autonomous call each</option>
+          <option value="granular" data-i18n="plan.option.granular">granular — legacy fine-grained task listing</option>
+        </select>
+        <label for="issue-launch-granularity" data-i18n="issueLaunch.planGranularity">Group granularity</label>
+        <select id="issue-launch-granularity">
+          <option value="" data-i18n="plan.option.projectDefault">project default</option>
+          <option value="auto" data-i18n="plan.option.auto">auto — PLAN sizes the groups</option>
+          <option value="single" data-i18n="plan.option.single">single — force one group</option>
+          <option value="conservative" data-i18n="plan.option.conservative">conservative — split more readily</option>
         </select>
         <p id="issue-launch-error" class="form-error hidden"></p>
         <div class="modal-actions">
@@ -490,17 +496,23 @@
           <option value="survey" data-i18n="taskType.survey">survey</option>
         </select>
 
-        <!-- Implementation-strategy override for PLAN → IMPLEMENT flows. The
-             empty value (project default) is the sentinel the submit path
-             translates into OMITTING the request field, so the project
-             configuration / planned default resolves it — an explicit empty
-             string would read as an override. -->
-        <label for="nt-strategy" data-i18n="newTask.strategy">Implementation strategy</label>
-        <select id="nt-strategy">
-          <option value="" data-i18n="strategy.option.projectDefault">project default</option>
-          <option value="auto" data-i18n="strategy.option.auto">auto — let the flow decide</option>
-          <option value="direct" data-i18n="strategy.option.direct">direct — single holistic implementation call</option>
-          <option value="planned" data-i18n="strategy.option.planned">planned — PLAN / task groups / worktree scheduling</option>
+        <!-- Plan-mode override for PLAN → IMPLEMENT flows. The empty value
+             (project default) is the sentinel the submit path translates into
+             OMITTING the request field, so the project configuration /
+             default resolves it — an explicit empty string would read as an
+             override. -->
+        <label for="nt-decomposition" data-i18n="newTask.planDecomposition">Plan decomposition</label>
+        <select id="nt-decomposition">
+          <option value="" data-i18n="plan.option.projectDefault">project default</option>
+          <option value="capability" data-i18n="plan.option.capability">capability — coarse groups, one autonomous call each</option>
+          <option value="granular" data-i18n="plan.option.granular">granular — legacy fine-grained task listing</option>
+        </select>
+        <label for="nt-granularity" data-i18n="newTask.planGranularity">Group granularity</label>
+        <select id="nt-granularity">
+          <option value="" data-i18n="plan.option.projectDefault">project default</option>
+          <option value="auto" data-i18n="plan.option.auto">auto — PLAN sizes the groups</option>
+          <option value="single" data-i18n="plan.option.single">single — force one group</option>
+          <option value="conservative" data-i18n="plan.option.conservative">conservative — split more readily</option>
         </select>
 
         <label for="nt-task" data-i18n="newTask.task">Task description</label>

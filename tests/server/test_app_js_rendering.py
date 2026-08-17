@@ -939,37 +939,46 @@ def test_incremental_loaders_guard_container_clear_behind_first_open():
 # ---------------------------------------------------------------------------
 # G10: implementation strategy / scope / backend usage summary wiring
 # ---------------------------------------------------------------------------
-def test_g10_strategy_selects_carry_project_default_first():
-    """Both strategy selects must default to the empty (project-default) value
-    so the submit path omits the field and the daemon resolves the project
+def test_g10_plan_mode_selects_carry_project_default_first():
+    """All four plan-mode selects must default to the empty (project-default)
+    value so the submit path omits the field and the daemon resolves the project
     configuration — an explicit empty override would silently change the
-    strategy resolution chain."""
+    plan-mode resolution chain."""
     html = _read_index_html()
-    for sel_id in ("nt-strategy", "issue-launch-strategy"):
+    expected = {
+        "nt-decomposition": ("capability", "granular"),
+        "nt-granularity": ("auto", "single", "conservative"),
+        "issue-launch-decomposition": ("capability", "granular"),
+        "issue-launch-granularity": ("auto", "single", "conservative"),
+    }
+    for sel_id, values in expected.items():
         idx = html.index(f'id="{sel_id}"')
         block = html[idx:html.index("</select>", idx)]
         first = block[block.index("<option"):block.index(">", block.index("<option")) + 1]
         assert 'value=""' in first, (
             f"{sel_id} must offer project default (value=\"\") first"
         )
-        for strategy in ("auto", "direct", "planned"):
-            assert f'value="{strategy}"' in block, (
-                f"{sel_id} must offer the explicit {strategy} option"
+        for value in values:
+            assert f'value="{value}"' in block, (
+                f"{sel_id} must offer the explicit {value} option"
             )
 
 
-def test_g10_new_flow_body_omits_default_strategy_field():
-    """buildNewFlowBody must only set implementation_strategy for an explicit
+def test_g10_new_flow_body_omits_default_plan_mode_fields():
+    """The request builders must only set the plan-mode fields for an explicit
     value — the omission is what lets the daemon apply project configuration.
     (The function body extractor trips on the destructuring parameter, so this
     screens the assignment pattern in the surrounding source instead.)"""
     src = _read_app_js()
-    assert "body.implementation_strategy = String(strategy);" in src, (
-        "buildNewFlowBody must assign the field"
+    assert "if (decomposition) body.plan_decomposition = String(decomposition);" in src, (
+        "applyPlanModeFields must assign the decomposition only when set"
     )
-    assert "if (strategy)" in src, (
-        "an empty strategy must skip setting the field entirely"
+    assert "if (granularity) body.plan_granularity = String(granularity);" in src, (
+        "applyPlanModeFields must assign the granularity only when set"
     )
+    # Both builders route through the one helper, so the omit-when-empty rule
+    # cannot drift between the New Task form and the Issue Launch modal.
+    assert src.count("applyPlanModeFields(body, planMode);") == 2
 
 
 def test_g10_backend_summary_renderers_share_one_schema():
@@ -985,13 +994,13 @@ def test_g10_backend_summary_renderers_share_one_schema():
         "the history region must reuse the shared payload renderer"
     )
     # The flow card / sidebar consume the same projection shape the daemon
-    # relays (implementation_strategy / review_scope / usage_summary).
+    # relays (plan_mode / review_scope / usage_summary).
     sidebar = _extract_js_function_body(src, "renderFlowSidebar")
-    assert "appendStrategySection" in sidebar, (
-        "sidebar must render the strategy projection"
+    assert "appendPlanModeSection" in sidebar, (
+        "sidebar must render the plan-mode projection"
     )
     signature = _extract_js_function_body(src, "flowSidebarSignature")
-    for field in ("implementation_strategy", "review_scope", "usage_summary"):
+    for field in ("plan_mode", "review_scope", "usage_summary"):
         assert field in signature, f"sidebar signature must carry {field}"
 
 

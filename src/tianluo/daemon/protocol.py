@@ -116,16 +116,15 @@ the dispatch decision lives in the server.
 Protocol version 7 added the optional ``implementation_strategy`` field on
 :data:`MSG_SPAWN_FLOW`. It is a *behavioural* field, not merely additive: a
 pre-7 daemon that silently ignores it would quietly fall back to the project's
-``workflow.implementation_strategy`` / the planned default — turning an
-operator's explicit web choice into a different flow than the one they
-published. The version was therefore bumped to ``7`` so the server can consult
-the daemon's advertised ``protocol_version`` (see
-:func:`supports_spawn_strategy`) *before* dispatching and answer with an
-immediate, explainable "this machine's daemon is too old" capability error
-instead of a silent downgrade. A daemon that never receives the field (an
-older server, or a request without an explicit strategy) behaves exactly as
-before: the CLI adds no ``--implementation-strategy`` option, so the project
-configuration / default resolves the strategy. As with every other gate here,
+configured / default strategy — turning an operator's explicit web choice into
+a different flow than the one they published. The version was therefore bumped
+to ``7`` so the server can consult the daemon's advertised
+``protocol_version`` (see :func:`supports_spawn_strategy`) *before* dispatching
+and answer with an immediate, explainable "this machine's daemon is too old"
+capability error instead of a silent downgrade. A daemon that never receives
+the field (an older server, or a request without an explicit strategy) behaves
+exactly as before: the CLI adds no strategy option, so the project
+configuration / default resolves it. As with every other gate here,
 this module owns only the wire schema, the version constant, and this
 contract; the dispatch decision lives in the server. The usage-summary fields
 added to :data:`MSG_STATUS_UPDATE` / :data:`MSG_HISTORY_DATA` snapshots in the
@@ -133,6 +132,24 @@ same revision are purely additive payload keys and are not themselves the
 reason for the bump — as is the ``usage_catalog`` field on
 :data:`MSG_HISTORY_DATA`, which carries the project's pricing table so the
 server's append-time re-aggregation never rebuilds with no catalog.
+
+Protocol version 8 retired the implementation-strategy routing axis: PLAN now
+owns the execution shape, so :data:`MSG_SPAWN_FLOW` carries the optional
+``plan_decomposition`` / ``plan_granularity`` pair instead. The bump is for
+exactly the reason revision 7 was bumped — these are behavioural fields, and a
+pre-8 daemon that dropped them would run the project's configured doctrine and
+granularity under the banner of an explicit operator choice. The server
+therefore consults :func:`supports_spawn_plan_mode` before dispatching a
+request that carries either field, and refuses with an explainable capability
+error rather than substituting a different flow shape. The retired
+``implementation_strategy`` field stays accepted for one version: a pre-8
+server still speaks it, and the daemon maps it onto the new options (``direct``
+-> ``plan_granularity=single``, ``planned`` -> ``plan_decomposition=granular``,
+``auto`` -> the new defaults) with a deprecation log rather than dropping the
+operator's intent on the floor. Note the asymmetry is deliberate: refusing a
+*new* field to an *old* peer protects against a silent downgrade, while
+accepting an *old* field on a *new* peer is a faithful translation with no
+behaviour lost.
 """
 
 from __future__ import annotations
@@ -167,7 +184,11 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # the server refuses to dispatch an explicit strategy to a peer advertising
 # "6" or older so a silent downgrade to project config / planned can never
 # masquerade as the requested strategy (see the module docstring).
-PROTOCOL_VERSION = "7"
+# Revision "8" replaced that field with the plan_decomposition /
+# plan_granularity pair (the strategy axis was retired in favour of PLAN's own
+# decomposition decision). Same refusal rule, same reason; the retired field
+# remains accepted for one version and is mapped on the daemon side.
+PROTOCOL_VERSION = "8"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -276,25 +297,62 @@ def supports_fetch(peer_version: Any) -> bool:
 
 
 #: Minimum peer ``protocol_version`` that understands the optional
-#: ``implementation_strategy`` field on :data:`MSG_SPAWN_FLOW`. The server
-#: checks this *before* dispatching a request that carries an explicit
-#: strategy: a pre-7 daemon that silently dropped the field would run the
-#: project-configured / default strategy instead — a *behavioural* downgrade
-#: that must surface as an explainable capability error, never as a quiet
-#: substitution. A missing or non-numeric version degrades safely to ``False``
-#: (refuse, report unsupported), mirroring :func:`supports_uploads` and
-#: :func:`supports_fetch`.
+#: ``implementation_strategy`` field on :data:`MSG_SPAWN_FLOW`. Retained for
+#: one version alongside the field itself; new senders use
+#: :data:`MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION` instead.
 MIN_SPAWN_STRATEGY_PROTOCOL_VERSION = 7
 
 
-#: Valid values for the optional ``implementation_strategy`` spawn field.
+#: Valid values for the retired ``implementation_strategy`` spawn field.
 SPAWN_STRATEGY_VALUES: FrozenSet[str] = frozenset({"auto", "direct", "planned"})
+
+
+#: Compatibility mapping applied when a pre-8 server still sends the retired
+#: field: each legacy value's *intent* survives as the equivalent plan-mode
+#: request. ``auto`` meant "let the flow decide", which is exactly the new
+#: default pair, so it maps to nothing at all.
+SPAWN_STRATEGY_PLAN_MODE_MAP = {
+    "direct": (None, "single"),
+    "planned": ("granular", None),
+    "auto": (None, None),
+}
 
 
 def supports_spawn_strategy(peer_version: Any) -> bool:
     """Return whether *peer_version* understands the revision-7 spawn-strategy field."""
     try:
         return int(str(peer_version).strip()) >= MIN_SPAWN_STRATEGY_PROTOCOL_VERSION
+    except (TypeError, ValueError):
+        return False
+
+
+#: Minimum peer ``protocol_version`` that understands the optional
+#: ``plan_decomposition`` / ``plan_granularity`` fields on
+#: :data:`MSG_SPAWN_FLOW`. The server checks this *before* dispatching a
+#: request that carries either: a pre-8 daemon that silently dropped them would
+#: run the project-configured / default doctrine and granularity instead — a
+#: *behavioural* downgrade that must surface as an explainable capability
+#: error, never as a quiet substitution. A missing or non-numeric version
+#: degrades safely to ``False`` (refuse, report unsupported), mirroring
+#: :func:`supports_uploads` and :func:`supports_fetch`.
+MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION = 8
+
+
+#: Valid values for the optional ``plan_decomposition`` spawn field.
+SPAWN_PLAN_DECOMPOSITION_VALUES: FrozenSet[str] = frozenset(
+    {"capability", "granular"}
+)
+
+#: Valid values for the optional ``plan_granularity`` spawn field.
+SPAWN_PLAN_GRANULARITY_VALUES: FrozenSet[str] = frozenset(
+    {"auto", "single", "conservative"}
+)
+
+
+def supports_spawn_plan_mode(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the revision-8 plan-mode fields."""
+    try:
+        return int(str(peer_version).strip()) >= MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION
     except (TypeError, ValueError):
         return False
 
@@ -827,6 +885,8 @@ def make_spawn_flow(
     resume_flow_id: str = "",
     from_issue_id: str = "",
     implementation_strategy: str = "",
+    plan_decomposition: str = "",
+    plan_granularity: str = "",
 ) -> Message:
     """server → daemon: instruct a daemon to spawn a new ``luo run`` flow.
 
@@ -842,9 +902,9 @@ def make_spawn_flow(
     When *resume_flow_id* is non-empty, the daemon resumes the named flow
     (``luo run --resume --flow-id <id>``) instead of starting a fresh one.
     The ``task_description`` is ignored in this case — the flow's own
-    persisted state supplies the task. ``implementation_strategy`` is likewise
-    never sent on a resume: the persisted flow strategy is authoritative and
-    must not be re-decided.
+    persisted state supplies the task. The plan-mode fields are likewise never
+    sent on a resume: the flow's persisted decomposition decision is
+    authoritative and must not be re-decided.
 
     When *from_issue_id* is non-empty, the daemon spawns the flow from an
     existing issue (``luo run --from-issue <id>``); the issue's description
@@ -854,13 +914,19 @@ def make_spawn_flow(
     plain fresh-spawn payload stays byte-for-byte backward compatible and the
     ``PROTOCOL_VERSION`` is not bumped.
 
-    When *implementation_strategy* is non-empty (revision 7), the daemon's
-    spawner appends ``--implementation-strategy <value>`` so the flow's
-    explicit web choice overrides the project configuration.  The value must
-    be a :data:`SPAWN_STRATEGY_VALUES` member; the server must check
-    :func:`supports_spawn_strategy` against the daemon's advertised protocol
-    version BEFORE sending a frame that carries it — a pre-7 daemon would
-    silently ignore the field and run a different strategy than requested.
+    When *plan_decomposition* / *plan_granularity* are non-empty (revision 8),
+    the daemon's spawner appends ``--plan-decomposition <value>`` /
+    ``--plan-granularity <value>`` so the flow's explicit web choice overrides
+    the project configuration.  Values must be members of
+    :data:`SPAWN_PLAN_DECOMPOSITION_VALUES` / :data:`SPAWN_PLAN_GRANULARITY_VALUES`;
+    the server must check :func:`supports_spawn_plan_mode` against the daemon's
+    advertised protocol version BEFORE sending a frame that carries either — a
+    pre-8 daemon would silently ignore them and run a different flow shape than
+    requested.
+
+    *implementation_strategy* is the retired revision-7 field, kept for one
+    version so a pre-8 server can still be understood; the daemon maps it onto
+    the two fields above on receipt.  New callers must not set it.
     """
     payload: Dict[str, Any] = {
         "task_description": task_description,
@@ -882,6 +948,21 @@ def make_spawn_flow(
                 f"{sorted(SPAWN_STRATEGY_VALUES)}, got {implementation_strategy!r}"
             )
         payload["implementation_strategy"] = strategy
+    # Unset plan-mode fields stay off the wire entirely, so a plain fresh-spawn
+    # payload is byte-for-byte what a revision-7 peer already accepts and the
+    # project configuration keeps resolving the doctrine.
+    for field_name, raw, allowed in (
+        ("plan_decomposition", plan_decomposition, SPAWN_PLAN_DECOMPOSITION_VALUES),
+        ("plan_granularity", plan_granularity, SPAWN_PLAN_GRANULARITY_VALUES),
+    ):
+        if not raw:
+            continue
+        value = str(raw).strip()
+        if value not in allowed:
+            raise ProtocolError(
+                f"spawn {field_name} must be one of {sorted(allowed)}, got {raw!r}"
+            )
+        payload[field_name] = value
     return Message(type=MSG_SPAWN_FLOW, payload=payload)
 
 

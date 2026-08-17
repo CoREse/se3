@@ -4138,15 +4138,15 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 
 /* ---------------------------------------------------------------------------
- * Implementation strategy / review scope / backend usage summary (G10)
+ * Plan decomposition / review scope / backend usage summary
  * ---------------------------------------------------------------------------
- * The sidebar and history detail render the daemon's strategy / scope /
+ * The sidebar and history detail render the daemon's plan-mode / scope /
  * usage projections; the styles below keep them as low-key annotations that
  * match the surrounding kv rows and report cards.
  */
 
-/* Flow-card strategy chip: one dim word beside the step/type meta line. */
-.flow-strategy-chip {
+/* Flow-card plan-mode chip: one dim word beside the step/type meta line. */
+.flow-plan-chip {
   color: var(--fg-dim);
   font-size: 11px;
   padding: 1px 6px;
@@ -4193,7 +4193,7 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 /* Session badge cost suffix (actual / estimated stay separate columns). */
 .flow-usage-badge__cost { font-variant-numeric: tabular-nums; }
 
-/* History detail: strategy/scope meta blocks under the flow-id line. */
+/* History detail: plan-mode/scope meta blocks under the flow-id line. */
 .history-meta {
   display: flex;
   flex-direction: column;
@@ -4260,8 +4260,8 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
 @media (max-width: 600px) {
   /* The sidebar drawer shares the modal-width constraints; the usage tables
-   * and strategy rows must degrade the same way the kv rows do. */
+   * and plan-mode rows must degrade the same way the kv rows do. */
   .kv { flex-wrap: wrap; }
   .kv .k { min-width: 100%; }
-  .flow-strategy-chip { white-space: normal; }
+  .flow-plan-chip { white-space: normal; }
 }

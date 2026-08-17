@@ -38,7 +38,7 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.gzip import GZipMiddleware
@@ -392,13 +392,14 @@ class NewFlowRequest(BaseModel):
     lifecycle via the ``luo run --from-issue`` CLI path.  *task* is optional in
     that case, so it defaults to an empty string.
 
-    *implementation_strategy* (optional, protocol revision 7) is the explicit
-    ``auto``/``direct``/``planned`` strategy the published flow must use.
-    Omitted by older clients — the field stays legal and the daemon adds no
-    CLI option, so the project configuration / default resolves the strategy.
-    When supplied, the owning daemon must advertise revision 7 or newer;
-    otherwise the request is refused with an explicit capability error instead
-    of silently running a different strategy than requested.
+    *plan_decomposition* / *plan_granularity* (optional, protocol revision 8)
+    are the explicit PLAN decomposition doctrine and group-count pressure the
+    published flow must use. Omitted by older clients — the fields stay legal
+    and the daemon adds no CLI option, so the project configuration / default
+    resolves them. When either is supplied, the owning daemon must advertise
+    revision 8 or newer; otherwise the request is refused with an explicit
+    capability error instead of silently running a different flow shape than
+    requested.
     """
 
     machine_id: str = ""
@@ -408,7 +409,8 @@ class NewFlowRequest(BaseModel):
     discover: bool = False
     worktree: bool = False
     from_issue_id: str = ""
-    implementation_strategy: str = ""
+    plan_decomposition: str = ""
+    plan_granularity: str = ""
 
 
 class RespondRequest(BaseModel):
@@ -1416,36 +1418,47 @@ def create_app(
         machine_id, flow = result
         return {"machine_id": machine_id, "flow": flow}
 
-    def _validated_strategy(req: NewFlowRequest) -> str:
-        """Validate the request's optional implementation strategy.
+    def _validated_plan_mode(req: NewFlowRequest) -> Tuple[str, str]:
+        """Validate the request's optional plan-mode fields.
 
-        Returns the trimmed value (``""`` when omitted — the field stays off
-        the wire so the daemon/CLI resolve project configuration / default).
-        Raises ``HTTPException(422)`` for a non-empty value outside
-        ``auto``/``direct``/``planned``.
+        Returns the trimmed ``(decomposition, granularity)`` pair (``""`` for
+        an omitted field — it stays off the wire so the daemon/CLI resolve
+        project configuration / default). Raises ``HTTPException(422)`` for a
+        non-empty value outside the protocol's legal set.
         """
-        strategy = req.implementation_strategy.strip()
-        if not strategy:
-            return ""
-        if strategy not in protocol.SPAWN_STRATEGY_VALUES:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"'implementation_strategy' must be one of "
-                    f"{sorted(protocol.SPAWN_STRATEGY_VALUES)}, got {strategy!r}"
-                ),
-            )
-        return strategy
+        values = []
+        for name, raw, allowed in (
+            (
+                "plan_decomposition",
+                req.plan_decomposition,
+                protocol.SPAWN_PLAN_DECOMPOSITION_VALUES,
+            ),
+            (
+                "plan_granularity",
+                req.plan_granularity,
+                protocol.SPAWN_PLAN_GRANULARITY_VALUES,
+            ),
+        ):
+            value = (raw or "").strip()
+            if value and value not in allowed:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"'{name}' must be one of {sorted(allowed)}, got {value!r}"
+                    ),
+                )
+            values.append(value)
+        return values[0], values[1]
 
     # WHY: a plain nested function, NOT a @staticmethod — a staticmethod object
     # is only directly callable from Python 3.10, and this package supports
     # 3.9+. Decorating it would make the compatibility gate itself raise a
     # TypeError (HTTP 500) exactly where it is supposed to explain the refusal.
-    def _strategy_unsupported(machine_id: str) -> JSONResponse:
-        """Refuse an explicit strategy for a pre-revision-7 daemon.
+    def _plan_mode_unsupported(machine_id: str) -> JSONResponse:
+        """Refuse an explicit plan mode for a pre-revision-8 daemon.
 
-        A silent drop of the field would downgrade the operator's explicit
-        choice to the project configuration / planned default — a behavioural
+        A silent drop of the fields would downgrade the operator's explicit
+        choice to the project configuration / default doctrine — a behavioural
         substitution, not a missing nicety — so it must surface as an
         immediate capability error the UI can explain (mirroring the upload /
         fetch refusal). The machine-readable ``reason`` lets the browser
@@ -1456,8 +1469,8 @@ def create_app(
             content={
                 "detail": (
                     f"daemon on '{machine_id}' does not support an explicit "
-                    "implementation strategy; upgrade it to a build speaking "
-                    f"protocol revision {protocol.MIN_SPAWN_STRATEGY_PROTOCOL_VERSION} "
+                    "plan decomposition mode; upgrade it to a build speaking "
+                    f"protocol revision {protocol.MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION} "
                     "or newer"
                 ),
                 "reason": "unsupported_daemon",
@@ -1510,19 +1523,19 @@ def create_app(
                 detail=f"machine '{machine_id}' owning issue '{from_issue_id}' "
                 "is not connected",
             )
-        strategy = _validated_strategy(req)
-        if strategy:
+        decomposition, granularity = _validated_plan_mode(req)
+        if decomposition or granularity:
             owned_issue_machine = await state.get_machine(
                 machine_id, owner=scope
             )
             # Fail CLOSED on a missing machine record: an unverifiable daemon
-            # cannot be assumed to speak revision 7, and dispatching anyway
-            # would let a pre-revision-7 daemon silently ignore the field and
-            # downgrade the operator's explicit strategy to project config.
-            if owned_issue_machine is None or not protocol.supports_spawn_strategy(
+            # cannot be assumed to speak revision 8, and dispatching anyway
+            # would let a pre-revision-8 daemon silently ignore the fields and
+            # downgrade the operator's explicit plan mode to project config.
+            if owned_issue_machine is None or not protocol.supports_spawn_plan_mode(
                 owned_issue_machine.get("protocol_version")
             ):
-                return _strategy_unsupported(machine_id)
+                return _plan_mode_unsupported(machine_id)
         message = protocol.make_spawn_flow(
             "",
             project_root=project_root,
@@ -1530,7 +1543,8 @@ def create_app(
             discover=req.discover,
             worktree=req.worktree,
             from_issue_id=from_issue_id,
-            implementation_strategy=strategy,
+            plan_decomposition=decomposition,
+            plan_granularity=granularity,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:
@@ -1587,18 +1601,19 @@ def create_app(
                 status_code=404,
                 detail=f"machine '{machine_id}' is not connected",
             )
-        strategy = _validated_strategy(req)
-        if strategy and not protocol.supports_spawn_strategy(
+        decomposition, granularity = _validated_plan_mode(req)
+        if (decomposition or granularity) and not protocol.supports_spawn_plan_mode(
             owned.get("protocol_version")
         ):
-            return _strategy_unsupported(machine_id)
+            return _plan_mode_unsupported(machine_id)
         message = protocol.make_spawn_flow(
             task,
             project_root=project_root,
             task_type=req.task_type,
             discover=req.discover,
             worktree=req.worktree,
-            implementation_strategy=strategy,
+            plan_decomposition=decomposition,
+            plan_granularity=granularity,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:

@@ -1170,13 +1170,37 @@ class DaemonClient:
         task_type = str(payload.get("task_type") or "feature")
         discover = bool(payload.get("discover", False))
         worktree = bool(payload.get("worktree", False))
-        implementation_strategy = str(
-            payload.get("implementation_strategy") or ""
-        ).strip()
-        if implementation_strategy not in protocol.SPAWN_STRATEGY_VALUES:
+        plan_decomposition = str(payload.get("plan_decomposition") or "").strip()
+        plan_granularity = str(payload.get("plan_granularity") or "").strip()
+        if plan_decomposition not in protocol.SPAWN_PLAN_DECOMPOSITION_VALUES:
             # A malformed value (or an empty one) simply stays off the argv:
             # the CLI then resolves project config / default. Never guess.
-            implementation_strategy = ""
+            plan_decomposition = ""
+        if plan_granularity not in protocol.SPAWN_PLAN_GRANULARITY_VALUES:
+            plan_granularity = ""
+        legacy_strategy = str(payload.get("implementation_strategy") or "").strip()
+        if legacy_strategy in protocol.SPAWN_STRATEGY_VALUES:
+            # A pre-8 server still speaks the retired axis. Translate the
+            # operator's intent onto the new options rather than dropping it;
+            # an explicit new-model field always wins over the mapping.
+            mapped_decomposition, mapped_granularity = (
+                protocol.SPAWN_STRATEGY_PLAN_MODE_MAP[legacy_strategy]
+            )
+            logger.warning(
+                "SPAWN_FLOW carried the deprecated implementation_strategy=%r; "
+                "mapping it onto plan_decomposition=%r / plan_granularity=%r. "
+                "The field is removed in the next major version.",
+                legacy_strategy, mapped_decomposition, mapped_granularity,
+            )
+            if mapped_decomposition and not plan_decomposition:
+                plan_decomposition = mapped_decomposition
+            if mapped_granularity and not plan_granularity:
+                plan_granularity = mapped_granularity
+        elif legacy_strategy:
+            logger.warning(
+                "Ignoring SPAWN_FLOW implementation_strategy=%r: not a legal value",
+                legacy_strategy,
+            )
         if self._spawn_handler is None:
             logger.warning("Received SPAWN_FLOW but no spawn handler is configured")
             return
@@ -1211,17 +1235,18 @@ class DaemonClient:
                 await _report_failure(f"project init failed: {error}")
                 return
         try:
-            # The from_issue_id 5th positional and the worktree /
-            # implementation_strategy keywords are passed only when
-            # present/true so legacy 4-argument spawn handlers stay backward
-            # compatible (a non-isolated fresh spawn keeps the exact
-            # 4-positional call shape).
+            # The from_issue_id 5th positional and the worktree / plan-mode
+            # keywords are passed only when present/true so legacy 4-argument
+            # spawn handlers stay backward compatible (a non-isolated fresh
+            # spawn keeps the exact 4-positional call shape).
             # The spawn handler registers the new flow, which reads engine.json
             # for its flow_id (size-guarded, but still disk I/O), and blocks on
             # a subprocess launch — run it off the event loop (issue #243 A3).
             spawn_kwargs = {"worktree": True} if worktree else {}
-            if implementation_strategy:
-                spawn_kwargs["implementation_strategy"] = implementation_strategy
+            if plan_decomposition:
+                spawn_kwargs["plan_decomposition"] = plan_decomposition
+            if plan_granularity:
+                spawn_kwargs["plan_granularity"] = plan_granularity
             if from_issue_id:
                 await asyncio.to_thread(
                     self._spawn_handler,
