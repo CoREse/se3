@@ -506,7 +506,7 @@ def test_publish_flow_omits_worktree_key_by_default(client_and_app):
         assert "worktree" not in spawn.payload
 
 
-def test_publish_flow_threads_implementation_strategy(client_and_app):
+def test_publish_flow_threads_plan_mode(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -516,19 +516,21 @@ def test_publish_flow_threads_implementation_strategy(client_and_app):
             "/api/flows",
             json={
                 "machine_id": "m1",
-                "task": "Direct it",
+                "task": "Group it",
                 "project_root": "/p",
-                "implementation_strategy": "direct",
+                "plan_decomposition": "capability",
+                "plan_granularity": "single",
             },
         )
         assert resp.status_code == 202
         spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
-        assert spawn.payload["implementation_strategy"] == "direct"
+        assert spawn.payload["plan_decomposition"] == "capability"
+        assert spawn.payload["plan_granularity"] == "single"
 
 
-def test_publish_flow_omits_strategy_key_by_default(client_and_app):
-    """An old client that never sends the field stays fully legal."""
+def test_publish_flow_omits_plan_mode_keys_by_default(client_and_app):
+    """An old client that never sends the fields stays fully legal."""
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -540,38 +542,45 @@ def test_publish_flow_omits_strategy_key_by_default(client_and_app):
         )
         assert resp.status_code == 202
         spawn = recv_daemon_frame(ws)
-        assert "implementation_strategy" not in spawn.payload
+        assert "plan_decomposition" not in spawn.payload
+        assert "plan_granularity" not in spawn.payload
 
 
-def test_publish_flow_rejects_invalid_strategy(client_and_app):
+def test_publish_flow_rejects_invalid_plan_mode(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
         recv_daemon_frame(ws)
-        resp = client.post(
-            "/api/flows",
-            json={
-                "machine_id": "m1",
-                "task": "X",
-                "project_root": "/p",
-                "implementation_strategy": "turbo",
-            },
-        )
-        assert resp.status_code == 422
+        for field, value in (
+            ("plan_decomposition", "turbo"),
+            ("plan_granularity", "planned"),
+        ):
+            resp = client.post(
+                "/api/flows",
+                json={
+                    "machine_id": "m1",
+                    "task": "X",
+                    "project_root": "/p",
+                    field: value,
+                },
+            )
+            assert resp.status_code == 422
+            # The refusal names the legal set so an operator can act on it.
+            assert "must be one of" in resp.text
 
 
-def test_publish_flow_strategy_refuses_pre_revision_7_daemon(client_and_app):
-    """An explicit strategy against a pre-7 daemon is a capability error.
+def test_publish_flow_plan_mode_refuses_pre_revision_8_daemon(client_and_app):
+    """An explicit plan mode against a pre-8 daemon is a capability error.
 
-    Silently dropping the field would downgrade the operator's explicit
-    choice to project config / planned — never a quiet substitution.
+    Silently dropping the fields would downgrade the operator's explicit
+    choice to project config / default — never a quiet substitution.
     """
     client, app = client_and_app
     hello = protocol.make_hello(
         "m1", "host-1", "6.4.0", key=app.state.test_daemon_key
     )
     frame = json.loads(hello.to_json())
-    frame["payload"]["protocol_version"] = "6"
+    frame["payload"]["protocol_version"] = "7"
     with client.websocket_connect("/ws") as ws:
         ws.send_text(json.dumps(frame))
         recv_daemon_frame(ws)  # WELCOME
@@ -580,9 +589,9 @@ def test_publish_flow_strategy_refuses_pre_revision_7_daemon(client_and_app):
             "/api/flows",
             json={
                 "machine_id": "m1",
-                "task": "Direct it",
+                "task": "Group it",
                 "project_root": "/p",
-                "implementation_strategy": "direct",
+                "plan_granularity": "single",
             },
         )
         assert resp.status_code == 501
@@ -591,13 +600,13 @@ def test_publish_flow_strategy_refuses_pre_revision_7_daemon(client_and_app):
         # No spawn frame was dispatched for the refused request.
         assert ws.receive_json()["type"] != protocol.MSG_SPAWN_FLOW
 
-    # The same old daemon accepts a strategy-less request: the field is
-    # omitted, so project configuration / default resolves it.
+    # The same old daemon accepts a plan-mode-less request: the fields are
+    # omitted, so project configuration / default resolves them.
     hello = protocol.make_hello(
         "m1", "host-1", "6.4.0", key=app.state.test_daemon_key
     )
     frame = json.loads(hello.to_json())
-    frame["payload"]["protocol_version"] = "6"
+    frame["payload"]["protocol_version"] = "7"
     with client.websocket_connect("/ws") as ws:
         ws.send_text(json.dumps(frame))
         recv_daemon_frame(ws)
@@ -608,10 +617,10 @@ def test_publish_flow_strategy_refuses_pre_revision_7_daemon(client_and_app):
         assert resp.status_code == 202
         spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
-        assert "implementation_strategy" not in spawn.payload
+        assert "plan_decomposition" not in spawn.payload
 
 
-def test_resume_flow_never_sends_strategy(client_and_app):
+def test_resume_flow_never_sends_plan_mode(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -636,8 +645,9 @@ def test_resume_flow_never_sends_strategy(client_and_app):
         spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["resume_flow_id"] == "f1"
-        # The persisted flow's strategy is authoritative — never re-decided.
-        assert "implementation_strategy" not in spawn.payload
+        # The persisted flow's decision is authoritative — never re-decided.
+        assert "plan_decomposition" not in spawn.payload
+        assert "plan_granularity" not in spawn.payload
 
 
 def test_publish_flow_unknown_machine_404(client_and_app):
@@ -1896,8 +1906,8 @@ def test_publish_flow_from_issue_dispatches(client_and_app):
         assert spawn.payload["discover"] is False
 
 
-def test_publish_flow_from_issue_threads_strategy(client_and_app):
-    """An explicit strategy reaches the from-issue spawn path too."""
+def test_publish_flow_from_issue_threads_plan_mode(client_and_app):
+    """An explicit plan mode reaches the from-issue spawn path too."""
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -1908,17 +1918,17 @@ def test_publish_flow_from_issue_threads_strategy(client_and_app):
             "/api/flows",
             json={
                 "from_issue_id": "011",
-                "implementation_strategy": "planned",
+                "plan_decomposition": "granular",
             },
         )
         assert resp.status_code == 202, resp.text
         spawn = recv_daemon_frame(ws)
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["from_issue_id"] == "011"
-        assert spawn.payload["implementation_strategy"] == "planned"
+        assert spawn.payload["plan_decomposition"] == "granular"
 
 
-def test_publish_flow_from_issue_omits_strategy_by_default(client_and_app):
+def test_publish_flow_from_issue_omits_plan_mode_by_default(client_and_app):
     client, app = client_and_app
     with client.websocket_connect("/ws") as ws:
         ws.send_text(_hello(app))
@@ -1931,7 +1941,8 @@ def test_publish_flow_from_issue_omits_strategy_by_default(client_and_app):
         )
         assert resp.status_code == 202, resp.text
         spawn = recv_daemon_frame(ws)
-        assert "implementation_strategy" not in spawn.payload
+        assert "plan_decomposition" not in spawn.payload
+        assert "plan_granularity" not in spawn.payload
 
 
 def test_publish_flow_from_issue_threads_discover(client_and_app):

@@ -144,11 +144,12 @@ def test_history_only_flow_metadata_without_engine_json(tmp_path):
     assert meta.active is False
 
 
-def test_history_only_flow_infers_strategy_from_recorded_step_files(tmp_path):
+def test_history_only_flow_infers_legacy_path_from_recorded_step_files(tmp_path):
     """A history-only feature flow with a recorded PLAN step must project the
-    same deterministic strategy fact (planned, inferred) the CLI history view
-    shows for the same directory — the recorded step list is readable from
-    the jsonl file names without engine state."""
+    same deterministic fact (the legacy planned path, inferred) the CLI history
+    view shows for the same directory — the recorded step list is readable from
+    the jsonl file names without engine state. Without engine state there is no
+    persisted doctrine to report, so only the legacy annotation is available."""
     hist_dir = tmp_path / "tianluo" / "history" / "orphan-plan"
     _write_jsonl(
         hist_dir / "03_plan_a1b2c3d4.jsonl",
@@ -164,10 +165,11 @@ def test_history_only_flow_infers_strategy_from_recorded_step_files(tmp_path):
     )
 
     meta = _make_reader(tmp_path).build_index()[0]
-    strategy = meta.implementation_strategy
-    assert strategy is not None
-    assert strategy["effective"] == "planned"
-    assert strategy["inferred"] is True
+    plan_mode = meta.plan_mode
+    assert plan_mode is not None
+    assert plan_mode["legacy_strategy"] == "planned"
+    assert plan_mode["decomposition"] is None
+    assert plan_mode["inferred"] is True
 
 
 def test_build_index_dedups_by_flow_id(tmp_path):

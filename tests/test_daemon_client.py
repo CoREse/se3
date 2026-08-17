@@ -312,26 +312,68 @@ def test_make_spawn_flow_omits_worktree_key_when_false():
     assert msg2.payload["worktree"] is True
 
 
-def test_dispatch_spawn_flow_threads_implementation_strategy():
+def _plan_mode_handler(received):
+    def handler(t, p, ty, d, *, plan_decomposition="", plan_granularity=""):
+        received.append((t, p, ty, d, plan_decomposition, plan_granularity))
+
+    return handler
+
+
+def test_dispatch_spawn_flow_threads_plan_mode():
     received = []
-    client = _make_client(
-        spawn_handler=lambda t, p, ty, d, *, implementation_strategy="": received.append(
-            (t, p, ty, d, implementation_strategy)
-        )
-    )
+    client = _make_client(spawn_handler=_plan_mode_handler(received))
 
     async def scenario():
         await client._dispatch(
             _FakeWS(),
-            protocol.make_spawn_flow("Direct it", implementation_strategy="direct"),
+            protocol.make_spawn_flow(
+                "Group it",
+                plan_decomposition="capability",
+                plan_granularity="single",
+            ),
         )
 
     asyncio.run(scenario())
-    assert received == [("Direct it", "", "feature", False, "direct")]
+    assert received == [("Group it", "", "feature", False, "capability", "single")]
 
 
-def test_dispatch_spawn_flow_omits_strategy_keyword_when_absent():
-    """A strategy-less spawn keeps the legacy handler call shape."""
+def test_dispatch_spawn_flow_maps_the_retired_strategy_field():
+    """A pre-8 server still speaks implementation_strategy; intent survives."""
+    received = []
+    client = _make_client(spawn_handler=_plan_mode_handler(received))
+
+    async def scenario():
+        for value in ("direct", "planned", "auto"):
+            await client._dispatch(
+                _FakeWS(),
+                protocol.make_spawn_flow("T", implementation_strategy=value),
+            )
+
+    asyncio.run(scenario())
+    assert [(entry[4], entry[5]) for entry in received] == [
+        ("", "single"),     # direct meant "one autonomous call"
+        ("granular", ""),   # planned meant "fine-grained task groups"
+        ("", ""),           # auto meant "let the flow decide" = new defaults
+    ]
+
+
+def test_dispatch_spawn_flow_rejects_invalid_plan_mode_values():
+    """A malformed value is dropped, never passed through to the CLI."""
+    received = []
+    client = _make_client(spawn_handler=_plan_mode_handler(received))
+
+    async def scenario():
+        message = protocol.make_spawn_flow("T", project_root="/p")
+        message.payload["plan_decomposition"] = "sideways"
+        message.payload["plan_granularity"] = "planned"
+        await client._dispatch(_FakeWS(), message)
+
+    asyncio.run(scenario())
+    assert received == [("T", "/p", "feature", False, "", "")]
+
+
+def test_dispatch_spawn_flow_omits_plan_mode_keywords_when_absent():
+    """A plan-mode-less spawn keeps the legacy handler call shape."""
     received = []
     client = _make_client(
         spawn_handler=lambda t, p, ty, d: received.append((t, p, ty, d))
@@ -347,18 +389,18 @@ def test_dispatch_spawn_flow_omits_strategy_keyword_when_absent():
     assert received == [("Plain", "/p", "feature", False)]
 
 
-def test_dispatch_spawn_flow_ignores_strategy_on_resume():
-    """A resume SPAWN_FLOW never forwards a strategy decision."""
+def test_dispatch_spawn_flow_ignores_plan_mode_on_resume():
+    """A resume SPAWN_FLOW never forwards a plan-mode decision."""
     received = []
     client = _make_client(
         resume_handler=lambda f, p: received.append((f, p))
     )
 
     async def scenario():
-        # Even a hand-crafted payload carrying the field is ignored on the
-        # resume path — the persisted flow strategy is authoritative.
+        # Even a hand-crafted payload carrying the fields is ignored on the
+        # resume path — the persisted flow decision is authoritative.
         message = protocol.make_spawn_flow("", resume_flow_id="f9")
-        message.payload["implementation_strategy"] = "direct"
+        message.payload["plan_decomposition"] = "granular"
         await client._dispatch(_FakeWS(), message)
 
     asyncio.run(scenario())

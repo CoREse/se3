@@ -254,10 +254,10 @@ class FlowSnapshot:
     resumable: bool = False
     # Control-plane projections relayed verbatim from the daemon's aggregator
     # (shared backends with the CLI history view — the server never re-derives
-    # them): the implementation-strategy view, the SELF_CHECK scope audit, and
-    # the compact records-free usage/cost summary. ``None`` = the daemon did
-    # not (or could not) supply it.
-    implementation_strategy: Optional[Dict[str, Any]] = None
+    # them): the plan-mode view (decomposition / granularity / group count),
+    # the SELF_CHECK scope audit, and the compact records-free usage/cost
+    # summary. ``None`` = the daemon did not (or could not) supply it.
+    plan_mode: Optional[Dict[str, Any]] = None
     review_scope: Optional[Dict[str, Any]] = None
     usage_summary: Optional[Dict[str, Any]] = None
 
@@ -281,9 +281,9 @@ class FlowSnapshot:
             step_history=list(data.get("step_history") or []),
             waiting_for_lock=bool(data.get("waiting_for_lock", False)),
             resumable=bool(data.get("resumable", False)),
-            implementation_strategy=(
-                data.get("implementation_strategy")
-                if isinstance(data.get("implementation_strategy"), dict)
+            plan_mode=(
+                data.get("plan_mode")
+                if isinstance(data.get("plan_mode"), dict)
                 else None
             ),
             review_scope=(
@@ -317,9 +317,9 @@ class FlowSnapshot:
             "resumable": self.resumable,
         }
         # Absent projections stay absent (unknown), never a fabricated empty
-        # dict that would read as a confirmed not_applicable / zero-usage.
-        if self.implementation_strategy is not None:
-            data["implementation_strategy"] = self.implementation_strategy
+        # dict that would read as a confirmed single-group / zero-usage answer.
+        if self.plan_mode is not None:
+            data["plan_mode"] = self.plan_mode
         if self.review_scope is not None:
             data["review_scope"] = self.review_scope
         if self.usage_summary is not None:

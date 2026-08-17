@@ -1,22 +1,23 @@
-"""Cross-surface compatibility tests for strategy, scope and usage projections.
+"""Cross-surface compatibility tests for plan-mode, scope and usage projections.
 
-The same three projections — the implementation-strategy view, the SELF_CHECK
-scope audit and the usage/cost summary — must surface identically through the
-CLI history view, the daemon status snapshot / session metadata / spawn
-protocol, and the server API.  These tests pin the shared backends
-(strategy_view.py, usage.py) and the relay surfaces that consume them.
+The same three projections — the PLAN decomposition view, the SELF_CHECK scope
+audit and the usage/cost summary — must surface identically through the CLI
+history view, the daemon status snapshot / session metadata / spawn protocol,
+and the server API.  These tests pin the shared backends (strategy_view.py,
+usage.py) and the relay surfaces that consume them.
 """
 
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
 from tianluo.daemon import protocol
 from tianluo.daemon.aggregator import DaemonAggregator, FlowSnapshot
 from tianluo.daemon.history import DaemonHistoryReader, SessionMeta
-from tianluo.strategy_view import scope_view, strategy_view
+from tianluo.strategy_view import plan_mode_view, scope_view
 from tianluo.usage import (
     UsageRecord,
     UsageStatus,
@@ -55,108 +56,162 @@ def _record(
 
 
 # --------------------------------------------------------------------------
-# strategy_view — the shared projection
+# plan_mode_view — the shared projection
 # --------------------------------------------------------------------------
 
 
-class TestStrategyView:
+class TestPlanModeView:
     def test_persisted_context_wins(self):
-        view = strategy_view(
+        view = plan_mode_view(
             {
-                "requested_implementation_strategy": "auto",
-                "effective_implementation_strategy": "planned",
-                "strategy_reason": "finalized",
+                "plan_decomposition": "capability",
+                "plan_granularity": "conservative",
+                "plan_mode_reason": "selected by explicit request",
             },
             task_type="feature",
-            selected_steps=["analyze", "implement"],
+            selected_steps=["analyze", "plan", "implement"],
+            plan_group_count=3,
         )
         assert view == {
-            "requested": "auto",
-            "effective": "planned",
-            "reason": "finalized",
+            "decomposition": "capability",
+            "granularity": "conservative",
+            "group_count": 3,
+            "reason": "selected by explicit request",
             # A persisted reason is flow data recorded at decision time, so it
             # carries no projection-authored i18n key.
             "reason_key": "",
+            "legacy_strategy": None,
             "inferred": False,
         }
 
-    def test_pending_effective_is_none(self):
-        view = strategy_view(
-            {"requested_implementation_strategy": "auto"},
-            task_type="pending",
-            selected_steps=[],
+    def test_group_count_falls_back_to_the_context_key(self):
+        # A hot/cold flow externalizes its PLAN outputs, so the count can only
+        # come from the context — never from opening the cold step body.
+        view = plan_mode_view(
+            {
+                "plan_decomposition": "capability",
+                "plan_granularity": "auto",
+                "plan_group_count": 2,
+            },
+            task_type="feature",
+            selected_steps=["plan", "implement"],
         )
-        assert view["requested"] == "auto"
-        assert view["effective"] is None
-        assert view["inferred"] is False
+        assert view["group_count"] == 2
+
+    def test_group_count_is_none_before_plan_runs(self):
+        view = plan_mode_view(
+            {"plan_decomposition": "capability", "plan_granularity": "auto"},
+            task_type="feature",
+            selected_steps=["analyze", "plan", "implement"],
+        )
+        assert view["group_count"] is None
+
+    def test_missing_granularity_defaults_to_auto(self):
+        view = plan_mode_view(
+            {"plan_decomposition": "granular"},
+            task_type="feature",
+            selected_steps=["plan", "implement"],
+        )
+        assert view["granularity"] == "auto"
+
+    def test_persisted_legacy_strategy_is_projected_as_legacy(self):
+        # A flow created under the retired axis never made a decomposition
+        # decision; the projection describes what it recorded instead of
+        # fabricating a doctrine it never had.
+        view = plan_mode_view(
+            {"effective_implementation_strategy": "direct"},
+            task_type="feature",
+            selected_steps=["analyze", "implement"],
+        )
+        assert view["legacy_strategy"] == "direct"
+        assert view["decomposition"] is None
+        assert view["granularity"] is None
+        assert view["inferred"] is True
+        assert view["reason_key"] == "legacy_strategy"
 
     def test_invalid_persisted_values_fall_back_to_inference(self):
         # A corrupt context must not crash the projection; the legacy
         # selected_steps remain the only authority.
-        view = strategy_view(
-            {"requested_implementation_strategy": "bogus"},
+        view = plan_mode_view(
+            {"plan_decomposition": "bogus"},
             task_type="bugfix",
             selected_steps=["plan", "implement"],
         )
-        assert view["effective"] == "planned"
+        assert view["decomposition"] is None
+        assert view["legacy_strategy"] == "planned"
         assert view["inferred"] is True
 
     def test_legacy_planned_inferred_from_steps(self):
-        view = strategy_view({}, task_type="bugfix", selected_steps=["plan", "implement", "self_check"])
-        assert view["effective"] == "planned"
-        assert view["requested"] == "planned"
+        view = plan_mode_view(
+            {}, task_type="bugfix", selected_steps=["plan", "implement", "self_check"],
+        )
+        assert view["legacy_strategy"] == "planned"
         assert view["inferred"] is True
 
     def test_legacy_direct_inferred_from_steps(self):
         # A choice-surface flow with IMPLEMENT but no PLAN predates the
-        # strategy fields yet runs direct-shaped steps.
-        view = strategy_view({}, task_type="feature", selected_steps=["analyze", "investigate", "implement"])
-        assert view["effective"] == "direct"
-        assert view["requested"] == "direct"
+        # plan-mode fields yet runs direct-shaped steps.
+        view = plan_mode_view(
+            {}, task_type="feature",
+            selected_steps=["analyze", "investigate", "implement"],
+        )
+        assert view["legacy_strategy"] == "direct"
         assert view["inferred"] is True
 
     def test_no_surface_task_types_are_not_applicable(self):
         for task_type in ("small", "review", "survey"):
-            view = strategy_view({}, task_type=task_type, selected_steps=["analyze", "implement", "test"])
-            assert view["effective"] == "not_applicable", task_type
+            view = plan_mode_view(
+                {}, task_type=task_type, selected_steps=["analyze", "implement", "test"],
+            )
+            assert view["legacy_strategy"] == "not_applicable", task_type
             assert view["inferred"] is True
 
     def test_empty_state_is_unknown(self):
-        view = strategy_view({}, task_type="", selected_steps=[])
-        assert view["requested"] is None
-        assert view["effective"] is None
+        view = plan_mode_view({}, task_type="", selected_steps=[])
+        assert view["decomposition"] is None
+        assert view["legacy_strategy"] is None
         assert view["inferred"] is False
+
+    def test_module_never_imports_the_engine(self):
+        # The daemon parses raw engine.json dicts; importing the engine here
+        # would drag the whole flow package into the control plane.
+        import tianluo.strategy_view as module
+
+        source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
+        assert "import tianluo.engine" not in source
+        assert "from .engine" not in source
+        assert "from tianluo.engine" not in source
 
 
 # WHY these no longer assert an engine-side mirror: the engine's legacy
 # inference existed because the retired strategy axis REWROTE the step
 # sequence, so an old flow's path had to be read back out of its recorded
 # steps. The single-path model rewrites nothing, so the engine has no such
-# inference to agree with — ``strategy_view`` is now the sole surface that
+# inference to agree with — ``plan_mode_view`` is now the sole surface that
 # describes a pre-model flow, and these pin it on its own.
 def test_retired_task_type_infers_direct_on_the_control_plane():
     # The unknown-type fallback is the feature sequence, so a retired task type
     # persisted in an old flow DOES have a recorded PLAN -> IMPLEMENT surface;
     # a step list without PLAN therefore describes the old direct path.
-    view = strategy_view(
+    view = plan_mode_view(
         {}, task_type="refactor", selected_steps=["analyze", "implement"],
     )
-    assert view["effective"] == "direct"
+    assert view["legacy_strategy"] == "direct"
 
 
 @pytest.mark.parametrize("task_type", ["feature", "bugfix", "refactor", ""])
 def test_empty_selected_steps_is_unknown_on_the_control_plane(task_type):
     # Nothing on disk to infer from: the projection may not fabricate a path.
-    view = strategy_view({}, task_type=task_type, selected_steps=[])
-    assert view["effective"] is None
-    assert view["requested"] is None
+    view = plan_mode_view({}, task_type=task_type, selected_steps=[])
+    assert view["decomposition"] is None
+    assert view["legacy_strategy"] is None
     assert view["inferred"] is False
 
 
 @pytest.mark.parametrize("task_type", ["small", "review", "survey"])
 def test_empty_selected_steps_planless_type_reads_not_applicable(task_type):
-    view = strategy_view({}, task_type=task_type, selected_steps=[])
-    assert view["effective"] == "not_applicable"
+    view = plan_mode_view({}, task_type=task_type, selected_steps=[])
+    assert view["legacy_strategy"] == "not_applicable"
 
 
 class TestScopeView:
@@ -282,19 +337,19 @@ class TestDaemonProjections:
             "task_type": "feature",
             "state": _engine_state(
                 context={
-                    "requested_implementation_strategy": "direct",
-                    "effective_implementation_strategy": "direct",
-                    "strategy_reason": "explicit",
+                    "plan_decomposition": "capability",
+                    "plan_granularity": "single",
+                    "plan_mode_reason": "selected by explicit request",
                 },
                 records=[record],
-                selected_steps=["analyze", "implement"],
+                selected_steps=["analyze", "plan", "implement"],
             ),
         }
-        strategy, scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
-        assert strategy == strategy_view(
+        plan_mode, scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
+        assert plan_mode == plan_mode_view(
             data["state"]["context"],
             task_type="feature",
-            selected_steps=["analyze", "implement"],
+            selected_steps=["analyze", "plan", "implement"],
         )
         assert scope is None
         assert usage is not None
@@ -316,7 +371,7 @@ class TestDaemonProjections:
         # header and writes it to steps/<flow_id>/_context.json, leaving only a
         # context_ref — the shape every current-format flow actually has on
         # disk. Reading the inline dict alone would fall back to legacy
-        # inference and fabricate a strategy the flow never requested.
+        # inference and describe a current flow as if it predated the model.
         from tianluo.runtime_paths import runtime_dir
 
         cold = runtime_dir(tmp_path) / "state" / "steps" / "f-ref"
@@ -324,9 +379,9 @@ class TestDaemonProjections:
         (cold / "_context.json").write_text(
             json.dumps({
                 "context": {
-                    "requested_implementation_strategy": "auto",
-                    "effective_implementation_strategy": None,
-                    "strategy_reason": "Pending task-type resolution in ANALYZE.",
+                    "plan_decomposition": "capability",
+                    "plan_granularity": "auto",
+                    "plan_mode_reason": "left at the default",
                 },
                 "fix_history": [],
             }),
@@ -340,17 +395,114 @@ class TestDaemonProjections:
                 "selected_steps": ["analyze", "plan", "implement"],
             },
         }
-        strategy, _scope, _usage = DaemonAggregator._projection_fields(
+        plan_mode, _scope, _usage = DaemonAggregator._projection_fields(
             tmp_path, data,
         )
-        assert strategy["requested"] == "auto"
-        assert strategy["effective"] is None
-        assert strategy["inferred"] is False
+        assert plan_mode["decomposition"] == "capability"
+        assert plan_mode["granularity"] == "auto"
+        assert plan_mode["legacy_strategy"] is None
+        assert plan_mode["inferred"] is False
 
-        reader_strategy, _ = DaemonHistoryReader._state_projections(
+        reader_plan_mode, _ = DaemonHistoryReader._state_projections(
             tmp_path, data, "f-ref",
         )
-        assert reader_strategy == strategy
+        assert reader_plan_mode == plan_mode
+
+    def test_group_count_follows_the_externalized_plan_body(self, tmp_path):
+        # A current-format flow keeps its PLAN outputs in a cold file, so the
+        # header alone cannot count the groups. The projection follows the
+        # recorded cold_ref — and memoizes on its content hash, so a poll loop
+        # does not re-read the whole plan document every few seconds.
+        from tianluo import strategy_view as sv
+        from tianluo.runtime_paths import runtime_dir
+
+        cold = runtime_dir(tmp_path) / "state" / "steps" / "f-cold"
+        cold.mkdir(parents=True)
+        (cold / "_context.json").write_text(
+            json.dumps({
+                "context": {
+                    "plan_decomposition": "capability",
+                    "plan_granularity": "auto",
+                },
+            }),
+            encoding="utf-8",
+        )
+        plan_body = cold / "01_plan_x.json"
+        plan_body.write_text(
+            json.dumps({
+                "outputs": {
+                    "task_groups": [{"group_id": "G1"}, {"group_id": "G2"}],
+                },
+            }),
+            encoding="utf-8",
+        )
+        data = {
+            "flow_id": "f-cold",
+            "task_type": "feature",
+            "state": {
+                "context_ref": {"file": "_context.json", "hash": "ctx1"},
+                "selected_steps": ["plan", "implement"],
+                "steps": {
+                    "01_plan_x": {
+                        "step_id": "01_plan_x",
+                        "step_type": "plan",
+                        "status": "completed",
+                        "cold_ref": {"file": "01_plan_x.json", "hash": "plan-h1"},
+                    },
+                },
+            },
+        }
+        sv._COLD_GROUP_COUNT_CACHE.clear()
+        plan_mode, _scope, _usage = DaemonAggregator._projection_fields(tmp_path, data)
+        assert plan_mode["decomposition"] == "capability"
+        assert plan_mode["group_count"] == 2
+
+        # Same hash -> served from the cache, with no second read: deleting the
+        # file cannot change the answer.
+        plan_body.unlink()
+        again, _s, _u = DaemonAggregator._projection_fields(tmp_path, data)
+        assert again["group_count"] == 2
+
+        # A plan revision rewrites the body and the hash, so the stale count is
+        # never reused.
+        plan_body.write_text(
+            json.dumps({"outputs": {"task_groups": [{"group_id": "G1"}]}}),
+            encoding="utf-8",
+        )
+        data["state"]["steps"]["01_plan_x"]["cold_ref"]["hash"] = "plan-h2"
+        revised, _s2, _u2 = DaemonAggregator._projection_fields(tmp_path, data)
+        assert revised["group_count"] == 1
+
+    def test_unreadable_cold_plan_body_is_unknown_not_memoized(self, tmp_path):
+        # A transient read failure must not pin "unknown" for the life of the
+        # plan revision — the next poll has to try again.
+        from tianluo import strategy_view as sv
+        from tianluo.runtime_paths import runtime_dir
+
+        state = {
+            "selected_steps": ["plan", "implement"],
+            "steps": {
+                "01_plan_x": {
+                    "step_type": "plan",
+                    "cold_ref": {"file": "01_plan_x.json", "hash": "missing-h"},
+                },
+            },
+        }
+        state_dir = runtime_dir(tmp_path) / "state"
+        sv._COLD_GROUP_COUNT_CACHE.clear()
+        assert sv.plan_group_count_from_state(
+            state, state_dir=state_dir, flow_id="f-miss"
+        ) is None
+        assert "missing-h" not in sv._COLD_GROUP_COUNT_CACHE
+
+        cold = state_dir / "steps" / "f-miss"
+        cold.mkdir(parents=True)
+        (cold / "01_plan_x.json").write_text(
+            json.dumps({"outputs": {"plan_group_count": 3}}), encoding="utf-8"
+        )
+        assert sv.plan_group_count_from_state(
+            state, state_dir=state_dir, flow_id="f-miss"
+        ) == 3
 
     def test_aggregator_projection_legacy_inference(self, tmp_path):
         data = {
@@ -358,9 +510,10 @@ class TestDaemonProjections:
             "task_type": "bugfix",
             "state": _engine_state(selected_steps=["plan", "implement"]),
         }
-        strategy, scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
-        assert strategy["effective"] == "planned"
-        assert strategy["inferred"] is True
+        plan_mode, scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
+        assert plan_mode["legacy_strategy"] == "planned"
+        assert plan_mode["decomposition"] is None
+        assert plan_mode["inferred"] is True
         assert usage is None  # no records at all -> omitted, not zero
 
     def test_aggregator_legacy_totals_adapt(self, tmp_path):
@@ -378,7 +531,7 @@ class TestDaemonProjections:
                 selected_steps=["plan", "implement"],
             ),
         }
-        _strategy, _scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
+        _plan_mode, _scope, usage = DaemonAggregator._projection_fields(tmp_path, data)
         assert usage is not None
         assert usage["totals"]["logical_input_tokens"] == 500
         # The old five-field tally is recovered as usable numbers (G6 keeps
@@ -386,20 +539,20 @@ class TestDaemonProjections:
         assert usage["totals"]["output_tokens"] == 50
 
     def test_degraded_header_read_yields_none(self, tmp_path):
-        strategy, scope, usage = DaemonAggregator._projection_fields(
+        plan_mode, scope, usage = DaemonAggregator._projection_fields(
             tmp_path, {"flow_id": "f4", "status": "running"}
         )
-        assert strategy is None and scope is None and usage is None
+        assert plan_mode is None and scope is None and usage is None
 
     def test_flow_snapshot_to_dict_omits_absent_projections(self):
         snap = FlowSnapshot(project_root="/p", flow_id="f")
         data = snap.to_dict()
-        assert "implementation_strategy" not in data
+        assert "plan_mode" not in data
         assert "review_scope" not in data
         assert "usage_summary" not in data
-        snap.implementation_strategy = {"effective": "planned", "inferred": True}
+        snap.plan_mode = {"decomposition": "capability", "group_count": 2}
         data = snap.to_dict()
-        assert data["implementation_strategy"]["effective"] == "planned"
+        assert data["plan_mode"]["decomposition"] == "capability"
 
     def test_session_meta_carries_projections_when_recoverable(self, tmp_path):
         reader = DaemonHistoryReader(project_roots_provider=lambda: [str(tmp_path)])
@@ -413,24 +566,24 @@ class TestDaemonProjections:
             "updated_at": "2026-08-13T00:00:00",
             "state": _engine_state(
                 context={
-                    "requested_implementation_strategy": "planned",
-                    "effective_implementation_strategy": "planned",
-                    "strategy_reason": "default",
+                    "plan_decomposition": "granular",
+                    "plan_granularity": "auto",
+                    "plan_mode_reason": "selected by project configuration",
                 },
                 records=[record],
                 selected_steps=["plan", "implement"],
             ),
         }
         meta = reader._meta_from_engine(tmp_path, data, source="archived")
-        assert meta.implementation_strategy["effective"] == "planned"
+        assert meta.plan_mode["decomposition"] == "granular"
         assert meta.usage_summary["totals"]["logical_input_tokens"] == 1000
-        assert "implementation_strategy" in meta.to_dict()
-        # History-only flows never guess a strategy or usage on the index path.
+        assert "plan_mode" in meta.to_dict()
+        # History-only flows never guess a plan mode or usage on the index path.
         history_dir = tmp_path / "tianluo" / "history" / "f6"
         history_dir.mkdir(parents=True)
         (history_dir / "_meta.json").write_text(json.dumps({"type": "small"}))
         history_meta = reader._meta_from_history(tmp_path, history_dir)
-        assert history_meta.implementation_strategy["effective"] == "not_applicable"
+        assert history_meta.plan_mode["legacy_strategy"] == "not_applicable"
         assert history_meta.usage_summary is None
         assert "usage_summary" not in history_meta.to_dict()
 
@@ -524,14 +677,15 @@ class TestDaemonReadFlowUsage:
 
 
 # --------------------------------------------------------------------------
-# protocol: spawn strategy + history-data usage
+# protocol: spawn plan mode + history-data usage
 # --------------------------------------------------------------------------
 
 
-class TestProtocolStrategyAndUsage:
-    def test_spawn_omits_strategy_by_default(self):
+class TestProtocolPlanModeAndUsage:
+    def test_spawn_omits_plan_mode_by_default(self):
         msg = protocol.make_spawn_flow("t", project_root="/p")
-        assert "implementation_strategy" not in msg.payload
+        assert "plan_decomposition" not in msg.payload
+        assert "plan_granularity" not in msg.payload
         assert msg.payload == {
             "task_description": "t",
             "project_root": "/p",
@@ -539,32 +693,56 @@ class TestProtocolStrategyAndUsage:
             "discover": False,
         }
 
-    def test_spawn_carries_valid_strategy(self):
-        for value in ("auto", "direct", "planned"):
+    def test_spawn_carries_valid_plan_mode(self):
+        for value in ("capability", "granular"):
             msg = protocol.make_spawn_flow(
-                "t", project_root="/p", implementation_strategy=value
+                "t", project_root="/p", plan_decomposition=value
             )
-            assert msg.payload["implementation_strategy"] == value
+            assert msg.payload["plan_decomposition"] == value
+        for value in ("auto", "single", "conservative"):
+            msg = protocol.make_spawn_flow(
+                "t", project_root="/p", plan_granularity=value
+            )
+            assert msg.payload["plan_granularity"] == value
 
-    def test_spawn_rejects_invalid_strategy(self):
+    def test_spawn_rejects_invalid_plan_mode(self):
         with pytest.raises(protocol.ProtocolError):
-            protocol.make_spawn_flow("t", project_root="/p", implementation_strategy="fast")
+            protocol.make_spawn_flow("t", project_root="/p", plan_decomposition="fast")
+        with pytest.raises(protocol.ProtocolError):
+            protocol.make_spawn_flow("t", project_root="/p", plan_granularity="planned")
 
-    def test_spawn_strategy_supported_values_set(self):
-        assert protocol.SPAWN_STRATEGY_VALUES == frozenset({"auto", "direct", "planned"})
+    def test_spawn_plan_mode_supported_values_sets(self):
+        assert protocol.SPAWN_PLAN_DECOMPOSITION_VALUES == frozenset(
+            {"capability", "granular"}
+        )
+        assert protocol.SPAWN_PLAN_GRANULARITY_VALUES == frozenset(
+            {"auto", "single", "conservative"}
+        )
 
-    def test_supports_spawn_strategy_gate(self):
-        assert protocol.supports_spawn_strategy("7") is True
-        assert protocol.supports_spawn_strategy("6") is False
-        assert protocol.supports_spawn_strategy(None) is False
-        assert protocol.supports_spawn_strategy("bogus") is False
-        assert protocol.MIN_SPAWN_STRATEGY_PROTOCOL_VERSION == 7
+    def test_supports_spawn_plan_mode_gate(self):
+        assert protocol.supports_spawn_plan_mode("8") is True
+        assert protocol.supports_spawn_plan_mode("7") is False
+        assert protocol.supports_spawn_plan_mode(None) is False
+        assert protocol.supports_spawn_plan_mode("bogus") is False
+        assert protocol.MIN_SPAWN_PLAN_MODE_PROTOCOL_VERSION == 8
 
-    def test_resume_spawn_never_carries_strategy(self):
+    def test_retired_strategy_field_still_speakable_for_one_version(self):
+        # A pre-8 server still sends it; the wire schema keeps accepting it so
+        # the daemon can translate rather than drop the operator's intent.
+        msg = protocol.make_spawn_flow(
+            "t", project_root="/p", implementation_strategy="direct"
+        )
+        assert msg.payload["implementation_strategy"] == "direct"
+        assert protocol.SPAWN_STRATEGY_PLAN_MODE_MAP["direct"] == (None, "single")
+        assert protocol.SPAWN_STRATEGY_PLAN_MODE_MAP["planned"] == ("granular", None)
+        assert protocol.SPAWN_STRATEGY_PLAN_MODE_MAP["auto"] == (None, None)
+
+    def test_resume_spawn_never_carries_plan_mode(self):
         # The server's resume endpoint never attaches it; the constructor
         # keeps it off the wire for the persisted path.
         msg = protocol.make_spawn_flow("", resume_flow_id="f")
-        assert "implementation_strategy" not in msg.payload
+        assert "plan_decomposition" not in msg.payload
+        assert "plan_granularity" not in msg.payload
 
     def test_history_data_usage_field(self):
         plain = protocol.make_history_data("f", "full", [{"step_id": "s"}])
@@ -885,13 +1063,13 @@ class TestServerBundleUsage:
             {
                 "flow_id": "f",
                 "project_root": "/p",
-                "implementation_strategy": {"effective": "direct", "inferred": False},
+                "plan_mode": {"decomposition": "capability", "group_count": 1},
                 "review_scope": {"active_round": {"scope_mode": "full"}},
                 "usage_summary": {"actual_cost_usd": 0.25, "totals": {}},
             }
         )
         data = snap.to_dict()
-        assert data["implementation_strategy"]["effective"] == "direct"
+        assert data["plan_mode"]["decomposition"] == "capability"
         assert data["review_scope"]["active_round"]["scope_mode"] == "full"
         assert data["usage_summary"]["actual_cost_usd"] == 0.25
 
@@ -900,7 +1078,7 @@ class TestServerBundleUsage:
 
         snap = ServerFlowSnapshot.from_payload({"flow_id": "f", "project_root": "/p"})
         data = snap.to_dict()
-        assert "implementation_strategy" not in data
+        assert "plan_mode" not in data
         assert "review_scope" not in data
         assert "usage_summary" not in data
 
@@ -908,9 +1086,10 @@ class TestServerBundleUsage:
 class TestLegacyTaskGroupsDaemonCompat:
     """Old flows carrying task_groups / adjudicated_plan keep working.
 
-    The daemon projections (strategy / scope / usage) never touch the legacy
-    scheduling data — they must neither crash on it nor leak it into the new
-    surfaces, so an old flow's resume / display path is unchanged.
+    The daemon projections (plan mode / scope / usage) never touch the legacy
+    scheduling data beyond counting the groups — they must neither crash on it
+    nor leak it into the new surfaces, so an old flow's resume / display path
+    is unchanged.
     """
     def _legacy_engine(self, tmp_path, flow_id="legacy-groups"):
         state_dir = tmp_path / "tianluo" / "state"
@@ -964,16 +1143,17 @@ class TestLegacyTaskGroupsDaemonCompat:
         metas = reader.build_index()
         assert metas, "legacy flow must appear in the index"
         meta = next(m for m in metas if m.flow_id == "legacy-groups")
-        # The legacy steps infer the planned strategy; no task_groups leak
-        # into the strategy projection or the meta dict.
-        assert meta.implementation_strategy["effective"] == "planned"
+        # The legacy steps infer the planned path; the group count is the only
+        # thing read off task_groups, which never leak into the meta dict.
+        assert meta.plan_mode["legacy_strategy"] == "planned"
+        assert meta.plan_mode["group_count"] == 1
         assert "task_groups" not in meta.to_dict()
 
         aggregator = DaemonAggregator()
         aggregator.add_project_root(str(tmp_path))
         snapshot = aggregator.get_snapshot()
         flow = next(f for f in snapshot.flows if f.flow_id == "legacy-groups")
-        assert flow.implementation_strategy["effective"] == "planned"
+        assert flow.plan_mode["legacy_strategy"] == "planned"
         assert "task_groups" not in flow.to_dict()
 
     def test_degraded_legacy_header_does_not_crash(self, tmp_path):
@@ -993,7 +1173,7 @@ class TestLegacyTaskGroupsDaemonCompat:
         metas = reader.build_index()
         assert any(m.flow_id == "giant-legacy" for m in metas)
         meta = next(m for m in metas if m.flow_id == "giant-legacy")
-        assert meta.implementation_strategy is None
+        assert meta.plan_mode is None
         assert meta.usage_summary is None
 
 
@@ -1084,19 +1264,19 @@ class TestMixedLegacyModernUsage:
 
 
 class TestSameEngineCrossSurfaceConsistency:
-    """The CLI, daemon and server must project the SAME strategy / scope /
+    """The CLI, daemon and server must project the SAME plan mode / scope /
     usage from one engine.json.
 
     The daemon parses the raw dict; the CLI loads the same file through the
     engine's PersistenceManager.  Both surfaces share the stdlib-only
-    strategy_view / scope_view / UsageSummary backends, and this test pins
+    plan_mode_view / scope_view / UsageSummary backends, and this test pins
     that the two consumption paths still agree end to end.
     """
 
-    def _write_engine(self, tmp_path, *, strategy_context=None, scope_state=None):
+    def _write_engine(self, tmp_path, *, plan_context=None, scope_state=None):
         record = _record()
         now = "2026-08-13T00:00:00"
-        context = dict(strategy_context or {})
+        context = dict(plan_context or {})
         if scope_state is not None:
             context["self_check_review"] = scope_state
         state = {
@@ -1140,10 +1320,10 @@ class TestSameEngineCrossSurfaceConsistency:
     def test_daemon_and_cli_projections_match(self, tmp_path):
         engine = self._write_engine(
             tmp_path,
-            strategy_context={
-                "requested_implementation_strategy": "auto",
-                "effective_implementation_strategy": "direct",
-                "strategy_reason": "single autonomous call",
+            plan_context={
+                "plan_decomposition": "capability",
+                "plan_granularity": "single",
+                "plan_mode_reason": "selected by explicit request",
             },
             scope_state={
                 "active_round": {
@@ -1157,10 +1337,11 @@ class TestSameEngineCrossSurfaceConsistency:
             },
         )
 
-        daemon_strategy, daemon_scope, daemon_usage = (
+        daemon_plan_mode, daemon_scope, daemon_usage = (
             DaemonAggregator._projection_fields(tmp_path, engine)
         )
-        assert daemon_strategy["effective"] == "direct"
+        assert daemon_plan_mode["decomposition"] == "capability"
+        assert daemon_plan_mode["granularity"] == "single"
         assert daemon_scope["active_round"]["scope_mode"] == "incremental"
         assert daemon_usage["completeness"] == "complete"
 
@@ -1168,11 +1349,11 @@ class TestSameEngineCrossSurfaceConsistency:
         # history command's shared-backend consumers.
         from tianluo.commands import history_cmd
         from tianluo.engine.persistence import PersistenceManager
-        from tianluo.strategy_view import scope_view, strategy_view
+        from tianluo.strategy_view import plan_mode_view, scope_view
 
         flow = PersistenceManager(tmp_path).load_flow()
         assert flow is not None
-        cli_strategy = strategy_view(
+        cli_plan_mode = plan_mode_view(
             flow.state.context,
             task_type=flow.task_type,
             selected_steps=flow.state.selected_steps,
@@ -1180,7 +1361,7 @@ class TestSameEngineCrossSurfaceConsistency:
         cli_scope = scope_view(flow.state.context)
         cli_usage = history_cmd._state_usage_payload(tmp_path, flow)
 
-        assert cli_strategy == daemon_strategy
+        assert cli_plan_mode == daemon_plan_mode
         assert cli_scope == daemon_scope
         assert cli_usage["summary"] == daemon_usage
         assert cli_usage["calls"] == [
@@ -1190,7 +1371,7 @@ class TestSameEngineCrossSurfaceConsistency:
     def test_legacy_engine_projection_consistent_without_usage(self, tmp_path):
         engine = self._write_engine(
             tmp_path,
-            strategy_context={},
+            plan_context={},
             scope_state=None,
         )
         engine["state"]["selected_steps"] = [
@@ -1201,36 +1382,36 @@ class TestSameEngineCrossSurfaceConsistency:
             "test",
             "self_check",
         ]
-        # A legacy flow with no strategy fields and no records: both surfaces
-        # infer the same planned strategy, and the old synthesized all-zero
+        # A legacy flow with no plan-mode fields and no records: both surfaces
+        # infer the same planned path, and the old synthesized all-zero
         # five-field tally surfaces as legacy_ambiguous (unknown/partial) on
         # BOTH surfaces — never silently omitted.
         engine["state"].pop("session_usage_records")
         engine["state"]["steps"]["01_implement_x"]["outputs"] = {"files_changed": []}
-        daemon_strategy, daemon_scope, daemon_usage = (
+        daemon_plan_mode, daemon_scope, daemon_usage = (
             DaemonAggregator._projection_fields(tmp_path, engine)
         )
-        assert daemon_strategy["effective"] == "planned"
-        assert daemon_strategy["inferred"] is True
+        assert daemon_plan_mode["legacy_strategy"] == "planned"
+        assert daemon_plan_mode["inferred"] is True
         assert daemon_scope is None
         assert daemon_usage is not None
         assert daemon_usage["completeness"] == "partial"
 
         from tianluo.commands import history_cmd
         from tianluo.engine.persistence import PersistenceManager
-        from tianluo.strategy_view import scope_view, strategy_view
+        from tianluo.strategy_view import plan_mode_view, scope_view
 
         (tmp_path / "tianluo" / "state" / "engine.json").write_text(
             json.dumps(engine), encoding="utf-8"
         )
         flow = PersistenceManager(tmp_path).load_flow()
         assert flow is not None
-        cli_strategy = strategy_view(
+        cli_plan_mode = plan_mode_view(
             flow.state.context,
             task_type=flow.task_type,
             selected_steps=flow.state.selected_steps,
         )
-        assert cli_strategy == daemon_strategy
+        assert cli_plan_mode == daemon_plan_mode
         assert scope_view(flow.state.context) is None
         cli_usage = history_cmd._state_usage_payload(tmp_path, flow)
         assert cli_usage["completeness"] == daemon_usage["completeness"] == "partial"
@@ -1244,14 +1425,14 @@ class TestSameEngineCrossSurfaceConsistency:
         legacy_ambiguous "unknown usage" call — that would claim one unknown
         call for a flow that never issued one.
         """
-        engine = self._write_engine(tmp_path, strategy_context={}, scope_state=None)
+        engine = self._write_engine(tmp_path, plan_context={}, scope_state=None)
         engine["state"]["session_usage_records"] = []
         engine["state"]["steps"]["01_implement_x"]["outputs"] = {"files_changed": []}
         (tmp_path / "tianluo" / "state" / "engine.json").write_text(
             json.dumps(engine), encoding="utf-8"
         )
 
-        _strategy, _scope, daemon_usage = DaemonAggregator._projection_fields(
+        _plan_mode, _scope, daemon_usage = DaemonAggregator._projection_fields(
             tmp_path, engine
         )
         assert daemon_usage is None
@@ -1279,7 +1460,7 @@ class TestSameEngineCrossSurfaceConsistency:
         from tianluo.commands import history_cmd
         from tianluo.engine.persistence import PersistenceManager
 
-        engine = self._write_engine(tmp_path, strategy_context={}, scope_state=None)
+        engine = self._write_engine(tmp_path, plan_context={}, scope_state=None)
         engine["state"].pop("session_usage_records")
         engine["state"]["session_token_usage"] = {
             "input_tokens": 5000,

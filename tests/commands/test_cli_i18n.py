@@ -308,12 +308,12 @@ def test_history_show_scope_round_localized(monkeypatch, tmp_path):
         en_out = runner.invoke(history_cmd.app, ["show", "f1"]).output
     assert "incremental#2 (fix 1)" in en_out
 
-def test_history_show_strategy_value_and_legacy_reason_localized(
+def test_history_show_plan_mode_value_and_legacy_reason_localized(
     monkeypatch, tmp_path,
 ):
-    """Strategy enum values and the projection-authored legacy-inference
+    """Plan-mode enum values and the projection-authored legacy-inference
     sentence are UI chrome: under zh-CN both must render translated, matching
-    the WebUI's ``strategy.value.*`` / ``strategy.reason.*`` treatment."""
+    the WebUI's ``plan.*`` / ``plan.reason.*`` treatment."""
     from unittest.mock import patch
 
     from tianluo.commands import history_cmd
@@ -329,11 +329,13 @@ def test_history_show_strategy_value_and_legacy_reason_localized(
         "updated_at": "2026-01-01T00:00:00",
         "chat_sessions": 1,
         "steps": [],
-        "implementation_strategy": {
-            "requested": "planned",
-            "effective": "not_applicable",
+        "plan_mode": {
+            "decomposition": None,
+            "granularity": None,
+            "group_count": None,
             "reason": LEGACY_INFER_REASON,
             "reason_key": "legacy_inference",
+            "legacy_strategy": "not_applicable",
             "inferred": True,
         },
     }
@@ -349,36 +351,45 @@ def test_history_show_strategy_value_and_legacy_reason_localized(
     assert "Inferred from persisted legacy" not in out
 
     # A persisted (engine-authored) reason stays verbatim: it is flow data.
-    detail["implementation_strategy"] = {
-        "requested": "auto",
-        "effective": "direct",
-        "reason": "ANALYZE recommended direct.",
+    detail["plan_mode"] = {
+        "decomposition": "capability",
+        "granularity": "single",
+        "group_count": 1,
+        "reason": "PLAN sized this as one autonomous call.",
         "reason_key": "",
+        "legacy_strategy": None,
         "inferred": False,
     }
     with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
          patch.object(history_cmd, "get_flow_detail", return_value=detail):
         out = runner.invoke(history_cmd.app, ["show", "f1"]).output
-    assert "ANALYZE recommended direct." in out
+    assert "PLAN sized this as one autonomous call." in out
 
 
 # ---------------------------------------------------------------------------
-# G10: strategy / scope / usage-cost labels across both catalogs
+# G10: plan-mode / scope / usage-cost labels across both catalogs
 # ---------------------------------------------------------------------------
 G10_CLI_KEYS = [
-    "history.field.strategy",
-    "history.field.strategy_value",
-    "history.field.strategy_inferred",
-    "history.field.strategy_reason",
+    "history.field.plan_mode",
+    "history.field.plan_mode_value",
+    "history.field.plan_mode_groups",
+    "history.field.plan_mode_legacy",
+    "history.field.plan_mode_inferred",
+    "history.field.plan_mode_reason",
     "history.field.scope",
     "history.field.scope_round",
     "history.field.scope_full_rounds",
-    "history.field.strategy_reason_legacy",
-    "history.strategy.value.auto",
-    "history.strategy.value.direct",
-    "history.strategy.value.planned",
-    "history.strategy.value.not_applicable",
-    "history.strategy.value.unknown",
+    "history.field.plan_mode_reason_legacy_inference",
+    "history.field.plan_mode_reason_legacy_strategy",
+    "history.plan.decomposition.capability",
+    "history.plan.decomposition.granular",
+    "history.plan.granularity.auto",
+    "history.plan.granularity.single",
+    "history.plan.granularity.conservative",
+    "history.plan.legacy.direct",
+    "history.plan.legacy.planned",
+    "history.plan.legacy.not_applicable",
+    "history.plan.unknown",
     "history.scope.mode.full",
     "history.scope.mode.incremental",
     "history.usage.header",
@@ -422,7 +433,7 @@ G10_CLI_KEYS = [
 
 
 def test_g10_cli_keys_exist_in_both_catalogs():
-    """The G10 strategy/scope/usage labels ship in both catalogs; a missing
+    """The G10 plan-mode/scope/usage labels ship in both catalogs; a missing
     zh-CN entry must fall back to en-US, not render the raw dotted key."""
     from tianluo.i18n.loader import load_catalog
 
@@ -441,7 +452,7 @@ def test_g10_cli_prose_keys_are_translated():
 
     en = load_catalog("en-US")
     zh = load_catalog("zh-CN")
-    for key in ("history.field.strategy", "history.field.scope",
+    for key in ("history.field.plan_mode", "history.field.scope",
                 "history.usage.header", "cli.display.usage.actual_cost",
                 "cli.display.usage.estimated_cost"):
         assert zh[key] != key, f"zh-CN {key} must be translated"

@@ -389,14 +389,15 @@ class SessionMeta:
     # degrading to a non-resumable history-only row.
     resumable: bool = False
     # Control-plane projections (shared with FlowSnapshot / the CLI history
-    # view). ``implementation_strategy`` is the strategy_view dict for
-    # state-backed flows (inferred for legacy ones, ``None`` for a history-only
-    # flow whose type is not determinable). ``usage_summary`` is the compact
-    # records-free UsageSummary — recoverable for active/archived/resumable
-    # flows from engine state; ``None`` for history-only flows, whose usage
-    # rides the on-demand HISTORY_DATA frame instead (parsing every jsonl on
-    # the index path would cost hundreds of MB per poll).
-    implementation_strategy: Optional[Dict[str, Any]] = None
+    # view). ``plan_mode`` is the plan_mode_view dict for state-backed flows
+    # (legacy-annotated for flows predating the model, ``None`` for a
+    # history-only flow whose path is not determinable). ``usage_summary`` is
+    # the compact records-free UsageSummary — recoverable for
+    # active/archived/resumable flows from engine state; ``None`` for
+    # history-only flows, whose usage rides the on-demand HISTORY_DATA frame
+    # instead (parsing every jsonl on the index path would cost hundreds of MB
+    # per poll).
+    plan_mode: Optional[Dict[str, Any]] = None
     usage_summary: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -415,8 +416,8 @@ class SessionMeta:
             "waiting_for_lock": self.waiting_for_lock,
             "resumable": self.resumable,
         }
-        if self.implementation_strategy is not None:
-            data["implementation_strategy"] = self.implementation_strategy
+        if self.plan_mode is not None:
+            data["plan_mode"] = self.plan_mode
         if self.usage_summary is not None:
             data["usage_summary"] = self.usage_summary
         return data
@@ -1313,7 +1314,7 @@ class DaemonHistoryReader:
         flow_id = str(data.get("flow_id"))
         if resumable is None:
             resumable = source == "active" and _is_resumable_status(status)
-        strategy, usage = self._state_projections(root, data, flow_id)
+        plan_mode, usage = self._state_projections(root, data, flow_id)
         return SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
@@ -1337,7 +1338,7 @@ class DaemonHistoryReader:
                 and data.get("waiting_for_lock", False)
             ),
             resumable=bool(resumable),
-            implementation_strategy=strategy,
+            plan_mode=plan_mode,
             usage_summary=usage,
         )
 
@@ -1345,14 +1346,18 @@ class DaemonHistoryReader:
     def _state_projections(
         root: Path, data: Dict[str, Any], flow_id: str
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Compute (strategy view, usage summary) for an engine-shaped dict.
+        """Compute (plan-mode view, usage summary) for an engine-shaped dict.
 
         Same shared backends as :meth:`DaemonAggregator._projection_fields`
         (strategy_view.py + usage.py) — the daemon never re-implements either
         formula.  A degraded header read without ``state`` yields
         ``(None, None)``.
         """
-        from ..strategy_view import resolve_flow_context, strategy_view
+        from ..strategy_view import (
+            plan_group_count_from_state,
+            plan_mode_view,
+            resolve_flow_context,
+        )
         from .usage_backend import flow_usage_summary
 
         state = data.get("state")
@@ -1363,10 +1368,15 @@ class DaemonHistoryReader:
             state_dir=runtime_dir(root) / "state",
             flow_id=str(flow_id or ""),
         )
-        strategy = strategy_view(
+        plan_mode = plan_mode_view(
             context,
             task_type=str(data.get("task_type") or ""),
             selected_steps=state.get("selected_steps") or [],
+            plan_group_count=plan_group_count_from_state(
+                state,
+                state_dir=runtime_dir(root) / "state",
+                flow_id=str(flow_id or ""),
+            ),
         )
         usage = flow_usage_summary(
             state,
@@ -1374,7 +1384,7 @@ class DaemonHistoryReader:
             call_id=flow_id or "flow",
             flow_id=str(flow_id or ""),
         )
-        return strategy, usage
+        return plan_mode, usage
 
     @staticmethod
     def _dir_signature(flow_dir: Path) -> Tuple[tuple, float]:
@@ -1437,10 +1447,10 @@ class DaemonHistoryReader:
         task_type = str(meta.get("type") or "")
         # A history-only flow has no engine state, but the recorded step list
         # is deterministically recoverable from the jsonl file names (the same
-        # scan ``_count_jsonl`` performs), so the strategy projection matches
+        # scan ``_count_jsonl`` performs), so the plan-mode projection matches
         # ``luo history show`` for the same flow. Usage is served on demand via
         # HISTORY_DATA instead.
-        from ..strategy_view import strategy_view
+        from ..strategy_view import plan_mode_view
 
         step_types = sorted({
             parsed
@@ -1448,10 +1458,12 @@ class DaemonHistoryReader:
             for parsed in (parse_step_type_from_step_id(_logical_step_id(f.name)),)
             if parsed
         })
-        strategy = strategy_view(
+        plan_mode = plan_mode_view(
             {}, task_type=task_type, selected_steps=step_types
         )
-        strategy = strategy if strategy.get("effective") else None
+        # Without engine state only the legacy inference can say anything; an
+        # all-``None`` projection is "unknown" and must stay off the wire.
+        plan_mode = plan_mode if plan_mode.get("legacy_strategy") else None
         result = SessionMeta(
             flow_id=flow_id,
             project_root=str(root),
@@ -1463,7 +1475,7 @@ class DaemonHistoryReader:
             active=False,
             source="history",
             step_count=_count_jsonl(flow_dir),
-            implementation_strategy=strategy,
+            plan_mode=plan_mode,
             usage_summary=None,
         )
         self._history_meta_cache[sig_key] = (sig, result)

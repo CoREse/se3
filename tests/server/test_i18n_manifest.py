@@ -78,17 +78,36 @@ def test_a_locale_without_its_own_endonym_labels_itself(monkeypatch, tmp_path):
     assert app_mod._discover_ui_languages() == [{"code": "ja-JP", "label": "ja-JP"}]
 
 # ---------------------------------------------------------------------------
-# G10: strategy / scope / usage-cost keys ship in both dictionaries
+# G10: plan-mode / scope / usage-cost keys ship in both dictionaries
 # ---------------------------------------------------------------------------
 G10_UI_KEYS = (
-    "newTask.strategy",
-    "issueLaunch.strategy",
-    "strategy.label",
-    "strategy.option.projectDefault",
-    "strategy.option.auto",
-    "strategy.option.direct",
-    "strategy.option.planned",
-    "strategy.value.not_applicable",
+    "newTask.planDecomposition",
+    "newTask.planGranularity",
+    "newTask.errUnsupportedDaemonPlanMode",
+    "issueLaunch.planDecomposition",
+    "issueLaunch.planGranularity",
+    "plan.label",
+    "plan.groupsLabel",
+    "plan.reasonLabel",
+    "plan.legacyNote",
+    "plan.inferredNote",
+    "plan.reason.legacy_inference",
+    "plan.reason.legacy_strategy",
+    "plan.option.projectDefault",
+    "plan.option.capability",
+    "plan.option.granular",
+    "plan.option.auto",
+    "plan.option.single",
+    "plan.option.conservative",
+    "plan.decomposition.capability",
+    "plan.decomposition.granular",
+    "plan.granularity.auto",
+    "plan.granularity.single",
+    "plan.granularity.conservative",
+    "plan.legacy.direct",
+    "plan.legacy.planned",
+    "plan.legacy.not_applicable",
+    "plan.unknown",
     "scope.label",
     "scope.round.line",
     "scope.baseline",
@@ -118,7 +137,7 @@ def _locale_dict(code):
 
 
 def test_g10_ui_keys_ship_in_both_locales():
-    """The strategy/scope/usage labels the console renders ship in both locale
+    """The plan-mode/scope/usage labels the console renders ship in both locale
     files — the manifest is derived from the directory, so this also pins that
     the two served dictionaries are complete."""
     en = _locale_dict("en-US")

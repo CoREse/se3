@@ -29,9 +29,10 @@ def test_protocol_version_current():
     # detail); the bump is what lets each side detect a legacy peer and fall
     # back to full-frame semantics. Revision 4 later added the (unrelated)
     # presence signalling, revision 5 the (likewise unrelated) upload channel,
-    # revision 6 its fetch counterpart, and revision 7 the optional spawn
-    # implementation_strategy field; pin the current revision here.
-    assert protocol.PROTOCOL_VERSION == "7"
+    # revision 6 its fetch counterpart, revision 7 the optional spawn
+    # implementation_strategy field, and revision 8 the plan_decomposition /
+    # plan_granularity pair that replaced it; pin the current revision here.
+    assert protocol.PROTOCOL_VERSION == "8"
 
 
 def test_history_message_types_registered():

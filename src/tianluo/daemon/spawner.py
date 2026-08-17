@@ -234,6 +234,22 @@ def _is_se3_project(project_root: Path) -> bool:
     return (runtime_dir(project_root) / "charter.md").is_file()
 
 
+def _plan_mode_args(decomposition: str, granularity: str) -> List[str]:
+    """Return the plan-mode CLI options for a spawn, omitting the unset ones.
+
+    An absent option is not the same as a default one: leaving it off the argv
+    is what lets the project's own ``workflow.plan_decomposition`` /
+    ``plan_granularity`` decide, whereas passing a guessed value would overrule
+    the project with something the operator never chose.
+    """
+    args: List[str] = []
+    if decomposition:
+        args += ["--plan-decomposition", str(decomposition)]
+    if granularity:
+        args += ["--plan-granularity", str(granularity)]
+    return args
+
+
 class DaemonSpawner:
     """Starts and manages ``luo run`` child processes."""
 
@@ -367,7 +383,8 @@ class DaemonSpawner:
         discover: bool = False,
         worktree: bool = False,
         from_issue_id: str = "",
-        implementation_strategy: str = "",
+        plan_decomposition: str = "",
+        plan_granularity: str = "",
         extra_args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
@@ -387,11 +404,12 @@ class DaemonSpawner:
         isolation" option threads its ``worktree`` flag down to here the same
         way as ``discover``).
 
-        When *implementation_strategy* is non-empty, the matching
-        ``--implementation-strategy <value>`` option is appended (fresh and
-        from-issue paths alike) so the operator's explicit web choice reaches
-        the CLI. Empty means "no option on the argv" — the CLI then resolves
-        the project configuration / default, never a value the server guessed.
+        When *plan_decomposition* / *plan_granularity* are non-empty, the
+        matching ``--plan-decomposition <value>`` / ``--plan-granularity
+        <value>`` options are appended (fresh and from-issue paths alike) so
+        the operator's explicit web choice reaches the CLI. Empty means "no
+        option on the argv" — the CLI then resolves the project configuration /
+        default, never a value the server guessed.
 
         When *from_issue_id* is non-empty, the flow is started from an existing
         issue instead: the argv becomes
@@ -425,8 +443,7 @@ class DaemonSpawner:
                 args.append("--discover")
             if worktree:
                 args.append("--worktree")
-            if implementation_strategy:
-                args += ["--implementation-strategy", implementation_strategy]
+            args += _plan_mode_args(plan_decomposition, plan_granularity)
             if extra_args:
                 args.extend(extra_args)
             label = task_description or f"[from issue {from_issue_id}]"
@@ -443,8 +460,7 @@ class DaemonSpawner:
             args.append("--discover")
         if worktree:
             args.append("--worktree")
-        if implementation_strategy:
-            args += ["--implementation-strategy", implementation_strategy]
+        args += _plan_mode_args(plan_decomposition, plan_granularity)
         if extra_args:
             args.extend(extra_args)
         return self._launch(args, cwd, task_description, env)

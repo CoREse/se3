@@ -316,7 +316,8 @@ class Daemon:
         discover: bool = False,
         worktree: bool = False,
         from_issue_id: str = "",
-        implementation_strategy: str = "",
+        plan_decomposition: str = "",
+        plan_granularity: str = "",
     ) -> SpawnedProcess:
         """Spawn a new ``luo run`` flow (entry point for remote requests).
 
@@ -327,8 +328,8 @@ class Daemon:
         on success. When *from_issue_id* is non-empty the flow is started from
         that issue (``luo run --from-issue <id>``), in which case the CLI
         sources the task from the issue and drives its status lifecycle. When
-        *implementation_strategy* is non-empty the explicit strategy reaches
-        the CLI's ``--implementation-strategy`` option.
+        *plan_decomposition* / *plan_granularity* are non-empty they reach the
+        CLI's ``--plan-decomposition`` / ``--plan-granularity`` options.
         """
         spawned = self.spawner.spawn(
             task_description,
@@ -337,7 +338,8 @@ class Daemon:
             discover=discover,
             worktree=worktree,
             from_issue_id=from_issue_id,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
         self.aggregator.add_project_root(spawned.project_root)
         return spawned
@@ -785,7 +787,8 @@ class Daemon:
         from_issue_id: str = "",
         *,
         worktree: bool = False,
-        implementation_strategy: str = "",
+        plan_decomposition: str = "",
+        plan_granularity: str = "",
     ) -> SpawnedProcess:
         """Adapt a server SPAWN_FLOW into a :meth:`request_spawn` call."""
         return self.request_spawn(
@@ -795,7 +798,8 @@ class Daemon:
             discover=discover,
             worktree=worktree,
             from_issue_id=from_issue_id,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
 
     def _handle_resume_request(

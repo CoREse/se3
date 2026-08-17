@@ -475,15 +475,20 @@ export function registerMobileResponsiveTests(ctx) {
       "an implement record must carry the step-type-implement class");
   });
 
-  // -- (G10) strategy controls + usage region mobile behaviour --------------
-  // The new strategy selects reuse the modal form styles (full-width controls
+  // -- (G10) plan-mode controls + usage region mobile behaviour -------------
+  // The plan-mode selects reuse the modal form styles (full-width controls
   // inside .modal-card), and the usage tables scroll horizontally instead of
   // widening the history pane past the viewport.
 
-  check("G10 DOM: new-task and issue-launch strategy selects exist", () => {
-    for (const id of ["nt-strategy", "issue-launch-strategy"]) {
+  check("G10 DOM: new-task and issue-launch plan-mode selects exist", () => {
+    for (const id of [
+      "nt-decomposition",
+      "nt-granularity",
+      "issue-launch-decomposition",
+      "issue-launch-granularity",
+    ]) {
       const node = document.getElementById(id);
-      assert.ok(node, `missing strategy select #${id}`);
+      assert.ok(node, `missing plan-mode select #${id}`);
     }
   });
 

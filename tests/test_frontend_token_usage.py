@@ -110,7 +110,7 @@ def test_token_usage_badge_wired_into_page():
 # G10: backend usage-summary payload rendering
 # ---------------------------------------------------------------------------
 def test_g10_strategy_usage_module_present():
-    """The G10 strategy/usage-summary mjs module exists and is wired in."""
+    """The G10 plan-mode/usage-summary mjs module exists and is wired in."""
     module = REPO_ROOT / "tests" / "frontend" / "strategy_usage_summary.test.mjs"
     assert module.is_file(), f"missing {module}"
     harness = FRONTEND_TEST.read_text(encoding="utf-8")
@@ -138,8 +138,8 @@ def test_g10_node_checks_executed():
         f"frontend test runner exited {result.returncode}:\n{combined}"
     )
     for needle in (
-        "G10 buildNewFlowBody omits strategy when project-default",
-        "G10 buildNewFlowBody sends explicit auto/direct/planned",
+        "G10 buildNewFlowBody omits plan mode when project-default",
+        "G10 buildNewFlowBody sends explicit doctrine + granularity",
         "G10 formatUsageTotals marks non-available instead of zero",
         "G10 renderUsagePayloadRegion renders calls + steps + flow totals",
         "G10 badge prefers the backend payload over client-side sums",
@@ -151,12 +151,18 @@ def test_g10_node_checks_executed():
         )
 
 
-def test_g10_strategy_selects_wired_into_page():
-    """Both strategy controls (New Task + issue launch) exist with a
-    project-default first option (value ""), and the history detail carries
-    the meta + usage-region containers the renderers write into."""
+def test_g10_plan_mode_selects_wired_into_page():
+    """All four plan-mode controls (New Task + issue launch, doctrine +
+    granularity) exist with a project-default first option (value ""), and the
+    history detail carries the meta + usage-region containers the renderers
+    write into."""
     html = INDEX_HTML.read_text(encoding="utf-8")
-    for sel_id in ("nt-strategy", "issue-launch-strategy"):
+    for sel_id in (
+        "nt-decomposition",
+        "nt-granularity",
+        "issue-launch-decomposition",
+        "issue-launch-granularity",
+    ):
         assert f'id="{sel_id}"' in html, f"{sel_id} select is missing"
     for container_id in ("history-meta", "history-usage-region"):
         assert f'id="{container_id}"' in html, f"{container_id} is missing"
@@ -166,5 +172,5 @@ def test_g10_usage_region_css_present():
     css = STYLE_CSS.read_text(encoding="utf-8")
     assert ".history-usage-region" in css, "history-usage-region CSS missing"
     assert ".usage-table" in css, "usage-table CSS missing"
-    assert ".flow-strategy-chip" in css, "flow-strategy-chip CSS missing"
+    assert ".flow-plan-chip" in css, "flow-plan-chip CSS missing"
 

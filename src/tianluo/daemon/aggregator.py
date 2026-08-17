@@ -164,13 +164,13 @@ class FlowSnapshot:
     # read this flag as the primary resume-eligibility signal, falling back to
     # the legacy status/source heuristic only when it is absent/false.
     resumable: bool = False
-    # Control-plane projections shared with the CLI history view: the
-    # implementation-strategy view (requested/effective/reason, inferred for
-    # legacy flows), the SELF_CHECK scope audit, and the compact records-free
-    # usage/cost summary. All three come from the same backends the CLI and
-    # server consume (strategy_view.py / usage.py); ``None`` means not
-    # recoverable (degraded header read / no usage recorded).
-    implementation_strategy: Optional[Dict[str, Any]] = None
+    # Control-plane projections shared with the CLI history view: the plan-mode
+    # view (decomposition / granularity / group count, with a legacy_strategy
+    # annotation for flows predating the model), the SELF_CHECK scope audit,
+    # and the compact records-free usage/cost summary. All three come from the
+    # same backends the CLI and server consume (strategy_view.py / usage.py);
+    # ``None`` means not recoverable (degraded header read / no usage recorded).
+    plan_mode: Optional[Dict[str, Any]] = None
     review_scope: Optional[Dict[str, Any]] = None
     usage_summary: Optional[Dict[str, Any]] = None
 
@@ -204,9 +204,9 @@ class FlowSnapshot:
         }
         # Omit the projection keys entirely when unrecoverable: an absent key
         # is "unknown" on the wire, and a fabricated empty dict would read as
-        # a confirmed not_applicable / zero-usage answer.
-        if self.implementation_strategy is not None:
-            data["implementation_strategy"] = self.implementation_strategy
+        # a confirmed single-group / zero-usage answer.
+        if self.plan_mode is not None:
+            data["plan_mode"] = self.plan_mode
         if self.review_scope is not None:
             data["review_scope"] = self.review_scope
         if self.usage_summary is not None:
@@ -1065,14 +1065,19 @@ class DaemonAggregator:
     def _projection_fields(
         root: Path, data: Dict[str, Any]
     ) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
-        """Compute (strategy_view, scope_view, usage_summary) for an engine dict.
+        """Compute (plan_mode_view, scope_view, usage_summary) for an engine dict.
 
         All three use the shared control-plane backends — strategy_view.py for
-        the strategy projection and usage.py's UsageSummary for the summary —
+        the plan-mode projection and usage.py's UsageSummary for the summary —
         so the daemon never re-implements the engine's or the CLI's formulas.
         A degraded header read (no ``state``) yields ``(None, None, None)``.
         """
-        from ..strategy_view import resolve_flow_context, scope_view, strategy_view
+        from ..strategy_view import (
+            plan_group_count_from_state,
+            plan_mode_view,
+            resolve_flow_context,
+            scope_view,
+        )
         from .usage_backend import flow_usage_summary
 
         state = data.get("state")
@@ -1083,10 +1088,15 @@ class DaemonAggregator:
             state_dir=runtime_dir(root) / "state",
             flow_id=str(data.get("flow_id") or ""),
         )
-        strategy = strategy_view(
+        plan_mode = plan_mode_view(
             context,
             task_type=str(data.get("task_type") or ""),
             selected_steps=state.get("selected_steps") or [],
+            plan_group_count=plan_group_count_from_state(
+                state,
+                state_dir=runtime_dir(root) / "state",
+                flow_id=str(data.get("flow_id") or ""),
+            ),
         )
         scope = scope_view(context)
         usage = flow_usage_summary(
@@ -1095,7 +1105,7 @@ class DaemonAggregator:
             call_id=str(data.get("flow_id") or "flow"),
             flow_id=str(data.get("flow_id") or ""),
         )
-        return strategy, scope, usage
+        return plan_mode, scope, usage
 
     def _snapshot_for_root(
         self, root: Path, live_roots: Optional[Set[str]] = None
@@ -1157,7 +1167,7 @@ class DaemonAggregator:
         flow_calls = self._filter_stale_calls(flow_calls, state)
         flow_calls = self._dedup_calls_by_step(flow_calls)
         status = str(data.get("status") or "unknown")
-        strategy, scope, usage = self._projection_fields(root, data)
+        plan_mode, scope, usage = self._projection_fields(root, data)
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
@@ -1173,7 +1183,7 @@ class DaemonAggregator:
             log_count=log_count,
             issue_count=issue_count,
             summary=self._read_summary(state_dir, flow_id_str),
-            implementation_strategy=strategy,
+            plan_mode=plan_mode,
             review_scope=scope,
             usage_summary=usage,
             # Surface the lock-wait sub-state; absent/false for every flow not
@@ -1293,7 +1303,7 @@ class DaemonAggregator:
         flow_id = data.get("flow_id")
         flow_id_str = str(flow_id) if flow_id else None
         status = str(data.get("status") or "unknown")
-        strategy, scope, usage = DaemonAggregator._projection_fields(root, data)
+        plan_mode, scope, usage = DaemonAggregator._projection_fields(root, data)
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
@@ -1311,7 +1321,7 @@ class DaemonAggregator:
             summary=None,
             waiting_for_lock=False,
             resumable=_resumable_with_live_gate(status, root, live_roots),
-            implementation_strategy=strategy,
+            plan_mode=plan_mode,
             review_scope=scope,
             usage_summary=usage,
         )

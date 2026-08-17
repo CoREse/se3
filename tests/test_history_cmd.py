@@ -598,7 +598,7 @@ class TestHistoryShowDetailedCliFixLoop:
 
 
 class TestHistoryUsageAndStrategySurfaces:
-    """The strategy / scope / usage projections surface through history show.
+    """The plan-mode / scope / usage projections surface through history show.
 
     These pin the same backends the daemon and server consume
     (strategy_view.py + usage.build_usage_payload), so the CLI JSON view can
@@ -630,11 +630,11 @@ class TestHistoryUsageAndStrategySurfaces:
         flow_data = _make_flow_dict("flow-usage-1")
         impl_id = "01_implement_abc"
         flow_data["state"]["step_history"] = [impl_id]
-        flow_data["state"]["selected_steps"] = ["analyze", "implement"]
+        flow_data["state"]["selected_steps"] = ["analyze", "plan", "implement"]
         flow_data["state"]["context"] = {
-            "requested_implementation_strategy": "direct",
-            "effective_implementation_strategy": "direct",
-            "strategy_reason": "explicit request",
+            "plan_decomposition": "capability",
+            "plan_granularity": "single",
+            "plan_mode_reason": "selected by explicit request",
             "self_check_review": {
                 "active_round": {
                     "round_id": "scr-x",
@@ -662,10 +662,11 @@ class TestHistoryUsageAndStrategySurfaces:
 
         detail = get_flow_detail(project, "flow-usage-1")
         assert detail is not None
-        strategy = detail["implementation_strategy"]
-        assert strategy["effective"] == "direct"
-        assert strategy["requested"] == "direct"
-        assert strategy["inferred"] is False
+        plan_mode = detail["plan_mode"]
+        assert plan_mode["decomposition"] == "capability"
+        assert plan_mode["granularity"] == "single"
+        assert plan_mode["legacy_strategy"] is None
+        assert plan_mode["inferred"] is False
         assert detail["review_scope"]["active_round"]["scope_mode"] == "incremental"
         assert detail["review_scope"]["completed_full_rounds"] == 1
         usage = detail["usage"]
@@ -698,7 +699,7 @@ class TestHistoryUsageAndStrategySurfaces:
         assert usage["calls"][0]["usage_status"] == "available"
         assert usage["summary"]["totals"]["logical_input_tokens"] == 300
 
-    def test_active_flow_strategy_inferred_for_legacy(self, project):
+    def test_active_flow_plan_mode_inferred_for_legacy(self, project):
         flow_data = _make_flow_dict("flow-legacy-strategy")
         flow_data["state"]["selected_steps"] = ["analyze", "plan", "implement", "test"]
         (project / "tianluo" / "state" / "engine.json").write_text(
@@ -706,9 +707,12 @@ class TestHistoryUsageAndStrategySurfaces:
         )
 
         detail = get_flow_detail(project, "flow-legacy-strategy")
-        strategy = detail["implementation_strategy"]
-        assert strategy["effective"] == "planned"
-        assert strategy["inferred"] is True
+        plan_mode = detail["plan_mode"]
+        # A flow with no plan-mode keys predates the model: it is described by
+        # the legacy path it ran, not by a doctrine it never chose.
+        assert plan_mode["legacy_strategy"] == "planned"
+        assert plan_mode["decomposition"] is None
+        assert plan_mode["inferred"] is True
         # This state records NO usage fact at all — neither a record ledger nor
         # a five-field tally — so both surfaces omit usage rather than claim an
         # unknown call. The daemon's flow_usage_summary reads the same bytes and
@@ -798,25 +802,26 @@ class TestHistoryUsageAndStrategySurfaces:
         assert usage["legacy"] is True
         assert len(usage["calls"]) == 2
         assert set(usage["steps"]) == {"01_analyze_abc", "02_self_check_def"}
-        # Strategy: history-only flows have no context; the recorded steps
-        # (analyze/self_check, no PLAN->IMPLEMENT surface) infer
-        # not_applicable — matching the engine's legacy inference.
-        assert detail["implementation_strategy"]["effective"] == "not_applicable"
-        assert detail["implementation_strategy"]["inferred"] is True
+        # Plan mode: history-only flows have no context; the recorded steps
+        # (analyze/self_check, no PLAN->IMPLEMENT surface) infer the legacy
+        # not_applicable path, with no doctrine recoverable.
+        assert detail["plan_mode"]["legacy_strategy"] == "not_applicable"
+        assert detail["plan_mode"]["decomposition"] is None
+        assert detail["plan_mode"]["inferred"] is True
         assert detail["review_scope"] is None
 
-    def test_show_cli_renders_usage_and_strategy_sections(
+    def test_show_cli_renders_usage_and_plan_mode_sections(
         self, project, monkeypatch
     ):
         flow_data = _make_flow_dict("flow-render-usage", status="completed")
         impl_id = "01_implement_abc"
         record = self._usage_record()
         flow_data["state"]["step_history"] = [impl_id]
-        flow_data["state"]["selected_steps"] = ["analyze", "implement"]
+        flow_data["state"]["selected_steps"] = ["analyze", "plan", "implement"]
         flow_data["state"]["context"] = {
-            "requested_implementation_strategy": "planned",
-            "effective_implementation_strategy": "planned",
-            "strategy_reason": "default",
+            "plan_decomposition": "granular",
+            "plan_granularity": "auto",
+            "plan_mode_reason": "left at the default",
         }
         flow_data["state"]["session_usage_records"] = [record]
         flow_data["state"]["steps"] = {
@@ -842,7 +847,7 @@ class TestHistoryUsageAndStrategySurfaces:
         # section header, so assert on the structural content instead).
         assert "claude-opus-5" in out
         assert "claude-code" in out
-        assert "planned" in out
+        assert "granular" in out
         assert "01_implement_abc" in out
 
     def test_show_cli_renders_legacy_plan_artifacts(self, project, monkeypatch):
@@ -920,7 +925,7 @@ class TestHistoryUsageAndStrategySurfaces:
 class TestArchivedFlowUsage:
     """Archived flows recover usage through the same state-backed path."""
 
-    def test_archived_flow_carries_usage_and_strategy(self, project):
+    def test_archived_flow_carries_usage_and_plan_mode(self, project):
         flow_data = _make_flow_dict("flow-archived-usage", task="Archived usage")
         record = {
             "schema_version": 2,
@@ -940,9 +945,9 @@ class TestArchivedFlowUsage:
         }
         flow_data["state"]["selected_steps"] = ["plan", "implement"]
         flow_data["state"]["context"] = {
-            "requested_implementation_strategy": "planned",
-            "effective_implementation_strategy": "planned",
-            "strategy_reason": "project config",
+            "plan_decomposition": "capability",
+            "plan_granularity": "conservative",
+            "plan_mode_reason": "selected by project configuration",
         }
         flow_data["state"]["session_usage_records"] = [record]
         archive_file = (
@@ -953,7 +958,8 @@ class TestArchivedFlowUsage:
         detail = get_flow_detail(project, "flow-archived-usage")
         assert detail is not None
         assert detail["status"] == "completed"
-        assert detail["implementation_strategy"]["effective"] == "planned"
+        assert detail["plan_mode"]["decomposition"] == "capability"
+        assert detail["plan_mode"]["granularity"] == "conservative"
         usage = detail["usage"]
         assert usage["completeness"] == "complete"
         assert usage["summary"]["totals"]["logical_input_tokens"] == 800

@@ -38,7 +38,7 @@ from ..engine.chat_history import (
     render_session_detailed,
 )
 from ..engine.display import build_history_usage_renderables
-from ..strategy_view import scope_view, strategy_view
+from ..strategy_view import plan_mode_view, scope_view
 from ..usage import (
     UsageRecord,
     build_usage_payload,
@@ -153,12 +153,28 @@ def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     return archived
 
 
-def _strategy_value_label(value: Any) -> str:
-    """Localize one strategy enum value (WebUI ``strategy.value.*`` parity)."""
+def _plan_decomposition_label(value: Any) -> str:
+    """Localize one decomposition doctrine (WebUI ``plan.decomposition.*`` parity)."""
     text = str(value or "").strip()
-    if text in ("auto", "direct", "planned", "not_applicable"):
-        return t(f"history.strategy.value.{text}")
-    return text or t("history.strategy.value.unknown")
+    if text in ("capability", "granular"):
+        return t(f"history.plan.decomposition.{text}")
+    return text or t("history.plan.unknown")
+
+
+def _plan_granularity_label(value: Any) -> str:
+    """Localize one granularity tier (WebUI ``plan.granularity.*`` parity)."""
+    text = str(value or "").strip()
+    if text in ("auto", "single", "conservative"):
+        return t(f"history.plan.granularity.{text}")
+    return text or t("history.plan.unknown")
+
+
+def _legacy_strategy_label(value: Any) -> str:
+    """Localize a legacy flow's retired implementation-strategy value."""
+    text = str(value or "").strip()
+    if text in ("direct", "planned", "not_applicable"):
+        return t(f"history.plan.legacy.{text}")
+    return text or t("history.plan.unknown")
 
 
 def _scope_mode_label(value: Any) -> str:
@@ -169,17 +185,70 @@ def _scope_mode_label(value: Any) -> str:
     return text or "-"
 
 
-def _strategy_reason_text(strategy: Dict[str, Any]) -> str:
-    """The strategy-reason row text.
+def _plan_group_count(step_details: List[Dict[str, Any]]) -> Optional[int]:
+    """Return how many task groups the flow's PLAN step emitted, if known.
+
+    ``task_groups`` wins over the recorded counter so a plan revision that
+    rewrote the groups can never leave a stale count on display; ``None`` means
+    PLAN has not run (or recorded nothing), never "one".
+    """
+    for step in step_details:
+        if step.get("step_type") != "plan":
+            continue
+        outputs = step.get("outputs")
+        if not isinstance(outputs, dict):
+            continue
+        groups = outputs.get("task_groups")
+        if isinstance(groups, list):
+            return len(groups)
+        count = outputs.get("plan_group_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            return count
+    return None
+
+
+def _plan_mode_display_value(plan_mode: Dict[str, Any]) -> str:
+    """Render the plan-mode row value, or "" when nothing is recoverable.
+
+    A flow created under the retired strategy axis carries no doctrine of its
+    own, so it is shown as what it actually recorded (``legacy_strategy``)
+    rather than as a new-model value it never had.
+    """
+    decomposition = plan_mode.get("decomposition")
+    if decomposition:
+        value = t(
+            "history.field.plan_mode_value",
+            decomposition=_plan_decomposition_label(decomposition),
+            granularity=_plan_granularity_label(plan_mode.get("granularity")),
+        )
+        count = plan_mode.get("group_count")
+        if isinstance(count, int) and not isinstance(count, bool):
+            value = t("history.field.plan_mode_groups", value=value, count=count)
+        return value
+    legacy = plan_mode.get("legacy_strategy")
+    if legacy:
+        value = t(
+            "history.field.plan_mode_legacy",
+            value=_legacy_strategy_label(legacy),
+        )
+        if plan_mode.get("inferred"):
+            value = t("history.field.plan_mode_inferred", value=value)
+        return value
+    return ""
+
+
+def _plan_mode_reason_text(plan_mode: Dict[str, Any]) -> str:
+    """The plan-mode reason row text.
 
     A ``reason_key`` marks a sentence the projection itself authored (legacy
-    inference), so it renders through the CLI catalog; a persisted reason is
-    flow data recorded at decision time and is shown verbatim.
+    inference / legacy strategy record), so it renders through the CLI catalog;
+    a persisted reason is flow data recorded at decision time and is shown
+    verbatim.
     """
-    key = str(strategy.get("reason_key") or "").strip()
-    if key == "legacy_inference":
-        return t("history.field.strategy_reason_legacy")
-    return str(strategy.get("reason") or "")
+    key = str(plan_mode.get("reason_key") or "").strip()
+    if key in ("legacy_inference", "legacy_strategy"):
+        return t(f"history.field.plan_mode_reason_{key}")
+    return str(plan_mode.get("reason") or "")
 
 
 def _pricing_catalog(project_root: Path) -> Any:
@@ -285,13 +354,14 @@ def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
         "current_step_id": flow.state.current_step_id,
         "steps": step_details,
         "chat_sessions": len(chat_sessions),
-        # Control-plane projections: strategy / scope audit / usage share one
+        # Control-plane projections: plan mode / scope audit / usage share one
         # backend with the daemon and server surfaces (see strategy_view.py /
         # usage.build_usage_payload), so CLI and WebUI never diverge.
-        "implementation_strategy": strategy_view(
+        "plan_mode": plan_mode_view(
             context,
             task_type=flow.task_type,
             selected_steps=flow.state.selected_steps,
+            plan_group_count=_plan_group_count(step_details),
         ),
         "review_scope": scope_view(context),
         "usage": _state_usage_payload(project_root, flow),
@@ -387,7 +457,7 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
             "outputs": outputs,
         })
 
-    # History-only flows carry no State, so strategy / scope audit are not
+    # History-only flows carry no State, so plan mode / scope audit are not
     # recoverable; usage is rebuilt from each assistant message's records
     # (legacy five-field tallies adapt to flagged legacy_ambiguous records).
     records_by_step = collect_usage_records_from_sessions(chat_sessions)
@@ -411,10 +481,11 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
         "current_step_id": None,
         "steps": step_details,
         "chat_sessions": len(chat_sessions),
-        "implementation_strategy": strategy_view(
+        "plan_mode": plan_mode_view(
             {},
             task_type=task_type,
             selected_steps=[step["step_type"] for step in step_details],
+            plan_group_count=_plan_group_count(step_details),
         ),
         "review_scope": None,
         "usage": usage,
@@ -654,27 +725,16 @@ def show_cmd(
         info_table.add_row(t("history.field.completed"), format_datetime(detail['completed_at']))
     info_table.add_row(t("history.field.chat_sessions"), str(detail['chat_sessions']))
 
-    # Implementation strategy (requested/effective/reason) — same projection
-    # the daemon status and server payloads carry (strategy_view).
-    strategy = detail.get("implementation_strategy")
-    if isinstance(strategy, dict) and strategy.get("effective"):
-        value = _strategy_value_label(strategy["effective"])
-        if (
-            strategy.get("requested")
-            and strategy["requested"] not in (strategy["effective"], "auto")
-            and strategy["requested"] in ("auto", "direct", "planned")
-        ):
-            value = t(
-                "history.field.strategy_value",
-                effective=value,
-                requested=_strategy_value_label(strategy["requested"]),
-            )
-        if strategy.get("inferred"):
-            value = t("history.field.strategy_inferred", value=value)
-        info_table.add_row(t("history.field.strategy"), value)
-        reason = _strategy_reason_text(strategy)
-        if reason:
-            info_table.add_row(t("history.field.strategy_reason"), reason)
+    # PLAN decomposition mode (doctrine / granularity / group count) — same
+    # projection the daemon status and server payloads carry (strategy_view).
+    plan_mode = detail.get("plan_mode")
+    if isinstance(plan_mode, dict):
+        value = _plan_mode_display_value(plan_mode)
+        if value:
+            info_table.add_row(t("history.field.plan_mode"), value)
+            reason = _plan_mode_reason_text(plan_mode)
+            if reason:
+                info_table.add_row(t("history.field.plan_mode_reason"), reason)
 
     # SELF_CHECK scope audit (persisted round state).
     review_scope = detail.get("review_scope")

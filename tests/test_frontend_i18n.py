@@ -173,21 +173,33 @@ def test_style_css_styles_the_language_switch():
 # 4b. G10 strategy / scope / usage keys (completeness + translation)
 # ---------------------------------------------------------------------------
 G10_WEBUI_KEYS = [
-    "newTask.strategy",
-    "issueLaunch.strategy",
-    "strategy.label",
-    "strategy.reasonLabel",
-    "strategy.requestedLabel",
-    "strategy.inferredNote",
-    "strategy.option.projectDefault",
-    "strategy.option.auto",
-    "strategy.option.direct",
-    "strategy.option.planned",
-    "strategy.value.auto",
-    "strategy.value.direct",
-    "strategy.value.planned",
-    "strategy.value.not_applicable",
-    "strategy.value.unknown",
+    "newTask.planDecomposition",
+    "newTask.planGranularity",
+    "newTask.errUnsupportedDaemonPlanMode",
+    "issueLaunch.planDecomposition",
+    "issueLaunch.planGranularity",
+    "plan.label",
+    "plan.groupsLabel",
+    "plan.reasonLabel",
+    "plan.legacyNote",
+    "plan.inferredNote",
+    "plan.reason.legacy_inference",
+    "plan.reason.legacy_strategy",
+    "plan.option.projectDefault",
+    "plan.option.capability",
+    "plan.option.granular",
+    "plan.option.auto",
+    "plan.option.single",
+    "plan.option.conservative",
+    "plan.decomposition.capability",
+    "plan.decomposition.granular",
+    "plan.granularity.auto",
+    "plan.granularity.single",
+    "plan.granularity.conservative",
+    "plan.legacy.direct",
+    "plan.legacy.planned",
+    "plan.legacy.not_applicable",
+    "plan.unknown",
     "scope.label",
     "scope.mode.full",
     "scope.mode.incremental",
@@ -258,13 +270,12 @@ def test_g10_webui_keys_translated_in_zh_cn():
     missing = [k for k in G10_WEBUI_KEYS if k not in zh]
     assert not missing, f"zh-CN is missing G10 keys: {missing}"
     # Config tokens / product nouns may legitimately be identical across
-    # languages (auto/direct/planned are strategy values, full/incremental are
-    # scope-mode tokens, "Agent"/"Runner"/"Provider" are product nouns); prose
-    # labels must be genuinely translated.
+    # languages (direct/planned are retired strategy values, full/incremental
+    # are scope-mode tokens, "Agent"/"Runner"/"Provider" are product nouns);
+    # prose labels must be genuinely translated.
     token_keys = {
-        "strategy.value.auto",
-        "strategy.value.direct",
-        "strategy.value.planned",
+        "plan.legacy.direct",
+        "plan.legacy.planned",
         "usage.totalsLine",
         "usage.col.agent",
         "usage.col.runner",

@@ -524,51 +524,73 @@ class TestSpawner:
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
-    def test_spawn_appends_implementation_strategy(self, fake_se3, tmp_path):
+    def test_spawn_appends_plan_mode_options(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn(
             "do a thing",
             project_root=str(tmp_path),
-            implementation_strategy="direct",
+            plan_decomposition="capability",
+            plan_granularity="single",
         )
-        idx = spawned.args.index("--implementation-strategy")
-        assert spawned.args[idx + 1] == "direct"
+        idx = spawned.args.index("--plan-decomposition")
+        assert spawned.args[idx + 1] == "capability"
+        idx = spawned.args.index("--plan-granularity")
+        assert spawned.args[idx + 1] == "single"
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
-    def test_spawn_omits_implementation_strategy_by_default(self, fake_se3, tmp_path):
+    def test_spawn_omits_plan_mode_options_by_default(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn("plain task", project_root=str(tmp_path))
         # No option on the argv -> the CLI resolves project config / default.
-        assert "--implementation-strategy" not in spawned.args
+        assert "--plan-decomposition" not in spawned.args
+        assert "--plan-granularity" not in spawned.args
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
-    def test_spawn_from_issue_appends_implementation_strategy(self, fake_se3, tmp_path):
+    def test_spawn_appends_only_the_selected_plan_mode_axis(self, fake_se3, tmp_path):
+        # Choosing one axis must not put a guessed value on the other: the
+        # unset one still belongs to the project configuration.
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "half a choice",
+            project_root=str(tmp_path),
+            plan_granularity="conservative",
+        )
+        assert "--plan-decomposition" not in spawned.args
+        idx = spawned.args.index("--plan-granularity")
+        assert spawned.args[idx + 1] == "conservative"
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_from_issue_appends_plan_mode_options(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn(
             "",
             project_root=str(tmp_path),
             from_issue_id="13",
-            implementation_strategy="auto",
+            plan_decomposition="granular",
         )
         assert "--from-issue" in spawned.args
-        idx = spawned.args.index("--implementation-strategy")
-        assert spawned.args[idx + 1] == "auto"
+        idx = spawned.args.index("--plan-decomposition")
+        assert spawned.args[idx + 1] == "granular"
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
-    def test_spawn_strategy_with_worktree_combined(self, fake_se3, tmp_path):
+    def test_spawn_plan_mode_with_worktree_combined(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn(
-            "isolated direct",
+            "isolated capability",
             project_root=str(tmp_path),
             worktree=True,
-            implementation_strategy="planned",
+            plan_decomposition="capability",
+            plan_granularity="auto",
         )
         assert "--worktree" in spawned.args
-        idx = spawned.args.index("--implementation-strategy")
-        assert spawned.args[idx + 1] == "planned"
+        idx = spawned.args.index("--plan-decomposition")
+        assert spawned.args[idx + 1] == "capability"
+        idx = spawned.args.index("--plan-granularity")
+        assert spawned.args[idx + 1] == "auto"
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
@@ -848,26 +870,32 @@ class TestDaemonLifecycle:
         daemon.spawner.wait(spawned.pid, timeout=10)
         daemon.spawner.reap()
 
-    def test_request_spawn_passes_implementation_strategy(self, fake_se3, tmp_path):
+    def test_request_spawn_passes_plan_mode(self, fake_se3, tmp_path):
         config = DaemonConfig(pid_dir=tmp_path / "rt")
         daemon = Daemon(config)
         proj = tmp_path / "proj"
         proj.mkdir()
         spawned = daemon.request_spawn(
-            "task", project_root=str(proj), implementation_strategy="direct"
+            "task",
+            project_root=str(proj),
+            plan_decomposition="capability",
+            plan_granularity="single",
         )
-        idx = spawned.args.index("--implementation-strategy")
-        assert spawned.args[idx + 1] == "direct"
+        idx = spawned.args.index("--plan-decomposition")
+        assert spawned.args[idx + 1] == "capability"
+        idx = spawned.args.index("--plan-granularity")
+        assert spawned.args[idx + 1] == "single"
         daemon.spawner.wait(spawned.pid, timeout=10)
         daemon.spawner.reap()
 
-    def test_request_spawn_omits_strategy_by_default(self, fake_se3, tmp_path):
+    def test_request_spawn_omits_plan_mode_by_default(self, fake_se3, tmp_path):
         config = DaemonConfig(pid_dir=tmp_path / "rt")
         daemon = Daemon(config)
         proj = tmp_path / "proj"
         proj.mkdir()
         spawned = daemon.request_spawn("task", project_root=str(proj))
-        assert "--implementation-strategy" not in spawned.args
+        assert "--plan-decomposition" not in spawned.args
+        assert "--plan-granularity" not in spawned.args
         daemon.spawner.wait(spawned.pid, timeout=10)
         daemon.spawner.reap()
 
