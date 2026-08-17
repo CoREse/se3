@@ -1060,38 +1060,132 @@ If the output is acceptable, set "approved" to true. If changes are needed, set 
     return prompt
 
 
+def _build_capability_grouping_review_prompt(
+    *,
+    task_description: str,
+    step_output_text: str,
+    revision_section: str,
+    lang_instruction: str,
+) -> str:
+    """Render the capability-doctrine *grouping* review prompt.
+
+    Three review dimensions, matching the three ways a capability grouping can
+    be wrong: too many / too few groups for the volume of work, a split made
+    along artifact type or code layer instead of along deliverable capability,
+    and a ``depends_on`` graph that does not describe real dependencies.
+    """
+    return f"""You are reviewing the output of the **plan** step in an SE3 development workflow.
+
+Your one and only job here is to review the **grouping**: whether the plan cut the
+work into the right task groups. Do NOT grade the plan on general quality, style,
+or feasibility, and do NOT ask for the requirements to be decomposed into a
+per-requirement task list — that is out of scope for this review. Under this
+doctrine a group is deliberately coarse: its description names a capability, and
+the detailed breakdown happens inside the implementation call, not here.
+
+## Original Task (the volume of work to be grouped lives in here)
+{task_description}
+
+## Output of the PLAN Step (proposal / design / task_groups)
+{step_output_text}
+{revision_section}
+## The Grouping Doctrine Being Reviewed
+The one and only criterion for a split is **whether a single autonomous implement
+call can safely carry the group**:
+- one capability that one call can finish → one group;
+- one capability too large for one call → split into two or more groups;
+- two naturally distinct capabilities that one call can still finish together →
+  still one group;
+- borderline → one capability per group. The more capabilities a group
+  aggregates, the lower the threshold for splitting it (be conservative).
+
+## Review Dimensions (check all three)
+1. **Group count vs. volume of work**: does the number of groups match the size
+   of the task? Flag both directions — a group so large that one autonomous
+   implement call could not safely carry it, and gratuitous splitting of work
+   that one call would comfortably finish together.
+2. **Forbidden splits by artifact type or layer**: grouping must follow
+   deliverable capability units, never files, modules, or code layers. A
+   standalone test group, docs group, or config group is forbidden — tests and
+   verification are part of what each group itself delivers. Flag any group
+   whose identity is an artifact type or an architectural layer rather than a
+   capability.
+3. **Dependency declarations**: does each `depends_on` describe a real ordering
+   constraint (the depended-on group produces something this group needs)? Flag
+   dangling group ids, cycles, dependencies that do not actually exist (which
+   needlessly serialize work that could run in parallel), and missing
+   dependencies between groups that genuinely must be ordered.
+
+Approve if the grouping is sound on all three dimensions. If any dimension fails,
+do NOT approve — name the offending groups and say how they should be regrouped.
+
+## Response Format
+You MUST respond with a JSON object in this exact format:
+```json
+{{
+    "approved": true or false,
+    "feedback": "Your detailed feedback here. If not approved, state which of the three dimensions failed, name the offending group ids, and describe the regrouping you expect."
+}}
+```
+
+If the grouping is sound, set "approved" to true. Otherwise set "approved" to
+false and give specific, actionable regrouping feedback.
+{lang_instruction}"""
+
+
 def build_plan_confirm_prompt(
     step_output: Dict[str, Any],
     task_description: str,
     revision_feedback: Optional[str] = None,
     project_root: Optional[Path] = None,
+    decomposition: Optional[Any] = None,
 ) -> str:
-    """Build the plan-specific *requirement coverage* review prompt.
+    """Build the plan-specific review prompt for the flow's decomposition doctrine.
 
     Unlike the generic ``build_llm_review_prompt``, this prompt is narrowly
     specialized for confirming a ``plan`` step: it does not score the plan on
-    general quality axes (completeness/clarity/feasibility). Instead it asks the
-    reviewer to (1) decompose the discrete requirements embedded in the original
-    ``task_description`` and (2) check, requirement by requirement, that every
-    requirement has at least one corresponding task in the plan's task_groups.
-    This is the always-on first half of the two-stage guarantee
-    (requirement -> task coverage); the second half (task -> implementation
-    correctness) lives in the self_check step.
+    general quality axes (completeness/clarity/feasibility). What it *does* ask
+    depends on which doctrine PLAN followed:
+
+    - ``capability`` (default): review the **grouping** — whether the group
+      count matches the volume of work, whether any group is split by artifact
+      type or code layer, and whether the ``depends_on`` declarations hold.
+    - ``granular`` (legacy): the historical requirement -> task coverage review,
+      kept verbatim because ``granular`` is a behaviour-preserving legacy value
+      and its per-task listing still makes coverage checkable.
+
+    The capability branch deliberately drops the requirement-coverage review;
+    see the colocated ``WHY:`` note in the body for the reasoning.
 
     The output schema is the same ``{approved, feedback}`` contract the generic
-    builder uses, so ``_llm_review``'s parsing, revision loop, and
-    cross-revision max_iterations counting are reused unchanged.
+    builder uses in both branches, so ``_llm_review``'s parsing, revision loop,
+    and cross-revision max_iterations counting are reused unchanged.
 
     Args:
         step_output: The outputs from the plan step (proposal/design/task_groups)
         task_description: Original task description from the flow
         revision_feedback: Previous revision feedback if this is a re-review
         project_root: Project root directory for language config
+        decomposition: The flow's persisted ``PlanDecomposition`` (or its string
+            value). ``None`` falls back to the current default doctrine.
 
     Returns:
-        Formatted prompt string for the plan requirement-coverage reviewer
+        Formatted prompt string for the plan reviewer
     """
     import json as _json
+
+    from .plan_decomposition import PlanDecomposition, PlanModeResolver
+
+    if decomposition is None:
+        resolved_decomposition = PlanModeResolver.DEFAULT_DECOMPOSITION
+    else:
+        raw = getattr(decomposition, "value", decomposition)
+        try:
+            resolved_decomposition = PlanDecomposition(str(raw).strip().lower())
+        except ValueError:
+            # An unrecognized value must not silently pick the legacy review;
+            # the current doctrine is the safer reading of an unknown flow.
+            resolved_decomposition = PlanModeResolver.DEFAULT_DECOMPOSITION
 
     # Format plan output for display (proposal/design/task_groups, etc.).
     output_parts = []
@@ -1116,6 +1210,27 @@ The following feedback was given in a previous review. Check whether it has been
     lang_instruction = ""
     if project_root:
         lang_instruction = get_step_language_instruction("confirm_llm_review", project_root)
+
+    # WHY: the capability branch reviews the grouping instead of requirement
+    # coverage, in three steps: (1) self_check is task-description-authoritative
+    # — the effective task description chain is what it accepts against; (2) the
+    # requirement -> code coverage check is therefore already performed by
+    # self_check, and against the real implementation rather than against a
+    # plan, which is strictly the stronger check; (3) a capability group carries
+    # no per-task listing — its description simply *is* the capability — so a
+    # requirement -> task coverage review has lost its discriminating power,
+    # since every requirement trivially "maps" to some group. Reviewing the
+    # grouping is the one judgement left here that no later gate can make. The
+    # granular branch keeps the coverage review because that legacy doctrine
+    # still emits the per-task listing the review needs to discriminate on, and
+    # its behaviour is contractually unchanged.
+    if resolved_decomposition is PlanDecomposition.CAPABILITY:
+        return _build_capability_grouping_review_prompt(
+            task_description=task_description,
+            step_output_text=step_output_text,
+            revision_section=revision_section,
+            lang_instruction=lang_instruction,
+        )
 
     prompt = f"""You are reviewing the output of the **plan** step in an SE3 development workflow.
 

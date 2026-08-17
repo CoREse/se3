@@ -746,12 +746,6 @@ def load_config(project_root: Optional[Path] = None) -> Config:
 _CONFIRM_DEFAULT_MAX_ITERATIONS = 3
 _CONFIRM_VALID_STEP_CFG_KEYS = frozenset({"reviewer", "max_iterations"})
 
-# plan-confirm is always-on: its CONFIRM insertion and default reviewer
-# resolution do not depend on a ``confirmation.steps.plan`` entry existing.
-# Named here so both insert_confirmation_steps and resolve_confirm_inputs
-# share one source of truth for the special-cased step type.
-_PLAN_STEP_NAME = "plan"
-
 _warned_confirmation_enabled_for: set[str] = set()
 _warned_confirmation_top_reviewer_for: set[str] = set()
 _warned_confirmation_llm_reviewer_for: set[str] = set()
@@ -1031,20 +1025,28 @@ def insert_confirmation_steps(
 ) -> list:
     """Insert CONFIRM steps after each step type that requires confirmation.
 
-    A non-plan step type triggers a CONFIRM insertion iff it is a key in
-    ``confirmation.steps`` (the new per-step dict) AND it actually
-    appears in the supplied step sequence. For those, opting a step out
-    of confirmation simply means omitting it from ``confirmation.steps``.
+    A step type triggers a CONFIRM insertion iff it is a key in
+    ``confirmation.steps`` (the per-step dict) AND it actually appears in
+    the supplied step sequence. Opting a step out of confirmation simply
+    means omitting it from ``confirmation.steps``.
 
-    ``plan`` is special-cased as **always-on**: a CONFIRM is inserted
-    after every plan step regardless of whether ``confirmation.steps``
-    contains a ``plan`` entry (or is empty entirely). This makes the
-    plan-confirm requirement-coverage check a mechanical guarantee
-    decoupled from config presence — the ``confirmation.steps.plan``
-    entry now only customizes the reviewer / max_iterations, never the
-    on/off decision (which is resolved in ``resolve_confirm_inputs`` by
-    synthesizing a default entry for plan).
+    ``plan`` used to be special-cased as always-on; it no longer is (see the
+    colocated ``WHY:`` note below).
     """
+    # WHY: plan-confirm was always-on to make a requirement -> task coverage
+    # review a mechanical guarantee. Three things retired that guarantee, in
+    # order: (1) self_check is now task-description-authoritative — the
+    # effective task description chain is what it accepts against; (2) it
+    # therefore already performs the requirement -> code coverage check, and
+    # does it against the real implementation rather than against a plan, which
+    # is strictly the stronger check; (3) under the capability decomposition
+    # doctrine PLAN emits coarse groups with no per-task listing, so a
+    # requirement -> task coverage review has lost its discriminating power —
+    # every requirement trivially "maps" to a group whose description simply is
+    # the capability. So the gate degrades to an ordinary opt-in per-step
+    # confirmation on the same ``confirmation.steps`` path as every other step;
+    # ``confirmation.steps.plan: {reviewer: human}`` remains available as the
+    # manual grouping gate.
     config = load_confirmation_config(project_root)
     steps_dict = config.get("steps", {})
 
@@ -1055,12 +1057,8 @@ def insert_confirmation_steps(
         else:
             step_type_names.add(str(s))
 
-    # plan is always confirmed; other steps only when configured. Even an
-    # empty confirmation.steps must still yield plan-confirm, so we cannot
-    # early-return on an empty steps_dict.
     steps_to_confirm = {s for s in steps_dict.keys() if s in step_type_names}
-    steps_to_confirm.add(_PLAN_STEP_NAME)
-    if not steps_to_confirm & step_type_names:
+    if not steps_to_confirm:
         return steps
 
     from .engine.models import StepType
@@ -2102,13 +2100,9 @@ def resolve_confirm_inputs(
     the ruling (human review is opt-in via an explicit
     ``confirmation.steps.adjudicate`` entry).
 
-    Exception: ``plan`` is always-on. When ``reviewed_step_type == 'plan'``
-    and no ``confirmation.steps.plan`` entry exists, a default entry is
-    synthesized (reviewer=None → default ``llm_caller.defaults`` chain,
-    default max_iterations) rather than returning None, so plan-confirm
-    always resolves to a usable CONFIRM input regardless of config presence.
-    An explicit ``confirmation.steps.plan`` entry still overrides reviewer /
-    max_iterations.
+    ``plan`` follows that same generic rule — it carries no always-on
+    exception (see :func:`insert_confirmation_steps` for why the gate was
+    degraded to opt-in).
 
     Otherwise returns ``{"reviewer": str|None, "max_iterations": int|None,
     "agents": list[dict]|None}``:
@@ -2142,30 +2136,14 @@ def resolve_confirm_inputs(
 
     step_cfg = merged_steps.get(reviewed_step_type)
     if step_cfg is None:
-        # plan-confirm is always-on: even without a confirmation.steps.plan
-        # entry it must resolve to a usable CONFIRM input. Synthesize the
-        # default entry (reviewer=None → default llm_caller chain, default
-        # max_iterations) instead of returning None. This keeps the
-        # always-on guarantee decoupled from config presence. Non-plan steps
-        # (including adjudicate) still return None when unconfigured, leaving
-        # the caller to apply its own default — for adjudicate the state
-        # machine auto-passes the ruling, so human review is opt-in only.
-        if reviewed_step_type != _PLAN_STEP_NAME:
-            return None
-        step_cfg = {"reviewer": None, "max_iterations": None}
+        # Unconfigured steps (plan included, since its always-on exception was
+        # retired) return None so the caller applies its own default — for
+        # adjudicate the state machine auto-passes the ruling, so human review
+        # is opt-in only.
+        return None
 
     reviewer = step_cfg.get("reviewer")
     max_iterations = step_cfg.get("max_iterations")
-
-    # plan-confirm is always-on and this resolver is the single source of
-    # truth for its CONFIRM inputs: bake in the concrete default here (covering
-    # both the synthesized no-entry case and an explicit but value-less
-    # ``plan: {}`` entry) so a direct caller — or any future CONFIRM
-    # construction path that does not duplicate the state_machine None→default
-    # fallback — observes the real limit rather than a None it must re-default.
-    # An explicit positive max_iterations is preserved untouched.
-    if reviewed_step_type == _PLAN_STEP_NAME and max_iterations is None:
-        max_iterations = _CONFIRM_DEFAULT_MAX_ITERATIONS
 
     if reviewer == "human":
         return {
