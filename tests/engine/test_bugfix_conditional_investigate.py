@@ -16,9 +16,9 @@ case:
    ``task_type == 'discovery'`` (to preserve its sequence), so the decision has
    to key off the *effective* type, not the sequence type.
 3. **The insertion sits at the front of the rebuild chain.** Under
-   ``--worktree`` the merge pair must still end the sequence and the CONFIRM
-   gate must still sit directly after PLAN — inserting later would land the
-   investigation on the wrong side of one of them.
+   ``--worktree`` the merge pair must still end the sequence and a configured
+   plan CONFIRM gate must still sit directly after PLAN — inserting later would
+   land the investigation on the wrong side of one of them.
 """
 
 from __future__ import annotations
@@ -42,7 +42,6 @@ from tianluo.engine.steps.analyze import _update_flow_steps
 BUGFIX_BASELINE = [
     StepType.ANALYZE,
     StepType.PLAN,
-    StepType.CONFIRM,
     StepType.IMPLEMENT,
     StepType.TEST,
     StepType.SELF_CHECK,
@@ -247,6 +246,11 @@ class TestDiscoverEntryGetsInsertion:
 
 class TestWorktreeRebuildOrdering:
     def test_merge_tail_and_confirm_gate_survive_the_insertion(self, project_root):
+        # plan-confirm is opt-in now, so the gate has to be configured for this
+        # ordering property to have anything to assert on.
+        (project_root / "tianluo.yaml").write_text(
+            "confirmation:\n  steps:\n    plan: {reviewer: human}\n"
+        )
         flow, _step = _run_analyze(
             project_root, root_cause_clear=False, worktree=True
         )

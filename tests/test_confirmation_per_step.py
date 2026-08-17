@@ -343,25 +343,21 @@ class TestInsertConfirmationSteps:
         from tianluo.engine.models import StepType
 
         (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
-        # plan is always-on, so a sequence without plan is the right probe
-        # for "empty dict means no non-plan confirmation".
         result = insert_confirmation_steps(
             [StepType.IMPLEMENT, StepType.TEST], tmp_path,
         )
         assert StepType.CONFIRM not in result
 
-    def test_empty_dict_still_confirms_plan(self, tmp_path, isolated_global_home):
+    def test_empty_dict_no_confirm_for_plan_either(self, tmp_path, isolated_global_home):
         from tianluo.engine.models import StepType
 
-        # plan-confirm is always-on: an empty confirmation.steps must still
-        # insert exactly one CONFIRM after plan.
+        # plan carries no always-on exception: an empty confirmation.steps
+        # leaves PLAN unconfirmed like every other step type.
         (tmp_path / "tianluo.yaml").write_text("confirmation: {steps: {}}\n")
         result = insert_confirmation_steps(
             [StepType.PLAN, StepType.IMPLEMENT], tmp_path,
         )
-        plan_idx = result.index(StepType.PLAN)
-        assert result[plan_idx + 1] == StepType.CONFIRM
-        assert result.count(StepType.CONFIRM) == 1
+        assert StepType.CONFIRM not in result
 
 
 # ---------------------------------------------------------------------------

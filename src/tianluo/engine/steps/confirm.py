@@ -225,10 +225,14 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     if reviewed_step and reviewed_step.inputs.get('is_revision'):
         revision_feedback = reviewed_step.inputs.get('revision_feedback')
 
-    # Build prompt. plan confirms are always specialized into a dedicated
-    # requirement-coverage review (decompose requirements -> check every
-    # requirement has a covering task), fully decoupled from the generic
-    # per-step confirm; every other step keeps the generic review prompt.
+    # Build prompt. plan confirms are specialized into a dedicated review whose
+    # subject follows the flow's persisted decomposition doctrine (capability →
+    # grouping review, granular → legacy requirement-coverage review); every
+    # other step keeps the generic review prompt. The doctrine is read from the
+    # flow context rather than the config so a resumed flow is reviewed under
+    # the doctrine it was planned with.
+    from ..plan_decomposition import PlanModeResolver
+
     project_root = resolve_flow_project_root(flow)
     task_description = step.inputs.get("task_description", flow.task_description)
     if step_to_review_type == 'plan':
@@ -237,6 +241,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             task_description=task_description,
             revision_feedback=revision_feedback,
             project_root=project_root,
+            decomposition=PlanModeResolver.view(flow.state.context).decomposition,
         )
     else:
         prompt = build_llm_review_prompt(

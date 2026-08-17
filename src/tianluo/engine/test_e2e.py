@@ -354,7 +354,7 @@ class TestWorktreeMergeSteps:
         self._register_mock_handlers(sm)
         flow = sm.create_flow(
             task_description="Add a worktree feature",
-            task_type="small",  # avoids the always-on plan-confirm
+            task_type="small",  # planless: keeps the sequence short
             is_worktree_mode=True,
         )
         flow.worktree_branch = "worktree/add-feature"
