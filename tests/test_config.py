@@ -17,9 +17,10 @@ from tianluo.config import (
     ConfigError,
     DEFAULT_ADJUDICATE_PERIOD,
     DEFAULT_BASELINE_FIX_MAX_ATTEMPTS,
-    DEFAULT_IMPLEMENTATION_STRATEGY,
     DEFAULT_INVESTIGATION_MAX_ITERATIONS,
     DEFAULT_MAX_FIX_ITERATIONS,
+    DEFAULT_PLAN_DECOMPOSITION,
+    DEFAULT_PLAN_GRANULARITY,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
     DEFAULT_SELF_CHECK_PASSES_REQUIRED,
     InvestigationConfig,
@@ -304,40 +305,132 @@ class TestWorkflowConfigFromDict:
         assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
         assert cfg.self_check_convergence_enabled == DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
 
-    @pytest.mark.parametrize("strategy", ["auto", "direct", "planned"])
-    def test_implementation_strategy_accepts_all_legal_values(self, strategy):
+
+# ---------------------------------------------------------------------------
+# WorkflowConfig.plan_decomposition / plan_granularity
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reset_strategy_deprecation_warning(monkeypatch):
+    """The deprecation guard is per-process; isolate it per test."""
+    import tianluo.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod, "_implementation_strategy_deprecation_warned", False
+    )
+    return config_mod
+
+
+class TestPlanDecompositionAndGranularity:
+    @pytest.mark.parametrize("value", ["capability", "granular"])
+    def test_plan_decomposition_accepts_all_legal_values(self, value):
+        cfg = WorkflowConfig.from_dict({"workflow": {"plan_decomposition": value}})
+        assert cfg.plan_decomposition == value
+        assert cfg.plan_decomposition_explicit is True
+
+    @pytest.mark.parametrize("value", ["auto", "single", "conservative"])
+    def test_plan_granularity_accepts_all_legal_values(self, value):
+        cfg = WorkflowConfig.from_dict({"workflow": {"plan_granularity": value}})
+        assert cfg.plan_granularity == value
+        assert cfg.plan_granularity_explicit is True
+
+    def test_defaults_are_capability_and_auto(self):
+        cfg = WorkflowConfig.from_dict({})
+        assert cfg.plan_decomposition == DEFAULT_PLAN_DECOMPOSITION == "capability"
+        assert cfg.plan_granularity == DEFAULT_PLAN_GRANULARITY == "auto"
+        assert cfg.plan_decomposition_explicit is False
+        assert cfg.plan_granularity_explicit is False
+
+    def test_dataclass_defaults_match_module_defaults(self):
+        cfg = WorkflowConfig()
+        assert cfg.plan_decomposition == "capability"
+        assert cfg.plan_granularity == "auto"
+
+    @pytest.mark.parametrize("value", ["coarse", "CAPABILITY", "", None, 1])
+    def test_invalid_plan_decomposition_names_config_path(self, value):
+        with pytest.raises(
+            ConfigError,
+            match=r"workflow\.plan_decomposition=.*must be one of",
+        ) as exc:
+            WorkflowConfig.from_dict({"workflow": {"plan_decomposition": value}})
+        assert "capability" in str(exc.value)
+        assert "granular" in str(exc.value)
+
+    @pytest.mark.parametrize("value", ["coarsest", "AUTO", "", None, 1])
+    def test_invalid_plan_granularity_names_config_path(self, value):
+        with pytest.raises(
+            ConfigError,
+            match=r"workflow\.plan_granularity=.*must be one of",
+        ) as exc:
+            WorkflowConfig.from_dict({"workflow": {"plan_granularity": value}})
+        assert "conservative" in str(exc.value)
+
+
+class TestRetiredImplementationStrategyMapping:
+    """``workflow.implementation_strategy`` is mapped for one version."""
+
+    @pytest.mark.parametrize(
+        "strategy,decomposition,granularity",
+        [
+            ("direct", "capability", "single"),
+            ("planned", "granular", "auto"),
+            ("auto", "capability", "auto"),
+        ],
+    )
+    def test_legacy_values_map_onto_new_keys(
+        self, reset_strategy_deprecation_warning, strategy, decomposition, granularity
+    ):
         cfg = WorkflowConfig.from_dict(
             {"workflow": {"implementation_strategy": strategy}}
         )
-        assert cfg.implementation_strategy == strategy
-        assert cfg.implementation_strategy_explicit is True
+        assert cfg.plan_decomposition == decomposition
+        assert cfg.plan_granularity == granularity
 
-    def test_implementation_strategy_defaults_to_planned(self):
-        cfg = WorkflowConfig.from_dict({})
-        assert cfg.implementation_strategy == DEFAULT_IMPLEMENTATION_STRATEGY
-        assert cfg.implementation_strategy == "planned"
-        assert cfg.implementation_strategy_explicit is False
+    def test_explicit_new_keys_beat_the_legacy_key(
+        self, reset_strategy_deprecation_warning
+    ):
+        cfg = WorkflowConfig.from_dict(
+            {
+                "workflow": {
+                    "implementation_strategy": "planned",
+                    "plan_decomposition": "capability",
+                    "plan_granularity": "conservative",
+                }
+            }
+        )
+        assert cfg.plan_decomposition == "capability"
+        assert cfg.plan_granularity == "conservative"
+
+    def test_mapping_warns_once_per_process(
+        self, reset_strategy_deprecation_warning, caplog
+    ):
+        with caplog.at_level("WARNING", logger="tianluo.config"):
+            WorkflowConfig.from_dict({"workflow": {"implementation_strategy": "direct"}})
+            WorkflowConfig.from_dict({"workflow": {"implementation_strategy": "direct"}})
+
+        warnings = [
+            r
+            for r in caplog.records
+            if "implementation_strategy is deprecated" in r.getMessage()
+        ]
+        assert len(warnings) == 1
 
     @pytest.mark.parametrize("value", ["automatic", "DIRECT", "", None, 1])
-    def test_invalid_implementation_strategy_names_config_path(self, value):
+    def test_invalid_legacy_value_still_fails_fast(
+        self, reset_strategy_deprecation_warning, value
+    ):
         with pytest.raises(
             ConfigError,
             match=r"workflow\.implementation_strategy=.*must be one of",
         ):
-            WorkflowConfig.from_dict(
-                {"workflow": {"implementation_strategy": value}}
-            )
+            WorkflowConfig.from_dict({"workflow": {"implementation_strategy": value}})
 
-    def test_explicit_implementation_strategy_overrides_project_value(self):
-        cfg = WorkflowConfig.from_dict(
-            {"workflow": {"implementation_strategy": "direct"}}
-        )
-        assert cfg.resolve_implementation_strategy("auto") == "auto"
-        assert cfg.resolve_implementation_strategy() == "direct"
-
-    def test_programmatically_constructed_strategy_is_resolved(self):
-        cfg = WorkflowConfig(implementation_strategy="direct")
-        assert cfg.resolve_implementation_strategy() == "direct"
+    def test_retired_api_surface_is_gone(self):
+        cfg = WorkflowConfig()
+        assert not hasattr(cfg, "implementation_strategy")
+        assert not hasattr(cfg, "implementation_strategy_explicit")
+        assert not hasattr(cfg, "resolve_implementation_strategy")
 
 
 # ---------------------------------------------------------------------------

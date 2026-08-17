@@ -174,6 +174,12 @@ def _read_multiline_input(
 # "discovery": that is a run *mode* reached only through ``--discover``, never a
 # classification the user asks analyze to honour.
 EXPLICIT_TASK_TYPES = ("feature", "bugfix", "review", "small", "survey")
+# PLAN grouping overrides. Mirrors of the config-layer tuples, re-exported here
+# so the CLI validation does not drag the config module in at import time; the
+# legacy tuple and its mapping table ARE imported from config, because a second
+# copy of the retirement mapping is exactly the thing that drifts.
+PLAN_DECOMPOSITIONS = ("capability", "granular")
+PLAN_GRANULARITIES = ("auto", "single", "conservative")
 IMPLEMENTATION_STRATEGIES = ("auto", "direct", "planned")
 
 
@@ -217,6 +223,16 @@ def run_cmd(
     output_format: str = typer.Option("cli", "--output-format", help=t("cli.help.run.output_format")),
     preset: Optional[str] = typer.Option(None, "--preset", help=t("cli.help.run.preset")),
     worktree: bool = typer.Option(False, "--worktree", help=t("cli.help.run.worktree")),
+    plan_decomposition: Optional[str] = typer.Option(
+        None,
+        "--plan-decomposition",
+        help=t("cli.help.run.plan_decomposition"),
+    ),
+    plan_granularity: Optional[str] = typer.Option(
+        None,
+        "--plan-granularity",
+        help=t("cli.help.run.plan_granularity"),
+    ),
     implementation_strategy: Optional[str] = typer.Option(
         None,
         "--implementation-strategy",
@@ -277,18 +293,62 @@ def run_cmd(
         raise typer.Exit(1)
 
     if (
-        implementation_strategy is not None
-        and implementation_strategy not in IMPLEMENTATION_STRATEGIES
+        plan_decomposition is not None
+        and plan_decomposition not in PLAN_DECOMPOSITIONS
     ):
         render_full(
             t(
-                "cli.run.invalid_implementation_strategy",
-                strategy=implementation_strategy,
-                valid_strategies=", ".join(IMPLEMENTATION_STRATEGIES),
+                "cli.run.invalid_plan_decomposition",
+                decomposition=plan_decomposition,
+                valid_decompositions=", ".join(PLAN_DECOMPOSITIONS),
             ),
             title=t("cli.common.error"),
         )
         raise typer.Exit(1)
+
+    if plan_granularity is not None and plan_granularity not in PLAN_GRANULARITIES:
+        render_full(
+            t(
+                "cli.run.invalid_plan_granularity",
+                granularity=plan_granularity,
+                valid_granularities=", ".join(PLAN_GRANULARITIES),
+            ),
+            title=t("cli.common.error"),
+        )
+        raise typer.Exit(1)
+
+    if implementation_strategy is not None:
+        if implementation_strategy not in IMPLEMENTATION_STRATEGIES:
+            render_full(
+                t(
+                    "cli.run.invalid_implementation_strategy",
+                    strategy=implementation_strategy,
+                    valid_strategies=", ".join(IMPLEMENTATION_STRATEGIES),
+                ),
+                title=t("cli.common.error"),
+            )
+            raise typer.Exit(1)
+
+        # Retired option, kept for one version. Translate through the SAME table
+        # the YAML key uses so the two surfaces can never disagree about what a
+        # legacy value meant, then let the rest of the command see only the new
+        # vocabulary. An explicitly-typed new option always wins.
+        from .config import LEGACY_STRATEGY_TO_PLAN_MODE
+
+        render_full(
+            t(
+                "cli.run.deprecated_implementation_strategy",
+                strategy=implementation_strategy,
+            ),
+            title=t("cli.common.warning"),
+        )
+        mapped_decomposition, mapped_granularity = LEGACY_STRATEGY_TO_PLAN_MODE[
+            implementation_strategy
+        ]
+        if mapped_decomposition is not None and plan_decomposition is None:
+            plan_decomposition = mapped_decomposition
+        if mapped_granularity is not None and plan_granularity is None:
+            plan_granularity = mapped_granularity
 
     project_root = get_project_root()
 
@@ -406,7 +466,8 @@ def run_cmd(
                 prompt_history=prompt_history,
                 source_issue_id=issue.id,
                 output_format=output_format,
-                implementation_strategy=implementation_strategy,
+                plan_decomposition=plan_decomposition,
+                plan_granularity=plan_granularity,
             )
         else:
             exit_code = run_flow(
@@ -417,7 +478,8 @@ def run_cmd(
                 prompt_history=prompt_history,
                 source_issue_id=issue.id,
                 output_format=output_format,
-                implementation_strategy=implementation_strategy,
+                plan_decomposition=plan_decomposition,
+                plan_granularity=plan_granularity,
             )
 
         # Issue finalization is NOT done here on exit_code: it is an unreliable
@@ -461,6 +523,11 @@ def run_cmd(
             # resume_run resolves whether the selected flow is an isolated
             # --worktree run (re-dispatch inside its worktree + trailing merge)
             # or a plain main-repo flow (resumed in place under the main lock).
+            # WHY no plan-mode arguments are forwarded here: the decomposition
+            # doctrine and granularity are decided once at flow creation and
+            # persisted; a resumed flow keeps the grouping it already entered,
+            # so a flag typed alongside --flow-id must be inert rather than
+            # silently re-deciding the shape of work already in progress.
             exit_code = resume_run(
                 project_root=project_root,
                 flow_id=target_flow_id,
@@ -500,7 +567,8 @@ def run_cmd(
             change_name=change,
             prompt_history=prompt_history,
             output_format=output_format,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
     else:
         exit_code = run_flow(
@@ -510,7 +578,8 @@ def run_cmd(
             change_name=change,
             prompt_history=prompt_history,
             output_format=output_format,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
     raise typer.Exit(exit_code)
 

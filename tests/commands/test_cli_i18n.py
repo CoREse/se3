@@ -413,6 +413,11 @@ G10_CLI_KEYS = [
     "cli.display.usage.completeness_partial",
     "cli.run.invalid_implementation_strategy",
     "cli.help.run.implementation_strategy",
+    "cli.run.invalid_plan_decomposition",
+    "cli.run.invalid_plan_granularity",
+    "cli.run.deprecated_implementation_strategy",
+    "cli.help.run.plan_decomposition",
+    "cli.help.run.plan_granularity",
 ]
 
 

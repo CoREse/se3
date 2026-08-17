@@ -2553,8 +2553,31 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
 DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
-DEFAULT_IMPLEMENTATION_STRATEGY = "planned"
-VALID_IMPLEMENTATION_STRATEGIES = ("auto", "direct", "planned")
+# PLAN's decomposition doctrine. ``capability`` is the single path: PLAN always
+# runs and emits coarse task groups sized by "what one autonomous implement call
+# can safely carry" (one group == today's direct shape). ``granular`` is the
+# retained legacy doctrine — the fine-grained per-task listing — kept only so
+# projects that depended on that artifact shape are not broken by the switch.
+DEFAULT_PLAN_DECOMPOSITION = "capability"
+VALID_PLAN_DECOMPOSITIONS = ("capability", "granular")
+# Group-count pressure under the capability doctrine only: ``auto`` lets the LLM
+# size the groups, ``single`` pins one group, ``conservative`` lowers the split
+# threshold. Meaningless (and ignored) under ``granular``.
+DEFAULT_PLAN_GRANULARITY = "auto"
+VALID_PLAN_GRANULARITIES = ("auto", "single", "conservative")
+
+# One-version compatibility shim for the retired ``workflow.implementation_strategy``
+# routing axis, removed in the next major. Each legacy value is mapped by the
+# user *intent* it carried, not by name: ``direct`` meant "do it in one call" =
+# force a single group; ``planned`` meant "I want fine-grained groups + DAG
+# scheduling" = keep the legacy doctrine; ``auto`` meant "let the flow decide" =
+# the new defaults. ``None`` in a slot means "leave the new default alone".
+LEGACY_IMPLEMENTATION_STRATEGIES = ("auto", "direct", "planned")
+LEGACY_STRATEGY_TO_PLAN_MODE = {
+    "auto": (None, None),
+    "direct": (None, "single"),
+    "planned": ("granular", None),
+}
 # Per-flow attempt cap for looping on inherited (baseline) test failures
 # (mechanism B). Independent of ``max_fix_iterations`` (which may be the
 # unlimited sentinel 0); baseline failures must stay independently bounded.
@@ -2592,6 +2615,11 @@ _logged_workflow_source_for: set[str] = set()
 # during a flow, but the deprecation needs to be surfaced only once.
 _convergence_deprecation_warned = False
 
+# Same one-shot-per-process guard for the retired implementation_strategy key:
+# workflow config is re-loaded on every step, so an un-deduped warning would
+# flood the log of any project still carrying the legacy key.
+_implementation_strategy_deprecation_warned = False
+
 
 class ConfigError(ValueError):
     """Raised when project configuration is invalid.
@@ -2615,13 +2643,18 @@ class WorkflowConfig:
     baseline_fix_max_attempts: int = DEFAULT_BASELINE_FIX_MAX_ATTEMPTS
     self_check_defer_fix_threshold: int = DEFAULT_SELF_CHECK_DEFER_FIX_THRESHOLD
     adjudicate_period: int = DEFAULT_ADJUDICATE_PERIOD
-    implementation_strategy: str = DEFAULT_IMPLEMENTATION_STRATEGY
+    plan_decomposition: str = DEFAULT_PLAN_DECOMPOSITION
+    plan_granularity: str = DEFAULT_PLAN_GRANULARITY
     # Whether ``workflow.self_check_passes_required`` was set explicitly in
     # the YAML. When False and ``llm_caller.steps.self_check`` is a nested
     # per-pass chain, the effective pass count is derived from the number
     # of declared chains (see state_machine effective-pass resolution).
     self_check_passes_required_explicit: bool = False
-    implementation_strategy_explicit: bool = False
+    # Explicitness is tracked so the legacy implementation_strategy mapping can
+    # yield to a new key the user actually wrote, and so downstream resolvers
+    # can tell "configured capability" from "defaulted capability".
+    plan_decomposition_explicit: bool = False
+    plan_granularity_explicit: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "WorkflowConfig":
@@ -2840,19 +2873,75 @@ class WorkflowConfig:
                 f"(use 0 or null to disable the periodic adjudicate safety net)"
             )
 
-        strategy_explicit = "implementation_strategy" in workflow_data
-        raw_strategy = workflow_data.get(
-            "implementation_strategy", DEFAULT_IMPLEMENTATION_STRATEGY
+        # plan_decomposition / plan_granularity: the two keys that replaced the
+        # retired implementation_strategy routing axis. Both are fail-fast on an
+        # unknown value (same shape as the key they replaced) — a typo here would
+        # otherwise silently pick a different PLAN doctrine, which is invisible
+        # until the groups come out the wrong size.
+        decomposition_explicit = "plan_decomposition" in workflow_data
+        raw_decomposition = workflow_data.get(
+            "plan_decomposition", DEFAULT_PLAN_DECOMPOSITION
         )
         if (
-            not isinstance(raw_strategy, str)
-            or raw_strategy not in VALID_IMPLEMENTATION_STRATEGIES
+            not isinstance(raw_decomposition, str)
+            or raw_decomposition not in VALID_PLAN_DECOMPOSITIONS
         ):
-            allowed = ", ".join(VALID_IMPLEMENTATION_STRATEGIES)
+            allowed = ", ".join(VALID_PLAN_DECOMPOSITIONS)
             raise ConfigError(
-                f"workflow.implementation_strategy={raw_strategy!r} "
+                f"workflow.plan_decomposition={raw_decomposition!r} "
                 f"must be one of: {allowed}"
             )
+
+        granularity_explicit = "plan_granularity" in workflow_data
+        raw_granularity = workflow_data.get(
+            "plan_granularity", DEFAULT_PLAN_GRANULARITY
+        )
+        if (
+            not isinstance(raw_granularity, str)
+            or raw_granularity not in VALID_PLAN_GRANULARITIES
+        ):
+            allowed = ", ".join(VALID_PLAN_GRANULARITIES)
+            raise ConfigError(
+                f"workflow.plan_granularity={raw_granularity!r} "
+                f"must be one of: {allowed}"
+            )
+
+        # Legacy implementation_strategy → plan-mode mapping. Done here, at the
+        # config-object boundary, so everything downstream (state machine, plan,
+        # control plane) only ever sees the new vocabulary instead of carrying
+        # two dialects. A new key the user actually wrote always wins: the legacy
+        # key is a fallback for un-migrated projects, never an override.
+        if "implementation_strategy" in workflow_data:
+            legacy_strategy = workflow_data["implementation_strategy"]
+            if (
+                not isinstance(legacy_strategy, str)
+                or legacy_strategy not in LEGACY_IMPLEMENTATION_STRATEGIES
+            ):
+                allowed = ", ".join(LEGACY_IMPLEMENTATION_STRATEGIES)
+                raise ConfigError(
+                    f"workflow.implementation_strategy={legacy_strategy!r} "
+                    f"must be one of: {allowed}"
+                )
+
+            global _implementation_strategy_deprecation_warned
+            if not _implementation_strategy_deprecation_warned:
+                _implementation_strategy_deprecation_warned = True
+                logger.warning(
+                    "workflow.implementation_strategy is deprecated and will be "
+                    "removed in the next major version; use "
+                    "workflow.plan_decomposition / workflow.plan_granularity "
+                    f"instead (mapping {legacy_strategy!r} for now)"
+                )
+
+            mapped_decomposition, mapped_granularity = LEGACY_STRATEGY_TO_PLAN_MODE[
+                legacy_strategy
+            ]
+            if mapped_decomposition is not None and not decomposition_explicit:
+                raw_decomposition = mapped_decomposition
+                decomposition_explicit = True
+            if mapped_granularity is not None and not granularity_explicit:
+                raw_granularity = mapped_granularity
+                granularity_explicit = True
 
         return cls(
             max_fix_iterations=max_fix,
@@ -2861,34 +2950,12 @@ class WorkflowConfig:
             baseline_fix_max_attempts=baseline_attempts,
             self_check_defer_fix_threshold=defer_threshold,
             adjudicate_period=adjudicate_period,
-            implementation_strategy=raw_strategy,
+            plan_decomposition=raw_decomposition,
+            plan_granularity=raw_granularity,
             self_check_passes_required_explicit=passes_explicit,
-            implementation_strategy_explicit=strategy_explicit,
+            plan_decomposition_explicit=decomposition_explicit,
+            plan_granularity_explicit=granularity_explicit,
         )
-
-    def resolve_implementation_strategy(
-        self,
-        explicit_request: Optional[Any] = None,
-    ) -> str:
-        """Resolve explicit request > this project config > planned."""
-        from .engine.implementation_strategy import (
-            ImplementationStrategyError,
-            ImplementationStrategyResolver,
-        )
-
-        configured = self.implementation_strategy
-        if (
-            not self.implementation_strategy_explicit
-            and self.implementation_strategy == DEFAULT_IMPLEMENTATION_STRATEGY
-        ):
-            configured = None
-        try:
-            return ImplementationStrategyResolver.resolve_requested(
-                explicit_request=explicit_request,
-                configured_strategy=configured,
-            ).value
-        except ImplementationStrategyError as exc:
-            raise ConfigError(str(exc)) from exc
 
     @classmethod
     def load(cls, project_root: Path) -> "WorkflowConfig":

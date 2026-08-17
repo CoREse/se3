@@ -89,11 +89,54 @@ def test_unknown_run_key_falls_back_to_en_us():
 # G10: run-command strategy / usage-cost labels localize
 # ---------------------------------------------------------------------------
 class TestRunStrategyAndUsageLabels:
-    """The --implementation-strategy error and the session usage block labels
-    come from the catalog — the strategy tokens (auto/direct/planned) stay raw
-    config values, the surrounding prose localizes."""
+    """The PLAN grouping option errors and the session usage block labels come
+    from the catalog — the mode tokens (capability/granular, auto/single/
+    conservative) stay raw config values, the surrounding prose localizes."""
 
-    def test_invalid_strategy_error_localizes(self, monkeypatch):
+    def test_invalid_plan_decomposition_error_localizes(self, monkeypatch):
+        from tianluo.i18n.loader import load_catalog
+
+        i18n.set_language("zh-CN")
+        text = i18n.t(
+            "cli.run.invalid_plan_decomposition",
+            decomposition="bogus",
+            valid_decompositions="capability, granular",
+        )
+        assert "bogus" in text
+        assert text != "cli.run.invalid_plan_decomposition"
+        # The zh-CN prose must not be the en-US sentence.
+        assert text != load_catalog("en-US")[
+            "cli.run.invalid_plan_decomposition"].format(
+            decomposition="bogus", valid_decompositions="capability, granular")
+
+    def test_invalid_plan_granularity_error_localizes(self, monkeypatch):
+        from tianluo.i18n.loader import load_catalog
+
+        i18n.set_language("zh-CN")
+        text = i18n.t(
+            "cli.run.invalid_plan_granularity",
+            granularity="bogus",
+            valid_granularities="auto, single, conservative",
+        )
+        assert "bogus" in text
+        assert text != "cli.run.invalid_plan_granularity"
+        assert text != load_catalog("en-US")[
+            "cli.run.invalid_plan_granularity"].format(
+            granularity="bogus", valid_granularities="auto, single, conservative")
+
+    def test_plan_mode_help_and_deprecation_localize(self, monkeypatch):
+        from tianluo.i18n.loader import load_catalog
+
+        en = load_catalog("en-US")
+        zh = load_catalog("zh-CN")
+        for key in (
+            "cli.help.run.plan_decomposition",
+            "cli.help.run.plan_granularity",
+            "cli.run.deprecated_implementation_strategy",
+        ):
+            assert zh[key] != en[key], f"zh-CN {key} must be translated"
+
+    def test_invalid_legacy_strategy_error_still_localizes(self, monkeypatch):
         from tianluo.i18n.loader import load_catalog
 
         i18n.set_language("zh-CN")
@@ -104,7 +147,6 @@ class TestRunStrategyAndUsageLabels:
         )
         assert "bogus" in text
         assert text != "cli.run.invalid_implementation_strategy"
-        # The zh-CN prose must not be the en-US sentence.
         assert text != load_catalog("en-US")[
             "cli.run.invalid_implementation_strategy"].format(
             strategy="bogus", valid_strategies="auto, direct, planned")

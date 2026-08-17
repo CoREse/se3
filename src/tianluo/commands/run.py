@@ -2163,7 +2163,8 @@ def run_flow(
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
     manage_pidfile: bool = True,
-    implementation_strategy: Optional[str] = None,
+    plan_decomposition: Optional[str] = None,
+    plan_granularity: Optional[str] = None,
 ) -> int:
     """Run a flow to completion.
 
@@ -2210,8 +2211,16 @@ def run_flow(
             ``cwd==main_root`` and the main ``engine.json`` does not carry the
             worktree flow_id) could not discover the process — and would then
             archive/delete the worktree out from under a still-running merge.
-        implementation_strategy: Explicit strategy request for a new flow.
-            Resume paths ignore this input and recover the persisted strategy.
+        plan_decomposition: Explicit PLAN decomposition doctrine
+            (``capability`` / ``granular``) for a NEW flow.
+        plan_granularity: Explicit group-count pressure
+            (``auto`` / ``single`` / ``conservative``) for a NEW flow.
+
+            WHY both are new-flow-only: the plan mode is decided once, at
+            ``create_flow``, and persisted in the flow context. A resume must
+            keep executing the shape it already entered — a hot config change or
+            a stray flag on the resume command line must never re-decide the
+            grouping of a flow whose PLAN has already produced groups.
 
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -2267,7 +2276,8 @@ def run_flow(
             worktree_branch=worktree_branch,
             worktree_original_branch=worktree_original_branch,
             main_lock=main_lock,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
     finally:
         # Restore original signal handler
@@ -2393,7 +2403,8 @@ def _run_flow_impl(
     worktree_branch: Optional[str] = None,
     worktree_original_branch: Optional[str] = None,
     main_lock: Any = None,
-    implementation_strategy: Optional[str] = None,
+    plan_decomposition: Optional[str] = None,
+    plan_granularity: Optional[str] = None,
 ) -> int:
     """Internal implementation of flow execution.
 
@@ -2535,7 +2546,8 @@ def _run_flow_impl(
                 task_type=task_type,
                 change_name=change_name,
                 is_worktree_mode=is_worktree_mode,
-                implementation_strategy=implementation_strategy,
+                plan_decomposition=plan_decomposition,
+                plan_granularity=plan_granularity,
             )
 
             # Set source issue ID if provided
@@ -3737,7 +3749,8 @@ def run_worktree_mode(
     prompt_history: Any = None,
     output_format: str = "cli",
     source_issue_id: Optional[str] = None,
-    implementation_strategy: Optional[str] = None,
+    plan_decomposition: Optional[str] = None,
+    plan_granularity: Optional[str] = None,
 ) -> int:
     """Run a flow in an isolated git worktree, then merge the result back.
 
@@ -3818,7 +3831,8 @@ def run_worktree_mode(
             worktree_branch=worktree_branch,
             worktree_original_branch=original_branch,
             manage_pidfile=False,
-            implementation_strategy=implementation_strategy,
+            plan_decomposition=plan_decomposition,
+            plan_granularity=plan_granularity,
         )
 
         if exit_code != 0:
