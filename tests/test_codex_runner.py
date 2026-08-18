@@ -682,7 +682,7 @@ class TestCodexBuildCallArgs:
         assert args[:3] == ["exec", "--json", "--skip-git-repo-check"]
         assert args[-1] == "implement all requirements"
         assert "/goal" not in " ".join(args)
-        assert runner.supports_native_goal is False
+        assert not getattr(runner, "supports_native_goal", False)
 
     def test_writable_step_has_sandbox_flag(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})

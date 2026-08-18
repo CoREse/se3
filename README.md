@@ -345,10 +345,11 @@ request → project config → `capability` + `auto`. The decision is made once 
 flow creation and persisted with its reason — a resumed flow keeps the doctrine
 it already entered and its groups are never re-judged mid-flow.
 
-The whole-task single-call shape works with every writable agent runner; a
-runner's native goal loop (e.g. Claude Code's `/goal` in print mode) is an
-optional per-call enhancement, not an entry requirement and never
-flow-authoritative state. A partial result or non-empty `incomplete_tasks`
+The whole-task single-call shape works with every writable agent runner; no
+runner-native goal loop is used — every runner executes the call through its
+ordinary autonomous interface, and completion pressure stays with the flow's
+own gates (TEST / review / fix-iterations), never with runner-side state. A
+partial result or non-empty `incomplete_tasks`
 never advances to TEST — the flow re-enters IMPLEMENT through the normal
 retry/resume machinery and a later caller continues in the existing workspace.
 

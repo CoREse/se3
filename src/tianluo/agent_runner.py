@@ -28,9 +28,14 @@ class InfraErrorType(Enum):
 class AgentInvocationIntent(str, Enum):
     """Vendor-neutral intent for one runner invocation.
 
-    The outer flow owns implementation strategy and recovery.  This value only
-    lets a runner enhance one call when it has a real native adapter for that
-    intent; runners without such an adapter keep using their ordinary command.
+    The outer flow owns implementation strategy and recovery.  The intent is
+    informational today: every runner executes the prompt through its normal
+    autonomous interface regardless of the value.  It stays in the contract as
+    the seam through which a future runner could translate an intent into a
+    native feature of its own CLI — any such adapter must degrade to the
+    ordinary command when the native feature cannot carry the call (Claude
+    Code's /goal was retired here precisely because its goal-condition
+    argument caps at 4000 characters, below any real implement prompt).
     """
 
     DEFAULT = "default"
@@ -71,8 +76,6 @@ class AgentRunner(ABC):
     Claude Code CLI, API-based agents).
     """
 
-    native_goal_capability = False
-    supports_native_goal = False
     startup_provider: Optional[str] = None
     startup_model: Optional[str] = None
 
@@ -168,10 +171,12 @@ class AgentRunner(ABC):
                 ``ClaudeCodeRunner`` honors it (via ``--plugin-dir``); other
                 runners ignore the intent (their sandboxing is handled
                 separately).
-            invocation_intent: Semantic purpose of this invocation. Runners
-                may translate it into a native feature only when
-                ``native_goal_capability`` is true; otherwise they execute the
-                prompt through their normal autonomous interface.
+            invocation_intent: Semantic purpose of this invocation. Kept as
+                information only: no current runner translates it into a
+                native feature (Claude Code's /goal was retired — its
+                goal-condition argument is capped far below real implement
+                prompt sizes), so every runner executes the prompt through
+                its normal autonomous interface.
 
         Returns:
             A list of CLI arguments to pass *after* the runner's base
@@ -180,15 +185,6 @@ class AgentRunner(ABC):
             as ``--file`` pairs or equivalent.
         """
         ...
-
-    def detect_native_goal_unavailable(self, stdout: str, stderr: str) -> bool:
-        """Return whether a native-goal launch failed before doing work.
-
-        The default is deliberately false.  Only a runner with a real native
-        goal adapter can recognize its own protocol's unavailable response.
-        Workspace and tool-side-effect checks remain the caller's job.
-        """
-        return False
 
     @abstractmethod
     def detect_infra_error(

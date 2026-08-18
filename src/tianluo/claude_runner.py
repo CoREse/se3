@@ -75,8 +75,9 @@ def _spawn_stdin_writer(proc: subprocess.Popen, payload: str) -> threading.Threa
 
 
 # Maximum number of stderr lines retained in the bounded tail buffer.  The
-# runner exposes this tail on its result so callers (e.g. the /goal fallback
-# gate) can see CLI-level reports that never reach the NDJSON stdout stream.
+# runner exposes this tail on its result so callers (e.g. infra-error
+# detection) can see CLI-level reports that never reach the NDJSON stdout
+# stream.
 _STDERR_BUFFER_MAXLEN = 200
 
 
@@ -140,77 +141,6 @@ USAGE_LIMIT_KEYWORDS = [
     "hit your limit",
     "you've hit your limit",
 ]
-
-# Rejection phrases bound to the /goal command itself.  Each pattern requires
-# the phrase to be bound to ``/goal`` within one report segment (a single
-# event's text or the joined raw stderr), so prose that merely mentions a
-# marker substring elsewhere (a task description saying "the legacy endpoint
-# does not exist") cannot trip the plain-mode fallback. The bounded window
-# tolerates multi-line prose whose phrase and ``/goal`` land on different
-# lines; a genuinely unrelated mention stays outside it.
-_GOAL_REJECTION_PATTERNS = (
-    # The CLI names the command first: "/goal is not available" /
-    # "the /goal command does not exist" / "/goal is not a valid slash
-    # command" / "/goal is not a recognized command".
-    re.compile(
-        r"/goal['\"]?\s*(?:command\s*)?:?\s*(?:is\s+)?"
-        r"(?:not\s+(?:available|supported|recognized|found|known)"
-        r"|unavailable|unsupported|unrecognized|unknown"
-        r"|does\s+not\s+exist|doesn['’]?t\s+exist"
-        r"|not\s+found"
-        r"|not\s+a\s+(?:(?:valid|recognized|known)\s+)?"
-        r"(?:slash\s+)?command"
-        r"|command\s+not\s+found)",
-        re.IGNORECASE,
-    ),
-    # Or the CLI names the rejection first: "Unknown slash command: /goal".
-    re.compile(
-        r"\b(?:unknown|unrecognized|invalid|no\s+such|not\s+a\s+valid)\s+"
-        r"(?:slash\s+)?command\b.{0,200}?['\"]?/goal\b",
-        re.IGNORECASE | re.DOTALL,
-    ),
-    # Or the model prose denies having the command: "I do not have a /goal
-    # command here" / "this build does not support /goal".
-    re.compile(
-        r"\b(?:do(?:es)?\s+not|don['’]?t|doesn['’]?t|cannot|can['’]?t|"
-        r"not\s+able\s+to)\s+"
-        r"(?:have|find|see|know(?:\s+of)?|support|recogni[sz]e|execute|run|use)\b"
-        r".{0,200}?['\"]?/goal\b",
-        re.IGNORECASE | re.DOTALL,
-    ),
-)
-
-
-def _ndjson_event_text(event: Dict[str, Any]) -> str:
-    """Best-effort prose text of one stream-json event, of any type.
-
-    Rejection reports arrive on different event shapes across CLI builds:
-    result/error events carry ``result``, system events a ``message`` string,
-    and user/assistant events a content list. Returns "" when the event
-    carries no readable text.
-    """
-    result = event.get("result")
-    if isinstance(result, str):
-        return result
-    for key in ("error", "message"):
-        value = event.get(key)
-        if isinstance(value, str):
-            return value
-    message = event.get("message")
-    if isinstance(message, dict):
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "\n".join(parts)
-    return ""
-
 
 # --- CLI-subprocess confirmation-prompt capture -------------------------------
 #
@@ -299,8 +229,6 @@ class ClaudeCodeRunner(AgentRunner):
     command is used.
     """
 
-    native_goal_capability = True
-    supports_native_goal = True
     startup_provider = "anthropic"
 
     def __init__(
@@ -532,14 +460,17 @@ class ClaudeCodeRunner(AgentRunner):
             own ``--dangerously-skip-permissions`` / ``--setting-sources``
             flags, which are prepended by the execution methods).
         """
-        effective_prompt = prompt
-        if invocation_intent == AgentInvocationIntent.DIRECT_IMPLEMENTATION:
-            effective_prompt = f"/goal\n\n{prompt}"
-
+        # invocation_intent is deliberately not translated into anything:
+        # Claude Code's /goal was tried here and retired — its goal-condition
+        # argument is hard-capped at 4000 characters, far below any real
+        # implement prompt, so the prefix made every DIRECT_IMPLEMENTATION
+        # call fail outright. Completion pressure is owned by the outer flow
+        # (tests / review / fix-iterations), so all intents share one argv
+        # shape.
         args: List[str] = [
             "--output-format", "stream-json",
             "--verbose",
-            "-p", effective_prompt,
+            "-p", prompt,
         ]
 
         if read_only:
@@ -560,48 +491,6 @@ class ClaudeCodeRunner(AgentRunner):
                     args.extend(["--file", str(f)])
 
         return args
-
-    @staticmethod
-    def detect_native_goal_unavailable(stdout: str, stderr: str) -> bool:
-        """Recognize an explicit report that ``/goal`` is absent.
-
-        Any stream event that names /goal as a rejected command counts —
-        result/error events, system messages, and model prose — matched per
-        text segment so a rejection phrase binds to /goal within one report
-        rather than across unrelated events. Marker substrings anywhere else
-        in the conversation (an echoed prompt, prose about a different
-        endpoint) never trip the fallback: a response that merely did no work
-        is not an unavailability report.
-        """
-        segments: List[str] = []
-        for line in (stdout or "").splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped.startswith("{"):
-                try:
-                    event = json.loads(stripped)
-                except (json.JSONDecodeError, TypeError):
-                    event = None
-                if isinstance(event, dict):
-                    text = _ndjson_event_text(event)
-                    if text:
-                        segments.append(text)
-                    continue
-            # Raw text (plain stdout prose beside the stream-json events).
-            segments.append(stripped)
-        if (stderr or "").strip():
-            # stderr is unstructured prose: join it so a rejection whose
-            # phrase and /goal land on different lines still counts.
-            segments.append((stderr or "").strip())
-        for segment in segments:
-            if "/goal" not in segment:
-                continue
-            if any(
-                pattern.search(segment) for pattern in _GOAL_REJECTION_PATTERNS
-            ):
-                return True
-        return False
 
     @staticmethod
     def detect_usage_limit(returncode: int, stdout: str, stderr: str) -> bool:
@@ -1119,9 +1008,8 @@ class MonitoredResult:
     cmd_index: int
     was_retry: bool
     interrupted: bool = False  # True if stopped by KeyboardInterrupt
-    # Bounded tail of the child's stderr, for CLI-level diagnostics (such as
-    # a native /goal unavailability report) that never reach the NDJSON
-    # stdout stream.
+    # Bounded tail of the child's stderr, for CLI-level diagnostics (e.g.
+    # infra-error reports) that never reach the NDJSON stdout stream.
     stderr_tail: str = ""
 
     @property

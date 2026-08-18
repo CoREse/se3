@@ -842,17 +842,25 @@ class TestBuildCallArgs:
         p_idx = args.index("-p")
         assert args[p_idx + 1] == prompt
 
-    def test_direct_intent_prepends_native_goal_without_changing_transport(self):
+    def test_direct_intent_leaves_argv_identical_to_default(self):
+        # Native /goal was retired: its goal-condition argument is capped at
+        # 4000 characters, below any real implement prompt, so the intent is
+        # informational and must not change the argv shape.
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
-        args = runner.build_call_args(
+        direct = runner.build_call_args(
             prompt="implement everything",
             read_only=False,
             invocation_intent=AgentInvocationIntent.DIRECT_IMPLEMENTATION,
         )
-
-        assert args[:4] == ["--output-format", "stream-json", "--verbose", "-p"]
-        assert args[4] == "/goal\n\nimplement everything"
-        assert runner.supports_native_goal is True
+        default = runner.build_call_args(
+            prompt="implement everything",
+            read_only=False,
+            invocation_intent=AgentInvocationIntent.DEFAULT,
+        )
+        assert direct == default
+        assert direct[:4] == ["--output-format", "stream-json", "--verbose", "-p"]
+        assert direct[4] == "implement everything"
+        assert not getattr(runner, "supports_native_goal", False)
 
     def test_non_direct_intent_never_injects_goal(self):
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
@@ -863,135 +871,7 @@ class TestBuildCallArgs:
         )
         assert args[args.index("-p") + 1] == "ordinary implement or fix"
 
-    def test_goal_unavailable_detection_requires_explicit_goal_marker(self):
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "Unknown slash command: /goal", "",
-        )
-        assert not ClaudeCodeRunner.detect_native_goal_unavailable(
-            "Unknown slash command: /review", "",
-        )
-        assert not ClaudeCodeRunner.detect_native_goal_unavailable(
-            "The /goal implementation completed", "",
-        )
 
-    def test_goal_unavailable_detection_ignores_prose_markers_in_messages(self):
-        # The echoed prompt and the model's prose may contain both "/goal"
-        # and a marker substring (e.g. "the legacy endpoint does not exist");
-        # without a result/error event naming /goal that is NOT an
-        # unavailability report.
-        stream = "\n".join([
-            json.dumps({
-                "type": "user",
-                "message": {
-                    "content": "/goal\n\ninvestigate why the legacy "
-                               "endpoint does not exist",
-                },
-            }),
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "content": [{
-                        "type": "text",
-                        "text": "The legacy endpoint does not exist; "
-                                "should I proceed with the /goal?",
-                    }],
-                },
-            }),
-            json.dumps({
-                "type": "result",
-                "subtype": "success",
-                "is_error": False,
-                "result": "done",
-            }),
-        ])
-        assert not ClaudeCodeRunner.detect_native_goal_unavailable(stream, "")
-
-    def test_goal_unavailable_detection_reads_result_events_and_stderr(self):
-        # A result event naming /goal counts regardless of is_error, and a
-        # stderr-only CLI report (no stream-json event) counts too.
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            json.dumps({
-                "type": "result",
-                "subtype": "success",
-                "is_error": False,
-                "result": "Unknown slash command: /goal",
-            }),
-            "",
-        )
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "Error: Unknown command: /goal\n",
-        )
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "Error: /goal is not available in this build\n",
-        )
-
-    def test_goal_unavailable_detection_binds_marker_to_goal_in_one_line(self):
-        # A marker line and a /goal mention on DIFFERENT stderr lines is not
-        # a bound report; prose markers elsewhere on stderr never trip it.
-        assert not ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "the legacy endpoint does not exist\n/goal\n",
-        )
-
-    def test_goal_unavailable_detection_accepts_any_event_type(self):
-        # A rejection delivered as a system event or as model prose counts —
-        # the fallback gate (zero tool events + clean workspace) is what
-        # keeps it safe, not the event type.
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            json.dumps({
-                "type": "system",
-                "subtype": "error",
-                "message": "Unknown slash command: /goal",
-            }),
-            "",
-        )
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "content": [{
-                        "type": "text",
-                        "text": "I do not have a /goal command here.",
-                    }],
-                },
-            }),
-            "",
-        )
-
-    def test_goal_unavailable_detection_accepts_multi_line_prose(self):
-        # A rejection whose phrase and /goal land on different lines of the
-        # same report still counts.
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "Error: unknown command\n/goal\n",
-        )
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "I do not have a\n/goal command here.\n",
-        )
-        assert ClaudeCodeRunner.detect_native_goal_unavailable(
-            "",
-            "the /goal command does not exist in this build\n",
-        )
-
-    def test_goal_unavailable_detection_bounded_window_stays_safe(self):
-        # A marker phrase far away from /goal in unrelated prose is not a
-        # bound report.
-        assert not ClaudeCodeRunner.detect_native_goal_unavailable(
-            json.dumps({
-                "type": "assistant",
-                "message": {
-                    "content": [{
-                        "type": "text",
-                        "text": "The legacy endpoint does not exist; "
-                                "should I proceed with the /goal?",
-                    }],
-                },
-            }),
-            "",
-        )
 # Runner metadata is an explicit adapter contract; wrapper command names are
 # deliberately irrelevant to provider/model attribution.
 def test_claude_runner_startup_metadata_does_not_guess_wrapper_model():

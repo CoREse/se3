@@ -326,9 +326,10 @@ PLAN 产出什么，而在粒度把组数留给 PLAN 决定时，**执行形态�
 项目配置 → `capability` + `auto`。决策在 flow 创建时只做一次并连同理由持久化 ——
 续跑的 flow 沿用它已经进入的学说，其分组也绝不中途重判。
 
-整体单次调用的形态适用于所有可写 agent runner；runner 的原生 goal 循环（例如
-Claude Code print 模式下的 `/goal`）只是单次调用内的可选增强，不是准入条件，
-也绝非 flow 级权威状态。partial 结果或非空 `incomplete_tasks` 绝不会前进到
+整体单次调用的形态适用于所有可写 agent runner；不使用任何 runner 原生的 goal
+循环 —— 每个 runner 都经其普通自主接口执行调用，完成度压力始终由 flow 自身的
+质量门（TEST / review / fix-iteration）承担，绝非 runner 侧状态。partial 结果
+或非空 `incomplete_tasks` 绝不会前进到
 TEST —— flow 经正常 retry/resume 机制重入 IMPLEMENT，后继 caller 在现有工作区
 继续。
 

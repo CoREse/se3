@@ -1,5 +1,11 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.7.1 - 2026-08-18
+
+- Retire the native `/goal` prefix on `DIRECT_IMPLEMENTATION` calls: the Claude CLI hard-caps the goal condition at 4000 characters while real implement prompts run tens of KB, so every such call failed outright ("the goal condition exceeded the maximum allowed length"); all intents now share the plain print-mode argv
+- Remove the now-dead native-goal machinery end to end — `supports_native_goal` / `native_goal_capability` capability flags, `detect_native_goal_unavailable` and its rejection-pattern heuristics, and LLMCaller's snapshot-guarded plain-mode fallback channel
+- Keep `AgentInvocationIntent` in the runner contract as an informational seam; no runner translates it into a native feature, and completion pressure stays with the flow's own gates (TEST / review / fix-iterations)
+
 ## 12.7.0 - 2026-08-18
 
 - Add a `test.parallel` config option (`auto` or a positive integer) that appends `-n` and `--dist loadgroup` to the primary pytest command; unset by default, so existing projects keep running serially

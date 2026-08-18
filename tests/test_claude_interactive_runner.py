@@ -217,7 +217,7 @@ class TestBuildCallArgs:
         assert "/goal" not in runner._pending_prompt
         assert runner._pending_prompt == "implement everything"
         assert "/goal" not in " ".join(args)
-        assert runner.supports_native_goal is False
+        assert not getattr(runner, "supports_native_goal", False)
 
     def test_context_files_translated_to_add_dir(self, tmp_path):
         f1 = tmp_path / "a" / "x.py"
