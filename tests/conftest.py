@@ -42,6 +42,19 @@ def _wire_browser_test_libs() -> None:
 
 _wire_browser_test_libs()
 
+# WHY: pytest-xdist exports COLUMNS=80 into every worker process, and rich's
+# ``Console.__init__`` reads COLUMNS *once* and pins ``_width`` from it. A module
+# level ``console = Console()`` (e.g. tianluo.commands.history_cmd) therefore
+# freezes at 80 columns in a worker, and a test that widens the terminal for the
+# duration of a CLI invocation — ``CliRunner(...).invoke(..., env={"COLUMNS":
+# "200"})`` — silently has no effect: rich never re-reads the variable, tables
+# clip their columns to "cla…", and content assertions fail under xdist while
+# passing serially. Removing the variable before any tianluo module is imported
+# leaves ``_width`` at ``None``, which is what the serial run has always had:
+# width is then resolved per render, so the per-invocation override works again.
+# Any test that genuinely wants a fixed width sets it itself.
+os.environ.pop("COLUMNS", None)
+
 # Pin the UI language to en-US at conftest *import* time, before any test module
 # is collected. Typer freezes each command/option ``help=`` string when the
 # module defining it is imported (the value is a plain ``t(...)`` result bound

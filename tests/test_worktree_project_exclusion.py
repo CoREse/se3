@@ -20,12 +20,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tianluo.daemon.aggregator import DaemonAggregator
 from tianluo.daemon.supervisor import (
     DaemonSupervisor,
     is_worktree_copy_root,
     resolve_worktree_main_root,
 )
+
+# WHY: pinned to the repo-wide serial xdist group. These modules drive git
+# worktree lifecycle operations and daemon/registry state that are shared
+# process-external resources (the real repo's .git worktree metadata, a
+# project-roots registry, socket-backed daemon reads); running them on separate
+# xdist workers concurrently produces batches of git-contention ERRORs rather
+# than genuine failures. The accepted trade-off is to give up parallelism for
+# this slice instead of retrofitting the tests for concurrency. Requires
+# ``--dist loadgroup`` (which ``test.parallel`` appends) for the group to mean
+# anything.
+pytestmark = pytest.mark.xdist_group(name="repo_serial")
 
 
 # -- fixtures --------------------------------------------------------------

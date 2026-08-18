@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from tianluo.daemon.history import (
     DaemonHistoryReader,
     _count_jsonl,
@@ -33,6 +35,17 @@ from tianluo.daemon.history import (
     parse_step_type_from_step_id,
 )
 from tianluo.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+
+# WHY: pinned to the repo-wide serial xdist group. These modules drive git
+# worktree lifecycle operations and daemon/registry state that are shared
+# process-external resources (the real repo's .git worktree metadata, a
+# project-roots registry, socket-backed daemon reads); running them on separate
+# xdist workers concurrently produces batches of git-contention ERRORs rather
+# than genuine failures. The accepted trade-off is to give up parallelism for
+# this slice instead of retrofitting the tests for concurrency. Requires
+# ``--dist loadgroup`` (which ``test.parallel`` appends) for the group to mean
+# anything.
+pytestmark = pytest.mark.xdist_group(name="repo_serial")
 
 
 # --------------------------------------------------------------------------

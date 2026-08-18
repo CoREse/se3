@@ -165,3 +165,12 @@ pythonpath = ["src"]
 # which are not available in this environment. The node-stub sibling
 # covers the same rendering logic.
 addopts = "--deselect=tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
+# Declare the xdist_group marker locally so it is a *known* marker even in an
+# environment where pytest-xdist is not installed. xdist_group is pure metadata
+# (it only means anything to xdist's loadgroup scheduler), so a serial run would
+# otherwise emit PytestUnknownMarkWarning for every module in the serial group.
+# pytest-xdist itself stays out of the packaging dependencies — parallelism is a
+# development-environment accelerator here, not a runtime/distribution need.
+markers = [
+    "xdist_group(name): pin all tests carrying the same name to one xdist worker",
+]

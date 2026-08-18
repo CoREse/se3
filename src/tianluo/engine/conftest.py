@@ -8,9 +8,25 @@ exception for testing tightly-coupled engine internals), so they are OUTSIDE
 tests need — see ``_no_real_code_index_refresh`` below.
 """
 
+import os
 from pathlib import Path
 
 import pytest
+
+# WHY: twin of the ``COLUMNS`` pop in ``tests/conftest.py`` (kept in sync); this
+# subtree is outside ``tests/`` so that conftest never applies to it.
+# pytest-xdist exports COLUMNS=80 into every worker process, and rich's
+# ``Console.__init__`` reads COLUMNS *once* and pins ``_width`` from it. A module
+# level ``console = Console()`` (e.g. tianluo.commands.history_cmd) therefore
+# freezes at 80 columns in a worker, and a test that widens the terminal for the
+# duration of a CLI invocation — ``CliRunner(...).invoke(..., env={"COLUMNS":
+# "200"})`` — silently has no effect: rich never re-reads the variable, tables
+# clip their columns to "cla…", and content assertions fail under xdist while
+# passing serially. Removing the variable before any tianluo module is imported
+# leaves ``_width`` at ``None``, which is what the serial run has always had:
+# width is then resolved per render, so the per-invocation override works again.
+# Any test that genuinely wants a fixed width sets it itself.
+os.environ.pop("COLUMNS", None)
 
 
 # Roots a co-located engine test must never write chat history into. The engine

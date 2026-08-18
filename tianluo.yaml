@@ -1,8 +1,9 @@
 # tianluo project configuration — this repository (self-hosting).
 #
-# Scope: this file currently carries ONLY the `documentation:` block. It is
-# not a full project config; everything else (agents, llm_caller, version,
-# language, ...) stays on built-in defaults or on a maintainer's local file.
+# Scope: this file currently carries only the `documentation:` and `test:`
+# blocks. It is not a full project config; everything else (agents, llm_caller,
+# version, language, ...) stays on built-in defaults or on a maintainer's local
+# file.
 #
 # Whole-file select-one, NOT key merge: config loading picks exactly ONE
 # config file (worktree/tianluo.local.yaml > main-repo/tianluo.local.yaml >
@@ -23,3 +24,24 @@
 # string identical to the badge line in README.md / README.zh.md.
 documentation:
   readme_badge_template: '![Version](https://img.shields.io/badge/dynamic/toml?url=https%3A%2F%2Fraw.githubusercontent.com%2FCoREse%2Ftianluo%2Fmaster%2Fpyproject.toml&query=%24.project.version&label=version&color=blue)'
+
+# WHY: this repo's suite is ~11k tests and runs ~10 minutes serially, long enough
+# to dominate every fix iteration of every flow (measured here: 657s serial vs
+# 95s on 16 workers). `auto` hands the primary pytest command to pytest-xdist
+# with one worker per CPU.
+#
+# The `--dist loadgroup` that the switch appends is load-bearing, not cosmetic:
+# it is what makes the `xdist_group(name="repo_serial")` module marker mean
+# "same worker, hence sequential". The tests carrying that marker (the
+# `tests/test_worktree*.py` family) contend over process-external shared state —
+# real git worktree metadata, the daemon project-roots registry — and would
+# otherwise produce batches of contention ERRORs that look exactly like
+# regressions. They are deliberately NOT retrofitted for concurrency; the serial
+# group is the accepted trade-off.
+#
+# pytest-xdist is a development-environment tool here and is intentionally NOT a
+# packaging dependency (see pyproject.toml). If the interpreter running the
+# tests lacks it, the test step fails with an install instruction instead of
+# silently reverting to a serial run.
+test:
+  parallel: auto
