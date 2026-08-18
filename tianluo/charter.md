@@ -141,6 +141,13 @@ treated as local, preserving pre-upgrade behaviour.
 - 测试放在 `tests/` 目录，命名 `test_*.py`，使用 pytest。受控例外：
   `src/tianluo/engine/` 允许与引擎源码同位放置 pytest 测试模块，用于覆盖紧耦合的引擎
   内部行为（私有 helper、状态机内部分支、step 内部细节）。
+- **Tests MUST be parallel-safe.** The suite is run across parallel workers, so a test
+  may not depend on its execution order relative to other tests, may not share mutable
+  global state, and MUST allocate its temporary resources (files, directories, ports,
+  database names …) under unique paths. A test that genuinely cannot be made
+  concurrency-safe is pinned to a single serial worker rather than rewritten. This is a
+  soft convention, of the same strength as the other conventions here — no mechanical
+  gate enforces it.
 - **关键 why-comment 标记前缀**：记载绑定意图/不变量（binding intent/invariant）
   的关键 why-comment 应以 `WHY:` 或 `INVARIANT:` 前缀显式标注。此类被标记的注释受
   `invariant_check` 硬守卫保护——diff 删除或改写它而未恢复、亦未以更新后的

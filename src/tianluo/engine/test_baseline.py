@@ -490,9 +490,23 @@ class BaselineCapture:
         carries a per-test verbose flag so ``_parse_test_ids`` can read
         ``file::test PASSED/FAILED`` lines (the auto-detected command already
         includes ``-v``).
+
+        WHY ``test.parallel`` is applied here too: the baseline failing-id set
+        exists to be *subtracted from* the test step's, so both must be measured
+        under the same execution mode. A serial baseline compared against a
+        parallel run turns every order-sensitive test into either a phantom
+        regression (passes serially, fails in parallel — the fix loop then burns
+        iterations on innocent code) or a phantom baseline entry that masks a
+        real one. The same two sources feed both commands, so the same switch
+        must reach both.
         """
         from ..config import TestConfig
-        from .steps.test import _detect_test_command, _is_pytest_command, _VERBOSE_PYTEST_FLAGS
+        from .steps.test import (
+            _apply_parallel,
+            _detect_test_command,
+            _is_pytest_command,
+            _VERBOSE_PYTEST_FLAGS,
+        )
 
         config = TestConfig.load(self.project_root)
         if config.command:
@@ -504,7 +518,13 @@ class BaselineCapture:
             flag in command for flag in _VERBOSE_PYTEST_FLAGS
         ):
             command = [*command, "-v"]
-        return command
+        # Deliberately no xdist pre-flight here: producing the actionable
+        # "install pytest-xdist" error belongs to the test step, which is where
+        # the user is asking for a verdict. A missing plugin makes pytest reject
+        # the command line, which parses to no results at all, so the capture
+        # resolves to the None sentinel and the caller's existing fallback path
+        # takes over rather than the flow dying at baseline time.
+        return _apply_parallel(command, getattr(config, "parallel", None))
 
     def _parse_result(self) -> Optional[Set[str]]:
         """Parse the captured output into a failing-id set, or None on failure."""

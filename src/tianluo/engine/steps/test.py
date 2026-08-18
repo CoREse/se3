@@ -534,7 +534,7 @@ def run_and_classify_tests(
         # Raises before a single test runs when the test interpreter has no
         # xdist — the whole point is that a missing plugin reaches the user as
         # an install instruction, never as a suite full of failures.
-        _preflight_xdist(primary_command, parallel)
+        _preflight_xdist(primary_command, parallel, project_root)
     # 1b. Timeout retry: a timeout is NOT an assertion/test failure — it can be
     #     a transient slowdown (machine load, cold caches, a one-off hang). Before
     #     treating it as a real failure, retry the command ONCE in place with the
@@ -1603,13 +1603,21 @@ _XDIST_NUMPROCESSES_LONG = "--numprocesses"
 _XDIST_DIST_LONG = "--dist"
 
 # What pytest prints when it is handed -n / --dist without xdist installed
-# (argparse rejects the unknown option). Matched only on a FAILING run that
-# actually depends on xdist, so an ordinary test whose output happens to quote
-# this text cannot trigger it.
+# (argparse rejects the unknown option). The message alone is NOT the
+# diagnosis: any suite whose own output quotes this text (a CLI/argparse test,
+# a printed assertion body) would otherwise be misread as a missing plugin, so
+# _is_missing_xdist_result additionally requires the run to show no sign of
+# having collected anything.
 _XDIST_MISSING_STDOUT_RE = re.compile(
     r"unrecognized arguments:[^\n]*"
     r"(?:(?<![\w-])-n(?![\w-])|--numprocesses|--dist)"
 )
+
+# pytest's ExitCode.USAGE_ERROR — what it returns when argument parsing fails,
+# as it does for an unknown -n. Distinct from the ordinary test-failure codes
+# (1 failed, 2 interrupted, 3 internal error), so it separates "pytest refused
+# the command line" from "the suite ran and something went wrong".
+_PYTEST_USAGE_ERROR_RETURNCODE = 4
 
 
 def _has_numprocesses_flag(command: list[str]) -> bool:
@@ -1714,68 +1722,143 @@ class XdistUnavailableError(Exception):
         return self.message
 
 
-def _pytest_module_interpreter(command: list[str]) -> str | None:
-    """The interpreter of a ``<python> -m pytest ...`` command, else None.
+def _pytest_module_launcher(command: list[str]) -> list[str] | None:
+    """The ``... -m`` prefix of a ``<launcher> -m pytest ...`` command, else None.
 
-    WHY the interpreter and not ``sys.executable``: tianluo may well be
+    WHY the launcher prefix and not ``sys.executable``: tianluo may well be
     installed in a different environment from the project it drives, so
-    "can *I* import xdist" answers the wrong question. Only the
-    ``python -m pytest`` shape names the environment that will actually run the
-    tests; a bare ``pytest`` command does not (it resolves through PATH to a
-    console script whose interpreter we cannot know without running it), which
-    is why that shape is diagnosed after the fact instead.
+    "can *I* import xdist" answers the wrong question. Only the ``-m pytest``
+    shape names the environment that will actually run the tests; a bare
+    ``pytest`` command does not (it resolves through PATH to a console script
+    whose interpreter we cannot know without running it), which is why that
+    shape is diagnosed after the fact instead.
+
+    WHY the whole prefix rather than the interpreter token alone: the shape is
+    routinely wrapped (``uv run python -m pytest``, ``poetry run ...``,
+    ``pixi run ...``, ``env <python> -m pytest``). ``command[0]`` names the
+    wrapper (probing it asks a question about the wrong program) and the bare
+    token before ``-m`` is often a PATH-relative ``python`` that resolves to a
+    different interpreter outside the wrapper. Re-running the user's own prefix
+    with ``-c`` instead of ``-m pytest`` is the only spelling that reaches the
+    same environment pytest will run in — and it doubles as a runnable
+    ``<prefix> -m pip install pytest-xdist`` remediation line.
     """
     for i, tok in enumerate(command):
         if tok == "-m" and i + 1 < len(command) and command[i + 1] == "pytest":
-            return command[0] if i > 0 else None
+            return list(command[:i]) or None
     return None
 
 
-def _preflight_xdist(command: list[str], parallel: Any) -> None:
-    """Raise :class:`XdistUnavailableError` if the test interpreter lacks xdist.
+# A probe that exits non-zero has NOT proved xdist missing: a wrapper launcher
+# can fail for its own reasons (no project/lockfile, no TTY, network), and
+# treating that as an absence produces a FAILED step — with no fix loop to
+# recover through — for a plugin that is in fact installed. Only the
+# interpreter's own "no such module" verdict is accepted as conclusive.
+_XDIST_IMPORT_ERROR_RE = re.compile(
+    r"(?:ModuleNotFoundError|ImportError)[^\n]*xdist", re.IGNORECASE,
+)
 
-    Only decides anything for the ``<python> -m pytest`` shape; for any other
+
+def _preflight_xdist(
+    command: list[str], parallel: Any, project_root: Path,
+) -> None:
+    """Raise :class:`XdistUnavailableError` if the test environment lacks xdist.
+
+    Only decides anything for the ``<launcher> -m pytest`` shape; for any other
     command it returns silently and leaves the diagnosis to
     :func:`_is_missing_xdist_result`. A probe that cannot be run at all (missing
-    interpreter, sandbox refusal) is treated as inconclusive rather than as
-    "missing", so the run proceeds and the post-hoc path still catches a real
-    absence.
+    interpreter, sandbox refusal) or that fails for a reason other than the
+    import itself is treated as inconclusive rather than as "missing", so the
+    run proceeds and the post-hoc path still catches a real absence.
+
+    WHY the probe runs in ``project_root``: the working directory is part of the
+    environment being probed, not incidental context. Wrapper launchers
+    (``uv run``, ``poetry run``, ``pixi run``) select their project and virtualenv
+    from the cwd, and a relative interpreter path (``.venv/bin/python``) resolves
+    against it. tianluo never chdirs — under ``--worktree`` its own cwd is the
+    main checkout while the tests run in the worktree — so probing without a cwd
+    would interrogate a different environment than :func:`_run_command` uses and
+    could raise "install pytest-xdist", with no fix loop to recover through, for
+    a plugin that is installed where the tests would actually have run.
     """
-    interpreter = _pytest_module_interpreter(command)
-    if not interpreter:
+    launcher = _pytest_module_launcher(command)
+    if not launcher:
         return
     try:
         probe = subprocess.run(
-            [interpreter, "-c", "import xdist"],
+            [*launcher, "-c", "import xdist"],
             capture_output=True,
             text=True,
             timeout=60,
+            cwd=project_root,
         )
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("pytest-xdist pre-flight probe could not run: %s", exc)
         return
-    if probe.returncode != 0:
-        raise _xdist_unavailable_error(parallel, interpreter)
+    if probe.returncode == 0:
+        return
+    probe_output = f"{probe.stdout or ''}\n{probe.stderr or ''}"
+    if not _XDIST_IMPORT_ERROR_RE.search(probe_output):
+        logger.debug(
+            "pytest-xdist pre-flight probe (%s) failed for an unrelated reason "
+            "(rc=%s); leaving the diagnosis to the run itself: %s",
+            shlex.join(launcher), probe.returncode, probe_output.strip(),
+        )
+        return
+    raise _xdist_unavailable_error(parallel, shlex.join(launcher))
 
 
 def _is_missing_xdist_result(result: dict[str, Any]) -> bool:
     """Does a FAILED run look like "pytest does not know about -n"?
 
     The post-hoc half of xdist detection, for commands whose interpreter we
-    cannot name. Callers must only consult it for a run that actually carries
-    the parallel flags, so a project whose own test output quotes an
-    ``unrecognized arguments`` message cannot be mistaken for a missing plugin.
+    cannot name.
+
+    WHY the message match is not enough on its own: the caller turns a True
+    here into a FAILED step that never reaches the fix loop, so a false
+    positive silently swallows a genuine regression and answers it with an
+    install instruction the user does not need. Test suites legitimately print
+    ``unrecognized arguments: -n ...`` — a CLI/argparse test asserting on that
+    text, or pytest echoing the source of a failing assertion that contains it.
+    So the message is only believed when the run also shows that pytest never
+    got as far as running anything: rejecting the command line happens during
+    argument parsing, before collection, hence no per-test lines, no aggregate
+    summary, and pytest's usage-error exit code. A run that produced real
+    results falls through to the normal REVISION_NEEDED / fix-loop path.
+
+    The exit code is only *required* when the result carries one — a caller
+    that hands over a partial result dict should not lose the diagnosis over a
+    missing key.
     """
     if result.get("passed"):
         return False
-    haystack = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
-    return bool(_XDIST_MISSING_STDOUT_RE.search(haystack))
+    stdout = result.get("stdout") or ""
+    stderr = result.get("stderr") or ""
+    if not _XDIST_MISSING_STDOUT_RE.search(f"{stdout}\n{stderr}"):
+        return False
+    # Corroboration, over stdout AND stderr: whichever stream the runner used,
+    # any parsed test result at all means the suite started, which a rejected
+    # command line makes impossible.
+    haystack = f"{stdout}\n{stderr}"
+    if _parse_test_ids(haystack):
+        return False
+    if _parse_test_summary_counts(haystack) is not None:
+        return False
+    returncode = result.get("returncode")
+    if returncode is not None and returncode != _PYTEST_USAGE_ERROR_RETURNCODE:
+        return False
+    return True
 
 
 def _xdist_unavailable_error(
     parallel: Any, environment: str | None = None,
 ) -> XdistUnavailableError:
-    """Build the one actionable "install pytest-xdist" error both paths raise."""
+    """Build the one actionable "install pytest-xdist" error both paths raise.
+
+    ``environment`` is the test command's launcher prefix as the user wrote it
+    (e.g. ``uv run python``), so the remediation line is a command they can
+    paste; the post-hoc path has no such prefix and falls back to plain ``pip``.
+    """
     where = environment or t("engine.test.xdist_missing_environment_unknown")
     install_command = (
         f"{environment} -m pip install pytest-xdist"

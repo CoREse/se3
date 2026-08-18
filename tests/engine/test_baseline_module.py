@@ -241,6 +241,77 @@ class TestBaselineCapture:
         assert "-v" in cmd
 
 
+class TestResolveCommandParallel:
+    """The baseline must run under the SAME execution mode as the test step.
+
+    A serial baseline compared against a parallel test run misattributes every
+    order-sensitive test, in both directions, so the switch has to reach both
+    command-resolution sites.
+    """
+
+    def _write_project(self, root, test_block):
+        (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+        (root / "tianluo.yaml").write_text(test_block, encoding="utf-8")
+
+    def test_auto_appends_xdist_flags_to_detected_command(self, tmp_path):
+        self._write_project(tmp_path, "test:\n  parallel: auto\n")
+        cmd = test_baseline.BaselineCapture(tmp_path)._resolve_command()
+        assert "-n" in cmd and cmd[cmd.index("-n") + 1] == "auto"
+        # loadgroup is what makes xdist_group serial groups mean anything; the
+        # baseline must schedule identically or its failing set differs.
+        assert "--dist" in cmd and cmd[cmd.index("--dist") + 1] == "loadgroup"
+        assert "-v" in cmd
+
+    def test_integer_workers_appended_to_configured_command(self, tmp_path):
+        self._write_project(
+            tmp_path, "test:\n  command: python -m pytest tests/\n  parallel: 3\n",
+        )
+        cmd = test_baseline.BaselineCapture(tmp_path)._resolve_command()
+        assert cmd[cmd.index("-n") + 1] == "3"
+        assert cmd[cmd.index("--dist") + 1] == "loadgroup"
+
+    def test_unset_parallel_stays_serial(self, tmp_path):
+        self._write_project(tmp_path, "test:\n  command: python -m pytest tests/\n")
+        cmd = test_baseline.BaselineCapture(tmp_path)._resolve_command()
+        assert "-n" not in cmd
+        assert "--dist" not in cmd
+
+    def test_non_pytest_command_is_untouched(self, tmp_path):
+        self._write_project(
+            tmp_path, "test:\n  command: npm test\n  parallel: auto\n",
+        )
+        cmd = test_baseline.BaselineCapture(tmp_path)._resolve_command()
+        assert cmd == ["npm", "test"]
+
+    def test_missing_xdist_degrades_to_none_sentinel(self, tmp_path, monkeypatch):
+        """A missing plugin must not crash the capture — it resolves to None.
+
+        Producing the actionable install error belongs to the test step; here
+        the rejected command line simply yields nothing parseable, which is the
+        pre-existing signal for "fall back to a synchronous re-measurement".
+        """
+        self._write_project(tmp_path, "test:\n  parallel: auto\n")
+
+        def _boom(self):
+            raise RuntimeError("pytest-xdist is not installed")
+
+        monkeypatch.setattr(
+            test_baseline.BaselineCapture, "_resolve_command", _boom,
+        )
+        capture = test_baseline.BaselineCapture(tmp_path).launch()
+        assert capture.wait() is None
+        assert capture.is_ready() is True
+
+    def test_usage_error_output_resolves_to_none_sentinel(self, tmp_path):
+        # What pytest actually does when handed -n without xdist installed:
+        # argparse rejects the command line before collection, so there are no
+        # per-test lines to parse.
+        body = "error: unrecognized arguments: -n auto --dist loadgroup"
+        cmd = [sys.executable, "-c", f"import sys; print({body!r}); sys.exit(4)"]
+        capture = test_baseline.BaselineCapture(tmp_path, command=cmd).launch()
+        assert capture.wait() is None
+
+
 # ---------------------------------------------------------------------------
 # Timeout / kill enforcement (bounded pre-implement run)
 # ---------------------------------------------------------------------------

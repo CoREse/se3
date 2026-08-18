@@ -24,7 +24,7 @@ from tianluo.engine.steps.test import (
     XdistUnavailableError,
     _apply_parallel,
     _is_missing_xdist_result,
-    _pytest_module_interpreter,
+    _pytest_module_launcher,
     test_handler as run_test_step,
 )
 
@@ -137,17 +137,34 @@ class TestApplyParallel:
 # xdist detection helpers
 # ---------------------------------------------------------------------------
 
-class TestPytestModuleInterpreter:
+class TestPytestModuleLauncher:
     def test_module_form_yields_interpreter(self):
-        assert _pytest_module_interpreter(
+        assert _pytest_module_launcher(
             ["/venv/bin/python", "-m", "pytest", "-v"]
-        ) == "/venv/bin/python"
+        ) == ["/venv/bin/python"]
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            ["uv", "run", "python"],
+            ["poetry", "run", "python"],
+            ["pixi", "run", "python"],
+            ["/usr/bin/env", "/venv/bin/python"],
+        ],
+    )
+    def test_wrapper_form_yields_the_whole_prefix(self, prefix):
+        """The wrapper owns the environment; probing its first token asks the
+        wrong program, and probing a bare ``python`` asks the wrong PATH."""
+        assert _pytest_module_launcher([*prefix, "-m", "pytest", "-v"]) == prefix
 
     def test_bare_pytest_has_no_knowable_interpreter(self):
-        assert _pytest_module_interpreter(["pytest", "-v"]) is None
+        assert _pytest_module_launcher(["pytest", "-v"]) is None
+
+    def test_leading_dash_m_has_no_launcher(self):
+        assert _pytest_module_launcher(["-m", "pytest"]) is None
 
     def test_non_pytest_module_is_not_matched(self):
-        assert _pytest_module_interpreter(["python", "-m", "unittest"]) is None
+        assert _pytest_module_launcher(["python", "-m", "unittest"]) is None
 
 
 class TestIsMissingXdistResult:
@@ -184,6 +201,56 @@ class TestIsMissingXdistResult:
             "passed": False,
             "stdout": "error: unrecognized arguments: --nonsense\n",
             "stderr": "",
+        })
+
+    def test_a_run_that_produced_per_test_results_is_not_missing_xdist(self):
+        """xdist absence aborts at argument parsing, so nothing can be collected.
+
+        A suite that ran under xdist and merely *printed* the signature (an
+        argparse/CLI test, or pytest echoing a failing assertion whose source
+        quotes it) must stay a real failure and reach the fix loop.
+        """
+        assert not _is_missing_xdist_result({
+            "passed": False,
+            "returncode": 1,
+            "stdout": (
+                "[gw0] [ 50%] PASSED tests/test_cli.py::test_a\n"
+                "[gw1] [100%] FAILED tests/test_cli.py::test_b\n"
+                "E       assert \"error: unrecognized arguments: -n auto "
+                "--dist loadgroup\" in out\n"
+            ),
+            "stderr": "",
+        })
+
+    def test_a_run_with_only_an_aggregate_summary_is_not_missing_xdist(self):
+        """Quiet (non-verbose) runs have no per-test lines; the summary still proves
+        the suite ran."""
+        assert not _is_missing_xdist_result({
+            "passed": False,
+            "returncode": 1,
+            "stdout": (
+                "E   assert 'unrecognized arguments: --numprocesses=4' in out\n"
+                "=== 1 failed, 4021 passed in 95.10s ===\n"
+            ),
+            "stderr": "",
+        })
+
+    def test_non_usage_error_exit_code_is_not_missing_xdist(self):
+        """pytest rejects an unknown option during argument parsing, which is exit
+        code 4; anything else means it got further than that."""
+        assert not _is_missing_xdist_result({
+            "passed": False,
+            "returncode": 1,
+            "stdout": "error: unrecognized arguments: -n auto\n",
+            "stderr": "",
+        })
+
+    def test_usage_error_exit_code_with_no_results_is_missing_xdist(self):
+        assert _is_missing_xdist_result({
+            "passed": False,
+            "returncode": 4,
+            "stdout": "",
+            "stderr": "error: unrecognized arguments: -n auto --dist loadgroup\n",
         })
 
 
@@ -341,13 +408,96 @@ class TestHandlerXdistMissing:
 
         with patch(
             "tianluo.engine.steps.test.subprocess.run",
-            return_value=MagicMock(returncode=1, stdout="", stderr="no xdist"),
+            return_value=MagicMock(
+                returncode=1,
+                stdout="",
+                stderr="ModuleNotFoundError: No module named 'xdist'\n",
+            ),
         ):
             result = run_test_step(step, flow)
 
         assert result == StepStatus.FAILED
         assert "pytest-xdist" in step.error_message
         mock_popen.assert_not_called()
+
+    def test_wrapper_command_probes_the_wrapped_environment(
+        self, mock_popen, mock_load, tmp_path, monkeypatch,
+    ):
+        """`uv run python -m pytest`: probe through the wrapper, not `uv` alone."""
+        monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
+        mock_load.return_value = TestConfig(
+            command="uv run python -m pytest -v", parallel="auto",
+        )
+        mock_popen.return_value = _mock_process(0, "1 passed in 1.0s\n")
+        flow, step = _make_flow_and_step(tmp_path)
+
+        with patch(
+            "tianluo.engine.steps.test.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        ) as mock_run:
+            assert run_test_step(step, flow) == StepStatus.COMPLETED
+
+        probe = next(
+            call.args[0] for call in mock_run.call_args_list
+            if call.args and "import xdist" in " ".join(call.args[0])
+        )
+        assert probe == ["uv", "run", "python", "-c", "import xdist"]
+
+    def test_probe_runs_in_the_same_directory_as_the_test_command(
+        self, mock_popen, mock_load, tmp_path, monkeypatch,
+    ):
+        """The cwd is part of the environment being probed.
+
+        Wrapper launchers pick their project/virtualenv from the working
+        directory, and tianluo never chdirs (under ``--worktree`` its own cwd is
+        the main checkout while the tests run in the worktree). A probe run from
+        anywhere else answers a question about a different environment — and a
+        false "missing" there ends the step FAILED with no fix loop to recover
+        through.
+        """
+        monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
+        mock_load.return_value = TestConfig(
+            command="uv run python -m pytest -v", parallel="auto",
+        )
+        mock_popen.return_value = _mock_process(0, "1 passed in 1.0s\n")
+        flow, step = _make_flow_and_step(tmp_path)
+
+        with patch(
+            "tianluo.engine.steps.test.subprocess.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        ) as mock_run:
+            assert run_test_step(step, flow) == StepStatus.COMPLETED
+
+        probe_call = next(
+            call for call in mock_run.call_args_list
+            if call.args and "import xdist" in " ".join(call.args[0])
+        )
+        assert probe_call.kwargs["cwd"] == mock_popen.call_args_list[0].kwargs["cwd"]
+
+    def test_probe_failing_for_an_unrelated_reason_is_inconclusive(
+        self, mock_popen, mock_load, tmp_path, monkeypatch,
+    ):
+        """A wrapper that refuses to run (no lockfile, no TTY) has said nothing
+        about xdist; ending the step as FAILED there is unrecoverable."""
+        monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
+        mock_load.return_value = TestConfig(
+            command="uv run python -m pytest -v", parallel="auto",
+        )
+        mock_popen.return_value = _mock_process(0, "1 passed in 1.0s\n")
+        flow, step = _make_flow_and_step(tmp_path)
+
+        with patch(
+            "tianluo.engine.steps.test.subprocess.run",
+            return_value=MagicMock(
+                returncode=2, stdout="", stderr="error: No `project` found\n",
+            ),
+        ):
+            assert run_test_step(step, flow) == StepStatus.COMPLETED
+
+        # The suite ran, in parallel, as configured.
+        assert _commands_run(mock_popen)[0][-4:] == [
+            "-n", "auto", "--dist", "loadgroup",
+        ]
 
     def test_ordinary_failure_still_enters_the_fix_loop(
         self, mock_popen, mock_load, tmp_path, monkeypatch,
@@ -357,6 +507,32 @@ class TestHandlerXdistMissing:
         mock_popen.return_value = _mock_process(
             1,
             "[gw0] [100%] FAILED tests/test_a.py::test_x\n1 failed in 1.0s\n",
+        )
+        flow, step = _make_flow_and_step(tmp_path)
+
+        assert run_test_step(step, flow) == StepStatus.REVISION_NEEDED
+        assert step.outputs["fix_needed"] is True
+
+    def test_suite_that_quotes_the_signature_still_enters_the_fix_loop(
+        self, mock_popen, mock_load, tmp_path, monkeypatch,
+    ):
+        """A real regression must not be answered with "install pytest-xdist".
+
+        This repository runs with ``test.parallel: auto`` and its own tests
+        assert on pytest's ``unrecognized arguments`` wording; when one of them
+        fails, pytest prints that source line into the suite output. Diagnosing
+        the whole run as a missing plugin would abort the flow and hide the
+        genuine failure.
+        """
+        monkeypatch.delenv("SE3_TEST_RUNNING", raising=False)
+        mock_load.return_value = TestConfig(command="pytest -v", parallel="auto")
+        mock_popen.return_value = _mock_process(
+            1,
+            "[gw0] [ 50%] PASSED tests/test_a.py::test_ok\n"
+            "[gw1] [100%] FAILED tests/test_test_parallel_switch.py::test_sig\n"
+            "E       assert \"error: unrecognized arguments: -n auto "
+            "--dist loadgroup\"\n"
+            "=== 1 failed, 1 passed in 2.0s ===\n",
         )
         flow, step = _make_flow_and_step(tmp_path)
 

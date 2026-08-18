@@ -43,5 +43,13 @@ documentation:
 # packaging dependency (see pyproject.toml). If the interpreter running the
 # tests lacks it, the test step fails with an install instruction instead of
 # silently reverting to a serial run.
+#
+# That requirement is per-interpreter, and the interpreter is the engine's own
+# `sys.executable` (`_detect_test_command` builds `<python> -m pytest` from it),
+# NOT whichever python happens to be on PATH. A machine that drives flows on
+# this repo from more than one install — e.g. an editable dev env plus a
+# separate venv the released `luo` runs from — must have pytest-xdist in EVERY
+# one of them, or flows started from the uncovered install fail at the TEST step
+# before a single test runs.
 test:
   parallel: auto
