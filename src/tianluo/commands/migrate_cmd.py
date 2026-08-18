@@ -265,7 +265,11 @@ def _make_llm_salvager(project_root: Path) -> SpecSalvager:
             "- Fold in ONLY cross-file / no-single-owner architectural why/intent "
             "from the other specs; per-module locators and per-symbol detail are "
             "DROPPED (they live in code-index now).\n"
-            "- Output the complete markdown document and nothing else.\n\n"
+            "- Output the complete markdown document and nothing else.\n"
+            "- Keep the following project-wide test convention in the coding "
+            "conventions section verbatim (it is a soft, prompt-level "
+            "convention — do NOT turn it into a hard check gate):\n"
+            f"  {charter_mod.DEFAULT_PARALLEL_SAFE_TESTS_CONVENTION}\n\n"
             f"## Admission standard\n{inp.admission_standard}\n\n"
             f"## Charter template (structure to follow)\n{inp.charter_template}\n\n"
             f"## Base spec (shrink + altitude-filter this)\n{inp.base_spec_text}\n\n"
@@ -336,7 +340,13 @@ def _fallback_charter(inp: SalvageInput) -> str:
             project_description="(migrated — review)",
             languages_and_frameworks="(migrated — review)",
             top_level_architecture="(migrated — review the salvaged base content below)",
-            coding_conventions="(migrated — review)",
+            coding_conventions=(
+                # Even on the degraded path the migrated charter carries the
+                # parallel-safety convention, so the fallback is not the one
+                # route that silently drops it.
+                "(migrated — review)\n"
+                "- " + charter_mod.DEFAULT_PARALLEL_SAFE_TESTS_CONVENTION
+            ),
             key_constraints="(migrated — review)",
             workflow_conventions="(migrated — review)",
         )

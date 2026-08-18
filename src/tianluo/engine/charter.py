@@ -150,6 +150,20 @@ def load_charter(project_root: Union[str, Path]) -> str:
         return ""
 
 
+#: Default project-level convention scaffolded into every freshly generated
+#: charter (`luo init` / `luo migrate`). It lives here rather than being typed
+#: out at each generation site so both entry points stay in step. It is a soft,
+#: prompt-level convention deliberately: parallel-safety of generated tests is
+#: a habit worth stating up front so a project can later turn on parallel test
+#: execution without an order-sensitive suite, but it is NOT worth a hard gate
+#: (no mechanical check can decide whether a test shares mutable global state).
+DEFAULT_PARALLEL_SAFE_TESTS_CONVENTION = (
+    "流程生成的测试应**并行安全**：不依赖测试之间的执行顺序、不共享可变全局状态、"
+    "临时资源（文件/目录/端口/数据库名等）一律使用唯一路径。此为软约定，"
+    "与其他 conventions 同等强度，不设硬性检查门。"
+)
+
+
 def load_charter_template() -> str:
     """Return the raw packaged charter template text (no substitution)."""
     template_path = Path(__file__).parent.parent / "templates" / CHARTER_TEMPLATE_NAME

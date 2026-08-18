@@ -128,7 +128,20 @@ Discovery is a read-only step. To ask better, more informed questions you MAY co
 """
 )
 
-_INITIAL_DISCOVERY_PROMPT_SUFFIX = """
+#: The "coarse is fine, wrong is not" accuracy discipline, spliced into BOTH
+#: discovery prompt suffixes from this single constant. It lives in one place on
+#: purpose: the two suffixes are large near-duplicates, so a hand-copied second
+#: copy would silently drift the moment someone edits only one of them.
+_ACCURACY_DISCIPLINE_SECTION = """
+ACCURACY DISCIPLINE — a coarse `refined_description` is fine, a wrong one is not:
+- Every factual assertion about the codebase that you put in `refined_description` (that a function / field / file / configuration key exists, and how it behaves) MUST be something you verified directly against the source IN THIS discovery session. Never write such an assertion from inference, from what a name suggests, or from what "must surely be there"; and never restate a conclusion carried in the conversation history / a summary / an earlier session unless you re-verified it against the source this round.
+- Anything you cannot verify — or that is not worth verifying — during discovery MUST be written as a behavioural requirement on the implementation ("the implementation MUST ensure / MUST verify X"), never as a statement of fact about how the code currently is. This keeps an unverified belief from entering the task description disguised as an established fact.
+- Prefer stable references: function names, configuration keys, glob patterns. Avoid line numbers and exhaustively enumerated file lists — they drift with any edit and are easy to mistype. Write "every `test_*` module under the tests directory" rather than "these 6 files, at lines 12 / 40 / 77".
+- When detail and correctness pull in opposite directions, cut the detail and keep it correct. A description that is coarse but true is acceptable; a description that is detailed but contains a wrong fact is not.
+"""
+
+_INITIAL_DISCOVERY_PROMPT_SUFFIX = (
+    """
 
 Respond in JSON format:
 {{
@@ -160,7 +173,9 @@ HARD INVARIANT — `refined_description` must be clean, final, and zero open ite
 - Every item that is not yet settled has exactly two destinations:
   1. **True blocker** (cannot proceed at all without the user's adjudication): put it in `questions`. A non-empty `questions` means discovery continues looping and does NOT reach the confirmation gate — i.e. as long as a genuine open decision remains, the user should not be asked to confirm at all.
   2. **Non-blocker** (you can reasonably pick a sensible default / make the decision yourself): write it into `refined_description` as an already-made decision (e.g. "Decided: use default value X"), and put the meta-note that "this is a default I picked on your behalf and can be changed" into `content` for the user's reference. Do NOT put non-blockers into `questions`.
-
+"""
+    + _ACCURACY_DISCIPLINE_SECTION
+    + """
 Handling Evaluative/Inquisitive Initial Descriptions:
 
 If the user's initial description is phrased as an evaluation, judgment, review, or inquiry — for example patterns like:
@@ -203,6 +218,7 @@ Guidelines:
 - Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as a clean already-made decision (e.g. "Decided: use default value X") with NO "default / changeable" annotation attached, while the "default picked on your behalf, changeable" meta-note goes ONLY into `content` (never inside `refined_description`) — never put a non-blocker into `questions`
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
+)
 
 # Wrap only the user's literal field ({initial_description}) as the
 # USER_CONTENT region. The placeholder is preserved verbatim so runtime
@@ -245,7 +261,8 @@ Discovery is a read-only step. To ask better, more informed questions you MAY co
 """
 )
 
-_CONTINUE_DISCOVERY_PROMPT_SUFFIX = """
+_CONTINUE_DISCOVERY_PROMPT_SUFFIX = (
+    """
 
 Respond in JSON format:
 {{
@@ -278,7 +295,9 @@ HARD INVARIANT — `refined_description` must be clean, final, and zero open ite
 - Every item that is not yet settled has exactly two destinations:
   1. **True blocker** (cannot proceed at all without the user's adjudication): put it in `questions`. A non-empty `questions` means discovery continues looping and does NOT reach the confirmation gate — i.e. as long as a genuine open decision remains, the user should not be asked to confirm at all.
   2. **Non-blocker** (you can reasonably pick a sensible default / make the decision yourself): write it into `refined_description` as an already-made decision (e.g. "Decided: use default value X"), and put the meta-note that "this is a default I picked on your behalf and can be changed" into `content` for the user's reference. Do NOT put non-blockers into `questions`.
-
+"""
+    + _ACCURACY_DISCIPLINE_SECTION
+    + """
 Handling Evaluative/Inquisitive Initial Descriptions (continuation):
 
 If the initial description was evaluative or inquisitive (recognition patterns: "Is this correct?", "Evaluate X", "Does Y have problems?", "Review this change", "What do you think about X?", Chinese equivalents like "这样做对吗" / "评判X是否合理" / "Y方案有问题吗" / "仔细评估这个改动", or references to specific code/files/commits), MAINTAIN the substantive discussion posture throughout all subsequent rounds. Do NOT revert to "let me re-confirm the task scope" or "what do you want to accomplish" midway through the conversation.
@@ -303,6 +322,7 @@ Guidelines:
 - Route every unsettled matter to one of two places: a true blocker goes into `questions` (which keeps discovery looping and stays out of the confirmation gate); a non-blocker is written into `refined_description` as a clean already-made decision (e.g. "Decided: use default value X") with NO "default / changeable" annotation attached, while the "default picked on your behalf, changeable" meta-note goes ONLY into `content` (never inside `refined_description`) — never put a non-blocker into `questions`
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
+)
 
 # The continue prompt wraps only the {user_response} field — the latest
 # user-typed message. {initial_description} from round 0 is now historical
