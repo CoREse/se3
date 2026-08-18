@@ -46,7 +46,17 @@ type semantics of a whole flow; there is no second routing axis that adds or
 removes steps. Every flow whose type carries a PLAN step runs it — what varies
 is the *decomposition doctrine and granularity* PLAN works under, and those
 decide only the execution shape of the PLAN → IMPLEMENT segment. The doctrine
-sizes coarse groups by what one autonomous implement call can safely carry.
+groups by **task**: one coherent task per group by default, and mutually
+unrelated tasks each get their own group so they can run in parallel. A task
+is split further only at the *capability edge* — PLAN positively judges that a
+single autonomous implement call cannot complete the task, or that forcing it
+into one call would substantially degrade execution quality. PLAN never
+pre-cuts a task along implementation phases, implementation paths, or artifact
+types: how a task decomposes internally is the implement call's own
+planning/subagent job (both runners support headless subagents — `claude -p`
+exposes the Agent tool, and codex ships subagents enabled by default — though
+codex only spawns them when explicitly instructed, so the implement prompts
+state that permission explicitly).
 Where the granularity left the group count to PLAN, the shape downstream is
 read off the resulting count rather than off a routing flag: one group is
 executed as a single whole-task call, two or more enter the dependency DAG.

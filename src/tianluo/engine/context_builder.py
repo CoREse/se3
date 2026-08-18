@@ -1060,56 +1060,138 @@ If the output is acceptable, set "approved" to true. If changes are needed, set 
     return prompt
 
 
+# WHY the count dimension is granularity-dependent while dimensions 2 and 3 are
+# not: the group *count* is the one thing `plan_granularity` overrides. Under
+# `auto` the count is PLAN's judgement and the gate may overturn it; under
+# `single` it is a configured guarantee PLAN is forbidden to deviate from, and
+# under `conservative` the configuration deliberately lowers the split threshold
+# below the capability edge. Reviewing all three against the `auto` standard
+# would make the gate demand a regrouping the configuration forbids PLAN to
+# produce, burning the whole revision budget until max_iterations auto-approves.
+# Forbidden artifact/layer splits and `depends_on` truthfulness are doctrine
+# invariants no granularity relaxes, so they stay identical across the three.
+_GROUPING_REVIEW_COUNT_DIMENSION_AUTO = """1. **Group count vs. independent tasks**: does the number of groups equal the
+   number of mutually unrelated, independent tasks in the requirement? Flag both
+   directions — unrelated tasks fused into one group (which needlessly
+   serializes work that could have run in parallel in isolated worktrees), and
+   one coherent task carved into several groups. For every group beyond
+   one-per-task, check that the plan actually gives a capability-edge reason and
+   that it holds: one autonomous implement call could not complete the task, or
+   forcing it into one call would substantially degrade execution quality. Flag
+   any group that exists only because a task was pre-cut along implementation
+   phases, implementation paths, or artifact types, and flag any group so large
+   that one autonomous implement call could not safely carry it."""
+
+_GROUPING_REVIEW_COUNT_DIMENSION_SINGLE = """1. **Group count (fixed by configuration — never a defect here)**: this flow is
+   pinned to `plan_granularity: single`, so PLAN was ordered to emit exactly one
+   group covering the entire task and forbidden to split it under any
+   circumstances. The count is therefore a configured guarantee, not a judgement
+   PLAN made, and the engine runs the whole task through one autonomous
+   implement call whatever count the plan carries. Do NOT fail the review on the
+   group count: a single group covering several mutually unrelated tasks is the
+   correct output here and must not be reported as a grouping defect, and no
+   feedback may ask for the work to be spread across more groups."""
+
+_GROUPING_REVIEW_COUNT_DIMENSION_CONSERVATIVE = """1. **Group count vs. independent tasks**: mutually unrelated, independent tasks
+   fused into one group is a defect — flag it, since it needlessly serializes
+   work that could have run in parallel in isolated worktrees. In the other
+   direction this flow is configured `plan_granularity: conservative`, which
+   deliberately lowers the splitting threshold below the capability edge: PLAN
+   was told to split whenever there is *any* doubt that one call can carry a
+   task, so a coherent task carved into several groups is expected here and must
+   NOT be flagged as over-splitting. Still flag any group that exists only
+   because a task was pre-cut along implementation phases, implementation paths,
+   or artifact types — a lowered threshold licenses smaller groups, never splits
+   along those axes — and flag any group so large that one autonomous implement
+   call could not safely carry it."""
+
+_GROUPING_REVIEW_COUNT_DIMENSION = {
+    "auto": _GROUPING_REVIEW_COUNT_DIMENSION_AUTO,
+    "single": _GROUPING_REVIEW_COUNT_DIMENSION_SINGLE,
+    "conservative": _GROUPING_REVIEW_COUNT_DIMENSION_CONSERVATIVE,
+}
+
+_GROUPING_REVIEW_GRANULARITY_NOTE = {
+    "single": """
+This flow additionally runs under `plan_granularity: single`, a configured pin
+that overrides the count rule above: PLAN was ordered to emit exactly one group
+for the whole requirement, unrelated tasks included, and the engine executes it
+as one autonomous call. The group count is out of your hands and out of scope.
+""",
+    "conservative": """
+This flow additionally runs under `plan_granularity: conservative`, a configured
+pin that lowers the split threshold below the capability edge: PLAN was told to
+split whenever there is any doubt that one call can carry a task, so more groups
+than the default sizing would produce is the configured intent, not a defect.
+""",
+}
+
+
 def _build_capability_grouping_review_prompt(
     *,
     task_description: str,
     step_output_text: str,
     revision_section: str,
     lang_instruction: str,
+    granularity: Any = None,
 ) -> str:
     """Render the capability-doctrine *grouping* review prompt.
 
     Three review dimensions, matching the three ways a capability grouping can
-    be wrong: too many / too few groups for the volume of work, a split made
-    along artifact type or code layer instead of along deliverable capability,
-    and a ``depends_on`` graph that does not describe real dependencies.
+    be wrong: a group count that does not match the number of mutually
+    independent tasks (unrelated tasks fused, or one task pre-cut without a
+    capability-edge reason), a split made along artifact type or code layer
+    instead of along a task unit, and a ``depends_on`` graph that does not
+    describe real dependencies.
+
+    ``granularity`` is the flow's persisted :class:`PlanGranularity` (or its
+    string value); it selects the count dimension's wording so the gate never
+    demands a group count the configuration forbids PLAN to emit. An unknown or
+    missing value reads as ``auto``.
     """
+    key = str(getattr(granularity, "value", granularity) or "auto").strip().lower()
+    count_dimension = _GROUPING_REVIEW_COUNT_DIMENSION.get(
+        key, _GROUPING_REVIEW_COUNT_DIMENSION_AUTO
+    )
+    granularity_note = _GROUPING_REVIEW_GRANULARITY_NOTE.get(key, "")
     return f"""You are reviewing the output of the **plan** step in an SE3 development workflow.
 
 Your one and only job here is to review the **grouping**: whether the plan cut the
 work into the right task groups. Do NOT grade the plan on general quality, style,
 or feasibility, and do NOT ask for the requirements to be decomposed into a
 per-requirement task list — that is out of scope for this review. Under this
-doctrine a group is deliberately coarse: its description names a capability, and
+doctrine a group is deliberately coarse: its description names a whole task, and
 the detailed breakdown happens inside the implementation call, not here.
 
-## Original Task (the volume of work to be grouped lives in here)
+## Original Task (the tasks to be grouped live in here)
 {task_description}
 
 ## Output of the PLAN Step (proposal / design / task_groups)
 {step_output_text}
 {revision_section}
 ## The Grouping Doctrine Being Reviewed
-The one and only criterion for a split is **whether a single autonomous implement
-call can safely carry the group**:
-- one capability that one call can finish → one group;
-- one capability too large for one call → split into two or more groups;
-- two naturally distinct capabilities that one call can still finish together →
-  still one group;
-- borderline → one capability per group. The more capabilities a group
-  aggregates, the lower the threshold for splitting it (be conservative).
-
+The unit of grouping is a **task** — one coherent piece of work the user would
+regard as a single thing — and the one and only reason to split a task any
+further is **whether a single autonomous implement call can safely carry it**:
+- one task that one call can finish → one group;
+- one task too large for one call → split into two or more groups;
+- mutually unrelated, independent tasks → one group each, so that they can be
+  executed in parallel in isolated worktrees;
+- default to aggregation — one task, one group. A task may be split only at the
+  capability edge, i.e. PLAN positively judged that a single autonomous
+  implement call cannot complete it, or that forcing it into one call would
+  substantially degrade the quality of the execution; that reason belongs in the
+  group's description. Pre-cutting one task along implementation phases,
+  implementation paths, or artifact types is never a valid split — how a task is
+  broken down internally is decided inside the implement call, not by PLAN.
+{granularity_note}
 ## Review Dimensions (check all three)
-1. **Group count vs. volume of work**: does the number of groups match the size
-   of the task? Flag both directions — a group so large that one autonomous
-   implement call could not safely carry it, and gratuitous splitting of work
-   that one call would comfortably finish together.
-2. **Forbidden splits by artifact type or layer**: grouping must follow
-   deliverable capability units, never files, modules, or code layers. A
-   standalone test group, docs group, or config group is forbidden — tests and
-   verification are part of what each group itself delivers. Flag any group
-   whose identity is an artifact type or an architectural layer rather than a
-   capability.
+{count_dimension}
+2. **Forbidden splits by artifact type or layer**: grouping must follow task
+   units, never files, modules, or code layers. A standalone test group, docs
+   group, or config group is forbidden — tests and verification are part of
+   what each group itself delivers. Flag any group whose identity is an
+   artifact type or an architectural layer rather than a task.
 3. **Dependency declarations**: does each `depends_on` describe a real ordering
    constraint (the depended-on group produces something this group needs)? Flag
    dangling group ids, cycles, dependencies that do not actually exist (which
@@ -1139,6 +1221,7 @@ def build_plan_confirm_prompt(
     revision_feedback: Optional[str] = None,
     project_root: Optional[Path] = None,
     decomposition: Optional[Any] = None,
+    granularity: Optional[Any] = None,
 ) -> str:
     """Build the plan-specific review prompt for the flow's decomposition doctrine.
 
@@ -1148,8 +1231,13 @@ def build_plan_confirm_prompt(
     depends on which doctrine PLAN followed:
 
     - ``capability`` (default): review the **grouping** — whether the group
-      count matches the volume of work, whether any group is split by artifact
-      type or code layer, and whether the ``depends_on`` declarations hold.
+      count matches the number of mutually independent tasks (and whether every
+      further split names a capability-edge reason that holds), whether any
+      group is split by artifact type or code layer, and whether the
+      ``depends_on`` declarations hold. The count half of that is stated
+      relative to the flow's ``granularity``: ``single`` and ``conservative``
+      are configured pins on the count, so the reviewer is told not to demand a
+      regrouping PLAN was forbidden (or told not) to produce.
     - ``granular`` (legacy): the historical requirement -> task coverage review,
       kept verbatim because ``granular`` is a behaviour-preserving legacy value
       and its per-task listing still makes coverage checkable.
@@ -1168,6 +1256,9 @@ def build_plan_confirm_prompt(
         project_root: Project root directory for language config
         decomposition: The flow's persisted ``PlanDecomposition`` (or its string
             value). ``None`` falls back to the current default doctrine.
+        granularity: The flow's persisted ``PlanGranularity`` (or its string
+            value), used only by the capability branch to phrase the group-count
+            dimension. ``None``/unknown reads as ``auto``.
 
     Returns:
         Formatted prompt string for the plan reviewer
@@ -1230,6 +1321,7 @@ The following feedback was given in a previous review. Check whether it has been
             step_output_text=step_output_text,
             revision_section=revision_section,
             lang_instruction=lang_instruction,
+            granularity=granularity,
         )
 
     prompt = f"""You are reviewing the output of the **plan** step in an SE3 development workflow.

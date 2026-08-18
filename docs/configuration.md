@@ -381,14 +381,23 @@ confirmation:
 
 What the review asks depends on the doctrine the flow was planned under:
 
-- **`capability`** — reviews the *grouping*: whether the group count matches
-  the volume of work, whether any group was cut along a forbidden artifact
-  type or code layer, and whether the `depends_on` declarations hold. It
-  explicitly does not ask for a per-requirement task decomposition.
+- **`capability`** — reviews the *grouping*: whether the group count equals the
+  number of independent tasks (and whether every further split names a
+  capability-edge reason that holds), whether any group was cut along a
+  forbidden artifact type or code layer, and whether the `depends_on`
+  declarations hold. It explicitly does not ask for a per-requirement task
+  decomposition.
 - **`granular`** — keeps the legacy requirement→task coverage review verbatim.
 
 The doctrine is read from the persisted flow context, so a resumed flow is
-reviewed under the doctrine it was planned with.
+reviewed under the doctrine it was planned with. The granularity travels with
+it, because it pins the group *count*: under `single` the count is a configured
+guarantee PLAN may not deviate from, so the review puts it out of scope
+entirely; under `conservative` the deliberate over-splitting that setting orders
+is not a defect. Only under `auto` is the count PLAN's own judgement, and only
+there may the gate ask for it to be regrouped — otherwise the reviewer would
+demand a revision PLAN is forbidden to produce, and the loop would just spin to
+`max_iterations`.
 
 By contrast `adjudicate` is **unconfirmed by default**: with no entry here a
 ruling auto-passes with no gate — including a ruling that rewrites the *task
@@ -432,7 +441,7 @@ Fix-loop and self_check behaviour. Loaded into `WorkflowConfig`.
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | For nested self_check chains: when a non-final pass finds *fewer* than this many issues and none is critical/high severity, its fix is deferred so the remaining passes run first; their findings are then deduped into one consolidated fix loop. **`0` (or `null`) disables deferral** — every issue-finding pass fixes immediately (the historical behaviour). Negative → `ConfigError`. |
 | `adjudicate_period` | int `>= 0` | `10` | Period, in fix iterations, of the adjudicate step's catch-all safety net: every N fix iterations one adjudicate run is forced even when no structural oscillation signal fired. **`0` (or `null`) disables the periodic net** (adjudicate then runs only on the structural triggers: candidate oscillation / contradiction / recurrence). Unlike its siblings this key is **fail-fast on a bad type**: a bool, a float, or a non-numeric string raises `ConfigError` rather than defaulting, because silently defaulting would enable an interval the user never asked for. A cleanly integer-valued string (`"7"`) still coerces. Negative → `ConfigError`. |
 | `plan_decomposition` | `capability` \| `granular` | `capability` | Which decomposition doctrine PLAN follows (see below). **Fail-fast on any other value** — a typo would otherwise silently pick a different doctrine, invisible until the groups come out the wrong size. |
-| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | Group-count pressure applied **under `capability` only**; meaningless and ignored under `granular`. `auto` = the LLM sizes the group count by its own capability estimate; `single` = pin exactly one group; `conservative` = lower the splitting threshold, err toward more groups. **Fail-fast on any other value.** |
+| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | Group-count pressure applied **under `capability` only**; meaningless and ignored under `granular`. `auto` = group count equals the number of independent tasks, more groups only at the capability edge; `single` = pin exactly one group; `conservative` = lower the splitting threshold, err toward more groups. **Fail-fast on any other value.** |
 
 The retired `workflow.self_check_convergence_enabled` key is accepted only for
 configuration compatibility. It is always normalized to `false`, and the
@@ -466,37 +475,50 @@ shape the PLAN → IMPLEMENT segment. Sequences that never had a PLAN step
 (`small`, `review`, `survey`) are unaffected.
 
 **`plan_decomposition: capability`** (default) — PLAN cuts the work into coarse
-groups whose *only* sizing criterion is "can a single autonomous implement call
-safely carry this?":
+groups whose unit is the **task**: one coherent piece of work the user would
+regard as a single thing. The *only* reason to split a task any further is
+"can a single autonomous implement call safely carry this?":
 
-1. one capability that one call can complete → **one group** (the group's
-   content is simply "implement that capability");
-2. one capability one call cannot carry → **two or more groups**;
-3. two naturally distinct capabilities one call could still complete together
-   → **still one group** — distinctness alone is not a reason to split;
-4. on the edge between "can" and "cannot" → **one capability per group**. The
-   more a group aggregates, the *lower* the threshold at which PLAN splits it.
+1. one task that one call can complete → **one group** (the group's content is
+   simply "carry out that task");
+2. one task one call cannot carry → **two or more groups**;
+3. two or more mutually unrelated, independent tasks → **one group each**, so
+   they can be executed in parallel in isolated worktrees. Aspects of one
+   coherent task are not independent tasks and stay together in its group;
+4. default to aggregation — **one task, one group**. Split a task only at the
+   *capability edge*: PLAN positively judges that a single autonomous
+   implement call cannot complete it, or that forcing it into one call would
+   substantially degrade the quality of the execution — and records that
+   reason in the group's description. PLAN never pre-cuts a single task along
+   implementation phases, implementation paths, or artifact types: how a task
+   breaks down internally is decided inside the implement call, not by PLAN.
 
 A hard guardrail forbids cutting groups along artifact types or code layers:
 no separate test group, docs group or config group, and no group defined by a
 file set, module boundary or layer. Testing and verification are part of what
-each group itself delivers. (A group whose *capability* happens to concern the
-test or docs system — "fix the flaky retry in the test runner" — is of course
-legitimate; what is forbidden is carving one capability's tests out into a
-group of their own.)
+each group itself delivers. (A group whose *task* happens to concern the test
+or docs system — "fix the flaky retry in the test runner" — is of course
+legitimate; what is forbidden is carving one task's tests out into a group of
+their own.)
 
 Under `capability`, PLAN emits **no per-task listing**. A group carries only
 the scheduling fields `group_id` / `name` / `description` / `group_order` /
 `depends_on`; the in-group breakdown is left to the implement runner's own
 planning / sub-agent system, which decomposes against the real code at
-execution time. PLAN still produces its coarse proposal / design output, which
-is what a human gate reviews and what is injected as `{design_section}` context
-during fix iterations.
+execution time. Both runners support headless subagents — `claude -p` exposes
+the Agent (subagent) tool, and codex ships subagents enabled by default under
+non-interactive `codex exec` — but codex only spawns them when explicitly
+instructed, so the implement prompts state that permission explicitly. PLAN
+still produces its coarse proposal / design output, which is what a human gate
+reviews and what is injected as `{design_section}` context during fix
+iterations.
 
 **`plan_granularity`** applies only under `capability`:
 
-- **`auto`** (default) — PLAN estimates how many autonomous implement calls the
-  task actually needs and emits exactly that many groups.
+- **`auto`** (default) — the group count is the number of mutually independent
+  tasks in the requirement, normally one group per task. Groups beyond that
+  count are added only where a single task reaches the capability edge and
+  genuinely needs more than one autonomous implement call.
 - **`single`** — exactly one group, whatever the task's size. This is the
   configuration-forced equivalent of the retired `direct` path, and it is a
   guarantee rather than a request: PLAN is instructed to emit one group, but if
@@ -504,9 +526,11 @@ during fix iterations.
   autonomous call and passes the groups in only as an outline. Under `single`
   a flow therefore never fans out into a parallel worktree DAG.
 - **`conservative`** — lower the splitting threshold: whenever there is *any*
-  doubt that one call can carry the work, split it. Errs toward more groups,
-  on the reasoning that an under-sized group costs little while a group that
-  overflows the call it was sized for costs a failed implementation.
+  doubt that one call can carry a task, split it. Prefers one group per
+  sub-task even where the default sizing would have kept the task whole, and
+  errs toward more groups, on the reasoning that an under-sized group costs
+  little while a group that overflows the call it was sized for costs a failed
+  implementation.
 
 **`plan_decomposition: granular`** is the retained legacy doctrine: the
 fine-grained per-task listing (`tasks` arrays with `complexity` /
@@ -1059,11 +1083,13 @@ silently serialize groups the plan declared independent. Capability mode
 dispatches on group count and topology instead: one group → the whole-task
 implement call, two or more → the DAG path (`plan_granularity: single` pins
 the whole-task call regardless of the count), still subject to the existing
-`use_worktree`, linear-dependency-chain and no-commits short-circuits. A
-capability group is by definition already sized at the ceiling of one
-autonomous call, well past any 300-LOC merge threshold, so re-judging it by
-LOC would add no information. Under `granular` the threshold behaves exactly
-as it always has.
+`use_worktree`, linear-dependency-chain and no-commits short-circuits. The
+threshold is skipped because a capability group carries no LOC estimate to
+judge — not because every group is large: a capability group is one coherent
+task, aggregated by default and split only at the capability edge, so it is
+*bounded* by what a single autonomous call can carry but is not sized at that
+ceiling (two mutually unrelated 20-LOC tasks legitimately produce two small
+groups). Under `granular` the threshold behaves exactly as it always has.
 
 `group_loc_threshold` is one of the explicit exceptions to the clamp-and-warn
 rule: `ImplementConfig.from_dict` calls bare `int(...)` on the value with no

@@ -1471,3 +1471,61 @@ class TestImplementVersionFileGuardrail:
         assert FIX_VERSION_FILE_GUARDRAIL.strip() in FIX_PROMPT
         assert 'Fix iterations are also covered' in FIX_PROMPT
 
+
+class TestImplementSubagentDecompositionHint:
+    """Both execution paths must explicitly permit in-call subagent use.
+
+    PLAN no longer pre-splits a task, so the runner has to be told — not
+    merely allowed to infer — that decomposing the work internally with its
+    own subagents is its job. codex in particular only spawns subagents when
+    explicitly instructed.
+    """
+
+    def test_holistic_prompt_explicitly_permits_subagents(self):
+        from tianluo.engine.steps.implement import HOLISTIC_IMPLEMENT_PROMPT
+        prompt = HOLISTIC_IMPLEMENT_PROMPT
+        assert "## Autonomous Execution Contract" in prompt
+        flat = " ".join(prompt.split())
+        assert (
+            "You are allowed — and encouraged — to spawn subagents inside "
+            "this call to decompose the requirement yourself" in flat
+        )
+
+    def test_holistic_permission_makes_no_claim_about_plan(self):
+        """The holistic template also renders for flows that have no PLAN step.
+
+        `small` tasks carry no PLAN step, and a resumed legacy `direct` flow
+        states in the very same prompt that it holds no plan and no task
+        groups — so the subagent permission must not be justified by what PLAN
+        did or did not split.
+        """
+        from tianluo.engine.steps.implement import HOLISTIC_IMPLEMENT_PROMPT
+        flat = " ".join(HOLISTIC_IMPLEMENT_PROMPT.split())
+        contract = flat.split("## Autonomous Execution Contract", 1)[1]
+        contract = contract.split("## ANALYZE Context", 1)[0]
+        assert "PLAN" not in contract
+        assert "no per-task breakdown is supplied here" in contract
+
+    def test_capability_group_prompt_explicitly_permits_subagents(self):
+        from tianluo.engine.steps.implement import (
+            CAPABILITY_GROUP_DOCTRINE,
+            IMPLEMENT_CAPABILITY_GROUP_PROMPT,
+        )
+        flat = " ".join(CAPABILITY_GROUP_DOCTRINE.split())
+        assert (
+            "you are allowed — and encouraged — to spawn subagents inside "
+            "this call to decompose the task yourself" in flat
+        )
+        assert CAPABILITY_GROUP_DOCTRINE in IMPLEMENT_CAPABILITY_GROUP_PROMPT
+        # The doctrine text is derived into the multi-group prompt via anchored
+        # substitution; the two must never drift apart.
+        assert "spawn subagents inside this call" in IMPLEMENT_CAPABILITY_GROUP_PROMPT
+
+    def test_group_doctrine_names_the_task_unit(self):
+        from tianluo.engine.steps.implement import (
+            CAPABILITY_GROUP_DOCTRINE,
+            IMPLEMENT_CAPABILITY_GROUP_PROMPT,
+        )
+        assert "**coarse task group**, not a task list" in CAPABILITY_GROUP_DOCTRINE
+        assert "coarse capability group" not in IMPLEMENT_CAPABILITY_GROUP_PROMPT
+

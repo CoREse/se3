@@ -328,7 +328,7 @@ class TestCapabilityGroupPrompt:
             not in capability
         )
         assert "## Current Capability Group" in capability
-        assert "Decompose the capability" in capability
+        assert "Decompose the task described in Current Capability Group" in capability
         assert "sub-agent" in capability
         # Tests belong to the group itself — the artifact-split ban's
         # execution-side counterpart.
@@ -381,7 +381,7 @@ class TestCapabilityGroupPrompt:
         assert len(prompts) == len(CAPABILITY_GROUPS)
         for prompt in prompts:
             assert "## Current Capability Group" in prompt
-            assert "Decompose the capability" in prompt
+            assert "Decompose the task described in Current Capability Group" in prompt
             assert (
                 "Implement the tasks listed in Current Group Tasks above."
                 not in prompt

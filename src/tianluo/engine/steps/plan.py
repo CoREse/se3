@@ -129,29 +129,37 @@ Complexity guidelines:
 # WHY a separate section rather than extra rules bolted onto TASKS_SECTION:
 # the two doctrines disagree on the *unit* being produced. TASKS_SECTION asks
 # for cohesive task lists sized to a focused human session; this one asks for
-# the largest unit one autonomous implement call can safely carry, with the
-# in-group breakdown deliberately left to the runner. Mixing both sets of
-# sizing advice into one section would leave the model to guess which unit it
-# is being asked for.
-CAPABILITY_TASKS_SECTION = """## {part_label}: Task Groups (capability units)
-Split the implementation into coarse task groups. The ONLY criterion for
-splitting is: **can a single autonomous implement call safely carry this?**
-Each group becomes exactly one such call.
+# one coherent *task* per group, split further only where a single autonomous
+# implement call cannot carry it, with the in-group breakdown deliberately left
+# to the runner. Mixing both sets of sizing advice into one section would leave
+# the model to guess which unit it is being asked for.
+CAPABILITY_TASKS_SECTION = """## {part_label}: Task Groups (task units)
+Split the implementation into coarse task groups. The unit of grouping is a
+**task** — one coherent piece of work the user would regard as a single thing.
+The ONLY criterion for splitting a task any further is: **can a single
+autonomous implement call safely carry this?** Each group becomes exactly one
+such call.
 
 ### Sizing Criteria
-1. One capability, and one call can complete it → **one group**. The group's
-   content is simply "implement that capability".
-2. One capability that a single call cannot carry → split it into **two or
-   more groups**, each of which one call can carry.
-3. Two (or more) naturally distinct capabilities that one call could still
-   complete together → **still one group**. Distinctness alone is not a
-   reason to split.
-4. On the edge between "can" and "cannot" → **one capability per group**. The
-   more capabilities a group aggregates, the LOWER the threshold at which you
-   split it: aggregation makes you more conservative, never less.
+1. One task, and one call can complete it → **one group**. The group's content
+   is simply "carry out that task".
+2. One task that a single call cannot carry → split it into **two or more
+   groups**, each of which one call can carry.
+3. Two (or more) mutually unrelated, independent tasks → **one group each**, so
+   that they can be executed in parallel in isolated worktrees. Aspects of one
+   coherent task are not independent tasks and stay together in its group.
+4. Default to aggregation — **one task, one group**. Split a task only at the
+   capability edge: you positively judge that a single autonomous implement
+   call cannot complete it, or that forcing it into one call would
+   substantially degrade the quality of the execution. When you do split, state
+   that capability-edge reason in the group's description. Never pre-cut a
+   single task along implementation phases, implementation paths, or artifact
+   types — how a task is broken down internally is decided inside the implement
+   call, not here.
 
 ### Grouping Principles
-- Groups are cut along **deliverable capability units** only.
+- Groups are cut along **task units** only: one coherent task per group, and
+  one group per mutually independent task.
 - Use `depends_on` to express real inter-group dependencies. Groups with no
   dependency between them are executed **in parallel, in isolated worktrees**,
   so a missing dependency is a real correctness hazard and a spurious one
@@ -162,14 +170,17 @@ Each group becomes exactly one such call.
 - Do NOT enumerate individual tasks inside a group. The implement runner has
   its own planning / sub-agent system that decomposes a group at execution
   time, against the real code — a task list written here would only duplicate
-  that at lower fidelity and go stale.
+  that at lower fidelity and go stale. Decomposing a task internally is the
+  implement call's job, not PLAN's.
 
 {granularity_directive}"""
 
 CAPABILITY_GRANULARITY_AUTO = """### Group Count: auto
-Estimate how many autonomous implement calls this task actually needs, and
-emit exactly that many groups. Do not inflate the count for the sake of
-structure, and do not compress into one group work that one call cannot carry.
+The group count is the number of mutually independent tasks in this
+requirement — normally one group per task. Add groups beyond that count only
+where a single task reaches the capability edge and genuinely needs more than
+one autonomous implement call. Do not inflate the count for the sake of
+structure, and do not compress unrelated tasks into one group.
 """
 
 CAPABILITY_GRANULARITY_SINGLE = """### Group Count: single (forced)
@@ -181,13 +192,14 @@ circumstances.
 
 CAPABILITY_GRANULARITY_CONSERVATIVE = """### Group Count: conservative
 Lower the splitting threshold: whenever there is **any** doubt that a single
-call can carry the work, split it. Prefer one capability per group, and err
-toward MORE groups than the default sizing would produce. A group that turns
-out to be smaller than one call could have handled costs little; a group that
-overflows the call it was sized for costs a failed implementation.
+call can carry a task, split it. Prefer one group per sub-task even where the
+default sizing would have kept the task whole, and err toward MORE groups than
+the default sizing would produce. A group that turns out to be smaller than
+one call could have handled costs little; a group that overflows the call it
+was sized for costs a failed implementation.
 """
 
-ARTIFACT_SPLIT_GUARDRAIL = """## Guardrail: Group by Capability, Never by Artifact Type
+ARTIFACT_SPLIT_GUARDRAIL = """## Guardrail: Group by Task, Never by Artifact Type
 Task groups MUST NOT be cut along artifact types or code layers. The following
 groups are forbidden and must not appear in your output:
 
@@ -198,14 +210,14 @@ groups are forbidden and must not appear in your output:
   (data layer / service layer / UI layer)
 
 Testing and verification are part of what **each group itself delivers**: a
-group is complete only when its own capability is implemented AND covered by
-its own tests. Groups are cut along deliverable capability units only — never
+group is complete only when its own task is implemented AND covered by
+its own tests. Groups are cut along task units only — never
 along files, modules, or code layers.
 
-A group whose *capability* happens to concern the test system, the docs system
-or the configuration system (e.g. "fix the flaky retry in the test runner") is
-legitimate. What is forbidden is carving one capability's tests, docs or
-config out into a group of their own.
+A group whose *task* happens to concern the test system, the docs system or
+the configuration system (e.g. "fix the flaky retry in the test runner") is
+legitimate. What is forbidden is carving one task's tests, docs or config out
+into a group of their own.
 """
 
 # Capability-doctrine output schema: groups carry only the scheduling fields.
@@ -236,7 +248,7 @@ Respond in JSON format:
     "task_groups": [
         {
             "group_id": "G1",
-            "name": "Capability this group delivers",
+            "name": "Task this group delivers",
             "description": "What this group delivers, in enough detail that one autonomous implement call can execute it end to end",
             "group_order": 1,
             "depends_on": []

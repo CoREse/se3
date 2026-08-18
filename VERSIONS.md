@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.8.0 - 2026-08-19
+
+- Reshape the PLAN grouping doctrine so the unit of a task group is a **task** — one coherent piece of work the user regards as a single thing — instead of a capability or an implementation phase; the default is now one group per task
+- Invert the split bias under `plan_granularity: auto`: groups default to aggregation and a task may be split only at the capability edge (a single autonomous implement call positively cannot complete it, or forcing it into one call would substantially degrade execution quality), with that reason required in the group description
+- Give mutually unrelated, independent tasks one group each so they still execute in parallel in isolated worktrees, and explicitly forbid pre-cutting one task along implementation phases, implementation paths, or artifact types
+- Make the plan-confirmation grouping review granularity-aware: `auto` reviews the count against the number of independent tasks, `single` treats the count as a configured guarantee and never fails on it, and `conservative` accepts sub-task splits while still rejecting artifact/layer splits — so the gate can no longer demand a regrouping the configuration forbids PLAN to produce
+- Tell the implement runner explicitly that it may — and is encouraged to — spawn subagents inside a call to decompose the task itself, in both holistic and capability-group prompts, since one supported runner only delegates when instructed to
+- Align the charter, both READMEs, both configuration references, `tianluo.example.yaml`, the CLI `--plan-decomposition` / `--plan-granularity` help text and the WebUI option labels with the task-unit wording, and record the two runners' headless subagent support as the doctrine's basis
+- Retire the native `/goal` prefix on `DIRECT_IMPLEMENTATION` calls and the surrounding native-goal capability machinery, so implement prompts are no longer rejected for exceeding the CLI's 4000-character goal-condition cap
 ## 12.7.1 - 2026-08-18
 
 - Retire the native `/goal` prefix on `DIRECT_IMPLEMENTATION` calls: the Claude CLI hard-caps the goal condition at 4000 characters while real implement prompts run tens of KB, so every such call failed outright ("the goal condition exceeded the maximum allowed length"); all intents now share the plain print-mode argv

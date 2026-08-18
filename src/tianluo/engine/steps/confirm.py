@@ -232,20 +232,27 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     # reviewed PLAN step's own record (falling back to the flow context) rather
     # than the config, so a resumed flow is reviewed under the doctrine it was
     # actually planned with — the same projection IMPLEMENT executes under.
+    # WHY the granularity travels with it: it is a pin on the group *count*
+    # (`single` forces one group, `conservative` deliberately over-splits), so a
+    # reviewer that only knew the doctrine would judge every flow by the `auto`
+    # count rule and reject plans PLAN was ordered to produce — a rejection PLAN
+    # cannot act on, so the revision loop would just spin to max_iterations.
     from ..plan_decomposition import effective_mode
 
     project_root = resolve_flow_project_root(flow)
     task_description = step.inputs.get("task_description", flow.task_description)
     if step_to_review_type == 'plan':
+        plan_mode = effective_mode(
+            reviewed_step.outputs if reviewed_step else {},
+            flow.state.context,
+        )
         prompt = build_plan_confirm_prompt(
             step_output=step_output,
             task_description=task_description,
             revision_feedback=revision_feedback,
             project_root=project_root,
-            decomposition=effective_mode(
-                reviewed_step.outputs if reviewed_step else {},
-                flow.state.context,
-            ).decomposition,
+            decomposition=plan_mode.decomposition,
+            granularity=plan_mode.granularity,
         )
     else:
         prompt = build_llm_review_prompt(

@@ -350,13 +350,18 @@ confirmation:
 
 审查什么,取决于该 flow 当初是在哪套学说下做的 plan:
 
-- **`capability`** —— 审*分组*:组数是否与任务体量匹配、有没有哪个组是按被禁止
-  的制品类型或代码分层切出来的、`depends_on` 的依赖声明是否成立。它明确不再
-  要求逐条需求的任务分解。
+- **`capability`** —— 审*分组*:组数是否等于独立任务数(每个超出每任务一组的
+  拆分是否给出了成立的能力边缘理由)、有没有哪个组是按被禁止的制品类型或代码
+  分层切出来的、`depends_on` 的依赖声明是否成立。它明确不再要求逐条需求的
+  任务分解。
 - **`granular`** —— 原样保留 legacy 的 requirement→task 覆盖审查。
 
 学说是从持久化的 flow context 读出的,因此续跑的 flow 会在它当初做 plan 时的
-那套学说下接受审查。
+那套学说下接受审查。粒度也一同带入审查,因为它钉的正是*组数*:`single` 下组数是
+配置给出的保证、PLAN 无权偏离,审查因此完全不看组数;`conservative` 下那种刻意的
+多拆本就是配置的意图,不算缺陷。只有 `auto` 下组数才是 PLAN 自己的判断,也只有这时
+闸口才可以要求重新分组——否则审查会索要一份 PLAN 根本不被允许产出的修订,
+revision 循环只会一路空转到 `max_iterations`。
 
 与之相对,`adjudicate` **默认不确认**:这里没有条目时,裁决自动通过、没有任何闸口
 —— 包括那种会改写*任务描述*的裁决。如果一次无人值守的运行绝不能悄悄改写自己的任务,
@@ -396,7 +401,7 @@ fix loop 与 self_check 的行为。加载进 `WorkflowConfig`。
 | `self_check_defer_fix_threshold` | int `>= 0` | `0` | 用于嵌套 self_check 链路:当某个非最后一遍发现的问题*少于*此数量、且其中没有 critical / high 严重级时,推迟其修复,让剩余各遍先跑完;随后把各遍的发现去重合并进一次统一的 fix loop。**`0`(或 `null`)禁用推迟** —— 每一遍只要发现问题就立刻修(历史行为)。负数 → `ConfigError`。 |
 | `adjudicate_period` | int `>= 0` | `10` | adjudicate step 那张兜底安全网的周期,单位是 fix 迭代次数:每 N 次 fix 迭代,即使没有任何结构性震荡信号触发,也强制跑一次 adjudicate。**`0`(或 `null`)禁用这张周期性的网**(adjudicate 此后只在结构性触发条件下运行:候选震荡 / 相互矛盾 / 反复复发)。与它的同类不同,这个 key 在**类型错误时快速失败**:bool、浮点或非数字字符串会抛 `ConfigError` 而非回落默认值 —— 因为悄悄回落等于启用了一个用户从未要求过的周期。能干净取整的字符串(`"7"`)仍会被强制转换。负数 → `ConfigError`。 |
 | `plan_decomposition` | `capability` \| `granular` | `capability` | PLAN 遵循哪套分解学说(见下)。**其他任何取值都是快速失败** —— 否则一个笔误会静默选中另一套学说,直到分组尺寸出错才被发现。 |
-| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | 组数压力,**仅在 `capability` 下生效**,`granular` 下无意义且被忽略。`auto` = 由 LLM 依自身能力估计定组数;`single` = 强制单组;`conservative` = 降低切分阈值,更倾向拆分。**其他任何取值都是快速失败。** |
+| `plan_granularity` | `auto` \| `single` \| `conservative` | `auto` | 组数压力,**仅在 `capability` 下生效**,`granular` 下无意义且被忽略。`auto` = 组数 = 独立任务数,仅在能力边缘追加拆分;`single` = 强制单组;`conservative` = 降低切分阈值,更倾向拆分。**其他任何取值都是快速失败。** |
 
 已退役的 `workflow.self_check_convergence_enabled` 仅为旧配置兼容而继续
 接受；加载时始终归一化为 `false`，弃用警告**每进程只输出一次**(长驻的 daemon /
@@ -424,38 +429,45 @@ key 只塑造 PLAN → IMPLEMENT 区间。本来就没有 PLAN step 的序列(`s
 `review`、`survey`)不受影响。
 
 **`plan_decomposition: capability`**(默认)—— PLAN 把工作切成粗粒度的组,
-切分的*唯一*依据是『一次自治 implement 调用能否安全承载』:
+分组单位是**任务**:用户会视为一件事的一个连贯任务。对任务进一步切分的*唯一*
+理由是『一次自治 implement 调用能否安全承载』:
 
-1. 一个功能,一次调用能完成 → **一个组**(组内容即『实现该功能』);
-2. 一个功能,一次调用扛不下 → 拆成**两个或多个组**;
-3. 天然两个(或更多)不同的功能,一次调用合起来也能完成 → **仍是一个组**,
-   仅仅『不同』不构成切分理由;
-4. 处于能与不能的边缘 → **一个功能一组**。组内聚合的功能越多,触发切分的阈值
-   *越低*。
+1. 一个任务,一次调用能完成 → **一个组**(组内容即『执行该任务』);
+2. 一个任务,一次调用扛不下 → 拆成**两个或多个组**;
+3. 两个(或更多)互不相干的独立任务 → **各成一组**,从而可在隔离 worktree 中
+   并行执行;同一个连贯任务的不同侧面不是独立任务,留在该任务的组内;
+4. 默认聚合 —— **一个任务一个组**。只有到了*能力边缘*才拆:PLAN 明确判断一次
+   自治 implement 调用无法完成该任务,或强行一次完成会大幅降低执行质量,并把
+   该理由写进组的 description。PLAN 不得按实现阶段、实现路径或制品类型预切
+   单个任务——任务内部如何分解是 implement 调用内部的事,不归 PLAN。
 
 一条硬禁令禁止按制品类型或代码层次切分:不得出现独立的 test 组、docs 组、
 config 组,也不得出现以文件集合、模块边界或代码分层定义的组。测试与验证是每个
-组自身交付的组成部分。(某个组的*功能本身*就与测试或文档系统有关——例如『修复
-测试运行器里的随机重试』——当然合法;被禁止的是把某一个功能的测试单独刨出来
+组自身交付的组成部分。(某个组的*任务本身*就与测试或文档系统有关——例如『修复
+测试运行器里的随机重试』——当然合法;被禁止的是把某一个任务的测试单独刨出来
 自成一组。)
 
 `capability` 下 PLAN **不输出逐条 task 列表**。组只携带调度所需字段
 `group_id` / `name` / `description` / `group_order` / `depends_on`;组内的细化
 分解交给 implement runner 已有的 planning / sub-agent 体系,由它在执行时对着
-真实代码做。PLAN 仍产出粗颗粒的 proposal / design,供人工 gate 审阅,以及 fix
-迭代时作为 `{design_section}` 上下文注入。
+真实代码做。两个 runner 的 headless subagent 支持均已确认(`claude -p` 实测
+暴露 Agent/subagent 工具;codex subagent 默认启用、非交互 `codex exec` 下
+可用),但 codex 仅在被明确指示时才 spawn subagent,故 implement prompt 会
+显式写出该许可。PLAN 仍产出粗颗粒的 proposal / design,供人工 gate 审阅,以及
+fix 迭代时作为 `{design_section}` 上下文注入。
 
 **`plan_granularity`** 仅在 `capability` 下生效:
 
-- **`auto`**(默认)—— 由 PLAN 估计这个任务实际需要几次自治 implement 调用,
-  就产出几个组。
+- **`auto`**(默认)—— 组数 = 独立任务数,通常一个任务一个组;只有单个任务达到
+  能力边缘、确实需要不止一次自治 implement 调用时,才在其上追加组。
 - **`single`** —— 无论任务多大,只产出一个组。这是配置强制的、已退役 `direct`
   路径的等价形态,且是**保证**而非请求:PLAN 被要求只产出一个组,但即使它仍
   产出了多个,IMPLEMENT 也照样把整个任务交给那一次自治调用,多出来的组只作为
   提纲一并传入。因此 `single` 下的 flow 绝不会散开成 worktree 并行 DAG。
-- **`conservative`** —— 降低切分阈值:只要对『一次调用能否扛下』有**任何**怀疑
-  就切分。它更倾向多产出组,理由是一个偏小的组代价很小,而一个撑爆了它所对应
-  调用的组,代价是一次失败的实现。
+- **`conservative`** —— 降低切分阈值:只要对『一次调用能否扛下这个任务』有
+  **任何**怀疑就切分。它更倾向多产出组(即使默认档会把任务保持为一个组,也
+  优先每个子任务一组),理由是一个偏小的组代价很小,而一个撑爆了它所对应调用的
+  组,代价是一次失败的实现。
 
 **`plan_decomposition: granular`** 是保留下来的 legacy 学说:细粒度的逐条 task
 列表(带 `complexity` / `estimated_loc` / `files` 的 `tasks` 数组)、由 LOC 驱动
@@ -902,8 +914,10 @@ driver 属于配置错误,在任何镜像构建之前即报出 —— 否则这�
 顺序执行。capability 模式改为按组数与拓扑分发:单组 → 整体实现调用,两组及以上
 → DAG 路径(`plan_granularity: single` 钉死整体实现调用、不看组数),并仍受既有的
 `use_worktree`、线性依赖链与 no-commits 三条短路约束。
-一个 capability 组按定义就已经是『一次自治调用扛得住的上限体量』,远超 300 LOC
-的合并阈值,再用 LOC 判一次不会带来任何信息量。`granular` 下阈值行为一如既往。
+阈值之所以被跳过,是因为 capability 组根本没有可判的 LOC 估算,而**不是**因为每个组
+都很大:capability 组是一个连贯任务,默认聚合、仅在能力边缘才拆,因此它只是**受限于**
+一次自治调用扛得住的量,并不等于就坐在那个上限上(两个互不相干的 20 行任务,按学说
+本就应产出两个很小的组)。`granular` 下阈值行为一如既往。
 
 `group_loc_threshold` 是 clamp-and-warn 规则的显式例外之一:`ImplementConfig.from_dict`
 对该值直接调用裸的 `int(...)`,既没有 `try`/`except`,implement step 里的调用方也没有

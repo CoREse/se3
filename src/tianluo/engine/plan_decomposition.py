@@ -9,7 +9,7 @@ its decision and the sequence it implied had to be persisted atomically, be
 unwindable on a failed rebuild, and be re-derivable from an old flow's recorded
 steps. None of that exists here. feature / bugfix / discovery all run
 ANALYZE -> PLAN -> IMPLEMENT unconditionally; what varies is only *what PLAN
-emits* (coarse capability groups vs. the legacy fine-grained task listing) and
+emits* (coarse task groups vs. the legacy fine-grained task listing) and
 *how many groups* it emits. Where the granularity left the group count to PLAN,
 the execution shape downstream is read off that count, not off a routing flag:
 one group is executed as a single whole-task call, two or more enter the
@@ -44,8 +44,11 @@ LEGACY_EFFECTIVE_STRATEGY_KEY = "effective_implementation_strategy"
 class PlanDecomposition(str, Enum):
     """Which decomposition doctrine PLAN follows."""
 
-    #: Coarse groups sized by "what one autonomous implement call can safely
-    #: carry"; a single group is the equivalent of the retired direct path.
+    #: Coarse groups whose unit is the task: one coherent task per group by
+    #: default, split further only at the capability edge (one autonomous
+    #: implement call cannot complete the task, or forcing it into one call
+    #: would substantially degrade execution quality); a single group is the
+    #: equivalent of the retired direct path.
     CAPABILITY = "capability"
     #: Retained legacy doctrine: the fine-grained per-task listing.
     GRANULAR = "granular"

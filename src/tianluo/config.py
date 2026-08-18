@@ -2595,15 +2595,18 @@ DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
 # PLAN's decomposition doctrine. ``capability`` is the single path: PLAN always
-# runs and emits coarse task groups sized by "what one autonomous implement call
-# can safely carry" (one group == today's direct shape). ``granular`` is the
-# retained legacy doctrine — the fine-grained per-task listing — kept only so
-# projects that depended on that artifact shape are not broken by the switch.
+# runs and emits coarse task groups whose unit is the task — one coherent task
+# per group by default, split further only at the capability edge ("what one
+# autonomous implement call can safely carry"; one group == today's direct
+# shape). ``granular`` is the retained legacy doctrine — the fine-grained
+# per-task listing — kept only so projects that depended on that artifact shape
+# are not broken by the switch.
 DEFAULT_PLAN_DECOMPOSITION = "capability"
 VALID_PLAN_DECOMPOSITIONS = ("capability", "granular")
-# Group-count pressure under the capability doctrine only: ``auto`` lets the LLM
-# size the groups, ``single`` pins one group, ``conservative`` lowers the split
-# threshold. Meaningless (and ignored) under ``granular``.
+# Group-count pressure under the capability doctrine only: ``auto`` sizes the
+# group count as the number of independent tasks, ``single`` pins one group,
+# ``conservative`` lowers the split threshold. Meaningless (and ignored) under
+# ``granular``.
 DEFAULT_PLAN_GRANULARITY = "auto"
 VALID_PLAN_GRANULARITIES = ("auto", "single", "conservative")
 

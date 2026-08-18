@@ -307,20 +307,23 @@ PLAN 产出什么，而在粒度把组数留给 PLAN 决定时，**执行形态�
 
 `workflow.plan_decomposition` 选择 PLAN 遵循哪套学说：
 
-- **`capability`**（默认）—— 粗粒度的组，切分的唯一依据是*一次自治 implement
-  调用能否安全承载*。一个功能一次调用能完成 → 一个组；扛不下 → 拆成两个或多个；
-  天然两个功能但一次调用合起来也能完成 → 仍是一个组；处于边缘 → 一个功能一组
-  （组内聚合得越多，触发切分的阈值越低）。禁止按制品类型或代码分层切分：不得有
-  独立的 test 组、docs 组、config 组——测试是每个组自身交付的组成部分。该模式下
-  PLAN 不输出逐条 task 列表，组只携带 `group_id` / `name` / `description` /
-  `group_order` / `depends_on`，组内细化分解交给 implement runner 已有的
-  planning / sub-agent 体系在执行时对着真实代码去做。
+- **`capability`**（默认）—— 粗粒度的组，分组单位是**任务**：默认一个连贯任务
+  一个组，互不相干的独立任务各成一组、从而可在隔离 worktree 中并行。只有到了
+  *能力边缘*才进一步拆分——PLAN 明确判断一次自治 implement 调用无法完成该任务，
+  或强行一次完成会大幅降低执行质量。PLAN 不得按实现阶段、实现路径或制品类型预切
+  一个任务（不得有独立的 test 组、docs 组、config 组——测试是每个组自身交付的
+  组成部分）。该模式下 PLAN 不输出逐条 task 列表，组只携带 `group_id` / `name` /
+  `description` / `group_order` / `depends_on`，组内细化分解交给 implement
+  runner 自身的 planning / sub-agent 体系在执行时对着真实代码去做。两个 runner
+  的 headless subagent 支持均已确认（`claude -p` 实测暴露 Agent 工具；codex
+  subagent 默认启用），但 codex 仅在被明确指示时才 spawn subagent，故
+  implement prompt 会显式写出该许可。
 - **`granular`** —— 保留下来的 legacy 学说：细粒度逐条 task 列表、LOC 驱动的
   合并与 DAG 阈值、关口上的 requirement→task 覆盖审查。
 
-`workflow.plan_granularity` 仅在 `capability` 下生效：`auto`（默认）由 PLAN 自行
-估算组数，`single` 无论任务多大都只出一个组，`conservative` 降低切分阈值、更倾向
-拆分。
+`workflow.plan_granularity` 仅在 `capability` 下生效：`auto`（默认）组数 = 独立
+任务数、仅在能力边缘追加拆分，`single` 无论任务多大都只出一个组，`conservative`
+降低切分阈值、更倾向拆分。
 
 优先级：显式 CLI（`--plan-decomposition` / `--plan-granularity`）或 Web 请求 →
 项目配置 → `capability` + `auto`。决策在 flow 创建时只做一次并连同理由持久化 ——
@@ -334,8 +337,12 @@ TEST —— flow 经正常 retry/resume 机制重入 IMPLEMENT，后继 caller �
 继续。
 
 想为分组加一道闸口，就在 `confirmation.steps` 里声明 `plan`（`reviewer: human`
-即人工分组 gate）。`capability` 下这道 review 审的是：组数是否与任务体量匹配、
-有没有哪个组是按被禁止的制品类型切出来的、`depends_on` 是否成立。
+即人工分组 gate）。`capability` 下这道 review 审的是：组数是否等于独立任务数
+（每个超出每任务一组的拆分是否给出了成立的能力边缘理由）、有没有哪个组是按
+被禁止的制品类型切出来的、`depends_on` 是否成立。其中组数这一维随该 flow 的
+`plan_granularity` 而变：`single` 下组数是配置给出的保证，审查不碰；
+`conservative` 下的多拆本就是配置要的，不算缺陷——只有组数确实由 PLAN 自己
+判断时，闸口才会要求重新分组。
 
 SELF_CHECK 以**有效任务描述**为验收权威（原始任务或 discovery 精化、用户
 interjection、裁决后的描述），外加 charter 与 `WHY:`/`INVARIANT:` 约束 —— PLAN、

@@ -406,6 +406,12 @@ HOLISTIC_IMPLEMENT_PROMPT = IMPLEMENT_PROMPT.replace(
     "You are an expert software engineer. Implement the following tasks by writing code.",
     "You are an expert software engineer. Complete this entire requirement by writing code.",
 ).replace(
+    # WHY the permission is stated without naming PLAN: this template is
+    # rendered for a small task and a resumed legacy `direct` flow too, neither
+    # of which has a PLAN step at all — justifying the permission with "PLAN
+    # does not pre-split the work" would describe a plan decision the reader
+    # can see does not exist. The PLAN-side justification lives in
+    # CAPABILITY_GROUP_DOCTRINE, where a PLAN step is always present.
     "## Task Groups\n{task_groups}",
     """## Holistic Implementation Mode
 {execution_mode}
@@ -415,7 +421,10 @@ Independently analyze the complete effective requirement and the repository,
 then implement the requirement in full. Do not stop after analysis or a partial
 subset. Inspect any additional code needed to understand cross-module effects,
 run targeted validation appropriate to the changes, and only then return the
-existing structured implementation summary.
+existing structured implementation summary. You are allowed — and encouraged —
+to spawn subagents inside this call to decompose the requirement yourself: no
+per-task breakdown is supplied here, so the internal breakdown is your own
+planning / sub-agent job.
 
 ## ANALYZE Context
 {analysis_context}
@@ -448,19 +457,22 @@ FIX_PROMPT = inject_boundary(FIX_PROMPT, "## Task Description\n")
 
 CAPABILITY_GROUP_DOCTRINE = """
 ### What this group is
-This is a **coarse capability group**, not a task list. Under the capability
-decomposition doctrine PLAN sizes every group by what one autonomous
+This is a **coarse task group**, not a task list. Under the capability
+decomposition doctrine PLAN sizes every group by one coherent task — or, where
+a task reaches the capability edge, one split of it — that one autonomous
 implementation call can safely carry, and deliberately emits no per-task
 breakdown for it — the fields above (group_id, name, description, group_order,
 depends_on) are the whole of what PLAN produced. There is no enumerated task
 list here and none is coming.
 
-Producing that breakdown is your job: decompose this capability yourself, using
-your own planning and sub-agent machinery, then implement it end to end.
+Producing that breakdown is your job: you are allowed — and encouraged — to
+spawn subagents inside this call to decompose the task yourself, then implement
+it end to end. How the task breaks down internally is your own planning /
+sub-agent job; PLAN deliberately did not pre-split it for you.
 
-The group is delivered only when its capability actually works **and** is
-covered by the tests it needs. Testing and verification are part of this
-group's own delivery — they are never split out into a group of their own.
+The group is delivered only when its task actually works **and** is covered by
+the tests it needs. Testing and verification are part of this group's own
+delivery — they are never split out into a group of their own.
 """
 
 # WHY the capability doctrine gets its own group prompt: the template above
@@ -491,20 +503,20 @@ IMPLEMENT_CAPABILITY_GROUP_PROMPT = _substitute_anchor(
                 "You are an expert software engineer. Implement the tasks for "
                 "this specific group by writing code.",
                 "You are an expert software engineer. Implement one coarse "
-                "capability group of this task by writing code.",
+                "task group of this requirement by writing code.",
             ),
             "## Current Group Tasks\n{current_group}",
             "## Current Capability Group\n{current_group}\n"
             + CAPABILITY_GROUP_DOCTRINE,
         ),
         "2. Implement the tasks listed in Current Group Tasks above.",
-        "2. Decompose the capability described in Current Capability Group "
-        "above into whatever steps it needs — that breakdown is your own "
-        "planning / sub-agent job — then implement it end to end.",
+        "2. Decompose the task described in Current Capability Group above "
+        "into whatever steps it needs — that breakdown is your own planning / "
+        "sub-agent job — then implement it end to end.",
     ),
     "4. Write tests if the task requires them.",
-    "4. Cover this capability with its own tests; the group is not delivered "
-    "until they pass.",
+    "4. Cover this task with its own tests; the group is not delivered until "
+    "they pass.",
 )
 
 
@@ -883,9 +895,11 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # ``_should_use_dag``, which would silently collapse every multi-group
     # capability plan into a sequential run and throw away the parallelism that
     # independent groups exist for. The threshold keeps its exact meaning for
-    # granular/legacy plans, which do carry per-task LOC; a capability group is
-    # by definition already sized at "as much as one call can carry", so
-    # re-judging it by lines of code adds no information.
+    # granular/legacy plans, which do carry per-task LOC. Note the bypass rests
+    # on the missing estimate alone, not on group size: a capability group is
+    # one coherent task, aggregated by default and split only at the capability
+    # edge, so it is bounded by what one call can carry but may well be tiny
+    # (two unrelated 20-LOC tasks are two groups by doctrine).
     capability_mode = is_capability_decomposition(step.inputs, flow.state.context)
 
     if not capability_mode and total_loc > 0 and total_loc <= impl_config.group_loc_threshold:

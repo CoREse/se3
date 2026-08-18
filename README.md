@@ -321,24 +321,28 @@ autonomous call.
 
 `workflow.plan_decomposition` picks the doctrine PLAN follows:
 
-- **`capability`** (default) — coarse groups whose only sizing criterion is
-  *can a single autonomous implement call safely carry this?* One capability
-  one call can finish is one group; one it cannot becomes two or more; two
-  distinct capabilities one call could still finish together stay one group;
-  and on the edge, one capability per group — the more a group aggregates, the
-  lower the threshold at which PLAN splits it. Groups may never be cut along
-  artifact types or code layers (no separate test, docs or config group):
-  testing is part of what each group itself delivers. PLAN emits no per-task
-  listing — a group carries only `group_id` / `name` / `description` /
-  `group_order` / `depends_on`, and the runner's own planning system
-  decomposes it against the real code at execution time.
+- **`capability`** (default) — coarse groups whose unit is the **task**: one
+  coherent task per group by default, and mutually unrelated tasks each get
+  their own group so they can run in parallel. A task is split further only at
+  the *capability edge* — PLAN positively judges that a single autonomous
+  implement call cannot complete it, or that forcing it into one call would
+  substantially degrade execution quality. PLAN never pre-cuts a task along
+  implementation phases, implementation paths, or artifact types (no separate
+  test, docs or config group): testing is part of what each group itself
+  delivers. PLAN emits no per-task listing — a group carries only `group_id` /
+  `name` / `description` / `group_order` / `depends_on`, and the runner
+  decomposes it against the real code at execution time with its own planning
+  and subagent machinery. Both runners support headless subagents (`claude -p`
+  exposes the Agent tool; codex ships subagents enabled by default) — though
+  codex only spawns them when explicitly instructed, so the implement prompts
+  state that permission explicitly.
 - **`granular`** — the retained legacy doctrine: fine-grained per-task listing,
   LOC-driven merge and DAG thresholds, requirement→task review at the gate.
 
 `workflow.plan_granularity` applies under `capability` only: `auto` (default)
-lets PLAN size the group count itself, `single` pins exactly one group whatever
-the task's size, and `conservative` lowers the splitting threshold and errs
-toward more groups.
+sizes the group count as the number of independent tasks, `single` pins
+exactly one group whatever the task's size, and `conservative` lowers the
+splitting threshold and errs toward more groups.
 
 Priority: explicit CLI (`--plan-decomposition` / `--plan-granularity`) or web
 request → project config → `capability` + `auto`. The decision is made once at
@@ -355,9 +359,14 @@ retry/resume machinery and a later caller continues in the existing workspace.
 
 An optional gate on the grouping is available by declaring `plan` under
 `confirmation.steps`; `reviewer: human` makes it a manual grouping gate. Under
-`capability` that review asks whether the group count matches the volume of
-work, whether any group was cut along a forbidden artifact type, and whether
-the `depends_on` declarations hold.
+`capability` that review asks whether the group count equals the number of
+independent tasks (and whether every further split names a capability-edge
+reason that holds), whether any group was cut along a forbidden artifact type,
+and whether the `depends_on` declarations hold. The count half of that follows
+the flow's `plan_granularity`: `single` pins the count as a configured
+guarantee, so the review leaves it alone, and `conservative` ordered the extra
+splits, so they are not defects — the gate only asks for a regrouping where the
+count was PLAN's own call.
 
 SELF_CHECK is judged against the **effective task description** (original task or
 discovery refinement, user interjections, adjudicated description) plus the

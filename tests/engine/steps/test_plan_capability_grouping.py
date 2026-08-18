@@ -4,6 +4,19 @@ Covers the four sizing criteria, the three granularity tiers, the
 artifact-split guardrail, the coarse output schema, and — in the opposite
 direction — that the ``granular`` legacy doctrine still produces exactly the
 prompt it produced before the doctrine split existed.
+
+Thought-experiment baseline (a semantic assertion, not an LLM-behaviour
+verification): under the task-unit doctrine, the merge input of flow
+``20260818-092937_4fb52e72`` — test parallelisation plus an unrelated
+discovery change — must size as **2 groups**, not the 4 phase-cut groups the
+old capability-edge bias produced. "Test parallelisation" is one coherent
+task: PLAN may not pre-cut it along implementation phases into a chained
+G1-G3 sequence (the old output), because how a task decomposes internally is
+the implement call's job. The unrelated discovery change is an independent
+task and gets its own group, so the two run in parallel in isolated
+worktrees. The two prompt semantics that force that 2-group answer are
+asserted in ``TestCapabilityGroupingDoctrine.test_thought_experiment_baseline_semantics``;
+nothing here runs an LLM.
 """
 
 from __future__ import annotations
@@ -65,30 +78,77 @@ class TestCapabilityGroupingDoctrine:
     """The only splitting criterion is "can one autonomous call carry it"."""
 
     def test_prompt_states_the_single_splitting_criterion(self):
-        prompt = _capability_prompt()
-        assert "can a single autonomous implement call safely carry this?" in prompt
-        assert "The ONLY criterion for" in prompt
+        flat = " ".join(_capability_prompt().split())
+        assert "can a single autonomous implement call safely carry this?" in flat
+        assert "The ONLY criterion for" in flat
 
     def test_prompt_carries_all_four_sizing_criteria(self):
         # Line wrapping is incidental; assert on the unwrapped text.
         flat = " ".join(_capability_prompt().split())
-        # 1. one capability, one call can do it -> one group
-        assert "One capability, and one call can complete it → **one group**" in flat
-        # 2. one capability one call cannot carry -> split
-        assert "a single call cannot carry" in flat
+        # 1. one task, one call can do it -> one group
+        assert "One task, and one call can complete it → **one group**" in flat
+        # 2. one task one call cannot carry -> split
+        assert "One task that a single call cannot carry" in flat
         assert "**two or more groups**" in flat
-        # 3. two distinct capabilities one call can still do -> still one group
-        assert "naturally distinct capabilities" in flat
-        assert "**still one group**" in flat
-        assert "Distinctness alone is not a reason to split" in flat
-        # 4. on the edge -> one capability per group, aggregation lowers the bar
-        assert 'On the edge between "can" and "cannot"' in flat
-        assert "**one capability per group**" in flat
+        # 3. mutually unrelated independent tasks -> one group each
+        assert "mutually unrelated, independent tasks" in flat
+        assert "**one group each**" in flat
+        assert "executed in parallel in isolated worktrees" in flat
         assert (
-            "more capabilities a group aggregates, the LOWER the threshold"
-            in flat
+            "Aspects of one coherent task are not independent tasks and stay "
+            "together in its group" in flat
         )
-        assert "aggregation makes you more conservative, never less" in flat
+        # 4. default to aggregation; split only at the capability edge
+        assert "Default to aggregation — **one task, one group**" in flat
+        assert "capability edge" in flat
+        assert (
+            "cannot complete it, or that forcing it into one call would "
+            "substantially degrade the quality of the execution" in flat
+        )
+        assert (
+            "Never pre-cut a single task along implementation phases, "
+            "implementation paths, or artifact types" in flat
+        )
+
+    @pytest.mark.parametrize("granularity", list(PlanGranularity))
+    def test_old_split_bias_wording_is_gone(self, granularity):
+        """The reversed bias must not survive in ANY rendering of the prompt.
+
+        Every granularity tier is rendered: the retired wording lived in the
+        tier directives too, so an auto-only assertion would let a
+        ``conservative`` flow keep re-teaching the per-capability unit.
+        """
+        flat = " ".join(_capability_prompt(granularity=granularity).split())
+        for stale in (
+            "one capability per group",
+            "the LOWER the threshold",
+            "aggregation makes you more conservative",
+            "naturally distinct capabilities",
+            "Distinctness alone is not a reason to split",
+            'On the edge between "can" and "cannot"',
+            # Old unit-of-grouping statements: the unit is a task everywhere,
+            # including the section header, the guardrail, and the schema.
+            "capability units",
+            "deliverable capability units",
+            "Group by Capability",
+            "its own capability is implemented",
+            "one capability's tests",
+        ):
+            assert stale not in flat
+
+    def test_thought_experiment_baseline_semantics(self):
+        """The two semantics behind the 2-groups-not-4 baseline (see module docstring)."""
+        flat = " ".join(_capability_prompt().split())
+        # One coherent task may not be pre-cut by PLAN along implementation
+        # phases — its internal decomposition is the implement call's job.
+        assert (
+            "Never pre-cut a single task along implementation phases, "
+            "implementation paths, or artifact types" in flat
+        )
+        # Mutually unrelated tasks each get their own group, so they can run
+        # in parallel in isolated worktrees.
+        assert "mutually unrelated, independent tasks → **one group each**" in flat
+        assert "executed in parallel in isolated worktrees" in flat
 
     def test_prompt_forbids_a_per_task_listing(self):
         prompt = _capability_prompt()
@@ -104,11 +164,11 @@ class TestCapabilityGroupingDoctrine:
     def test_bugfix_depth_keeps_its_lightweight_design(self):
         prompt = _capability_prompt(depth="medium")
         assert "## Part 2: Design (lightweight)" in prompt
-        assert "## Part 3: Task Groups (capability units)" in prompt
+        assert "## Part 3: Task Groups (task units)" in prompt
 
     def test_shallow_depth_labels_the_section_instructions(self):
         prompt = _capability_prompt(depth="shallow")
-        assert "## Instructions: Task Groups (capability units)" in prompt
+        assert "## Instructions: Task Groups (task units)" in prompt
         assert "## Part 1: Proposal" not in prompt
 
     def test_capability_prompt_never_carries_the_granular_tasks_section(self):
@@ -157,15 +217,30 @@ class TestGranularityTiers:
         assert "Emit **exactly one** task group" in prompt
         assert "do not split under any" in prompt
 
+    def test_auto_sizes_by_independent_task_count(self):
+        auto = _capability_prompt(granularity=PlanGranularity.AUTO)
+        flat = " ".join(auto.split())
+        assert (
+            "The group count is the number of mutually independent tasks in "
+            "this requirement" in flat
+        )
+        assert "normally one group per task" in flat
+        assert "capability edge" in flat
+
     def test_conservative_is_more_split_prone_than_auto(self):
         conservative = _capability_prompt(
             granularity=PlanGranularity.CONSERVATIVE,
         )
         auto = _capability_prompt(granularity=PlanGranularity.AUTO)
         assert "Lower the splitting threshold" in conservative
-        assert "err\ntoward MORE groups" in conservative
-        # auto explicitly refuses to bias either way
+        assert "err toward MORE groups" in " ".join(conservative.split())
+        # The tier lowers the threshold but keeps the task-unit doctrine: what
+        # it prefers is one group per sub-task, never one per capability.
+        assert "Prefer one group per sub-task" in " ".join(conservative.split())
+        # auto defaults to aggregation: one group per task, split only at the
+        # capability edge
         assert "Do not inflate the count" in auto
+        assert "normally one group per task" in auto
         assert "Lower the splitting threshold" not in auto
 
     def test_unknown_granularity_falls_back_to_auto(self):
@@ -223,9 +298,26 @@ class TestArtifactSplitGuardrail:
         assert "a file set, a module boundary, or a code layer" in text
         assert "never\nalong files, modules, or code layers" in text
 
-    def test_guardrail_still_allows_a_test_system_capability(self):
+    def test_guardrail_still_allows_a_test_system_task(self):
         """Otherwise "fix the flaky test runner" becomes unplannable."""
         assert "fix the flaky retry in the test runner" in ARTIFACT_SPLIT_GUARDRAIL
+
+    def test_guardrail_carries_the_task_grouping_unit(self):
+        """Every unit-of-grouping statement in the guardrail names the task.
+
+        The guardrail is appended directly after CAPABILITY_TASKS_SECTION, so
+        a leftover capability-unit statement here would re-teach the old
+        doctrine to the model in the very prompt that reversed it.
+        """
+        flat = " ".join(ARTIFACT_SPLIT_GUARDRAIL.split())
+        assert "Group by Task, Never by Artifact Type" in flat
+        assert "its own task is implemented AND covered by its own tests" in flat
+        assert "Groups are cut along task units only" in flat
+        assert "A group whose *task* happens to concern the test system" in flat
+        assert "carving one task's tests, docs or config out" in flat
+        for stale in ("deliverable capability units", "one capability's tests",
+                      "its own capability"):
+            assert stale not in flat
 
     def test_guardrail_is_only_attached_under_capability(self):
         assert ARTIFACT_SPLIT_GUARDRAIL in _capability_prompt()
@@ -255,6 +347,11 @@ class TestCapabilitySchema:
             '"group_order"', '"depends_on"',
         ):
             assert field in CAPABILITY_JSON_SCHEMA
+
+    def test_schema_example_names_a_task_not_a_capability(self):
+        """The example group must not teach the old capability-unit wording."""
+        assert '"name": "Task this group delivers"' in CAPABILITY_JSON_SCHEMA
+        assert "Capability this group delivers" not in CAPABILITY_JSON_SCHEMA
 
     def test_schema_keeps_proposal_and_design(self):
         assert '"proposal"' in CAPABILITY_JSON_SCHEMA

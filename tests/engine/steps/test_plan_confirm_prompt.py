@@ -11,12 +11,17 @@ follows the flow's persisted decomposition doctrine. These tests pin:
   wrote into a persisted sequence keeps resolving to the unattended LLM review
   it had before the degrade, instead of falling through to a human gate.
 - ``build_plan_confirm_prompt`` content: the capability doctrine yields a
-  grouping review (group count vs. volume, forbidden artifact-type/layer splits,
-  ``depends_on`` soundness) and explicitly does NOT ask for a per-requirement
-  task decomposition; the legacy granular doctrine keeps the requirement
-  coverage review verbatim.
+  grouping review (group count vs. the number of mutually independent tasks,
+  forbidden artifact-type/layer splits, ``depends_on`` soundness) and explicitly
+  does NOT ask for a per-requirement task decomposition; the legacy granular
+  doctrine keeps the requirement coverage review verbatim.
+- The count dimension follows the flow's ``plan_granularity`` pin: ``single``
+  puts the count out of scope (it is a configured guarantee PLAN may not
+  deviate from) and ``conservative`` allows the deliberate over-splitting it
+  orders, so the gate never demands a regrouping PLAN cannot produce.
 - ``_llm_review`` dispatch: a plan confirm routes to ``build_plan_confirm_prompt``
-  while a non-plan confirm keeps ``build_llm_review_prompt``.
+  with both the persisted doctrine and granularity, while a non-plan confirm
+  keeps ``build_llm_review_prompt``.
 - ``approved`` true/false map to COMPLETED / REVISION_NEEDED, and the
   cross-revision max_iterations cap still auto-approves.
 """
@@ -39,7 +44,9 @@ from tianluo.engine.context_builder import build_plan_confirm_prompt
 from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
 from tianluo.engine.plan_decomposition import (
     PLAN_DECOMPOSITION_KEY,
+    PLAN_GRANULARITY_KEY,
     PlanDecomposition,
+    PlanGranularity,
 )
 
 
@@ -349,14 +356,14 @@ class TestCapabilityGroupingReviewPrompt:
             decomposition="capability",
         )
 
-    def test_reviews_group_count_against_volume(self):
+    def test_reviews_group_count_against_independent_tasks(self):
         low = self._prompt().lower()
         assert "group count" in low
-        assert "volume of work" in low
+        assert "independent tasks" in low
         assert "safely carry" in low
 
     def test_reviews_forbidden_artifact_type_splits(self):
-        low = self._prompt().lower()
+        low = " ".join(self._prompt().lower().split())
         assert "artifact type" in low
         assert "test group" in low and "docs group" in low and "config group" in low
         assert "layer" in low
@@ -378,11 +385,23 @@ class TestCapabilityGroupingReviewPrompt:
 
     def test_states_the_grouping_doctrine_criteria(self):
         low = self._prompt().lower()
-        # The three doctrine cases plus the conservative borderline rule.
-        assert "one capability that one call can finish" in low
+        # The task-unit doctrine: one task one group by default, split only
+        # at the capability edge.
+        assert "one task that one call can finish" in low
         assert "too large for one call" in low
-        assert "still one group" in low
-        assert "borderline" in low
+        assert "one group each" in low
+        assert "default to aggregation" in low
+        assert "capability edge" in low
+
+    def test_old_split_bias_wording_is_gone(self):
+        low = self._prompt().lower()
+        for stale in (
+            "borderline",
+            "volume of work",
+            "one capability that one call can finish",
+            "be conservative",
+        ):
+            assert stale not in low
 
     def test_embeds_task_description_and_groups(self):
         prompt = self._prompt()
@@ -416,6 +435,92 @@ class TestCapabilityGroupingReviewPrompt:
             )
             == self._prompt()
         )
+
+
+class TestGroupingReviewFollowsGranularityPin:
+    """The count dimension must not demand what the granularity forbids.
+
+    ``plan_granularity`` pins the group *count*: ``single`` orders PLAN to emit
+    exactly one group for the whole requirement (a configured guarantee, not a
+    PLAN judgement), and ``conservative`` deliberately splits below the
+    capability edge. A reviewer phrased only for ``auto`` would reject those
+    plans for a count PLAN is not allowed to change, and the revision loop would
+    spin until ``max_iterations`` auto-approves.
+    """
+
+    def _prompt(self, granularity, **kwargs):
+        return build_plan_confirm_prompt(
+            step_output=_plan_output(CAPABILITY_GROUPS),
+            task_description=TASK_DESCRIPTION,
+            decomposition=PlanDecomposition.CAPABILITY,
+            granularity=granularity,
+            **kwargs,
+        )
+
+    def test_auto_is_the_default_and_keeps_the_count_rule(self):
+        assert self._prompt(PlanGranularity.AUTO) == self._prompt(None)
+        low = " ".join(self._prompt(None).lower().split())
+        assert "does the number of groups equal the number of mutually unrelated" in low
+
+    def test_single_declares_the_count_out_of_scope(self):
+        low = " ".join(self._prompt(PlanGranularity.SINGLE).lower().split())
+        assert "plan_granularity: single" in low
+        assert "do not fail the review on the group count" in low
+        # The exact defect the auto wording would have manufactured here.
+        assert (
+            "a single group covering several mutually unrelated tasks is the "
+            "correct output here" in low
+        )
+
+    def test_single_drops_the_auto_count_demand(self):
+        low = " ".join(self._prompt(PlanGranularity.SINGLE).lower().split())
+        assert "does the number of groups equal the number of mutually unrelated" not in low
+        assert "unrelated tasks fused into one group (which needlessly" not in low
+
+    def test_conservative_keeps_fusion_defect_but_allows_over_splitting(self):
+        low = " ".join(self._prompt(PlanGranularity.CONSERVATIVE).lower().split())
+        assert "plan_granularity: conservative" in low
+        assert "fused into one group is a defect" in low
+        assert "must not be flagged as over-splitting" in low
+        # A lowered threshold is not a licence for phase/artifact pre-cuts.
+        assert "implementation phases" in low
+
+    def test_string_granularity_accepted(self):
+        assert self._prompt("single") == self._prompt(PlanGranularity.SINGLE)
+
+    def test_unknown_granularity_falls_back_to_auto(self):
+        assert self._prompt("not-a-granularity") == self._prompt(PlanGranularity.AUTO)
+
+    def test_all_three_variants_keep_the_other_two_dimensions(self):
+        for granularity in (
+            PlanGranularity.AUTO,
+            PlanGranularity.SINGLE,
+            PlanGranularity.CONSERVATIVE,
+        ):
+            prompt = self._prompt(granularity)
+            low = prompt.lower()
+            assert "forbidden splits by artifact type or layer" in low
+            assert "dependency declarations" in low
+            assert "depends_on" in prompt
+
+    def test_granularity_ignored_by_the_legacy_granular_branch(self):
+        # granular is behaviour-preserving: its coverage review has no count
+        # dimension to pin, so the new argument must not alter it.
+        base = build_plan_confirm_prompt(
+            step_output=_plan_output(),
+            task_description=TASK_DESCRIPTION,
+            decomposition=PlanDecomposition.GRANULAR,
+        )
+        for granularity in ("single", "conservative", PlanGranularity.AUTO):
+            assert (
+                build_plan_confirm_prompt(
+                    step_output=_plan_output(),
+                    task_description=TASK_DESCRIPTION,
+                    decomposition=PlanDecomposition.GRANULAR,
+                    granularity=granularity,
+                )
+                == base
+            )
 
 
 class TestGranularCoverageReviewPrompt:
@@ -642,6 +747,48 @@ class TestLlmReviewDispatch:
         assert (
             mock_plan.call_args.kwargs["decomposition"] is PlanDecomposition.CAPABILITY
         )
+
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
+    def test_persisted_granularity_is_forwarded_to_prompt_builder(
+        self, MockLLMCaller, mock_plan
+    ):
+        """The count pin travels with the doctrine.
+
+        Without it a flow pinned to ``single`` would be reviewed under the
+        ``auto`` count rule and rejected for a group count PLAN was ordered to
+        emit — a revision it cannot act on.
+        """
+        from tianluo.engine.steps.confirm import _llm_review
+
+        mock_plan.return_value = "PLAN_PROMPT"
+        caller = MagicMock()
+        caller.call.return_value = '{"approved": true, "feedback": "ok"}'
+        MockLLMCaller.return_value = caller
+
+        self.flow.state.context[PLAN_DECOMPOSITION_KEY] = "capability"
+        self.flow.state.context[PLAN_GRANULARITY_KEY] = "single"
+        confirm = self._make_confirm("plan")
+        _llm_review(confirm, self.flow)
+
+        assert mock_plan.call_args.kwargs["granularity"] is PlanGranularity.SINGLE
+
+    @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
+    @patch("tianluo.engine.steps.confirm.LLMCaller")
+    def test_default_granularity_forwarded_when_context_empty(
+        self, MockLLMCaller, mock_plan
+    ):
+        from tianluo.engine.steps.confirm import _llm_review
+
+        mock_plan.return_value = "PLAN_PROMPT"
+        caller = MagicMock()
+        caller.call.return_value = '{"approved": true, "feedback": "ok"}'
+        MockLLMCaller.return_value = caller
+
+        confirm = self._make_confirm("plan")
+        _llm_review(confirm, self.flow)
+
+        assert mock_plan.call_args.kwargs["granularity"] is PlanGranularity.AUTO
 
     @patch("tianluo.engine.steps.confirm.build_llm_review_prompt")
     @patch("tianluo.engine.steps.confirm.build_plan_confirm_prompt")
