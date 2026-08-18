@@ -6,7 +6,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, Union
 from dataclasses import dataclass, field
 from enum import Enum
 import yaml
@@ -3233,6 +3233,48 @@ def load_investigation_config(
     return InvestigationConfig.load(project_root)
 
 
+def _parse_test_parallel(raw: Any, source_label: str) -> Optional[Union[str, int]]:
+    """Validate ``test.parallel``: ``"auto"``, a positive int, or serial.
+
+    Follows the same warn-and-default policy as the rest of :class:`TestConfig`:
+    a malformed value never raises and never guesses a worker count — it logs
+    and falls back to serial execution, which is the behaviour every project had
+    before this key existed. Silently defaulting to *some* parallelism would be
+    the worse failure: a suite that is not parallel-safe would start failing for
+    reasons unrelated to the code under test.
+    """
+    if raw is None:
+        return None
+    # bool is an int subclass, so `parallel: true` would otherwise be read as
+    # one worker — an opaque way to spell something the user did not mean.
+    if isinstance(raw, bool):
+        logger.warning(
+            "Invalid test.parallel %r in %s; expected 'auto' or a positive "
+            "integer. Running tests serially.",
+            raw, source_label,
+        )
+        return None
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.lower() == "auto":
+            return "auto"
+        try:
+            value = int(text)
+        except ValueError:
+            value = None
+        if value is not None and value > 0:
+            return value
+    elif isinstance(raw, int):
+        if raw > 0:
+            return raw
+    logger.warning(
+        "Invalid test.parallel %r in %s; expected 'auto' or a positive "
+        "integer. Running tests serially.",
+        raw, source_label,
+    )
+    return None
+
+
 @dataclass
 class TestConfig:
     """Test step configuration loaded from tianluo.yaml test: section."""
@@ -3253,6 +3295,14 @@ class TestConfig:
     # platform/optional-dependency skips are never penalised. See the test
     # step's _detect_critical_failures for the matching/gating semantics.
     critical_tests: list[str] = field(default_factory=list)
+    # Parallel execution of the PRIMARY test command only: ``"auto"`` (one
+    # worker per CPU) or a positive worker count. None = serial, the historical
+    # behaviour — parallelism is opt-in because it is only safe for a suite
+    # whose tests do not share mutable global state. Phases are deliberately
+    # out of scope: they are commands the user wrote verbatim, so the framework
+    # never rewrites them. See the test step's _apply_parallel for how the flags
+    # are appended (and why ``--dist loadgroup`` comes with them).
+    parallel: Optional[Union[str, int]] = None
 
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
@@ -3343,6 +3393,10 @@ class TestConfig:
                 )
                 critical_tests = []
 
+            parallel = _parse_test_parallel(
+                test_data.get("parallel"), source_label,
+            )
+
             return cls(
                 command=test_data.get("command"),
                 timeout=timeout,
@@ -3351,6 +3405,7 @@ class TestConfig:
                 min_dynamic_timeout=min_dyn,
                 max_dynamic_timeout=max_dyn,
                 critical_tests=critical_tests,
+                parallel=parallel,
             )
         except Exception as e:
             logger.warning(

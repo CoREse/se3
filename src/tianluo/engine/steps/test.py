@@ -7,6 +7,7 @@ Supports:
 - Auto-detection of project type (Python/Node/Rust/Go)
 - Custom test command via tianluo.yaml test.command
 - Multi-phase test execution via tianluo.yaml test.phases
+- Opt-in pytest-xdist parallelism for the primary command via test.parallel
 - Result classification into new_tests vs regression
 - Fix-loop aware phase filtering
 - Dot progress indicator during test execution
@@ -311,23 +312,29 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     Returns:
         StepStatus.COMPLETED on success,
-        StepStatus.REVISION_NEEDED when tests fail (triggers fix loop)
+        StepStatus.REVISION_NEEDED when tests fail (triggers fix loop),
+        StepStatus.FAILED when the test environment itself is unusable (e.g.
+        ``test.parallel`` is set but pytest-xdist is not installed) — that is
+        not a code defect, so it goes to the human instead of the fix loop.
     """
     from ...config import TestConfig
 
     project_root = resolve_flow_project_root(flow)
     config = TestConfig.load(project_root)
 
-    verdict = run_and_classify_tests(
-        project_root=project_root,
-        flow=flow,
-        tests_added=step.inputs.get("tests_added", []),
-        baseline_failures=step.inputs.get("baseline_failures") or [],
-        is_fix_iteration=step.inputs.get("is_fix_iteration", False),
-        fix_iteration=step.inputs.get("fix_iteration", 0),
-        estimated_test_duration=step.inputs.get("estimated_test_duration"),
-        config=config,
-    )
+    try:
+        verdict = run_and_classify_tests(
+            project_root=project_root,
+            flow=flow,
+            tests_added=step.inputs.get("tests_added", []),
+            baseline_failures=step.inputs.get("baseline_failures") or [],
+            is_fix_iteration=step.inputs.get("is_fix_iteration", False),
+            fix_iteration=step.inputs.get("fix_iteration", 0),
+            estimated_test_duration=step.inputs.get("estimated_test_duration"),
+            config=config,
+        )
+    except XdistUnavailableError as exc:
+        return _fail_test_environment(step, exc)
 
     # Write structured outputs.
     step.outputs["test_results"] = verdict.test_results
@@ -374,6 +381,32 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.REVISION_NEEDED
 
     return StepStatus.COMPLETED
+
+
+def _fail_test_environment(step: Step, exc: XdistUnavailableError) -> StepStatus:
+    """Record a host-side test-environment problem as FAILED + guidance.
+
+    INVARIANT: ``fix_needed`` is deliberately NOT written here. It is the single
+    flag the state machine consults to enter the fix loop, so leaving it unset
+    is what keeps a missing pytest-xdist out of the fix loop (and out of the
+    fix-iteration budget) and routes it to the human instead — the same contract
+    the e2e step's environment failures follow.
+    """
+    logger.error("test environment failure: %s", exc.message)
+    step.outputs["environment_error"] = exc.message
+    step.outputs["test_remediation"] = exc.remediation
+    step.outputs["tests_passed"] = False
+    step.outputs["test_results"] = {
+        "passed": False,
+        "overall_passed": False,
+        "environment_error": exc.message,
+        "remediation": exc.remediation,
+        "phases": [],
+    }
+    step.error_message = "\n".join(
+        part for part in (exc.message, exc.remediation) if part
+    )
+    return StepStatus.FAILED
 
 
 def _e2e_enable_suggestion(project_root: Path) -> str:
@@ -486,6 +519,22 @@ def run_and_classify_tests(
     primary_command = _ensure_verbose_pytest(
         primary_command, bool(config.critical_tests),
     )
+    # Parallelism is applied HERE and nowhere else: the primary command is
+    # already framework-shaped (auto-detected, -v appended above), whereas the
+    # phases below are the user's own commands and run verbatim.
+    parallel = getattr(config, "parallel", None)
+    primary_command = _apply_parallel(primary_command, parallel)
+    # True exactly when the run about to happen depends on xdist: the switch is
+    # on and the command is pytest, so it carries -n either because we appended
+    # it or because the user had already written one. Both halves of the
+    # missing-plugin diagnosis key off this, so a project that pinned its own
+    # -n gets the same actionable error instead of a fix loop.
+    parallel_active = bool(parallel) and _is_pytest_command(primary_command)
+    if parallel_active:
+        # Raises before a single test runs when the test interpreter has no
+        # xdist — the whole point is that a missing plugin reaches the user as
+        # an install instruction, never as a suite full of failures.
+        _preflight_xdist(primary_command, parallel)
     # 1b. Timeout retry: a timeout is NOT an assertion/test failure — it can be
     #     a transient slowdown (machine load, cold caches, a one-off hang). Before
     #     treating it as a real failure, retry the command ONCE in place with the
@@ -500,6 +549,11 @@ def run_and_classify_tests(
     primary_result, primary_retried_after_timeout = _run_command_with_timeout_retry(
         primary_command, project_root, primary_timeout, "primary test command",
     )
+    if parallel_active and _is_missing_xdist_result(primary_result):
+        # The bare-`pytest` counterpart of the pre-flight probe: same absence,
+        # same actionable error, just diagnosed from the output because the
+        # command never named an interpreter to probe.
+        raise _xdist_unavailable_error(parallel)
 
     # 2. Classify primary results
     new_tests, regression = _classify_results(
@@ -1540,6 +1594,202 @@ def _ensure_verbose_pytest(command: list[str], has_critical: bool) -> list[str]:
         "surface per-test SKIPPED lines for critical-test detection."
     )
     return [*command, "-v"]
+
+
+# Flag spellings that already pin xdist's worker count / distribution mode. A
+# user who wrote either of them has made a deliberate choice, so the switch
+# tops the command up rather than overriding it.
+_XDIST_NUMPROCESSES_LONG = "--numprocesses"
+_XDIST_DIST_LONG = "--dist"
+
+# What pytest prints when it is handed -n / --dist without xdist installed
+# (argparse rejects the unknown option). Matched only on a FAILING run that
+# actually depends on xdist, so an ordinary test whose output happens to quote
+# this text cannot trigger it.
+_XDIST_MISSING_STDOUT_RE = re.compile(
+    r"unrecognized arguments:[^\n]*"
+    r"(?:(?<![\w-])-n(?![\w-])|--numprocesses|--dist)"
+)
+
+
+def _has_numprocesses_flag(command: list[str]) -> bool:
+    """Does ``command`` already pin an xdist worker count?
+
+    Covers every spelling pytest accepts: ``-n 4``, ``-n4``, ``-nauto``,
+    ``--numprocesses 4`` and ``--numprocesses=4``.
+    """
+    for tok in command:
+        if tok == _XDIST_NUMPROCESSES_LONG or tok.startswith(
+            _XDIST_NUMPROCESSES_LONG + "="
+        ):
+            return True
+        if tok == "-n" or (tok.startswith("-n") and not tok.startswith("--")):
+            return True
+    return False
+
+
+def _has_dist_flag(command: list[str]) -> bool:
+    """Does ``command`` already pin an xdist distribution mode?"""
+    for tok in command:
+        if tok == _XDIST_DIST_LONG or tok.startswith(_XDIST_DIST_LONG + "="):
+            return True
+    return False
+
+
+def _render_parallel_workers(parallel: Any) -> str:
+    """Render a validated ``test.parallel`` value as xdist's ``-n`` argument."""
+    return "auto" if isinstance(parallel, str) else str(parallel)
+
+
+def _apply_parallel(command: list[str], parallel: Any) -> list[str]:
+    """Append xdist parallel flags to a pytest PRIMARY test command.
+
+    WHY ``--dist loadgroup`` rides along with ``-n``: it is the only scheduling
+    mode under which pytest's ``xdist_group`` marker means anything — same group
+    means same worker, hence sequential. Projects use that marker to keep their
+    genuinely order-dependent tests (shared git worktree, shared mutable global
+    state) out of each other's way, so turning on ``-n`` without it would not
+    merely lose a hint, it would break those tests. If the command already picks
+    a ``--dist`` mode we leave it alone: the user's explicit choice wins, at the
+    cost of that guarantee.
+
+    Only ever applied to the primary command, never to configured phases —
+    those are the user's own commands and are executed verbatim. A non-pytest
+    command is returned unchanged (the flags are pytest-specific), and so is
+    every command when ``parallel`` is unset.
+    """
+    if not parallel:
+        return command
+    if not _is_pytest_command(command):
+        logger.debug(
+            "test.parallel=%r ignored: the test command %r is not pytest, so "
+            "the pytest-xdist flags do not apply.",
+            parallel, " ".join(command),
+        )
+        return command
+
+    result = list(command)
+    if _has_numprocesses_flag(result):
+        logger.debug(
+            "test.parallel=%r: the test command already pins a worker count; "
+            "leaving it as written.",
+            parallel,
+        )
+    else:
+        result += ["-n", _render_parallel_workers(parallel)]
+    if _has_dist_flag(result):
+        logger.debug(
+            "test.parallel=%r: the test command already pins a --dist mode; "
+            "xdist_group serial grouping is only guaranteed under loadgroup.",
+            parallel,
+        )
+    else:
+        result += ["--dist", "loadgroup"]
+    return result
+
+
+class XdistUnavailableError(Exception):
+    """pytest-xdist is missing from the environment that runs the tests.
+
+    WHY it is an exception rather than a failed :class:`TestVerdict`: nothing in
+    the code under test can fix a package that is not installed, so this must
+    reach the human through a FAILED step (like the e2e missing-extra path) and
+    must never be dressed up as a test failure — a fix loop would burn its whole
+    iteration budget rewriting innocent code. Falling back to a serial run is
+    rejected for the same reason it is elsewhere: it would report success for
+    something the user asked for and did not get.
+
+    :attr:`remediation` carries the localized install line and is appended to
+    ``str(exc)`` so a bare print still tells the user what to do.
+    """
+
+    def __init__(self, message: str, remediation: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.remediation = remediation
+
+    def __str__(self) -> str:
+        if self.remediation:
+            return f"{self.message}\n{self.remediation}"
+        return self.message
+
+
+def _pytest_module_interpreter(command: list[str]) -> str | None:
+    """The interpreter of a ``<python> -m pytest ...`` command, else None.
+
+    WHY the interpreter and not ``sys.executable``: tianluo may well be
+    installed in a different environment from the project it drives, so
+    "can *I* import xdist" answers the wrong question. Only the
+    ``python -m pytest`` shape names the environment that will actually run the
+    tests; a bare ``pytest`` command does not (it resolves through PATH to a
+    console script whose interpreter we cannot know without running it), which
+    is why that shape is diagnosed after the fact instead.
+    """
+    for i, tok in enumerate(command):
+        if tok == "-m" and i + 1 < len(command) and command[i + 1] == "pytest":
+            return command[0] if i > 0 else None
+    return None
+
+
+def _preflight_xdist(command: list[str], parallel: Any) -> None:
+    """Raise :class:`XdistUnavailableError` if the test interpreter lacks xdist.
+
+    Only decides anything for the ``<python> -m pytest`` shape; for any other
+    command it returns silently and leaves the diagnosis to
+    :func:`_is_missing_xdist_result`. A probe that cannot be run at all (missing
+    interpreter, sandbox refusal) is treated as inconclusive rather than as
+    "missing", so the run proceeds and the post-hoc path still catches a real
+    absence.
+    """
+    interpreter = _pytest_module_interpreter(command)
+    if not interpreter:
+        return
+    try:
+        probe = subprocess.run(
+            [interpreter, "-c", "import xdist"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("pytest-xdist pre-flight probe could not run: %s", exc)
+        return
+    if probe.returncode != 0:
+        raise _xdist_unavailable_error(parallel, interpreter)
+
+
+def _is_missing_xdist_result(result: dict[str, Any]) -> bool:
+    """Does a FAILED run look like "pytest does not know about -n"?
+
+    The post-hoc half of xdist detection, for commands whose interpreter we
+    cannot name. Callers must only consult it for a run that actually carries
+    the parallel flags, so a project whose own test output quotes an
+    ``unrecognized arguments`` message cannot be mistaken for a missing plugin.
+    """
+    if result.get("passed"):
+        return False
+    haystack = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}"
+    return bool(_XDIST_MISSING_STDOUT_RE.search(haystack))
+
+
+def _xdist_unavailable_error(
+    parallel: Any, environment: str | None = None,
+) -> XdistUnavailableError:
+    """Build the one actionable "install pytest-xdist" error both paths raise."""
+    where = environment or t("engine.test.xdist_missing_environment_unknown")
+    install_command = (
+        f"{environment} -m pip install pytest-xdist"
+        if environment
+        else "pip install pytest-xdist"
+    )
+    return XdistUnavailableError(
+        t(
+            "engine.test.xdist_missing",
+            parallel=_render_parallel_workers(parallel),
+            environment=where,
+        ),
+        t("engine.test.xdist_missing_remediation", command=install_command),
+    )
 
 
 def _resolve_cwd(project_root: Path, cwd: str | None) -> Path:

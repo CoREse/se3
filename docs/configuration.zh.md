@@ -594,7 +594,7 @@ daemon history payload 与 Web 控制台渲染的都是**同一份后端聚合�
 ### `test`
 
 test step 的命令、超时、附加阶段,以及『skip 不算通过』的闸口。加载进 `TestConfig`。
-全部七个字段:
+全部八个字段:
 
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
@@ -605,6 +605,7 @@ test step 的命令、超时、附加阶段,以及『skip 不算通过』的闸�
 | `min_dynamic_timeout` | int `>= 1`(秒) | `30` | 计算出的动态超时的下限。会带告警地上钳到 `1`。 |
 | `max_dynamic_timeout` | int(秒) | `14400`(4 小时) | 计算出的动态超时的上限,以免 fix loop 中反复超时把估算无限放大、把一个卡死的测试掩饰成『只是有点慢』。**实际默认值是 `max(14400, timeout)`** —— 一个刻意把 `test.timeout` 设得更大的项目,不会被压到低于它自己的明示意图。若配置值低于 `min_dynamic_timeout`,会带告警地提升到与之相等。 |
 | `critical_tests` | string 列表 | `[]` | 必须真正跑起来的验收测试。见下文。 |
+| `parallel` | `"auto"` 或 int `>= 1` | `null` | 让**主命令**在 [pytest-xdist](https://pytest-xdist.readthedocs.io/) 下并行执行。`null`(默认)= 串行,与该 key 出现之前完全一致。其他任何取值 —— `0`、负数、小数、`true`、无法识别的字符串 —— 都会告警并回落到串行。见下文。 |
 
 > **坑 —— 一个坏的 `timeout` 会丢掉整块配置。**`TestConfig.load()` 用一个笼统的
 > `try/except` 包住了它的解析过程,出错时回落到一个**全默认的 `TestConfig`**。多数
@@ -647,6 +648,35 @@ verbose 命令**,例如 `python -m pytest -v`。
 
 该列表默认为空 —— 这是一个显式的 opt-in,因此普通的平台 / 可选依赖类 skip 永远不会
 被惩罚。非列表的值只告警并禁用该闸口,不抛错。
+
+**`parallel` —— opt-in 的 pytest-xdist 并行。**`auto` 表示每个 CPU 一个 worker,
+整数则钉住 worker 数。该取值会以 `-n auto` / `-n N` 追加到主命令上,并**连带
+`--dist loadgroup`**:
+
+```yaml
+test:
+  parallel: auto     # -> <主命令> -n auto --dist loadgroup
+```
+
+有三条边界值得知道:
+
+- **`--dist loadgroup` 是连带的。**只有在这个调度模式下,pytest 的 `xdist_group`
+  标记才有意义 —— 同一组名的测试会落到同一个 worker,因而彼此串行。一套测试正是
+  靠它把那些真正依赖执行顺序的测试(共享 git 工作区、共享可变全局状态)隔开,所以
+  没有它这个开关就是不安全的。若你的命令**已经**指定了 `--dist` 模式,则以你的选择
+  为准,`xdist_group` 的串行组保证也随之失效。`-n` / `--numprocesses` 同理:命令里
+  已写明的 worker 数永远不会被覆盖。
+- **只作用于主命令。**`phases[]` 里的条目是你自己写的命令,一律原样执行 —— 该开关
+  绝不改写它们。非 pytest 的主命令(`npm test`、`cargo test` 等)同样不动,只记一行
+  debug 日志说明忽略了该开关。
+- **插件缺失是报错,而非静默回退。**若实际执行测试的环境里没有装 pytest-xdist,该
+  step 会以 `FAILED` 结束并给出安装提示,交回给你 —— 它不会退化成串行运行(那等于
+  为你没有得到的东西报成功),也不会进入 fix loop(装包不是改代码能解决的)。对
+  `<python> -m pytest …` 形态的命令,这在任何测试跑起来**之前**就被探测出来(用同一
+  个解释器做 import 预检);对裸 `pytest` 形态 —— 其解释器事先无从判定 —— 则事后从
+  pytest 的 `unrecognized arguments: -n …` 输出中识别。
+
+并行只对『不依赖执行顺序、不共享可变全局状态』的测试套件才安全,所以它是 opt-in 的。
 
 ### `e2e`
 

@@ -191,9 +191,23 @@ e2e:
 # pytest's per-test ids (file::test), so a fully-qualified id is the precise
 # anchor. Requires the browser extra: `pip install tianluo[browser]` then
 # `playwright install chromium`.
+#
+# `parallel` runs the PRIMARY test command under pytest-xdist: "auto" (one
+# worker per CPU) or a positive worker count; omit it (the default) to keep the
+# suite serial. It appends `-n auto` / `-n N` AND `--dist loadgroup` — loadgroup
+# is what makes pytest's `xdist_group` marker mean "same group, same worker,
+# hence sequential", which is how order-dependent tests (shared git worktree,
+# shared mutable global state) stay safe under parallelism. Flags you wrote
+# yourself win: an existing `-n` / `--numprocesses` or `--dist` in the command
+# is never overridden (an explicit `--dist` other than loadgroup does drop the
+# serial-group guarantee). Commands under `phases` are executed verbatim and are
+# NOT affected, and a non-pytest command ignores the switch. If pytest-xdist is
+# missing from the environment that runs the tests, the step fails with an
+# install instruction rather than silently falling back to serial.
 test:
   critical_tests:
     - "tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
+  # parallel: auto
 
 workflow:
   # Backstop only: with the deterministic pre-implement test baseline, a

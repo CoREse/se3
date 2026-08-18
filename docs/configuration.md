@@ -677,7 +677,7 @@ history starve investigation (or the reverse).
 ### `test`
 
 The test step's command, timeouts, extra phases, and the skip-is-not-a-pass
-gate. Loaded into `TestConfig`. All seven fields:
+gate. Loaded into `TestConfig`. All eight fields:
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
@@ -688,6 +688,7 @@ gate. Loaded into `TestConfig`. All seven fields:
 | `min_dynamic_timeout` | int `>= 1` (seconds) | `30` | Floor for the computed dynamic timeout. Clamped up to `1` with a warning. |
 | `max_dynamic_timeout` | int (seconds) | `14400` (4 h) | Ceiling for the computed dynamic timeout, so repeated fix-loop timeouts cannot compound the estimate without bound and mask a hung test as "just slow". **The effective default is `max(14400, timeout)`** — a project that deliberately sets a larger `test.timeout` is not capped below its own explicit intent. If the configured value is below `min_dynamic_timeout` it is raised to match, with a warning. |
 | `critical_tests` | list of strings | `[]` | Acceptance tests that MUST genuinely run. See below. |
+| `parallel` | `"auto"` or int `>= 1` | `null` | Run the **primary** command under [pytest-xdist](https://pytest-xdist.readthedocs.io/). `null` (the default) = serial, exactly as before this key existed. Anything else — `0`, a negative, a float, `true`, an unknown string — warns and falls back to serial. See below. |
 
 > **Gotcha — a bad `timeout` discards the whole block.** `TestConfig.load()`
 > wraps its parsing in a blanket `try/except` that falls back to an
@@ -738,6 +739,43 @@ as `python -m pytest -v`.
 The list is empty by default — this is an explicit opt-in, so ordinary
 platform / optional-dependency skips are never penalised. A non-list value warns
 and disables the gate rather than raising.
+
+**`parallel` — opt-in pytest-xdist parallelism.** `auto` gives one worker per
+CPU, an integer pins the worker count. The value is appended to the primary
+command as `-n auto` / `-n N`, **together with `--dist loadgroup`**:
+
+```yaml
+test:
+  parallel: auto     # -> <primary command> -n auto --dist loadgroup
+```
+
+Three boundaries are worth knowing:
+
+- **`--dist loadgroup` rides along.** It is the only scheduling mode under which
+  pytest's `xdist_group` marker means anything — tests sharing a group name run
+  on the same worker, and therefore sequentially. That is how a suite keeps its
+  genuinely order-dependent tests (a shared git worktree, shared mutable global
+  state) from colliding, so the switch would be unsafe without it. If your
+  command **already** specifies a `--dist` mode, your choice wins and the
+  `xdist_group` serial-group guarantee is lost with it. The same applies to
+  `-n` / `--numprocesses`: an explicit worker count in the command is never
+  overridden.
+- **Primary command only.** `phases[]` entries are commands you wrote, and they
+  are executed verbatim — this switch never rewrites them. A non-pytest primary
+  command (`npm test`, `cargo test`, …) is likewise left alone, with a debug log
+  line saying so.
+- **A missing plugin is an error, not a silent fallback.** If pytest-xdist is
+  not installed in the environment that runs the tests, the step ends as
+  `FAILED` with an install instruction and goes to you — it never degrades to a
+  serial run (which would report success for something you did not get) and
+  never enters the fix loop (no code change can install a package). For a
+  `<python> -m pytest …` command this is detected *before* anything runs, by
+  probing that same interpreter; for a bare `pytest` command — whose interpreter
+  cannot be known up front — it is recognised from pytest's
+  `unrecognized arguments: -n …` output afterwards.
+
+Parallelism is only safe for a suite whose tests do not depend on execution
+order or share mutable global state, which is why it is opt-in.
 
 ### `e2e`
 
