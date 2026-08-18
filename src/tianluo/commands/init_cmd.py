@@ -521,7 +521,9 @@ def _get_charter_template(project_name: str) -> str:
 
     The fill-in placeholders are seeded with the same please-fill-this-in
     prompts the old base-spec skeleton used, so a fresh project still gets a
-    guided skeleton; the rendering is delegated to
+    guided skeleton, plus the one convention that is worth stating before any
+    code exists (``charter.DEFAULT_PARALLEL_SAFE_TESTS_CONVENTION``); the
+    rendering is delegated to
     ``charter.render_charter_template`` so it stays consistent with the
     `luo migrate` charter assembly and the packaged template stays the single
     source of truth.
@@ -531,7 +533,13 @@ def _get_charter_template(project_name: str) -> str:
         project_description="（请填写项目简述）",
         languages_and_frameworks="（请填写语言和框架）",
         top_level_architecture="（请填写顶层架构：主要子系统及其边界）",
-        coding_conventions="（请填写代码规范）",
+        coding_conventions=(
+            "（请填写代码规范）\n"
+            # Seeded alongside the fill-in prompt, not in place of it: a fresh
+            # project should start out with parallel-safe tests rather than
+            # retrofit them once the suite is already order-sensitive.
+            "- " + charter_mod.DEFAULT_PARALLEL_SAFE_TESTS_CONVENTION
+        ),
         key_constraints="（请填写关键约束）",
         workflow_conventions=(
             '使用 `luo run "task description"` 启动开发流程\n'

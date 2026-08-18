@@ -113,6 +113,8 @@ tianluo 解决的是*跨 session*的项目治理：持久化状态、code-first 
 
 - **charter** — `tianluo/charter.md`，旧 base spec 收缩、改名后的继任者。它在每个 step 被**全量注入**，并兼任沙箱子进程的 conventions 通道（子进程读不到 `CLAUDE.md`）。一个 *altitude gate* 只准入"**代码说不出、且全项目每个 step 都需要全量看到**"的内容：项目身份、顶层架构、项目级横切不变量。曾让 base spec 膨胀的每模块 locator 索引被甩掉了——那是 code-index 的职责。字节阈值只是监控灯、不是硬墙：因 charter 内容与项目规模解耦（只随架构复杂度增长，不随 LOC 增长），全量加载在大项目上仍然廉价；若真的大到难以全量加载，那是低层内容泄漏进来的红灯，而非给 charter 建索引的理由。
 
+  由 `luo init` / `luo migrate` 生成的 charter 自带一条现成的编码约定：**流程生成的测试应并行安全** —— 不依赖测试之间的执行顺序、不共享可变全局状态、临时资源（文件/目录/端口/数据库名等）一律使用唯一路径。之所以一开始就写进去，是为了让项目此后可以直接打开并行测试（`test.parallel`），而不必先去拆解一个已经对顺序敏感的套件。与 why-注释纪律一样，它是 prompt 级软约定 —— 背后没有硬检查门。
+
 - **why-注释** — colocated 注释，*只*承载代码表达不了的 why/意图，仅在 why 变化时更新。它们不作为 code-index 的来源，故无 per-change 同步税；implement step 的 prompt 只是约定：当一处改动的意图变化时，同步更新 colocated 的 why-注释。如实承认这是 prompt 级的软约定（与其它 conventions 同等强度），是把注释纪律压到最小面，而非根治。被标记为 `WHY:` / `INVARIANT:` 的那个子集是例外：它们受 `invariant_check` step 硬守卫。
 
 ### 真正变好了什么（诚实的账）
