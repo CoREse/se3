@@ -184,6 +184,10 @@ def _parse_test_summary_counts(stdout: str) -> tuple[int, int] | None:
     ``5 passed; 0 failed``) are genuinely separate results that must total to
     ``10 passed``, not be collapsed to ``5``. Single-run output (pytest / jest,
     one summary line) is unaffected — one line yields exactly its own counts.
+    A pytest-xdist run is likewise a single-summary-line run: the workers report
+    back to one controller, so the parallel output carries exactly one aggregate
+    line and the summing behaviour above does not inflate it (covered by a test
+    over a recorded xdist run).
 
     Returns ``(passed, failed)``, or ``None`` when no recognizable count is
     found (so the caller can fall back to a truthful phase-level statement).
@@ -1285,17 +1289,87 @@ def _classify_results(
     )
 
 
+# The two per-test line shapes pytest emits under ``-v``. Both are anchored at
+# a line start on purpose: the ``-r`` short-summary block emits status-first
+# lines (``PASSED file::test``, ``FAILED file::test - reason``) that are NOT
+# per-test results, and the FAILURES block quotes arbitrary source text — an
+# unanchored pattern would harvest those and double-count or invent tests.
+_PYTEST_PER_TEST_STATUSES = "PASSED|FAILED|SKIPPED"
+
+# Serial pytest: the test id leads the line, status follows.
+#   ``tests/test_foo.py::test_bar PASSED  [ 12%]``
+# The gap is ``\s+`` (which spans newlines) purely to preserve the long-standing
+# behaviour of this pattern; narrowing it would be an unrelated behaviour change.
+_PYTEST_SERIAL_PER_TEST_RE = re.compile(
+    rf'^(\S+::\S+)\s+({_PYTEST_PER_TEST_STATUSES})\b',
+    re.MULTILINE,
+)
+
+# pytest-xdist: a worker prefix and the status come *before* the id, so the
+# serial pattern above cannot match such a line at all.
+#   ``[gw3] [ 42%] PASSED tests/test_foo.py::test_bar``
+# The ``[gwN]`` prefix is what makes this pattern safe to run over the whole
+# output — it is the one thing that distinguishes a real xdist result line from
+# the status-first short-summary lines above. The progress percentage is left
+# optional so the match does not hinge on a cosmetic field.
+_PYTEST_XDIST_PER_TEST_RE = re.compile(
+    rf'^\[gw\d+\]\s+(?:\[\s*\d+%\]\s+)?({_PYTEST_PER_TEST_STATUSES})\s+(\S+::\S+)',
+    re.MULTILINE,
+)
+
+
+def _iter_pytest_per_test_results(stdout: str) -> list[tuple[str, str]]:
+    """Extract ``(test_id, status)`` for every pytest per-test line, in order.
+
+    Recognises both the serial verbose form and the pytest-xdist verbose form
+    so that everything built on per-test results — new-vs-regression
+    classification (:func:`_classify_results`) and the critical skipped/missing
+    gate (:func:`_detect_critical_failures`) — keeps working identically when a
+    project runs its suite in parallel. Without this, an xdist run parses to
+    zero per-test results and those checks silently degrade to no-ops while
+    still exiting 0.
+
+    Results are ordered by position in the output and de-duplicated on the
+    ``(test_id, status)`` pair. De-duplicating on the id alone would be wrong:
+    a rerun plugin can legitimately report the same test as FAILED then PASSED,
+    and collapsing that to the first (or last) verdict would either hide a
+    failure or invent one. Identical pairs are collapsed, which is what makes a
+    blob containing both output forms safe to parse.
+    """
+    if not stdout:
+        return []
+    matches: list[tuple[int, str, str]] = []
+    for m in _PYTEST_SERIAL_PER_TEST_RE.finditer(stdout):
+        matches.append((m.start(), m.group(1), m.group(2)))
+    for m in _PYTEST_XDIST_PER_TEST_RE.finditer(stdout):
+        matches.append((m.start(), m.group(2), m.group(1)))
+    matches.sort(key=lambda item: item[0])
+
+    seen: set[tuple[str, str]] = set()
+    results: list[tuple[str, str]] = []
+    for _pos, tid, status in matches:
+        key = (tid, status)
+        if key in seen:
+            continue
+        seen.add(key)
+        results.append(key)
+    return results
+
+
 def _parse_test_ids(stdout: str) -> list[tuple[str, bool]]:
     """Parse test IDs and pass/fail status from test runner output.
 
-    Supports pytest, jest, go test, cargo test output formats.
+    Supports pytest (serial and pytest-xdist parallel output), jest, go test,
+    cargo test output formats.
     Returns list of (test_id, passed) tuples.
     """
     results = []
 
-    # pytest: "tests/test_foo.py::test_bar PASSED" or "FAILED"
-    for m in re.finditer(r'^(\S+::\S+)\s+(PASSED|FAILED)', stdout, re.MULTILINE):
-        results.append((m.group(1), m.group(2) == "PASSED"))
+    # pytest: "tests/test_foo.py::test_bar PASSED" / "FAILED", or the xdist
+    # form "[gw0] [ 42%] PASSED tests/test_foo.py::test_bar".
+    for tid, status in _iter_pytest_per_test_results(stdout):
+        if status in ("PASSED", "FAILED"):
+            results.append((tid, status == "PASSED"))
 
     if results:
         return results
@@ -1320,19 +1394,19 @@ def _parse_skipped_test_ids(stdout: str) -> list[str]:
 
     Matches the per-test lines emitted by ``pytest -v``, e.g.
     ``tests/test_foo.py::test_bar SKIPPED`` (optionally followed by a reason
-    in parentheses/brackets). The ``-rs`` short-summary form
-    (``SKIPPED [1] file:line: reason``) is intentionally NOT parsed here: it
-    carries ``file:line`` rather than ``file::test`` and so cannot be matched
-    against critical-test patterns by test name.
+    in parentheses/brackets), and their pytest-xdist counterpart
+    ``[gw0] [ 42%] SKIPPED tests/test_foo.py::test_bar``. The ``-rs``
+    short-summary form (``SKIPPED [1] file:line: reason``) is intentionally NOT
+    parsed here: it carries ``file:line`` rather than ``file::test`` and so
+    cannot be matched against critical-test patterns by test name.
 
     Returns the skipped test IDs in order of first appearance, deduplicated.
     """
-    if not stdout:
-        return []
     seen: set[str] = set()
     skipped: list[str] = []
-    for m in re.finditer(r'^(\S+::\S+)\s+SKIPPED', stdout, re.MULTILINE):
-        tid = m.group(1)
+    for tid, status in _iter_pytest_per_test_results(stdout):
+        if status != "SKIPPED":
+            continue
         if tid not in seen:
             seen.add(tid)
             skipped.append(tid)

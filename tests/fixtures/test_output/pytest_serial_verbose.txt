@@ -1,0 +1,36 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.2, pytest-9.0.2, pluggy-1.6.0 -- /home/cre/.pixi/envs/pip/bin/python3.14
+rootdir: /tmp/xdrec
+plugins: timeout-2.4.0, asyncio-1.3.0, anyio-4.12.1, xdist-3.8.0, respx-0.23.1
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 9 items
+
+tests/test_acceptance.py::test_render_paradigm_in_headless_browser SKIPPED [ 11%]
+tests/test_acceptance.py::test_console_smoke PASSED                      [ 22%]
+tests/test_legacy.py::test_zeta PASSED                                   [ 33%]
+tests/test_legacy.py::test_eta SKIPPED (env)                             [ 44%]
+tests/test_legacy.py::test_epsilon FAILED                                [ 55%]
+tests/test_sample.py::test_alpha PASSED                                  [ 66%]
+tests/test_sample.py::test_beta FAILED                                   [ 77%]
+tests/test_sample.py::test_delta[1] PASSED                               [ 88%]
+tests/test_sample.py::test_delta[2] PASSED                               [100%]
+
+=================================== FAILURES ===================================
+_________________________________ test_epsilon _________________________________
+
+    def test_epsilon():
+>       raise AssertionError("boom")
+E       AssertionError: boom
+
+tests/test_legacy.py:14: AssertionError
+__________________________________ test_beta ___________________________________
+
+    def test_beta():
+>       assert 1 == 2
+E       assert 1 == 2
+
+tests/test_sample.py:9: AssertionError
+=========================== short test summary info ============================
+SKIPPED [1] tests/test_acceptance.py:4: chromium not installed
+SKIPPED [1] tests/test_legacy.py:8: env
+==================== 2 failed, 5 passed, 2 skipped in 0.03s ====================
