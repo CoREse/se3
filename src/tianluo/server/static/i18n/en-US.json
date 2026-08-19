@@ -544,6 +544,8 @@
   "tool.detail.noMatches": "(no matches)",
   "tool.detail.noFiles": "(no files)",
   "tool.detail.patternPath": "pattern={pattern} path={path}",
+  "tool.detail.input": "input",
+  "tool.detail.noInput": "(no input)",
   "tool.detail.toggleShow": "details",
   "tool.detail.toggleHide": "hide details",
   "topbar.ownerAdmin": "{name} (admin)",

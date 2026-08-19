@@ -2108,6 +2108,50 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   overflow-wrap: anywhere;
   word-break: break-word;
 }
+
+/* A tool call's own arguments, shown for an in-flight call (kind=tool_input)
+ * and alongside the result text for an unregistered tool's settled payload.
+ * Deliberately quieter than the result body — the input is context, not the
+ * thing the reader opened the panel for. */
+.tool-marker-input {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 4px 6px;
+  border-radius: 3px;
+  margin-bottom: 4px;
+}
+.tool-marker-input-label {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  margin-bottom: 3px;
+}
+.tool-marker-input-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 2px;
+}
+.tool-marker-input-key {
+  flex-shrink: 0;
+  color: var(--cyan);
+  opacity: 0.85;
+}
+.tool-marker-input-value {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-marker-input-pre {
+  flex: 1;
+  margin: 0;
+  max-height: 18em;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
 .tool-detail-empty {
   color: var(--fg-dim);
   font-style: italic;

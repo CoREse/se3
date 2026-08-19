@@ -544,6 +544,8 @@
   "tool.detail.noMatches": "(无匹配)",
   "tool.detail.noFiles": "(无文件)",
   "tool.detail.patternPath": "模式={pattern} 路径={path}",
+  "tool.detail.input": "输入",
+  "tool.detail.noInput": "（无输入）",
   "tool.detail.toggleShow": "详情",
   "tool.detail.toggleHide": "隐藏详情",
   "topbar.ownerAdmin": "{name}（管理员）",

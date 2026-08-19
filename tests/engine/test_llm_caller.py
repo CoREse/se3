@@ -2148,3 +2148,92 @@ class TestChipFragmentGrammar:
         assert terminal["content"].startswith(
             "[mcp__context7__get-library-docs ✓ library=fastapi · docs..."
         ), terminal["content"]
+
+
+class TestInFlightFragmentCarriesInputDetail:
+    """A running tool call's fragment carries its full input as `tool_detail`.
+
+    Borrows (rather than inherits) the cross-runner harness above so the parent
+    class's own parametrized cases are not re-run here. The payload is attached
+    in the shared LLMCaller layer, so claude, claude-interactive and codex all
+    get it.
+    """
+
+    _tracker = staticmethod(TestChipFragmentGrammar._tracker)
+    _tool_use_line = staticmethod(TestChipFragmentGrammar._tool_use_line)
+    _tool_result_line = staticmethod(TestChipFragmentGrammar._tool_result_line)
+    _run_pair = TestChipFragmentGrammar._run_pair
+
+    def test_tool_use_fragment_has_a_tool_input_payload(self, monkeypatch, tmp_path):
+        in_flight, _ = self._run_pair(
+            monkeypatch, tmp_path, "Agent",
+            {"description": "self check", "prompt": "look at the diff"},
+        )
+        detail = in_flight["tool_detail"]
+        assert detail is not None, "an in-flight fragment must be expandable"
+        assert detail["kind"] == "tool_input"
+        assert detail["tool_name"] == "Agent"
+        assert detail["input"] == {
+            "description": "self check", "prompt": "look at the diff",
+        }
+        assert detail["truncated"] is False
+
+    def test_in_flight_is_still_marked_by_a_missing_is_error(
+        self, monkeypatch, tmp_path
+    ):
+        """INVARIANT: the payload must not make the record look terminal."""
+        in_flight, terminal = self._run_pair(
+            monkeypatch, tmp_path, "Agent", {"prompt": "x"},
+        )
+        assert in_flight["is_error"] is None
+        assert in_flight["tool_detail"] is not None
+        assert terminal["is_error"] is False
+
+    def test_bash_command_reaches_the_panel_in_full(self, monkeypatch, tmp_path):
+        command = "pytest -q tests/engine && echo done  # " + "x" * 400
+        in_flight, _ = self._run_pair(
+            monkeypatch, tmp_path, "Bash", {"command": command},
+        )
+        # The header truncates at 50 chars; the panel does not.
+        assert in_flight["content"] != f"[Bash: {command}]"
+        assert in_flight["tool_detail"]["input"]["command"] == command
+
+    def test_codex_synthesized_mcp_pair_carries_input_both_ways(
+        self, monkeypatch, tmp_path
+    ):
+        """Driven by codex_runner's stream-json byte-shape, end to end."""
+        in_flight, terminal = self._run_pair(
+            monkeypatch, tmp_path,
+            "mcp__context7__get-library-docs", {"library": "fastapi"},
+            result="docs...",
+        )
+        assert in_flight["tool_detail"] == {
+            "kind": "tool_input",
+            "tool_name": "mcp__context7__get-library-docs",
+            "input": {"library": "fastapi"},
+            "truncated": False,
+        }
+        # The settled payload keeps the input alongside the result text, so the
+        # completed chip is never poorer than the running one it replaced.
+        assert terminal["tool_detail"]["kind"] == "text"
+        assert terminal["tool_detail"]["input"] == {"library": "fastapi"}
+        assert terminal["tool_detail"]["text"] == "docs..."
+
+    def test_registered_tool_terminal_payload_is_unchanged(
+        self, monkeypatch, tmp_path
+    ):
+        in_flight, terminal = self._run_pair(
+            monkeypatch, tmp_path, "Bash", {"command": "ls -la"}, result="a\nb",
+        )
+        assert in_flight["tool_detail"]["kind"] == "tool_input"
+        assert terminal["tool_detail"]["kind"] == "bash_output"
+        assert terminal["tool_detail"]["command"] == "ls -la"
+        assert "input" not in terminal["tool_detail"]
+
+    def test_payload_is_json_serialisable(self, monkeypatch, tmp_path):
+        in_flight, _ = self._run_pair(
+            monkeypatch, tmp_path, "Skill",
+            {"skill": "code-review", "args": {"level": "high"}, "n": 3},
+        )
+        assert json.loads(json.dumps(in_flight["tool_detail"]))["input"]["n"] == 3
+

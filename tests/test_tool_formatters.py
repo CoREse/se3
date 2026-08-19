@@ -11,6 +11,7 @@ from rich.console import Console
 from tianluo.engine.tool_formatters import (
     TOOL_FORMATTERS,
     build_tool_detail_payload,
+    build_tool_in_flight_detail_payload,
     format_tool_chip_header,
     format_tool_chip_in_flight_header,
     format_tool_diff,
@@ -1438,3 +1439,62 @@ class TestDeleteViaGenericFormatter:
         result = format_tool_use_preview("Delete", {"file_path": long_path})
         # path-aware shortening never truncates the filename itself
         assert "gone.py" in result
+
+
+# ---------------------------------------------------------------------------
+# In-flight detail payload — the running chip's expandable input panel
+# ---------------------------------------------------------------------------
+
+class TestBuildToolInFlightDetailPayload:
+    def test_kind_and_tool_name(self):
+        payload = build_tool_in_flight_detail_payload("Agent", {"prompt": "p"})
+        assert payload["kind"] == "tool_input"
+        assert payload["tool_name"] == "Agent"
+
+    def test_bash_command_is_present_in_full(self):
+        command = "for f in *.py; do echo $f; done  # " + "c" * 500
+        payload = build_tool_in_flight_detail_payload("Bash", {"command": command})
+        assert payload["input"] == {"command": command}
+
+    def test_registered_tool_also_gets_a_payload(self):
+        """The in-flight panel is not limited to unregistered tools."""
+        payload = build_tool_in_flight_detail_payload(
+            "Read", {"file_path": "src/a.py", "offset": 0, "limit": 200}
+        )
+        assert payload["tool_name"] == "Read"
+        assert payload["input"]["file_path"] == "src/a.py"
+        assert payload["input"]["limit"] == 200
+
+    def test_truncation_boundary(self):
+        over = "x" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 1)
+        payload = build_tool_in_flight_detail_payload("Agent", {"prompt": over})
+        assert payload["truncated"] is True
+        assert len(payload["input"]["prompt"]) == TOOL_DETAIL_PAYLOAD_MAX_CHARS
+
+    def test_json_round_trip(self):
+        payload = build_tool_in_flight_detail_payload(
+            "mcp__srv__tool", {"args": {"a": [1, 2]}, "n": 3, "flag": False}
+        )
+        assert json.loads(json.dumps(payload)) == payload
+
+
+class TestGenericDetailPayloadCarriesInput:
+    def test_unregistered_settled_payload_has_input_and_text(self):
+        detail = build_tool_detail_payload(
+            "Agent",
+            {"description": "self check", "prompt": "look at the diff"},
+            "No findings reported.",
+        )
+        assert detail["kind"] == "text"
+        assert detail["text"] == "No findings reported."
+        assert detail["input"]["description"] == "self check"
+
+    def test_bash_payload_keeps_its_own_shape(self):
+        detail = build_tool_detail_payload("Bash", {"command": "ls"}, "a\nb")
+        assert detail == {
+            "kind": "bash_output",
+            "command": "ls",
+            "stdout": "a\nb",
+            "stderr": "",
+            "truncated": False,
+        }

@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "TOOL_FORMATTERS",
     "build_tool_detail_payload",
+    "build_tool_in_flight_detail_payload",
     "format_tool_chip_header",
     "format_tool_chip_in_flight_header",
     "format_tool_diff",
@@ -706,6 +707,76 @@ def _maybe_truncate_lines(
     return lines[:max_items], True
 
 
+def _json_safe_value(value: Any) -> Any:
+    """Coerce one tool-input value into something ``json.dumps`` can encode.
+
+    WHY: the detail payload is written verbatim into the step jsonl and pushed
+    to the browser, so a value the stream carried but json cannot encode would
+    poison the whole record rather than just its own key. Falling back to
+    ``str(value)`` keeps the key visible instead of losing the record.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    try:
+        json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return str(value)
+    return value
+
+
+def _build_input_payload(use_input: Optional[dict]) -> Tuple[Dict[str, Any], bool]:
+    """Return the tool's own input, JSON-safe and per-value tail-truncated.
+
+    Unlike the 60-char chip-header summary, this keeps every key and the FULL
+    value up to ``TOOL_DETAIL_PAYLOAD_MAX_CHARS`` — the panel exists precisely
+    so a Bash ``command`` or an Agent ``prompt`` can be read in full. Returns
+    ``(payload, truncated)`` where ``truncated`` is True if any string value
+    was cut.
+    """
+    if not isinstance(use_input, dict):
+        return {}, False
+    payload: Dict[str, Any] = {}
+    truncated_any = False
+    for key, value in use_input.items():
+        name = key if isinstance(key, str) else str(key)
+        if isinstance(value, str):
+            text, truncated = _maybe_truncate_text(value)
+            payload[name] = text
+            truncated_any = truncated_any or truncated
+        else:
+            payload[name] = _json_safe_value(value)
+    return payload, truncated_any
+
+
+def build_tool_in_flight_detail_payload(
+    tool_name: str, use_input: Optional[dict]
+) -> dict:
+    """Build the detail payload for an *in-flight* (result-pending) tool call.
+
+    Returns ``{"kind": "tool_input", "tool_name": …, "input": {…},
+    "truncated": bool}``. The frontend's ``tool_input`` renderer draws it as a
+    ``$ command`` line for Bash and as a key/value list otherwise, so a running
+    call can be expanded to read its full arguments instead of only the
+    truncated chip header.
+
+    WHY a separate ``kind`` rather than reusing ``text``: the terminal payload
+    keeps its own discriminator table, and adding a new kind leaves every
+    registered tool's settled payload structure untouched.
+
+    INVARIANT: emitting this payload does NOT make a record terminal. Both the
+    backend (``llm_caller._emit_progress``) and the frontend distinguish
+    in-flight from settled solely by ``is_error`` being absent — never by
+    ``tool_detail`` being empty.
+    """
+    payload, truncated = _build_input_payload(use_input)
+    return {
+        "kind": "tool_input",
+        "tool_name": tool_name,
+        "input": payload,
+        "truncated": truncated,
+    }
+
+
 def _build_file_path_only_detail(file_path: str) -> dict:
     """Detail payload for "a file changed, but no text was reported".
 
@@ -850,12 +921,22 @@ def _build_glob_detail(use_input: dict, result_data: Any, old_content: Optional[
 
 
 def _build_generic_text_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    """Settled payload for a tool with no registered detail builder.
+
+    Carries the call's own ``input`` alongside the result text: an unregistered
+    tool (claude's ``Agent`` / ``Skill``, codex's ``mcp__<server>__<tool>``) has
+    no per-tool renderer to reconstruct its arguments from, so dropping the
+    input would make the completed chip strictly less informative than the
+    in-flight one it replaced.
+    """
     text = _extract_text(result_data) or ""
     truncated_text, truncated = _maybe_truncate_text(text)
+    input_payload, input_truncated = _build_input_payload(use_input)
     return {
         "kind": "text",
         "text": truncated_text,
-        "truncated": truncated,
+        "input": input_payload,
+        "truncated": truncated or input_truncated,
     }
 
 
@@ -893,7 +974,9 @@ def build_tool_detail_payload(
     ``truncated: True``.
 
     Unregistered tools fall back to ``kind="text"`` carrying the extracted
-    result text.
+    result text **plus** the call's own ``input`` dict, so a settled Agent /
+    MCP chip shows what was asked as well as what came back. The in-flight
+    counterpart is :func:`build_tool_in_flight_detail_payload`.
     """
     use_input = use_input or {}
     builder = _DETAIL_BUILDERS.get(tool_name)

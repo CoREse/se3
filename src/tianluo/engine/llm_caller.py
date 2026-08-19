@@ -238,6 +238,7 @@ def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
 from ..i18n import t
 from .tool_formatters import (
     build_tool_detail_payload,
+    build_tool_in_flight_detail_payload,
     format_tool_chip_header,
     format_tool_chip_in_flight_header,
     format_tool_diff,
@@ -368,12 +369,20 @@ class StreamJSONTracker:
         in-flight LLM stream is never disrupted by history I/O.
 
         Optional ``tool_use_id`` / ``is_error`` / ``tool_detail`` kwargs feed
-        the frontend's single-chip state machine: an in-flight tool chip
-        carries ``tool_use_id`` with ``tool_detail=None``; the terminal chip
-        carries the same id plus ``is_error`` and the structured detail
-        payload. They are forwarded to ``record_stream_progress`` only when
-        non-default so narrative-text progress lines stay byte-identical to
-        the legacy schema.
+        the frontend's single-chip state machine. Both chip states carry
+        ``tool_use_id`` and a structured ``tool_detail``: the in-flight one a
+        ``kind="tool_input"`` payload (the call's full arguments, expandable
+        while it runs), the terminal one the settled
+        ``build_tool_detail_payload`` result.
+
+        INVARIANT: ``is_error`` — absent while in flight, ``True``/``False``
+        once settled — is the ONLY marker distinguishing the two states, on
+        both sides of the wire. ``tool_detail`` is populated in both, so no
+        caller may read its absence as "still running".
+
+        They are forwarded to ``record_stream_progress`` only when non-default
+        so narrative-text progress lines stay byte-identical to the legacy
+        schema.
         """
         if not self._progress_enabled or not content:
             return
@@ -679,10 +688,15 @@ class StreamJSONTracker:
                                 f"[{in_flight}]",
                                 item,
                                 tool_use_id=tool_use_id or None,
-                                # tool_detail=None marks the in-flight state for
-                                # the frontend chip state machine; the matching
-                                # terminal emit on tool_result fills it in.
-                                tool_detail=None,
+                                # INVARIANT: the omitted `is_error` — NOT an
+                                # empty tool_detail — is what marks this record
+                                # in-flight. The payload carries the call's full
+                                # input so a running tool chip can be expanded
+                                # instead of showing only its truncated header;
+                                # the terminal emit on tool_result replaces it.
+                                tool_detail=build_tool_in_flight_detail_payload(
+                                    name, tool_input
+                                ),
                             )
 
             elif msg_type == 'tool_result':

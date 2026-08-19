@@ -3856,6 +3856,11 @@ chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 const chipGenericNameMod = await import("./tool_chip_generic_name.test.mjs");
 chipGenericNameMod.registerToolChipGenericNameTests({ app, check, findOne, findAll });
 
+// Register the in-flight chip detail-panel tests: a running tool call must be
+// expandable to its full input, and settling it must not duplicate the panel.
+const chipInFlightDetailMod = await import("./tool_chip_in_flight_detail.test.mjs");
+chipInFlightDetailMod.registerToolChipInFlightDetailTests({ app, check, findOne, findAll });
+
 // Register the G4 per-group DAG status marker tests (separate module — same
 // `check` reporter, same `app` module, same shared DOM stub already installed
 // above).

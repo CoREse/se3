@@ -8320,11 +8320,16 @@ function normalizeRecord(rec) {
   }
 
   // Tool chip state fields written by record_stream_progress on stream_progress
-  // records: tool_use carries `tool_use_id` with `tool_detail=null` / `is_error`
-  // absent (in-flight); tool_result carries the same id plus `is_error` and a
-  // structured `tool_detail` payload (terminal). Expose them so the live chip
-  // state machine can find/upgrade chips by id without re-parsing the bracket
-  // marker text.
+  // records. Both states carry `tool_use_id` and a structured `tool_detail`:
+  // tool_use a `kind:"tool_input"` payload (the call's full arguments), and
+  // tool_result the settled per-tool payload.
+  //
+  // INVARIANT: `is_error` — absent in flight, true/false once settled — is the
+  // ONLY field that separates the two. Never read a missing `tool_detail` as
+  // "still running"; in-flight records carry one too.
+  //
+  // Expose them so the live chip state machine can find/upgrade chips by id
+  // without re-parsing the bracket marker text.
   const toolUseIdRaw = pick("tool_use_id");
   const toolUseId =
     typeof toolUseIdRaw === "string" && toolUseIdRaw ? toolUseIdRaw : null;
@@ -10629,6 +10634,13 @@ function applyFragmentToBubble(row, norm) {
       if (!existing) {
         const chip = createInFlightChip(parsed.name, parsed.header);
         if (chip.dataset) chip.dataset.toolUseId = norm.toolUseId;
+        // Folded by default: a running call's full arguments stay one click
+        // away without shoving the live conversation around while it streams.
+        // The terminal upgrade re-runs attachChipDetail, which drops this
+        // toggle/panel pair first, so no duplicate panel survives.
+        if (norm.toolDetail) {
+          attachChipDetail(chip, norm.toolDetail, /*expanded=*/false);
+        }
         reg.set(norm.toolUseId, chip);
         inline.appendChild(chip);
       }
@@ -11579,8 +11591,77 @@ registerToolDetailRenderer("glob_matches", (detail) => {
   return frag;
 });
 
+// Render a tool call's own arguments as a labelled key/value block. Long or
+// multi-line values go into a `<pre>` so a full Agent prompt stays readable;
+// short scalars stay on one line next to their key.
+function renderToolInputBlock(input) {
+  const wrap = el("div", "tool-marker-input");
+  const keys = input && typeof input === "object" ? Object.keys(input) : [];
+  wrap.appendChild(el("div", "tool-marker-input-label",
+    tf("tool.detail.input", "input")));
+  if (!keys.length) {
+    wrap.appendChild(el("p", "tool-detail-empty",
+      tf("tool.detail.noInput", "(no input)")));
+    return wrap;
+  }
+  for (const k of keys) {
+    const v = input[k];
+    const row = el("div", "tool-marker-input-row");
+    row.appendChild(el("span", "tool-marker-input-key", String(k)));
+    let text;
+    if (typeof v === "string") text = v;
+    else if (v === undefined) text = "";
+    else {
+      try { text = JSON.stringify(v, null, 2); }
+      catch (_) { text = String(v); }
+      if (text === undefined) text = String(v);
+    }
+    text = String(text == null ? "" : text);
+    if (text.indexOf("\n") >= 0 || text.length > 80) {
+      row.appendChild(el("pre", "tool-marker-input-pre", text));
+    } else {
+      row.appendChild(el("span", "tool-marker-input-value", text));
+    }
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+// In-flight payload (`build_tool_in_flight_detail_payload`): the call is still
+// running, so there is no result to show — only what was asked. Bash reuses the
+// `$ command` line from `bash_output` so a running and a finished shell call
+// read the same way.
+registerToolDetailRenderer("tool_input", (detail) => {
+  const frag = document.createDocumentFragment();
+  const input = detail.input && typeof detail.input === "object" ? detail.input : {};
+  if (detail.tool_name === "Bash") {
+    const cmd = el("div", "tool-marker-bash-cmd");
+    cmd.appendChild(el("span", "tool-marker-bash-label", "$"));
+    cmd.appendChild(el("span", "tool-marker-bash-text", String(input.command || "")));
+    frag.appendChild(cmd);
+    const rest = {};
+    for (const k of Object.keys(input)) {
+      if (k !== "command") rest[k] = input[k];
+    }
+    if (Object.keys(rest).length) frag.appendChild(renderToolInputBlock(rest));
+  } else {
+    frag.appendChild(renderToolInputBlock(input));
+  }
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
+  }
+  return frag;
+});
+
 registerToolDetailRenderer("text", (detail) => {
   const wrap = el("div", "tool-marker-text-plain");
+  // An unregistered tool's settled payload carries the call's input as well as
+  // its result, so the finished chip is never less informative than the
+  // in-flight one it replaced. Legacy records with no `input` key skip this.
+  if (detail.input && typeof detail.input === "object" &&
+      Object.keys(detail.input).length) {
+    wrap.appendChild(renderToolInputBlock(detail.input));
+  }
   wrap.appendChild(el("pre", "tool-marker-text-pre", String(detail.text || "")));
   if (detail.truncated) {
     wrap.appendChild(el("div", "diff-truncated", tf("tool.detail.truncated", "… (output truncated)")));
@@ -11646,6 +11727,45 @@ function _toolTruncatePath(path, max) {
   const parts = s.replace(/\\/g, "/").split("/");
   if (parts.length <= 1) return s;
   return `${parts[0]}/.../${parts[parts.length - 1]}`;
+}
+
+// JS mirror of `TOOL_DETAIL_PAYLOAD_MAX_CHARS` (engine/truncation.py). The
+// final view rebuilds detail payloads locally from raw_json, so it must cut
+// oversize values at the same boundary the daemon does — otherwise the same
+// call would render differently live and after the step settles.
+const TOOL_DETAIL_PAYLOAD_MAX_CHARS = 20000;
+
+// JS mirror of `_build_input_payload`: keep every key and the full value up to
+// the cap, flagging whether anything was cut. Non-string values pass through —
+// the browser already holds them as parsed JSON.
+function _toolInputPayload(input) {
+  const out = {};
+  let truncated = false;
+  if (input && typeof input === "object") {
+    for (const k of Object.keys(input)) {
+      const v = input[k];
+      if (typeof v === "string" && v.length > TOOL_DETAIL_PAYLOAD_MAX_CHARS) {
+        out[k] = v.slice(0, TOOL_DETAIL_PAYLOAD_MAX_CHARS);
+        truncated = true;
+      } else {
+        out[k] = v;
+      }
+    }
+  }
+  return { input: out, truncated: truncated };
+}
+
+// JS mirror of `build_tool_in_flight_detail_payload`. Used for a tool_use that
+// the step ended without a matching tool_result, so the final view can expand a
+// never-settled call exactly like the live one could.
+function _toolInFlightDetailPayload(toolName, input) {
+  const p = _toolInputPayload(input);
+  return {
+    kind: "tool_input",
+    tool_name: toolName || "Tool",
+    input: p.input,
+    truncated: p.truncated,
+  };
 }
 
 function _toolHasKey(input, key) {
@@ -11902,7 +12022,16 @@ function _toolDetailPayload(toolName, input, resultData) {
       truncated: false,
     };
   }
-  return { kind: "text", text: _toolExtractText(resultData), truncated: false };
+  // Mirrors `_build_generic_text_detail`: an unregistered tool has no per-tool
+  // renderer to reconstruct its arguments from, so the settled payload carries
+  // them alongside the result text.
+  const generic = _toolInputPayload(input);
+  return {
+    kind: "text",
+    text: _toolExtractText(resultData),
+    input: generic.input,
+    truncated: generic.truncated,
+  };
 }
 
 // --- Chip event extraction (raw_json → ordered text/chip events) -----------
@@ -11937,7 +12066,10 @@ function extractAssistantChipEvents(rawJson) {
       name: toolName,
       status: "in-flight",
       header: header,
-      detail: null,
+      // A call the step ended without a tool_result stays in-flight here; give
+      // it the same expandable input payload the live chip got, so the final
+      // view is not strictly poorer than the stream it replaced.
+      detail: _toolInFlightDetailPayload(toolName, input),
       _input: input || {},
     };
     events.push(evt);
@@ -12031,6 +12163,7 @@ function renderChipEvents(events) {
       if (evt.toolUseId) chip.dataset && (chip.dataset.toolUseId = evt.toolUseId);
       if (evt.status === "success") upgradeChipToSuccess(chip, evt.header, evt.detail);
       else if (evt.status === "failure") upgradeChipToFailure(chip, evt.header, evt.detail);
+      else if (evt.detail) attachChipDetail(chip, evt.detail, /*expanded=*/false);
       nodes.push(chip);
     }
   }
@@ -13022,6 +13155,7 @@ function renderNarrativeNodes(text, norm) {
     if (evt.toolUseId) chip.dataset && (chip.dataset.toolUseId = evt.toolUseId);
     if (evt.status === "success") upgradeChipToSuccess(chip, evt.header, evt.detail);
     else if (evt.status === "failure") upgradeChipToFailure(chip, evt.header, evt.detail);
+    else if (evt.detail) attachChipDetail(chip, evt.detail, /*expanded=*/false);
     return chip;
   };
 
@@ -17374,6 +17508,7 @@ if (typeof module !== "undefined" && module.exports) {
     createInFlightChip,
     upgradeChipToSuccess,
     upgradeChipToFailure,
+    attachChipDetail,
     renderToolDetailPanel,
     extractAssistantChipEvents,
     renderChipEvents,

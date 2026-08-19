@@ -2,11 +2,14 @@
 ``StreamJSONTracker._emit_progress``.
 
 Each tool call produces exactly two ``stream_progress`` records: an
-in-flight one on the ``tool_use`` event (``tool_detail`` absent because the
-in-flight chip has no detail panel yet) and a terminal one on the
-``tool_result`` event (carrying ``is_error`` and a structured
-``tool_detail`` payload). No third ``[<preview>]`` chip is emitted on
-tool_result.
+in-flight one on the ``tool_use`` event (carrying a ``kind="tool_input"``
+``tool_detail`` so the running chip can be expanded to its full arguments)
+and a terminal one on the ``tool_result`` event (carrying ``is_error`` and
+the settled structured ``tool_detail`` payload). No third ``[<preview>]``
+chip is emitted on tool_result.
+
+The two states are told apart by ``is_error`` alone — absent while running,
+``True``/``False`` once settled. Both carry a ``tool_detail``.
 """
 
 from __future__ import annotations
@@ -115,10 +118,12 @@ def test_read_success_emits_in_flight_and_terminal(monkeypatch, tmp_path):
 
     in_flight, terminal = recs
 
-    # In-flight: tool_use_id set, no is_error, no tool_detail.
+    # In-flight: tool_use_id set, no is_error, and a `tool_input` detail
+    # payload carrying the call's own arguments. `is_error` being absent — NOT
+    # an empty tool_detail — is what marks the record in-flight.
     assert in_flight["tool_use_id"] == "tu-read-1"
     assert in_flight["is_error"] is None
-    assert in_flight["tool_detail"] is None
+    assert in_flight["tool_detail"]["kind"] == "tool_input"
     assert in_flight["content"].startswith("[Read")
     assert "✓" not in in_flight["content"]
     assert "✗" not in in_flight["content"]
@@ -192,10 +197,11 @@ def test_edit_success_terminal_has_edit_diff_detail_with_hunk_start(
 
     in_flight, terminal = recs
 
-    # In-flight emits an [Edit:...] chip with the line-count summary but no detail.
+    # In-flight emits an [Edit:...] chip with the line-count summary plus the
+    # expandable tool_input payload.
     assert in_flight["tool_use_id"] == "tu-edit-1"
     assert in_flight["content"].startswith("[Edit")
-    assert in_flight["tool_detail"] is None
+    assert in_flight["tool_detail"]["kind"] == "tool_input"
     assert in_flight["is_error"] is None
 
     # Terminal carries the structured edit_diff payload.
@@ -264,7 +270,7 @@ def test_bash_failure_emits_terminal_with_is_error_true(monkeypatch, tmp_path):
     assert in_flight["tool_use_id"] == "tu-bash-1"
     assert in_flight["content"].startswith("[Bash")
     assert in_flight["is_error"] is None
-    assert in_flight["tool_detail"] is None
+    assert in_flight["tool_detail"]["kind"] == "tool_input"
 
     assert terminal["tool_use_id"] == "tu-bash-1"
     assert terminal["is_error"] is True

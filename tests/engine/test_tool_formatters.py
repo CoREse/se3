@@ -6,13 +6,18 @@ generic fallback, registry structure, and routing (registered vs unregistered).
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from tianluo.engine.tool_formatters import (
+    TOOL_DETAIL_PAYLOAD_MAX_CHARS,
     TOOL_FORMATTERS,
+    _build_generic_text_detail,
     _extract_text,
+    build_tool_detail_payload,
+    build_tool_in_flight_detail_payload,
     format_tool_chip_header,
     format_tool_chip_in_flight_header,
     format_tool_result_preview,
@@ -689,3 +694,152 @@ class TestChipGrammarLeadsWithToolName:
         assert format_tool_use_preview("Agent", {"prompt": "x"}) == (
             "Tool: Agent | Input: prompt=x"
         )
+
+
+# ---------------------------------------------------------------------------
+# In-flight detail payload — an expandable panel for a still-running call
+# ---------------------------------------------------------------------------
+
+
+class TestInFlightDetailPayload:
+    """`build_tool_in_flight_detail_payload` feeds the running chip's panel.
+
+    The chip header is a 60-char summary, so a Bash `command` or an Agent
+    `prompt` is unreadable there. The panel carries the call's arguments in
+    full (up to the payload cap) while the call is still running.
+    """
+
+    def test_shape_and_discriminator(self):
+        payload = build_tool_in_flight_detail_payload(
+            "Agent", {"description": "self check", "prompt": "look at the diff"}
+        )
+        assert payload == {
+            "kind": "tool_input",
+            "tool_name": "Agent",
+            "input": {"description": "self check", "prompt": "look at the diff"},
+            "truncated": False,
+        }
+
+    def test_bash_command_is_carried_whole(self):
+        command = "pytest -q tests/ && echo done  # " + "x" * 300
+        payload = build_tool_in_flight_detail_payload("Bash", {"command": command})
+        assert payload["input"]["command"] == command
+        assert payload["truncated"] is False
+
+    def test_agent_prompt_is_carried_whole(self):
+        prompt = "line one\nline two\n" + "y" * 5000
+        payload = build_tool_in_flight_detail_payload(
+            "Agent", {"description": "d", "prompt": prompt}
+        )
+        assert payload["input"]["prompt"] == prompt
+        assert payload["input"]["description"] == "d"
+
+    def test_every_generic_key_survives(self):
+        use_input = {"a": 1, "b": "two", "c": [3], "d": None, "e": True, "f": "six"}
+        payload = build_tool_in_flight_detail_payload("mcp__srv__tool", use_input)
+        # Unlike the 3-key chip header summary, nothing is dropped here.
+        assert set(payload["input"]) == set(use_input)
+        assert payload["input"]["c"] == [3]
+        assert payload["input"]["e"] is True
+        assert payload["input"]["d"] is None
+
+    def test_oversize_string_is_tail_truncated_and_flagged(self):
+        long = "z" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 500)
+        payload = build_tool_in_flight_detail_payload("Agent", {"prompt": long})
+        assert payload["truncated"] is True
+        assert len(payload["input"]["prompt"]) == TOOL_DETAIL_PAYLOAD_MAX_CHARS
+        assert payload["input"]["prompt"] == long[:TOOL_DETAIL_PAYLOAD_MAX_CHARS]
+
+    def test_exactly_at_the_cap_is_not_flagged(self):
+        exact = "z" * TOOL_DETAIL_PAYLOAD_MAX_CHARS
+        payload = build_tool_in_flight_detail_payload("Agent", {"prompt": exact})
+        assert payload["truncated"] is False
+        assert payload["input"]["prompt"] == exact
+
+    def test_one_long_value_flags_the_whole_payload(self):
+        payload = build_tool_in_flight_detail_payload(
+            "Agent",
+            {"short": "s", "long": "z" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 1)},
+        )
+        assert payload["truncated"] is True
+        assert payload["input"]["short"] == "s"
+
+    def test_empty_and_missing_input(self):
+        for use_input in ({}, None):
+            payload = build_tool_in_flight_detail_payload("unknown", use_input)
+            assert payload["input"] == {}
+            assert payload["truncated"] is False
+            assert payload["kind"] == "tool_input"
+
+    def test_unserializable_value_becomes_str(self):
+        sentinel = object()
+        payload = build_tool_in_flight_detail_payload("X", {"obj": sentinel})
+        assert payload["input"]["obj"] == str(sentinel)
+        json.dumps(payload)
+
+    def test_payload_is_json_safe(self):
+        payload = build_tool_in_flight_detail_payload(
+            "Agent", {"prompt": "p", "nested": {"k": [1, 2]}, "who": object()}
+        )
+        assert json.loads(json.dumps(payload)) == payload
+
+    def test_non_string_key_is_stringified(self):
+        payload = build_tool_in_flight_detail_payload("X", {1: "one"})
+        assert payload["input"] == {"1": "one"}
+        json.dumps(payload)
+
+
+class TestGenericTerminalDetailCarriesInput:
+    """A settled unregistered call must not be poorer than its in-flight chip."""
+
+    def test_generic_text_detail_has_input(self):
+        detail = _build_generic_text_detail(
+            {"description": "d", "prompt": "p"}, "No findings reported.", None
+        )
+        assert detail["kind"] == "text"
+        assert detail["text"] == "No findings reported."
+        assert detail["input"] == {"description": "d", "prompt": "p"}
+        assert detail["truncated"] is False
+
+    def test_routed_through_build_tool_detail_payload(self):
+        detail = build_tool_detail_payload(
+            "Agent", {"prompt": "look"}, "done", None
+        )
+        assert detail["kind"] == "text"
+        assert detail["input"] == {"prompt": "look"}
+
+    def test_input_truncation_flags_the_payload(self):
+        long = "z" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 10)
+        detail = _build_generic_text_detail({"prompt": long}, "short result", None)
+        assert detail["truncated"] is True
+        assert len(detail["input"]["prompt"]) == TOOL_DETAIL_PAYLOAD_MAX_CHARS
+        assert detail["text"] == "short result"
+
+    def test_result_truncation_still_flags_the_payload(self):
+        detail = _build_generic_text_detail(
+            {"prompt": "p"}, "z" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 10), None
+        )
+        assert detail["truncated"] is True
+        assert detail["input"] == {"prompt": "p"}
+
+    def test_empty_input_yields_empty_dict_not_missing_key(self):
+        detail = _build_generic_text_detail({}, "r", None)
+        assert detail["input"] == {}
+
+    @pytest.mark.parametrize(
+        "tool_name,use_input,expected_kind,expected_key",
+        [
+            ("Bash", {"command": "ls"}, "bash_output", "command"),
+            ("Read", {"file_path": "a.py"}, "read_text", "file_path"),
+            ("Grep", {"pattern": "x", "path": "."}, "grep_matches", "pattern"),
+            ("Glob", {"pattern": "*.py", "path": "."}, "glob_matches", "pattern"),
+        ],
+    )
+    def test_registered_payload_structure_unchanged(
+        self, tool_name, use_input, expected_kind, expected_key
+    ):
+        """Registered tools keep their own payload shape — no `input` key added."""
+        detail = build_tool_detail_payload(tool_name, use_input, "out", None)
+        assert detail["kind"] == expected_kind
+        assert expected_key in detail
+        assert "input" not in detail

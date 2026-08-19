@@ -895,12 +895,19 @@ def record_stream_progress(
 
     Optional tool-event fields (``tool_use_id`` / ``is_error`` /
     ``tool_detail``) carry per-chip state for the frontend's single-chip
-    state machine: an in-flight chip emitted on ``tool_use`` carries the id
-    with ``tool_detail=None``; the terminal chip emitted on ``tool_result``
-    carries the same id plus ``is_error`` and a structured ``tool_detail``
-    payload (built by ``tool_formatters.build_tool_detail_payload``). When
-    all three fields are at their defaults (``None``) the written record is
-    byte-identical to the pre-extension schema, so legacy jsonl readers and
+    state machine. Both chip states carry the id and a structured
+    ``tool_detail``: the in-flight chip emitted on ``tool_use`` a
+    ``kind="tool_input"`` payload (``build_tool_in_flight_detail_payload`` —
+    the call's full arguments, so a running tool can be expanded), the
+    terminal chip emitted on ``tool_result`` the settled payload from
+    ``tool_formatters.build_tool_detail_payload``.
+
+    INVARIANT: ``is_error`` — written only once the call settles — is the ONLY
+    field distinguishing the two states; a reader must never infer "still
+    running" from a missing ``tool_detail``.
+
+    When all three fields are at their defaults (``None``) the written record
+    is byte-identical to the pre-extension schema, so legacy jsonl readers and
     narrative-text progress lines are unaffected.
 
     Optional ``agent_name`` / ``model_name`` carry the identity of the agent
