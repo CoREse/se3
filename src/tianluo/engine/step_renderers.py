@@ -859,19 +859,29 @@ def _render_implement(step: Step) -> None:
         for test_path in tests_added:
             lines.append(f"  [green]+[/green] {test_path}")
 
-    # ── Incomplete Tasks ────────────────────────────────────────────
+    # ── Incomplete Tasks / Notes ────────────────────────────────────
+    # WHY: the engine keeps a "complete" verdict even when the agent left
+    # entries here, so painting them red contradicts the ✓ shown above in the
+    # same panel. Under "complete" the leftovers are notes / unverified items,
+    # not failures — only partial/failed/unknown warrant the red framing.
     if incomplete_tasks:
+        neutral = completion_status == "complete"
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append(t("cli.steprender.implement.incomplete_tasks", count=len(incomplete_tasks)))
+        lines.append(t(
+            "cli.steprender.implement.notes" if neutral
+            else "cli.steprender.implement.incomplete_tasks",
+            count=len(incomplete_tasks),
+        ))
+        bullet = "[dim]•[/dim]" if neutral else "[red]✗[/red]"
         for task in incomplete_tasks:
             if isinstance(task, dict):
                 tid = task.get("task_id", task.get("id", "?"))
                 reason = task.get("reason", task.get("error", ""))
-                lines.append(f"  [red]✗[/red] [bold]{tid}[/bold]{f': {reason}' if reason else ''}")
+                lines.append(f"  {bullet} [bold]{tid}[/bold]{f': {reason}' if reason else ''}")
             else:
-                lines.append(f"  [red]✗[/red] {task}")
+                lines.append(f"  {bullet} {task}")
 
     # ── Restricted Edits ────────────────────────────────────────────
     if restricted_applied or restricted_failed:

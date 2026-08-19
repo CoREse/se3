@@ -916,6 +916,7 @@
   "cli.steprender.implement.files_changed": "[bold yellow]变更文件[/bold yellow]  [dim]（{count}）[/dim]",
   "cli.steprender.implement.groups": "[bold]{count}[/bold] 个分组",
   "cli.steprender.implement.incomplete_tasks": "[bold red]未完成任务[/bold red]  [dim]（{count}）[/dim]",
+  "cli.steprender.implement.notes": "[bold]备注 / 未验证项[/bold]  [dim]（{count}）[/dim]",
   "cli.steprender.implement.partial": "部分完成",
   "cli.steprender.implement.restricted_applied": "[dim]受限编辑已应用：{count}[/dim]",
   "cli.steprender.implement.restricted_failed": "[bold red]受限编辑失败：{count}[/bold red]",

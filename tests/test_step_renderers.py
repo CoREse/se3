@@ -981,3 +981,128 @@ class TestRenderImplement:
         assert "alpha; beta; gamma" in content
         for bogus in ("G1.", "G2.", "G3.", "1.", "2.", "3."):
             assert f"[dim]{bogus}[/dim]" not in content
+
+
+# ---------------------------------------------------------------------------
+# _render_implement — leftover incomplete_tasks under a "complete" verdict
+# ---------------------------------------------------------------------------
+
+
+class TestRenderImplementLeftoverNotes:
+    """A "complete" verdict must not be contradicted by a red failure block.
+
+    The engine deliberately keeps ``complete`` when the agent left entries in
+    ``incomplete_tasks``; the renderer therefore has to downgrade that block to
+    neutral notes instead of painting ✓ and red ✗ in the same panel.
+    """
+
+    @staticmethod
+    def _content(mock_render_full):
+        return mock_render_full.call_args[0][0]
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_complete_renders_neutral_notes(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "complete",
+            "summary": "did the work",
+            "files_changed": ["a.py"],
+            "tests_added": [],
+            "incomplete_tasks": ["Full test suite run was still in progress"],
+        })
+        _render_implement(step)
+
+        content = self._content(mock_render_full)
+        assert "Notes / Unverified Items" in content
+        assert "Incomplete Tasks" not in content
+        assert "未完成任务" not in content
+        assert "[red]✗[/red]" not in content
+        assert "[dim]•[/dim] Full test suite run was still in progress" in content
+        # t() resolved — no raw dotted key leaked.
+        assert "cli.steprender." not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_complete_neutral_branch_expands_dict_entries(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "complete",
+            "files_changed": [],
+            "tests_added": [],
+            "incomplete_tasks": [
+                {"task_id": "T1", "reason": "suite not observed"},
+                {"id": "T2", "error": "flaky check"},
+                {"task_id": "T3"},
+            ],
+        })
+        _render_implement(step)
+
+        content = self._content(mock_render_full)
+        assert "  [dim]•[/dim] [bold]T1[/bold]: suite not observed" in content
+        assert "  [dim]•[/dim] [bold]T2[/bold]: flaky check" in content
+        assert "  [dim]•[/dim] [bold]T3[/bold]" in content
+        assert "[red]✗[/red]" not in content
+
+    @pytest.mark.parametrize("status", ["partial", "failed", "unknown", None])
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_non_complete_keeps_red_incomplete_block(self, mock_render_full, status):
+        from tianluo.engine.step_renderers import _render_implement
+
+        outputs = {
+            "files_changed": [],
+            "tests_added": [],
+            "incomplete_tasks": [
+                {"task_id": "T1", "reason": "blocked"},
+                "loose string task",
+            ],
+        }
+        if status is not None:
+            outputs["completion_status"] = status
+        step = _make_step(StepType.IMPLEMENT, outputs)
+        _render_implement(step)
+
+        content = self._content(mock_render_full)
+        assert "Incomplete Tasks" in content
+        assert "Notes / Unverified Items" not in content
+        assert "  [red]✗[/red] [bold]T1[/bold]: blocked" in content
+        assert "  [red]✗[/red] loose string task" in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_complete_neutral_title_localises_to_zh_cn(self, mock_render_full, monkeypatch):
+        """The neutral key must exist in zh-CN too, not fall back to en-US."""
+        import tianluo.i18n as _i18n
+        from tianluo.engine.step_renderers import _render_implement
+
+        monkeypatch.setenv("SE3_LANG", "zh-CN")
+        _i18n.reset_language()
+        _i18n.clear_caches()
+        try:
+            step = _make_step(StepType.IMPLEMENT, {
+                "completion_status": "complete",
+                "files_changed": [],
+                "tests_added": [],
+                "incomplete_tasks": ["残留备注"],
+            })
+            _render_implement(step)
+        finally:
+            _i18n.reset_language()
+            _i18n.clear_caches()
+
+        content = self._content(mock_render_full)
+        assert "备注 / 未验证项" in content
+        assert "未完成任务" not in content
+        assert "Notes / Unverified Items" not in content
+
+    def test_neutral_key_present_in_both_locales(self):
+        import json
+        from pathlib import Path
+
+        import tianluo.i18n as _i18n
+
+        locales = Path(_i18n.__file__).parent / "locales"
+        key = "cli.steprender.implement.notes"
+        for name in ("en-US.json", "zh-CN.json"):
+            data = json.loads((locales / name).read_text(encoding="utf-8"))
+            assert key in data, f"{key} missing from {name}"
+            assert "{count}" in data[key]
