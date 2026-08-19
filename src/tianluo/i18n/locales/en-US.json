@@ -917,6 +917,7 @@
   "cli.steprender.implement.files_changed": "[bold yellow]Files Changed[/bold yellow]  [dim]({count})[/dim]",
   "cli.steprender.implement.groups": "[bold]{count}[/bold] groups",
   "cli.steprender.implement.incomplete_tasks": "[bold red]Incomplete Tasks[/bold red]  [dim]({count})[/dim]",
+  "cli.steprender.implement.notes": "[bold]Notes / Unverified Items[/bold]  [dim]({count})[/dim]",
   "cli.steprender.implement.partial": "Partial",
   "cli.steprender.implement.restricted_applied": "[dim]Restricted edits applied: {count}[/dim]",
   "cli.steprender.implement.restricted_failed": "[bold red]Restricted edits failed: {count}[/bold red]",
