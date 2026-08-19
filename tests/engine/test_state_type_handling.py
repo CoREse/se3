@@ -129,7 +129,7 @@ class TestBaselineFailuresPersistence:
     def test_populated_list_round_trips(self):
         """A concrete failure set round-trips intact."""
         failures = [
-            "tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count",
+            "tests/engine/test_charter.py::TestLoadCharter::test_missing_file",
             "tests/test_daemon.py::test_flaky",
         ]
         state = State()

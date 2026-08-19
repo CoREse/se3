@@ -1,7 +1,7 @@
 """Context builder for automatic context collection.
 
-Automatically gathers relevant context from specs, previous outputs,
-project state, and code for LLM calls.
+Automatically gathers relevant context from previous outputs, project
+state, and code for LLM calls.
 """
 
 from __future__ import annotations
@@ -124,23 +124,6 @@ ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 # config would inject the prompt fragment with nothing to collect the result,
 # so the summarize handler no longer calls the injection at all.
 ISSUE_DISCOVERY_DEFAULT_STEPS: list[str] = []
-
-# Steps explicitly forbidden from spec names injection
-SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = frozenset({"summarize", "commit"})
-
-# Default steps that receive the available-specs names injection.
-# Note: deprecated step types (propose/design) are NOT listed here — their
-# stub handlers forward to the unified plan_handler, which keys its injection
-# on "plan". There is therefore no code path that would lookup "design" or
-# "propose" against this whitelist.
-SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
-    "plan",
-    "plan_tasks",
-    "implement",
-    "verify_spec",
-    "update_spec",
-    "self_check",
-]
 
 # Steps explicitly forbidden from runtime environment injection.
 # These are mechanical steps where awareness of read-only luo history/issue
@@ -302,105 +285,6 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     return ISSUE_DISCOVERY_PROMPT
 
 
-def get_spec_names_injection(
-    step_type: str,
-    project_root: Path,
-    relevant_specs: list[str] | None = None,
-) -> str:
-    """Get the available-specs names prompt injection for a step.
-
-    Lists all available specs under ``tianluo/specs/`` and declares which are already
-    loaded into the prompt (from ``relevant_specs``), so the LLM can optionally
-    consult additional specs on demand via the read-only ``luo spec`` index
-    commands (``luo spec index`` / ``luo spec show``) if the analyze step missed
-    them — never by reading a whole ``spec.md`` file.
-
-    Args:
-        step_type: Current step type name (e.g., "plan", "implement").
-        project_root: Project root directory for loading config and specs.
-        relevant_specs: Spec names already loaded into the prompt. May be ``None``
-            or empty; treated as "no specs loaded" in that case.
-
-    Returns:
-        Spec-names injection string to append to prompt, or empty string when the
-        step is not in the whitelist.
-    """
-    # Forbidden steps never get injection — short-circuit before any I/O.
-    # This also makes a later re-check unnecessary: yaml cannot re-enable a
-    # forbidden step because the early return fires first.
-    if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
-        return ""
-
-    # Read whitelist from the active project YAML (tianluo.local.yaml when
-    # present, otherwise tianluo.yaml). Routing through load_project_yaml
-    # ensures malformed-local-shadow warnings surface here too rather
-    # than depending on some other loader having run first.
-    whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
-    from ..config import load_project_yaml
-
-    config, _src = load_project_yaml(project_root)
-    # Use `or {}` rather than the default arg so that an explicit
-    # `spec_names_injection: null` (common when users "disable" a key)
-    # falls through to defaults instead of raising AttributeError
-    # on the subsequent .get("steps") call.
-    section = config.get("spec_names_injection") if isinstance(config, dict) else None
-    section = section or {}
-    if isinstance(section, dict):
-        configured_steps = section.get("steps")
-        # Only accept list overrides; silently ignore malformed values
-        # (e.g. a bare string / dict from a user typo) which would
-        # otherwise turn the `in` check into surprising substring or
-        # key-lookup semantics.
-        if isinstance(configured_steps, list):
-            whitelist = configured_steps
-
-    if step_type not in whitelist:
-        return ""
-
-    # Scan the resolved specs dir (tianluo/specs preferred, specs/ fallback,
-    # openspec/specs legacy) so projects using the fallback layout get the
-    # correct listing.
-    specs_dir = ContextBuilder._resolve_specs_dir(project_root)
-    all_spec_names: list[str] = []
-    if specs_dir.exists():
-        for entry in specs_dir.iterdir():
-            if entry.is_dir() and (entry / "spec.md").exists():
-                all_spec_names.append(entry.name)
-    all_spec_names.sort()
-
-    # Defensive filter: upstream inputs can occasionally contain non-string
-    # entries (e.g. dicts from a malformed analyze output). `sorted()` on a
-    # mixed-type list would raise TypeError — silently drop non-strings.
-    # The `isinstance(list)` guard also prevents a bare string from being
-    # iterated character-by-character (yielding bogus per-letter entries).
-    if isinstance(relevant_specs, list):
-        loaded_spec_names = sorted(s for s in relevant_specs if isinstance(s, str))
-    else:
-        loaded_spec_names = []
-    loaded_display = ", ".join(loaded_spec_names) if loaded_spec_names else "none"
-    all_display = ", ".join(all_spec_names) if all_spec_names else "(none found)"
-
-    return (
-        "\n\n## Available Specifications\n"
-        f"All available specs in this project: {all_display}.\n\n"
-        f"Specs already loaded above: {loaded_display}.\n\n"
-        "If a spec above is not yet included but you believe it is relevant to "
-        "the current task, you MAY consult it on demand through the read-only "
-        "`luo spec` index commands (run them via Bash):\n"
-        "- `luo spec index` — root view: every spec's name, a one-sentence "
-        "locator, and item count. Start here.\n"
-        "- `luo spec index <spec> [<group>...]` — drill into one spec's "
-        "Requirement index; trailing group-path components open a folded domain "
-        "group or a `pN` page.\n"
-        "- `luo spec show <spec>::<requirement>` — read the authoritative body of "
-        "ONE Requirement (plus its physical location).\n"
-        "Do NOT read an entire `spec.md` file with the Read tool (large specs "
-        "exceed the Read size limit); navigate with `luo spec index` and fetch "
-        "only the specific Requirement bodies you need with `luo spec show`. "
-        "Only consult specs that directly help the task — avoid reading broadly."
-    )
-
-
 def get_charter_injection(project_root: Path) -> str:
     """Get the full-charter prompt injection.
 
@@ -408,9 +292,9 @@ def get_charter_injection(project_root: Path) -> str:
     spec and plays exactly one runtime role: it is injected **in full, into
     every step, unconditionally**, doubling as the conventions channel for the
     sandboxed LLM sub-process (which cannot read CLAUDE.md and obtains
-    project-level conventions only through what luo injects). This helper is the
-    charter half of the injection-surface switch that replaces the retired
-    ``get_spec_names_injection`` (spec-name list) path.
+    project-level conventions only through what luo injects). It is the sole
+    surviving project-convention injection surface — the spec-name listing it
+    replaced was removed along with the spec mirror.
 
     Returns the charter wrapped in a labelled section (prefixed with ``\\n\\n``
     so it concatenates cleanly onto a prompt suffix), or ``""`` when the charter
@@ -810,61 +694,6 @@ def _detect_main_repo_root(worktree_path: Path) -> Path | None:
     except Exception:
         pass
     return None
-
-
-class ContextBuilder:
-    """Provides spec directory resolution and spec content loading.
-
-    Used by the analyze and discovery handlers (via ContextBuilder.load_specs_for_step)
-    to locate and load specification files from the project's specs directory.
-    """
-
-    def __init__(self, project_root: Path):
-        """Initialize context builder.
-
-        Args:
-            project_root: Project root directory
-        """
-        self.project_root = Path(project_root)
-        self.specs_dir = self._resolve_specs_dir(self.project_root)
-
-    @staticmethod
-    def _resolve_specs_dir(project_root: Path) -> Path:
-        """Resolve specs directory: tianluo/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
-        primary = runtime_dir(project_root) / "specs"
-        fallback = project_root / "specs"
-        legacy = project_root / "openspec" / "specs"
-        if primary.exists():
-            return primary
-        if fallback.exists():
-            return fallback
-        return legacy
-
-    def _load_spec_content(self, spec_name: str) -> Optional[str]:
-        """Load spec content by name.
-
-        Args:
-            spec_name: Name of spec (e.g., "flow-engine")
-
-        Returns:
-            Spec content or None
-        """
-        # Try different paths
-        paths = [
-            self.specs_dir / spec_name / "spec.md",
-            self.specs_dir / f"{spec_name}.md",
-            self.project_root / spec_name,
-            self.project_root / f"{spec_name}.md",
-        ]
-
-        for path in paths:
-            if path.exists():
-                try:
-                    return path.read_text(encoding="utf-8")
-                except Exception as e:
-                    logger.warning(f"Failed to read spec {path}: {e}")
-
-        return None
 
 
 def build_llm_review_prompt(

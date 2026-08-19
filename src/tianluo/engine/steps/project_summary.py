@@ -43,9 +43,6 @@ Recent commits:
 ### Backlog Items
 {backlog_summary}
 
-### Available Specs
-{specs_list}
-
 Provide a concise natural language summary:
 """
 
@@ -106,16 +103,12 @@ def generate_project_summary(
     else:
         backlog_summary = "  (none)"
 
-    specs = raw.get("specs", [])
-    specs_list = ", ".join(specs) if specs else "(none)"
-
     prompt = PROJECT_SUMMARY_PROMPT.format(
         branch=branch,
         uncommitted_count=uncommitted_count,
         recent_commits=recent_commits,
         flow_engine_summary=flow_engine_summary,
         backlog_summary=backlog_summary,
-        specs_list=specs_list,
     )
 
     # Append issue discovery injection if applicable

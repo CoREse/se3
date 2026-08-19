@@ -46,8 +46,6 @@
    - [`server`](#server)
    - [`presets`](#presets)
 3. [Legacy / 历史遗留配置](#legacy--历史遗留配置)
-   - [`spec_governance`](#spec_governance)
-   - [`spec_loading`](#spec_loading)
    - [引擎已不再读取的配置块](#引擎已不再读取的配置块)
 4. [排错:改了配置却没有任何变化](#排错改了配置却没有任何变化)
 
@@ -1205,43 +1203,12 @@ preset 重定向到任意 `prompt_file`。在这里声明一个 preset、却既�
 
 ## Legacy / 历史遗留配置
 
-下面这些块名来自已退役的 **spec 镜像**时代 —— 那时 `tianluo/specs/**` 是一份受治理
-的代码镜像。该镜像已经退役 —— 代码是唯一真相源,经由 code-index、
-`tianluo/charter.md` 以及同位的 why-comments 对外暴露。保留下面这些块,是因为它们
-仍能被解析(其中一个甚至仍在驱动一项真实检查),而不是因为它们还描述着当前的知识
-模型。这里没有任何东西值得在新项目里配置。
-
-### `spec_governance`
-
-spec 文件体积的字节预算与一个执法档位。容错:非法值告警并回落,永不抛错。
-
-| Key | 类型 | 默认值 | 含义 |
-|-----|------|--------|------|
-| `base_max_bytes` | 正 int | `32768`(32 KiB) | `base` spec(历史上每个 step 都全量注入的那一份)的预算。 |
-| `index_render_threshold` | 正 int | `16384`(16 KiB) | 超过此阈值时,`luo spec index` 的输出会被折叠为分组句柄。**空转** —— spec 索引渲染器已随 spec 体系一同退役;保留该字段只为向后兼容,它不驱动任何渲染器。 |
-| `spec_file_warn_bytes` | 正 int | `65536`(64 KiB) | 单个 spec 文件达到此体积时,guardrails 报出 `SIZE_SPEC_FILE` 违规。 |
-| `requirement_warn_bytes` | 正 int | `8192`(8 KiB) | 单个 Requirement 达到此体积时,guardrails 报出 `SIZE_REQUIREMENT` 违规。 |
-| `guardrails_size_tier` | `warn` \| `enforce` | `warn` | `warn` 打印违规并以 `0` 退出;`enforce` 打印违规并以 `1` 退出,而且会让超预算的 spec 像内容违规那样**阻断一次 merge**。 |
-
-**它们如今还被什么用着(已对照代码核实):**三个字节阈值由
-`engine/merge/guardrails.py` 中的 `check_spec_sizes()` 读取,而该函数由
-`luo guardrails` 命令调用 —— 档位为 `enforce` 时,merge 的 guardrail 检查也会调用它。
-`guardrails_size_tier` 还额外决定 `luo guardrails` 的退出码。但 `check_spec_sizes`
-遍历的是 `tianluo/specs/<name>/spec.md`;在一个后 spec 时代的项目里该目录并不存在,
-于是这项检查无物可量,这些阈值也就没有任何可观测的效果。它们**不**被 code-index 的
-降级逻辑使用 —— 那是 [`code_index.degrade_trigger_*`](#code_index),另一个块。
-
-### `spec_loading`
-
-| Key | 类型 | 默认值 | 含义 |
-|-----|------|--------|------|
-| `steps` | mapping `<step> → items` \| `full_spec` | `{}` | 按 step 的 spec 内容加载模式:`items`(头部 + 选中的若干 requirement)对 `full_spec`(整个 spec 文件)。非法值会被跳过并告警,于是内置默认值生效。 |
-
-**完全空转。**`SpecLoadingConfig` / `load_spec_loading_config()` 在 `config.py` 之外
-没有任何调用方(已用全仓 grep 核实,覆盖 `src/` 与 `tests/`)。历史上 `update_spec`
-默认取 `full_spec`;它已转向 index-first 协议、完全不再消费 spec 文本,而那份
-默认 full_spec 的集合如今是空的。`mode_for()` 对每个 step 都返回 `items`。设置这个块
-不会改变任何事情。
+旧版 `tianluo.yaml` 里有些块名来自已退役的 **spec 镜像**时代 —— 那时
+`tianluo/specs/**` 是一份受治理的代码镜像。该镜像已经退役 —— 代码是唯一真相源,
+经由 code-index、`tianluo/charter.md` 以及同位的 why-comments 对外暴露。
+`spec_governance`、`spec_loading`、`spec_write_protection`(以及
+`merge.guardrail_repair`)这几个块如今连 loader 都不存在了:配置里残留的块会被直接
+忽略,留着无害,但也没有任何意义。
 
 ### 引擎已不再读取的配置块
 

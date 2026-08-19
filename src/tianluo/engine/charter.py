@@ -12,8 +12,7 @@ Three capabilities live here:
 - :func:`render_charter_template` — render the packaged ``charter.md`` template
   with project-init placeholder substitution (used by init / migrate).
 - :func:`check_admission` — the **altitude gate**. The normative admission
-  standard (:data:`CHARTER_ADMISSION_STANDARD`, relocated and adapted from
-  ``spec_governance.BASE_ADMISSION_STANDARD``) is the LLM-facing text that
+  standard (:data:`CHARTER_ADMISSION_STANDARD`) is the LLM-facing text that
   guards against low-level content leaking into the charter; the byte threshold
   is a **monitoring light**, not a hard wall — over-threshold flags a review of
   whether low-level content has leaked in, it never blocks.
@@ -57,15 +56,14 @@ DEFAULT_CHARTER_MAX_BYTES = 32768
 
 
 # ---------------------------------------------------------------------------
-# altitude gate — admission standard (relocated from BASE_ADMISSION_STANDARD)
+# altitude gate — admission standard
 # ---------------------------------------------------------------------------
 # The normative text that defines what the charter MAY carry. It is injected
 # into the LLM-driven charter-admission check (see flow check (b)), which is the
-# component that actually judges whether low-level content leaked in. This is
-# the charter-flavoured adaptation of spec_governance.BASE_ADMISSION_STANDARD:
-# charter IS the renamed base, so the admission altitude is identical, but the
-# wording references code-index (the new home of per-module locators) rather
-# than the retired `luo spec` surface.
+# component that actually judges whether low-level content leaked in. The
+# admission altitude is inherited from the retired base spec — charter IS the
+# renamed base — but the wording points at code-index as the home of per-module
+# locators, since the spec surface it used to name no longer exists.
 CHARTER_ADMISSION_STANDARD = """\
 ## Charter Admission Standard
 

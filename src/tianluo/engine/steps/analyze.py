@@ -426,8 +426,8 @@ def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> str:
 def _collect_project_summary(project_root: Path) -> str:
     """Collect structured project context and format as text summary.
 
-    Uses ProjectContextCollector to gather git status, flow engine state,
-    backlog, and spec list, then formats them into a concise text block.
+    Uses ProjectContextCollector to gather git status, flow engine state and
+    backlog, then formats them into a concise text block.
     This replaces the former PROJECT_SUMMARY LLM step with a programmatic
     approach — no LLM call needed.
 
@@ -476,11 +476,6 @@ def _collect_project_summary(project_root: Path) -> str:
             status = item.get("status", "?")
             title = item.get("title", item.get("slug", "?"))
             parts.append(f"  - [{status}] {title}")
-
-    # Specs
-    specs = raw.get("specs", [])
-    if specs:
-        parts.append(f"Available specs: {', '.join(specs)}")
 
     return "\n".join(parts) if parts else "No additional context available"
 

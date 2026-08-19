@@ -34,7 +34,6 @@ try:
     from ..engine.models import FlowInstance, FlowStatus, StepStatus, StepType
     from ..engine.persistence import PersistenceManager
     from ..engine.state_machine import StateMachine
-    from ..engine.context_builder import ContextBuilder
     from ..engine.steps import STEP_HANDLERS
     from ..engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from ..engine.llm_caller import set_extra_prompt
@@ -59,7 +58,6 @@ except ImportError:
     from engine.models import FlowInstance, FlowStatus, StepStatus, StepType
     from engine.persistence import PersistenceManager
     from engine.state_machine import StateMachine
-    from engine.context_builder import ContextBuilder
     from engine.steps import STEP_HANDLERS
     from engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from engine.llm_caller import set_extra_prompt
