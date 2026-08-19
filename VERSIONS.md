@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.10.0 - 2026-08-19
+
+- Retire the spec write-protection mechanism end to end: no step's prompt carries a `SPEC FILE WRITE PROTECTION` section any more, the PreToolUse guard plugin and `--plugin-dir` injection are gone, and the per-step snapshot/diff/rollback guard over `tianluo/specs/` no longer runs
+- Narrow the PLAN step's contract to pure scheduling data — `task_groups` + `total_complexity` + `estimated_effort` plus the existing decomposition/granularity fields — dropping `proposal`, `design` and `spec_changes`; the full/medium/shallow prompt-depth tiers collapse into one schema per doctrine
+- Stop injecting `## Project Conventions` and `## Design Document` into implement prompts (project conventions are already carried by the charter + code-index injection) and drop the spec wording from self_check, version_analyze, discovery and the runtime-environment guidance
+- Remove the merge subsystem's spec guardrails chain and its LLM repair loop: merge now proceeds straight from conflict resolution to commit/merge-back, with no guardrails stage, no guardrail fix-up commits and no `merge.guardrail_repair` configuration
+- Remove the `luo guardrails` command along with its help text in every locale and its entry in both README command tables, and narrow the `luo merge-respond` description to conflict escalation only
+- Delete the unused spec loading and validation code (`spec_validator`, `spec_governance`, `spec_format`, the spec-directory resolution helpers and `utils.discover_specs`/`parse_spec`) and drop the `spec_write_protection`, `spec_loading` and `spec_governance` configuration sections from the loader and both configuration references
+- Keep existing projects loading cleanly: leftover `spec_write_protection:`, `spec_loading:`, `spec_governance:` and `merge.guardrail_repair:` blocks in `tianluo.yaml` are silently ignored, old human-call files with guardrail fields are read without error, and persisted flows that recorded `plan.proposal`/`plan.design` still render in `luo history show` and the WebUI
+- Change the commit-message fallback chain to version_analyze `commit_message` → `implement_summary` → task-description template, now that PLAN no longer produces a proposal summary
 ## 12.9.2 - 2026-08-19
 
 - Fix WebUI chat history for active --worktree flows showing plan and confirm records duplicated several times over

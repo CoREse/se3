@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tianluo"
-version = "12.9.2"
+version = "12.10.0"
 description = "tianluo (田螺) - autonomous SE 3.0 flow engine: prompt once, walk away, come back to a finished deliverable"
 readme = "README.md"
 license = "Apache-2.0"
