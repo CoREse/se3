@@ -50,5 +50,4 @@ The code-index root map is also injected into this step automatically; use `luo 
 - `luo issue create` / `luo issue reset` — write operations; do not create issues on your own
 - `luo salvage` — auto-commits, creates issues, archives sessions
 - `luo merge` / `luo merge respond` — mutates git merge state
-- `luo sync` / `luo sync respond` — modifies spec files
 - `luo init` — only for initializing brand-new projects

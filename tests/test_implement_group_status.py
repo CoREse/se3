@@ -103,7 +103,6 @@ class TestDagGroupStatusWiring:
             task_description="t",
             task_type="feature",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -356,7 +355,6 @@ class TestDagAgentModelRelay:
                 task_description="t",
                 task_type="feature",
                 design_section="",
-                spec_summary="",
                 injection=None,
                 retry_count=0,
             )

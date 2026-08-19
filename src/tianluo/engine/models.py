@@ -843,7 +843,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.ANALYZE: {
         "name": "analyze",
-        "description": "Analyze input, determine task type and scope; collect project context and select/load specs",
+        "description": "Analyze input, determine task type and scope; collect project context",
         "uses_llm": True,
         "read_only": True,
         "inputs": ["task_description", "project_context"],
@@ -855,7 +855,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
             "root_cause_clear",
             "project_summary",
             "relevant_specs",
-            "spec_content",
         ],
     },
     StepType.INVESTIGATE: {
@@ -916,7 +915,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "read_only": True,
         "inputs": [
             "task_description",
-            "spec_content",
             "project_summary",
             "task_type",
             "scope",
@@ -928,7 +926,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "outputs": [
             "plan",
             "task_groups",
-            "spec_changes",
             "total_complexity",
             "estimated_effort",
             "plan_decomposition",

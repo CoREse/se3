@@ -3051,10 +3051,9 @@ class StateMachine:
                     inputs["scope"] = step.outputs.get("scope")
                     inputs["complexity"] = step.outputs.get("complexity")
                     inputs["analysis_reasoning"] = step.outputs.get("reasoning")
-                    # Merged from the former project_summary step. The retired
-                    # spec-selection mechanism no longer produces spec_content /
-                    # relevant_specs / selected_items; downstream steps receive the
-                    # charter + code-index injection instead.
+                    # Merged from the former project_summary step. Downstream
+                    # steps receive the charter + code-index injection as their
+                    # project-convention channel.
                     inputs["project_summary"] = step.outputs.get("project_summary")
                 # Deprecated: PROJECT_SUMMARY merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
@@ -3072,7 +3071,6 @@ class StateMachine:
                     inputs["proposal"] = plan.get("proposal", {})
                     inputs["design_doc"] = plan.get("design", {})
                     inputs["task_groups"] = step.outputs.get("task_groups")
-                    inputs["spec_changes"] = step.outputs.get("spec_changes", [])
                     for _mode_key in (PLAN_DECOMPOSITION_KEY, PLAN_GRANULARITY_KEY):
                         _recorded = step.outputs.get(_mode_key)
                         if _recorded:
@@ -3131,10 +3129,6 @@ class StateMachine:
                 elif step.step_type == StepType.CONFIRM:
                     # Pass through review result for tracking
                     inputs["last_review_result"] = step.outputs.get("review_result")
-
-        # The spec system (item-level loader, full_spec re-render, selected_items
-        # selection) was retired; downstream steps now receive the charter +
-        # code-index injection instead of assembled spec_content.
 
         # When discovery produced a refined_description, preserve original
         # for traceability and override the effective task_description.

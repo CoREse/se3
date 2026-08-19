@@ -314,7 +314,6 @@ class TestCapabilityGroupPrompt:
             design_section="",
             current_group=json.dumps(CAPABILITY_GROUPS[0]),
             previous_results="No previous groups.",
-            spec_summary="SS",
             root_cause_section="",
         )
         capability = IMPLEMENT_CAPABILITY_GROUP_PROMPT.format(**fields)

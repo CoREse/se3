@@ -648,15 +648,15 @@ class TestRootCausePromptSections:
         rendered = [
             IMPLEMENT_PROMPT.format(
                 task_description="TD", task_type="bugfix", design_section="",
-                task_groups="TG", spec_summary="SS", root_cause_section=section,
+                task_groups="TG", root_cause_section=section,
             ),
             IMPLEMENT_GROUP_PROMPT.format(
                 task_description="TD", task_type="bugfix", design_section="",
-                current_group="CG", previous_results="PR", spec_summary="SS",
+                current_group="CG", previous_results="PR",
                 root_cause_section=section,
             ),
             FIX_PROMPT.format(
-                task_description="TD", spec_summary="SS", design_section="",
+                task_description="TD", design_section="",
                 fix_instructions="FI", fix_context="FC", fix_history="FH",
                 fix_iteration=1, root_cause_section=section,
             ),
@@ -673,7 +673,7 @@ class TestRootCausePromptSections:
 
         prompt = IMPLEMENT_PROMPT.format(
             task_description="TD", task_type="bugfix", design_section="## D",
-            task_groups="TG", spec_summary="SS", root_cause_section="",
+            task_groups="TG", root_cause_section="",
         )
         assert "Root-Cause" not in prompt
         assert "## Task Type\nbugfix\n\n## D" in prompt
@@ -710,14 +710,14 @@ class TestRootCausePromptSections:
         cases = [
             (IMPLEMENT_PROMPT, dict(
                 task_description="TD", task_type="bugfix", design_section="",
-                task_groups="TG", spec_summary="SS",
+                task_groups="TG",
             )),
             (IMPLEMENT_GROUP_PROMPT, dict(
                 task_description="TD", task_type="bugfix", design_section="",
-                current_group="CG", previous_results="PR", spec_summary="SS",
+                current_group="CG", previous_results="PR",
             )),
             (FIX_PROMPT, dict(
-                task_description="TD", spec_summary="SS", design_section="",
+                task_description="TD", design_section="",
                 fix_instructions="FI", fix_context="FC", fix_history="FH",
                 fix_iteration=1,
             )),

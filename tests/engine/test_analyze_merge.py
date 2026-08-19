@@ -178,7 +178,10 @@ class TestStepPoolUpdates:
         outputs = STEP_POOL[StepType.ANALYZE]["outputs"]
         assert "project_summary" in outputs
         assert "relevant_specs" in outputs
-        assert "spec_content" in outputs
+
+    def test_analyze_outputs_drop_retired_spec_content(self):
+        """The spec-content channel is retired; ANALYZE declares no such output."""
+        assert "spec_content" not in STEP_POOL[StepType.ANALYZE]["outputs"]
 
     def test_analyze_outputs_include_original_fields(self):
         outputs = STEP_POOL[StepType.ANALYZE]["outputs"]

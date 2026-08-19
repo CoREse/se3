@@ -1078,7 +1078,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         step.outputs["plan"] = plan
         step.outputs["task_groups"] = task_groups
-        step.outputs["spec_changes"] = result.get("spec_changes", [])
         step.outputs["total_complexity"] = result.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = result.get("estimated_effort", "")
         step.outputs[PLAN_DECOMPOSITION_KEY] = mode.decomposition.value

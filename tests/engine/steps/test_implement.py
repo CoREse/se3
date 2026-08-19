@@ -597,7 +597,6 @@ class TestStaleBranchHandling:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -681,7 +680,6 @@ class TestStaleBranchHandling:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -740,7 +738,6 @@ class TestStaleBranchHandling:
                 task_description="test",
                 task_type="bugfix",
                 design_section="",
-                spec_summary="",
                 injection=None,
                 retry_count=0,
             )
@@ -815,7 +812,6 @@ class TestStaleBranchHandling:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -1032,7 +1028,6 @@ class TestDagResumeFiltering:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
             prior_outputs=prior,
@@ -1100,7 +1095,6 @@ class TestDagResumeFiltering:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -1224,7 +1218,6 @@ class TestDagParallelResumeBehavior:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -1309,7 +1302,6 @@ class TestDagParallelResumeBehavior:
             task_description="test",
             task_type="bugfix",
             design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
             prior_outputs=prior,

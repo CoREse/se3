@@ -4,8 +4,8 @@ The plan step no longer routes work through the retired spec governance steps
 (``verify_spec`` / ``update_spec``): it plans against the task, the charter, and
 the code-index. These tests pin that the spec-change declaration section and the
 spec-file-write-protection section are gone from the prompt / JSON schemas, that
-the version-file guardrail is still injected, and that ``spec_changes`` degrades
-to an empty list for any defensive downstream consumer.
+the version-file guardrail is still injected, and that PLAN emits no
+``spec_changes`` output at all.
 """
 
 from __future__ import annotations
@@ -99,8 +99,7 @@ class TestBuildPrompt:
 
 
 class TestPlanHandlerSpecChanges:
-    """plan_handler completes and exposes an empty spec_changes for defensive
-    downstream consumers."""
+    """plan_handler completes and emits no spec_changes channel."""
 
     @pytest.fixture
     def flow(self, tmp_path):
@@ -156,8 +155,8 @@ class TestPlanHandlerSpecChanges:
     @patch("tianluo.engine.context_builder.get_charter_injection", return_value="")
     @patch("tianluo.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("tianluo.engine.context_builder.get_step_language_instruction", return_value="")
-    def test_spec_changes_defaults_to_empty_list(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
-        """When the LLM omits spec_changes, the output defaults to []."""
+    def test_spec_changes_output_removed(self, _lang, _inj, _ch, _fresh, _ci, _env, flow, step):
+        """PLAN emits no spec_changes output — the step-to-step channel is gone."""
         with patch("tianluo.engine.steps.plan.LLMCaller") as mock_cls:
             mock_caller = Mock()
             mock_caller.call.return_value = self._mock_llm_response()
@@ -166,7 +165,8 @@ class TestPlanHandlerSpecChanges:
             result = plan_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
-        assert step.outputs["spec_changes"] == []
+        assert "spec_changes" not in step.outputs
+        assert step.outputs["task_groups"]
 
     @patch("tianluo.engine.context_builder.get_runtime_environment_injection", return_value="")
     @patch("tianluo.engine.context_builder.get_code_index_injection", return_value="")

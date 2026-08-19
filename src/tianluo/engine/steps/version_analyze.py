@@ -66,10 +66,6 @@ Given a version number MAJOR.MINOR.PATCH, increment the:
 
 {changes_made}
 
-## Spec Changes (API Contract)
-
-{spec_changes}
-
 ## Verification Results
 
 {verification_result}
@@ -141,7 +137,6 @@ Respond in valid JSON format:
 
 IMPORTANT:
 - `suggested_version` MUST be present and MUST be a concrete version string — the commit step uses it verbatim.
-- API contract changes (spec_changes) are the strongest indicator under default SemVer rules.
 - Project-specific rules (when given) override the default rules on conflict.
 - If unsure between minor and patch under default rules, be conservative and choose patch.
 """
@@ -223,14 +218,6 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     verification_result = step.inputs.get("verification_result", {})
 
-    # Get spec changes - handle both dict (legacy) and list (current) formats
-    spec_changes_raw = step.inputs.get("updated_specs", {})  # From update_spec step
-    if isinstance(spec_changes_raw, list):
-        # Convert list format to dict format for consistent handling
-        spec_changes = {"updated_specs": spec_changes_raw}
-    else:
-        spec_changes = spec_changes_raw
-
     # Get current version if available
     current_version = _get_current_version(flow)
 
@@ -258,7 +245,6 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Format inputs for prompt
     changes_text = _format_changes(changes_made)
-    spec_changes_text = _format_spec_changes(spec_changes)
     verification_text = _format_verification(verification_result)
     session_commits_text = _format_session_commits(session_commits)
 
@@ -266,7 +252,6 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         task_type=task_type,
         task_description=task_description,
         changes_made=changes_text,
-        spec_changes=spec_changes_text,
         verification_result=verification_text,
         current_version=current_version,
         pre_session_version=pre_session_version,
@@ -374,7 +359,6 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 pre_session_version=pre_session_version,
                 versions_changes=versions_changes,
                 changes_text=changes_text,
-                spec_changes_text=spec_changes_text,
                 verification_text=verification_text,
             )
         except OSError as exc:
@@ -429,7 +413,6 @@ def _emit_version_intent(
     pre_session_version: Any,
     versions_changes: list[str],
     changes_text: str,
-    spec_changes_text: str,
     verification_text: str,
 ) -> None:
     """Persist a worktree session's version bump as a branch-committed intent.
@@ -446,7 +429,7 @@ def _emit_version_intent(
     ``change_summary`` is the intent's substance for the custom-rules (LLM)
     reconcile channel, which cannot rely on ``bump_type`` (that field is
     auxiliary and MAY be lossy under non-SemVer rules). It is the inductive
-    digest of the same changes / spec / verification material this step already
+    digest of the same changes / verification material this step already
     formatted for its prompt, so no usable intent is lost when ``bump_type`` is.
 
     A write failure is NOT swallowed: it propagates as :class:`OSError` for the
@@ -457,9 +440,7 @@ def _emit_version_intent(
     """
     from ..version_intent import VersionIntent, write_intent
 
-    change_summary = _build_change_summary(
-        changes_text, spec_changes_text, verification_text
-    )
+    change_summary = _build_change_summary(changes_text, verification_text)
     baseline = pre_session_version if isinstance(pre_session_version, str) else None
 
     intent = VersionIntent(
@@ -485,20 +466,17 @@ def _emit_version_intent(
     step.outputs["version_intent_path"] = str(path)
 
 
-def _build_change_summary(
-    changes_text: str, spec_changes_text: str, verification_text: str
-) -> str:
+def _build_change_summary(changes_text: str, verification_text: str) -> str:
     """Compose the free-form intent digest from the formatted prompt sections.
 
-    Reuses the already-formatted Changes / Spec Changes / Verification blocks
-    (the same material the LLM saw) rather than re-deriving them, so the intent
-    the merge side reads is faithful to what drove this session's bump decision.
+    Reuses the already-formatted Changes / Verification blocks (the same
+    material the LLM saw) rather than re-deriving them, so the intent the merge
+    side reads is faithful to what drove this session's bump decision.
     Empty / placeholder sections are dropped to keep the digest compact.
     """
     sections: list[str] = []
     for heading, body in (
         ("Changes Made", changes_text),
-        ("Spec Changes", spec_changes_text),
         ("Verification", verification_text),
     ):
         text = (body or "").strip()
@@ -669,66 +647,6 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
         lines.append("")
     
     return "\n".join(lines) if lines else "Changes made but details unavailable."
-
-
-def _format_spec_changes(spec_changes: dict[str, Any]) -> str:
-    """Format spec changes for inclusion in prompt.
-    
-    Spec changes are the primary indicator for API contract changes
-    and are key to determining breaking vs non-breaking changes.
-    
-    Args:
-        spec_changes: Spec changes from update_spec step (dict or list)
-        
-    Returns:
-        Formatted spec changes text
-    """
-    if not spec_changes:
-        return "No spec changes recorded."
-    
-    # Handle list format (direct list of specs)
-    if isinstance(spec_changes, list):
-        spec_changes = {"updated_specs": spec_changes}
-    
-    lines = []
-    
-    # Format updated specs
-    updated_specs = spec_changes.get("updated_specs", []) if isinstance(spec_changes, dict) else []
-    if updated_specs:
-        lines.append("### Spec Files Updated:")
-        for spec in updated_specs:
-            spec_name = spec.get("spec_name", spec.get("path", "?"))
-            change_desc = spec.get("change_description", "")
-            lines.append(f"- {spec_name}")
-            if change_desc:
-                lines.append(f"  {change_desc}")
-            # Legacy format support
-            changes = spec.get("changes", [])
-            for change in changes:
-                change_type = change.get("type", "?")
-                description = change.get("description", "")
-                lines.append(f"  - [{change_type}] {description}")
-        lines.append("")
-    
-    # Format API changes summary
-    api_changes = spec_changes.get("api_changes", [])
-    if api_changes:
-        lines.append("### API Changes:")
-        for change in api_changes:
-            api_name = change.get("name", "?")
-            change_type = change.get("type", "?")  # e.g., "added", "removed", "modified"
-            impact = change.get("impact", "")  # e.g., "breaking", "non-breaking"
-            lines.append(f"- [{change_type}] {api_name} ({impact})")
-        lines.append("")
-    
-    # If no structured data, try to use summary
-    summary = spec_changes.get("summary", "")
-    if summary and not lines:
-        lines.append("### Summary:")
-        lines.append(summary)
-        lines.append("")
-    
-    return "\n".join(lines) if lines else "Spec was checked but no API changes were recorded."
 
 
 _SESSION_COMMITS_RENDER_LIMIT = 50

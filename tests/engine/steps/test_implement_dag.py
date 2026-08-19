@@ -212,7 +212,7 @@ class TestTransitiveReductionIntegration:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # transitive_reduce called with original groups
@@ -280,7 +280,7 @@ class TestLinearRelayChain:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.COMPLETED
@@ -334,7 +334,7 @@ class TestLinearRelayChain:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # DAGScheduler.run must be called with execute_fn
@@ -399,7 +399,7 @@ class TestForkRelay:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.COMPLETED
@@ -457,7 +457,7 @@ class TestForkRelay:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # DAGScheduler received relay_plan with fork_from
@@ -528,7 +528,7 @@ class TestDiamondConvergence:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.COMPLETED
@@ -589,7 +589,7 @@ class TestDiamondConvergence:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # Verify relay_plan passed to scheduler has convergence info
@@ -653,7 +653,7 @@ class TestMidChainFailure:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # G1 merged as fallback leaf
@@ -707,7 +707,7 @@ class TestMidChainFailure:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         incomplete = step.outputs["incomplete_tasks"]
@@ -755,7 +755,7 @@ class TestMidChainFailure:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.FAILED
@@ -833,7 +833,7 @@ class TestConflictResolution:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.COMPLETED
@@ -910,7 +910,7 @@ class TestConflictResolution:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # take-theirs fallback succeeded → no merge_failures
@@ -1004,7 +1004,7 @@ class TestOutputAggregation:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert result == StepStatus.COMPLETED
@@ -1067,7 +1067,7 @@ class TestOutputAggregation:
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
             prior_outputs={
                 "files_changed": ["a.py"],
                 "tests_added": [],
@@ -1110,7 +1110,7 @@ class TestOutputAggregation:
             result = _run_dag_parallel(
                 groups=[], step=step, flow=flow, project_root=Path("/repo"),
                 task_description="t", task_type="feature", design_section="",
-                spec_summary="", injection=None, retry_count=0,
+                injection=None, retry_count=0,
                 prior_outputs={
                     "files_changed": ["a.py"],
                     "tests_added": [],
@@ -1153,7 +1153,7 @@ class TestOutputAggregation:
             result = _run_dag_parallel(
                 groups=[], step=step, flow=flow, project_root=Path("/repo"),
                 task_description="t", task_type="feature", design_section="",
-                spec_summary="", injection=None, retry_count=0,
+                injection=None, retry_count=0,
                 prior_outputs={
                     "files_changed": ["a.py"],
                     "tests_added": [],
@@ -1381,7 +1381,7 @@ class TestWorktreeCleanup:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert mock_cleanup.call_count == 1
@@ -1434,7 +1434,7 @@ class TestWorktreeCleanup:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         assert mock_cleanup.call_count == 2
@@ -1493,7 +1493,7 @@ class TestBranchDeletion:
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
             task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            injection=None, retry_count=0,
         )
 
         # Only actual branch names should be deleted (G2 reuses G1's branch)
