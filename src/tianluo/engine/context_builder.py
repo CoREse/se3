@@ -1048,7 +1048,7 @@ the detailed breakdown happens inside the implementation call, not here.
 ## Original Task (the tasks to be grouped live in here)
 {task_description}
 
-## Output of the PLAN Step (proposal / design / task_groups)
+## Output of the PLAN Step (task_groups)
 {step_output_text}
 {revision_section}
 ## The Grouping Doctrine Being Reviewed
@@ -1132,7 +1132,7 @@ def build_plan_confirm_prompt(
     and cross-revision max_iterations counting are reused unchanged.
 
     Args:
-        step_output: The outputs from the plan step (proposal/design/task_groups)
+        step_output: The outputs from the plan step (task_groups, complexity, …)
         task_description: Original task description from the flow
         revision_feedback: Previous revision feedback if this is a re-review
         project_root: Project root directory for language config
@@ -1160,7 +1160,7 @@ def build_plan_confirm_prompt(
             # the current doctrine is the safer reading of an unknown flow.
             resolved_decomposition = PlanModeResolver.DEFAULT_DECOMPOSITION
 
-    # Format plan output for display (proposal/design/task_groups, etc.).
+    # Format plan output for display (task_groups, total_complexity, etc.).
     output_parts = []
     for key, value in step_output.items():
         if key.startswith("_"):
@@ -1216,7 +1216,7 @@ for this review.
 ## Original Task (the requirements live in here)
 {task_description}
 
-## Output of the PLAN Step (proposal / design / task_groups)
+## Output of the PLAN Step (task_groups)
 {step_output_text}
 {revision_section}
 ## Review Procedure (follow in order)
@@ -1224,9 +1224,8 @@ for this review.
    Original Task above and break it into a numbered list of discrete, atomic
    requirements. A single sentence may contain several requirements; split them.
 2. **Check requirement-by-requirement coverage**: for each requirement, check
-   whether the plan's task_groups contain at least one task that covers it
-   (consult the proposal and design as supporting context). In other words,
-   verify that **every requirement has a corresponding task**.
+   whether the plan's task_groups contain at least one task that covers it.
+   In other words, verify that **every requirement has a corresponding task**.
 3. **List uncovered requirements**: explicitly call out any requirement that has
    no corresponding task, or that is only partially covered. These coverage gaps
    are the reason to request a revision.

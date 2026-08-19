@@ -48,7 +48,7 @@ class StepType(Enum):
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
     INVESTIGATE = "investigate"  # Net-zero-diff root-cause investigation (no fix, no commit)
     PROJECT_SUMMARY = "project_summary"  # Generate project context summary
-    PLAN = "plan"  # Unified planning: proposal + design + task breakdown
+    PLAN = "plan"  # Unified planning: task-group breakdown
     PROPOSE = "propose"  # Generate change proposal (deprecated: use PLAN)
     DESIGN = "design"  # Design solution and architecture decisions (deprecated: use PLAN)
     PLAN_TASKS = "plan_tasks"  # Break down into concrete tasks (deprecated: use PLAN)
@@ -910,7 +910,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.PLAN: {
         "name": "plan",
-        "description": "Unified planning: proposal + design + task breakdown in one LLM call",
+        "description": "Unified planning: task-group breakdown in one LLM call",
         "uses_llm": True,
         "read_only": True,
         "inputs": [
@@ -924,7 +924,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
             "plan_granularity",
         ],
         "outputs": [
-            "plan",
             "task_groups",
             "total_complexity",
             "estimated_effort",
@@ -976,7 +975,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": [
             "task_groups",
             "task_list",
-            "design_doc",
             "plan_decomposition",
             "plan_granularity",
         ],
@@ -1163,7 +1161,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Commit changes with version bump",
         "uses_llm": False,
         "read_only": False,
-        "inputs": ["changes_made", "updated_specs", "bump_type", "proposal", "commit_message"],
+        "inputs": ["changes_made", "updated_specs", "bump_type", "commit_message"],
         "outputs": ["commit_hash"],
     },
     StepType.SUMMARIZE: {

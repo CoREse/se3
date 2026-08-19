@@ -596,7 +596,6 @@ class TestStaleBranchHandling:
             step=step,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -679,7 +678,6 @@ class TestStaleBranchHandling:
             step=step,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -737,7 +735,6 @@ class TestStaleBranchHandling:
                 project_root=self.project_root,
                 task_description="test",
                 task_type="bugfix",
-                design_section="",
                 injection=None,
                 retry_count=0,
             )
@@ -811,7 +808,6 @@ class TestStaleBranchHandling:
             project_root=self.project_root,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -1027,7 +1023,6 @@ class TestDagResumeFiltering:
             project_root=self.project_root,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
             prior_outputs=prior,
@@ -1094,7 +1089,6 @@ class TestDagResumeFiltering:
             project_root=self.project_root,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -1217,7 +1211,6 @@ class TestDagParallelResumeBehavior:
             step=step,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -1301,7 +1294,6 @@ class TestDagParallelResumeBehavior:
             project_root=self.project_root,
             task_description="test",
             task_type="bugfix",
-            design_section="",
             injection=None,
             retry_count=0,
             prior_outputs=prior,

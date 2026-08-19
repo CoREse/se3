@@ -599,7 +599,7 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -646,7 +646,7 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -708,7 +708,7 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -762,7 +762,7 @@ class TestDagParallelRelayIntegration:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -822,7 +822,7 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 

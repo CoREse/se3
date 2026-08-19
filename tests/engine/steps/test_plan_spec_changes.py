@@ -17,12 +17,10 @@ from unittest.mock import Mock, patch
 
 from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
 from tianluo.engine.steps.plan import (
-    FULL_JSON_SCHEMA,
-    MEDIUM_JSON_SCHEMA,
-    SHALLOW_JSON_SCHEMA,
+    CAPABILITY_JSON_SCHEMA,
+    GRANULAR_JSON_SCHEMA,
     VERSION_FILE_GUARDRAIL,
     _build_prompt,
-    _get_prompt_depth,
     plan_handler,
 )
 
@@ -42,29 +40,29 @@ class TestSpecMachineryRetired:
 
 
 class TestJsonSchemas:
-    """No depth's JSON schema solicits spec_changes anymore."""
+    """Neither doctrine's JSON schema solicits spec_changes anymore."""
 
-    def test_full_schema_excludes_spec_changes(self):
-        assert "spec_changes" not in FULL_JSON_SCHEMA
-
-    def test_medium_schema_excludes_spec_changes(self):
-        assert "spec_changes" not in MEDIUM_JSON_SCHEMA
-
-    def test_shallow_schema_excludes_spec_changes(self):
-        assert "spec_changes" not in SHALLOW_JSON_SCHEMA
+    @pytest.mark.parametrize(
+        "schema", [CAPABILITY_JSON_SCHEMA, GRANULAR_JSON_SCHEMA],
+        ids=["capability", "granular"],
+    )
+    def test_schema_excludes_spec_changes(self, schema):
+        assert "spec_changes" not in schema
 
 
 class TestBuildPrompt:
     """_build_prompt no longer carries any retired spec machinery."""
 
-    def test_full_depth_has_no_spec_machinery(self):
+    @pytest.mark.parametrize(
+        "task_type", ["feature", "bugfix", "small"],
+    )
+    def test_prompt_has_no_spec_machinery(self, task_type):
         prompt = _build_prompt(
             task_description="Add feature X",
-            task_type="feature",
+            task_type=task_type,
             scope="module_a",
             project_summary="summary",
             revision_section="",
-            depth="full",
         )
         assert "Spec Changes Declaration" not in prompt
         assert "spec_changes" not in prompt
@@ -72,30 +70,6 @@ class TestBuildPrompt:
         assert "verify_spec" not in prompt
         # The header no longer frames a Relevant Specifications spec dump.
         assert "Relevant Specifications" not in prompt
-
-    def test_medium_depth_has_no_spec_machinery(self):
-        prompt = _build_prompt(
-            task_description="Fix bug Y",
-            task_type="bugfix",
-            scope="module_b",
-            project_summary="summary",
-            revision_section="",
-            depth="medium",
-        )
-        assert "Spec Changes Declaration" not in prompt
-        assert "spec_changes" not in prompt
-
-    def test_shallow_depth_has_no_spec_machinery(self):
-        prompt = _build_prompt(
-            task_description="Small tweak Z",
-            task_type="small",
-            scope="module_c",
-            project_summary="summary",
-            revision_section="",
-            depth="shallow",
-        )
-        assert "Spec Changes Declaration" not in prompt
-        assert "spec_changes" not in prompt
 
 
 class TestPlanHandlerSpecChanges:
@@ -130,10 +104,6 @@ class TestPlanHandlerSpecChanges:
         """Build a mock LLM JSON response (no spec_changes — the prompt no
         longer solicits it)."""
         data = {
-            "plan": {
-                "proposal": {"summary": "s", "motivation": "m", "files_to_modify": [], "files_to_create": [], "risks": []},
-                "design": {"overview": "o", "architecture_decisions": [], "components": [], "data_flow": "", "testing_strategy": ""},
-            },
             "task_groups": [
                 {
                     "group_id": "G1",
@@ -190,7 +160,7 @@ class TestPlanHandlerSpecChanges:
 
 class TestVersionFileGuardrail:
     """The prompt-layer guardrail forbidding version-file bumps as plan tasks
-    is still injected at every depth."""
+    is still injected for every task type."""
 
     def test_guardrail_constant_exists_and_lists_examples(self):
         assert isinstance(VERSION_FILE_GUARDRAIL, str)
@@ -201,39 +171,15 @@ class TestVersionFileGuardrail:
         assert "version_analyze" in VERSION_FILE_GUARDRAIL
         assert "commit" in VERSION_FILE_GUARDRAIL
 
-    def test_full_depth_includes_guardrail(self):
+    @pytest.mark.parametrize("task_type", ["feature", "bugfix", "small"])
+    def test_prompt_includes_guardrail(self, task_type):
         prompt = _build_prompt(
             task_description="Add feature X",
-            task_type="feature",
+            task_type=task_type,
             scope="m",
             project_summary="p",
             revision_section="",
-            depth="full",
         )
         assert "Do Not Bump Version Files" in prompt
         assert "pyproject.toml" in prompt
         assert "VERSIONS.md" in prompt
-
-    def test_medium_depth_includes_guardrail(self):
-        prompt = _build_prompt(
-            task_description="Fix bug Y",
-            task_type="bugfix",
-            scope="m",
-            project_summary="p",
-            revision_section="",
-            depth="medium",
-        )
-        assert "Do Not Bump Version Files" in prompt
-        assert "pyproject.toml" in prompt
-
-    def test_shallow_depth_includes_guardrail(self):
-        prompt = _build_prompt(
-            task_description="Small tweak Z",
-            task_type="small",
-            scope="m",
-            project_summary="p",
-            revision_section="",
-            depth="shallow",
-        )
-        assert "Do Not Bump Version Files" in prompt
-        assert "pyproject.toml" in prompt

@@ -452,8 +452,9 @@ config 组,也不得出现以文件集合、模块边界或代码分层定义的
 真实代码做。两个 runner 的 headless subagent 支持均已确认(`claude -p` 实测
 暴露 Agent/subagent 工具;codex subagent 默认启用、非交互 `codex exec` 下
 可用),但 codex 仅在被明确指示时才 spawn subagent,故 implement prompt 会
-显式写出该许可。PLAN 仍产出粗颗粒的 proposal / design,供人工 gate 审阅,以及
-fix 迭代时作为 `{design_section}` 上下文注入。
+显式写出该许可。PLAN 也不再产出 proposal / design:其全部输出就是调度数据
+(task_groups 加 `total_complexity` / `estimated_effort`),人工 gate 审阅的正是
+这份数据。项目约定改由 charter 与 code-index 注入 implement 调用。
 
 **`plan_granularity`** 仅在 `capability` 下生效:
 

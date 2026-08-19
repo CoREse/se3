@@ -102,7 +102,6 @@ class TestDagGroupStatusWiring:
             project_root=tmp_path,
             task_description="t",
             task_type="feature",
-            design_section="",
             injection=None,
             retry_count=0,
         )
@@ -354,7 +353,6 @@ class TestDagAgentModelRelay:
                 project_root=tmp_path,
                 task_description="t",
                 task_type="feature",
-                design_section="",
                 injection=None,
                 retry_count=0,
             )

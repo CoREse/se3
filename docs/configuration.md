@@ -508,9 +508,10 @@ execution time. Both runners support headless subagents — `claude -p` exposes
 the Agent (subagent) tool, and codex ships subagents enabled by default under
 non-interactive `codex exec` — but codex only spawns them when explicitly
 instructed, so the implement prompts state that permission explicitly. PLAN
-still produces its coarse proposal / design output, which is what a human gate
-reviews and what is injected as `{design_section}` context during fix
-iterations.
+produces no proposal and no design document either: its whole output is the
+scheduling data (the groups plus `total_complexity` / `estimated_effort`), and
+that is what a human gate reviews. Project conventions reach the implement call
+through the charter and the code-index instead.
 
 **`plan_granularity`** applies only under `capability`:
 

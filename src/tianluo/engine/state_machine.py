@@ -3067,9 +3067,9 @@ class StateMachine:
                         if isinstance(report, dict) and report:
                             investigation_reports.append(report)
                 elif step.step_type == StepType.PLAN:
-                    plan = step.outputs.get("plan", {})
-                    inputs["proposal"] = plan.get("proposal", {})
-                    inputs["design_doc"] = plan.get("design", {})
+                    # PLAN emits scheduling data only. The deprecated
+                    # PROPOSE/DESIGN branches below still forward `proposal` /
+                    # `design_doc` so a persisted legacy flow resumes unchanged.
                     inputs["task_groups"] = step.outputs.get("task_groups")
                     for _mode_key in (PLAN_DECOMPOSITION_KEY, PLAN_GRANULARITY_KEY):
                         _recorded = step.outputs.get(_mode_key)

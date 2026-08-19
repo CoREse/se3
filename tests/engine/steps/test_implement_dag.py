@@ -211,7 +211,7 @@ class TestTransitiveReductionIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -279,7 +279,7 @@ class TestLinearRelayChain:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -333,7 +333,7 @@ class TestLinearRelayChain:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -398,7 +398,7 @@ class TestForkRelay:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -456,7 +456,7 @@ class TestForkRelay:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -527,7 +527,7 @@ class TestDiamondConvergence:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -588,7 +588,7 @@ class TestDiamondConvergence:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -652,7 +652,7 @@ class TestMidChainFailure:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -706,7 +706,7 @@ class TestMidChainFailure:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -754,7 +754,7 @@ class TestMidChainFailure:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -832,7 +832,7 @@ class TestConflictResolution:
         # Use the real _merge_leaf_branch (not mocked)
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -909,7 +909,7 @@ class TestConflictResolution:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -1003,7 +1003,7 @@ class TestOutputAggregation:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -1066,7 +1066,7 @@ class TestOutputAggregation:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
             prior_outputs={
                 "files_changed": ["a.py"],
@@ -1109,7 +1109,7 @@ class TestOutputAggregation:
             mock_git.return_value = MagicMock(returncode=1)
             result = _run_dag_parallel(
                 groups=[], step=step, flow=flow, project_root=Path("/repo"),
-                task_description="t", task_type="feature", design_section="",
+                task_description="t", task_type="feature",
                 injection=None, retry_count=0,
                 prior_outputs={
                     "files_changed": ["a.py"],
@@ -1152,7 +1152,7 @@ class TestOutputAggregation:
             mock_git.return_value = MagicMock(returncode=1)
             result = _run_dag_parallel(
                 groups=[], step=step, flow=flow, project_root=Path("/repo"),
-                task_description="t", task_type="feature", design_section="",
+                task_description="t", task_type="feature",
                 injection=None, retry_count=0,
                 prior_outputs={
                     "files_changed": ["a.py"],
@@ -1380,7 +1380,7 @@ class TestWorktreeCleanup:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -1433,7 +1433,7 @@ class TestWorktreeCleanup:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 
@@ -1492,7 +1492,7 @@ class TestBranchDeletion:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
+            task_description="t", task_type="feature",
             injection=None, retry_count=0,
         )
 

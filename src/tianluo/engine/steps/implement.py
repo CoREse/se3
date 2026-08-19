@@ -193,7 +193,6 @@ Preferred alternatives, in order:
 ## Task Type
 {task_type}
 {root_cause_section}
-{design_section}
 
 ## Task Groups
 {task_groups}
@@ -262,7 +261,6 @@ Preferred alternatives, in order:
 ## Task Type
 {task_type}
 {root_cause_section}
-{design_section}
 
 ## Current Group Tasks
 {current_group}
@@ -330,7 +328,6 @@ Preferred alternatives, in order:
 
 ## Task Description
 {task_description}
-{design_section}
 {root_cause_section}
 ## Fix Instructions
 {fix_instructions}
@@ -432,8 +429,8 @@ planning / sub-agent job.
 )
 
 # Two-segment marker only: USER_CONTENT region is empty.
-# implement consumes upstream LLM artifacts (design / task_groups /
-# changes_made / test_results) and framework-derived task_description;
+# implement consumes upstream LLM artifacts (task_groups / changes_made /
+# test_results) and framework-derived task_description;
 # nothing at this assembly point is a user-literal field. The web console
 # renders the whole post-BEGIN tail inside the collapsed system-prompt chip.
 IMPLEMENT_PROMPT = inject_boundary(IMPLEMENT_PROMPT, "## Task Description\n")
@@ -544,7 +541,6 @@ def _run_holistic_implement(
     project_root: Path,
     task_description: str,
     task_type: str,
-    design_section: str,
     root_cause_section: str,
     injection: str,
     retry_count: int,
@@ -555,14 +551,7 @@ def _run_holistic_implement(
     call: a small task, a single capability group (or one forced by
     ``plan_granularity: single``), and a resumed legacy ``direct`` flow.
     """
-    # WHY the design survives into the whole-task call: a single capability
-    # group is not "no plan" — PLAN still produced the proposal/design that a
-    # configured `confirmation.steps.plan` gate may have had a human approve,
-    # and the grouped and fix-iteration paths both carry it. Only the legacy
-    # `direct` mode below genuinely holds no plan, so it alone renders empty.
-    rendered_design = design_section
     if mode == HOLISTIC_MODE_LEGACY_DIRECT:
-        rendered_design = ""
         # WHY a distinct wording rather than reusing the single-group text: this
         # mode is reported only for a legacy `direct` flow that holds no groups
         # at all, so telling the agent "PLAN sized this as a single capability
@@ -651,7 +640,6 @@ def _run_holistic_implement(
     prompt = HOLISTIC_IMPLEMENT_PROMPT.format(
         task_description=task_description,
         task_type=task_type,
-        design_section=rendered_design,
         execution_mode=execution_mode,
         analysis_context=json.dumps(
             analysis_context, indent=2, ensure_ascii=False, default=str,
@@ -696,7 +684,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     task_type = step.inputs.get("task_type") or flow.task_type or "feature"
     holistic_mode = _holistic_execution_mode(step, flow)
-    design_doc = step.inputs.get("design_doc", {})
     fix_context = step.inputs.get("fix_context")
     fix_instructions = step.inputs.get("fix_instructions")
     is_fix_iteration = step.inputs.get("is_fix_iteration", False)
@@ -729,16 +716,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # visible if a downstream path fails before we recompute.
     if "session_commits" not in step.outputs:
         step.outputs["session_commits"] = []
-
-    # Format design section (shared across paths)
-    design_section = ""
-    if design_doc:
-        if isinstance(design_doc, dict):
-            design_section = "## Design Document\n" + json.dumps(
-                design_doc, indent=2, ensure_ascii=False
-            )
-        else:
-            design_section = f"## Design Document\n{design_doc}"
 
     # Root-cause report from a preceding INVESTIGATE round, if any. Rendered
     # once and shared by every prompt path below (single call, grouped,
@@ -776,16 +753,12 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         fix_history = step.inputs.get("fix_history", [])
         fix_history_text = _format_fix_history(fix_history)
         fix_context_text = _format_fix_context_structured(fix_context)
-        # For FIX_PROMPT, design_section needs self-contained spacing:
-        # non-empty → "\n{content}\n", empty → "\n" (single blank line).
-        fix_design = f"\n{design_section}" if design_section else ""
         prompt = FIX_PROMPT.format(
             task_description=task_description,
             fix_instructions=fix_instructions,
             fix_context=fix_context_text,
             fix_iteration=fix_iteration,
             fix_history=fix_history_text,
-            design_section=fix_design,
             root_cause_section=root_cause_section,
         )
         if injection:
@@ -831,7 +804,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root=project_root,
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             root_cause_section=root_cause_section,
             injection=injection,
             retry_count=retry_count,
@@ -855,7 +827,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = IMPLEMENT_PROMPT.format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             task_groups=task_groups_text,
             root_cause_section=root_cause_section,
         )
@@ -899,7 +870,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = IMPLEMENT_PROMPT.format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             task_groups=task_groups_text,
             root_cause_section=root_cause_section,
         )
@@ -1033,7 +1003,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         project_root=project_root,
                         task_description=task_description,
                         task_type=task_type,
-                        design_section=design_section,
                         injection=injection,
                         retry_count=retry_count,
                         root_cause_section=root_cause_section,
@@ -1074,7 +1043,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root=project_root,
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             injection=injection,
             retry_count=retry_count,
             root_cause_section=root_cause_section,
@@ -1169,7 +1137,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = _group_prompt_template(capability_mode).format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             current_group=json.dumps(group, indent=2, ensure_ascii=False),
             previous_results=prev_ctx,
             root_cause_section=root_cause_section,
@@ -1417,7 +1384,6 @@ def _make_execute_fn(
     step: Step,
     task_description: str,
     task_type: str,
-    design_section: str,
     injection: str | None,
     retry_count: int,
     group_agent_info: dict[str, tuple[str, str | None]] | None = None,
@@ -1569,7 +1535,6 @@ def _make_execute_fn(
             prompt = _group_prompt_template(capability_mode).format(
                 task_description=task_description,
                 task_type=task_type,
-                design_section=design_section,
                 current_group=json.dumps(group, indent=2, ensure_ascii=False),
                 previous_results=prev_ctx,
                 root_cause_section=root_cause_section,
@@ -2323,7 +2288,6 @@ def _run_dag_parallel(
     project_root: Path,
     task_description: str,
     task_type: str,
-    design_section: str,
     injection: str | None,
     retry_count: int,
     prior_outputs: dict[str, Any] | None = None,
@@ -2522,7 +2486,6 @@ def _run_dag_parallel(
         step=step,
         task_description=task_description,
         task_type=task_type,
-        design_section=design_section,
         injection=injection,
         retry_count=retry_count,
         group_agent_info=group_agent_info,

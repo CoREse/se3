@@ -45,7 +45,6 @@ def _implement_templates() -> dict[str, tuple[str, dict]]:
         task_description=_DUMMY,
         task_type="feature",
         root_cause_section="",
-        design_section="",
         current_group=_DUMMY,
         previous_results=_DUMMY,
     )
@@ -55,7 +54,6 @@ def _implement_templates() -> dict[str, tuple[str, dict]]:
             task_description=_DUMMY,
             task_type="feature",
             root_cause_section="",
-            design_section="",
             task_groups=_DUMMY,
         )),
         # Whole-task holistic call (small / single group / legacy direct).
@@ -63,7 +61,6 @@ def _implement_templates() -> dict[str, tuple[str, dict]]:
             task_description=_DUMMY,
             task_type="small",
             root_cause_section="",
-            design_section="",
             execution_mode=_DUMMY,
             analysis_context=_DUMMY,
             continuation_context=_DUMMY,
@@ -75,7 +72,6 @@ def _implement_templates() -> dict[str, tuple[str, dict]]:
         # Fix iteration.
         "fix": (FIX_PROMPT, dict(
             task_description=_DUMMY,
-            design_section="",
             root_cause_section="",
             fix_instructions=_DUMMY,
             fix_context=_DUMMY,

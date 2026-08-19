@@ -3,7 +3,8 @@
 Verifies:
 1. PLAN no longer forwards a ``spec_changes`` input to any downstream step,
    even when a legacy persisted flow still carries the key in its outputs
-2. PLAN still forwards design_doc (from plan.design) to update_spec
+2. PLAN no longer forwards ``proposal`` / ``design_doc`` either — a legacy
+   flow whose PLAN outputs still carry them is read without reviving them
 3. The rest of PLAN's outputs are unaffected by the channel removal
 """
 
@@ -106,17 +107,22 @@ class TestSpecChangesNotForwarded:
         inputs = sm._build_step_inputs(flow_with_legacy_spec_changes, step_type)
         assert "spec_changes" not in inputs
 
+    @pytest.mark.parametrize(
+        "step_type",
+        [StepType.UPDATE_SPEC, StepType.IMPLEMENT, StepType.COMMIT],
+    )
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_receives_design_doc(
-        self, _cfg, sm, flow_with_legacy_spec_changes,
+    def test_legacy_plan_proposal_and_design_are_not_revived(
+        self, _cfg, sm, flow_with_legacy_spec_changes, step_type,
     ):
-        inputs = sm._build_step_inputs(
-            flow_with_legacy_spec_changes, StepType.UPDATE_SPEC,
-        )
-        assert "design_doc" in inputs
-        assert inputs["design_doc"]["overview"] == "High-level design"
-        assert len(inputs["design_doc"]["architecture_decisions"]) == 1
-        assert len(inputs["design_doc"]["components"]) == 1
+        """A persisted plan.proposal / plan.design is read, never forwarded.
+
+        The old flow still renders in `luo history show`; what stopped is the
+        step-to-step channel, so no downstream prompt can pick them back up.
+        """
+        inputs = sm._build_step_inputs(flow_with_legacy_spec_changes, step_type)
+        assert "design_doc" not in inputs
+        assert "proposal" not in inputs
 
 
 class TestPlanForwardingUnaffected:
@@ -144,13 +150,28 @@ class TestPlanForwardingUnaffected:
         return flow
 
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_design_doc_still_forwarded(self, _cfg, sm, flow_without_spec_changes):
-        inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.UPDATE_SPEC)
-        assert inputs["design_doc"]["overview"] == "Fix approach"
-
-    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_other_plan_outputs_unaffected(self, _cfg, sm, flow_without_spec_changes):
-        """task_groups and design_doc still forwarded normally."""
+        """task_groups is still forwarded normally."""
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.IMPLEMENT)
         assert inputs["task_groups"] == [{"group_id": "G1", "name": "fix", "tasks": []}]
-        assert inputs["design_doc"]["overview"] == "Fix approach"
+
+    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    def test_deprecated_design_step_still_forwards_its_output(
+        self, _cfg, sm, flow_without_spec_changes,
+    ):
+        """Legacy DESIGN/PROPOSE flows resume unchanged — only PLAN stopped."""
+        _add_completed_step(
+            flow_without_spec_changes,
+            StepType.DESIGN,
+            {"design_doc": {"overview": "legacy design"}},
+        )
+        _add_completed_step(
+            flow_without_spec_changes,
+            StepType.PROPOSE,
+            {"proposal": {"summary": "legacy proposal"}},
+        )
+        inputs = sm._build_step_inputs(
+            flow_without_spec_changes, StepType.UPDATE_SPEC,
+        )
+        assert inputs["design_doc"]["overview"] == "legacy design"
+        assert inputs["proposal"]["summary"] == "legacy proposal"
