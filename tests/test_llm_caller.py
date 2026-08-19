@@ -283,7 +283,7 @@ class _ArgsCapturingRunner:
         self.captured_args = None
 
     def build_call_args(
-        self, prompt, read_only, context_files=None, spec_guard_plugin=None
+        self, prompt, read_only, context_files=None
     ):
         args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
         if read_only:
@@ -294,8 +294,6 @@ class _ArgsCapturingRunner:
                 "NotebookEdit",
                 "AskUserQuestion",
             ]
-        if spec_guard_plugin is not None:
-            args += ["--plugin-dir", str(spec_guard_plugin)]
         if context_files:
             for f in context_files:
                 if f.exists():
@@ -327,7 +325,7 @@ def test_direct_intent_keeps_legacy_runner_on_plain_autonomous_prompt():
 
 class TestReadOnlyToolDisallowList:
     """Tool-layer enforcement: read-only steps append --disallowedTools for the
-    write tools; writable steps (sync_resolve / implement) do not."""
+    write tools; writable steps (implement / commit) do not."""
 
     def _run_and_capture_args(self, step_type: str):
         caller = _make_caller(step_type=step_type)
@@ -339,28 +337,29 @@ class TestReadOnlyToolDisallowList:
         assert runner.captured_args is not None
         return runner.captured_args
 
-    def test_sync_scan_args_contain_disallowed_write_tools(self):
-        args = self._run_and_capture_args("sync_scan")
+    def test_code_index_args_contain_disallowed_write_tools(self):
+        """code_index is an internal pure-data sub-agent: SE3 writes the map."""
+        args = self._run_and_capture_args("code_index")
         assert "--disallowedTools" in args
         for tool in ("Write", "Edit", "NotebookEdit", "AskUserQuestion"):
             assert tool in args, f"{tool} should be in disallowed list"
 
-    def test_sync_analyze_args_contain_disallowed_write_tools(self):
-        args = self._run_and_capture_args("sync_analyze")
+    def test_migrate_args_contain_disallowed_write_tools(self):
+        args = self._run_and_capture_args("migrate")
         assert "--disallowedTools" in args
         assert "Write" in args and "Edit" in args
 
     def test_read_tools_not_disallowed(self):
         """Read/Grep/Glob/Bash must remain available (not in the disallow list)."""
-        args = self._run_and_capture_args("sync_scan")
+        args = self._run_and_capture_args("code_index")
         di = args.index("--disallowedTools")
         disallowed = args[di + 1:]
         for tool in ("Read", "Grep", "Glob", "Bash"):
             assert tool not in disallowed, f"{tool} must not be disallowed"
 
-    def test_sync_resolve_args_have_no_disallowed_tools(self):
-        """sync_resolve is the writable update path (Way A edits the spec)."""
-        args = self._run_and_capture_args("sync_resolve")
+    def test_unknown_step_args_have_no_disallowed_tools(self):
+        """An unregistered step type is not read-only and gets no tool lock."""
+        args = self._run_and_capture_args("not_a_registered_step")
         assert "--disallowedTools" not in args
 
     def test_implement_args_have_no_disallowed_tools(self):
@@ -522,7 +521,6 @@ class TestDirectCallerRotation:
                 prompt,
                 read_only,
                 context_files=None,
-                spec_guard_plugin=None,
                 invocation_intent=AgentInvocationIntent.DEFAULT,
             ):
                 calls.append((self.name, prompt, invocation_intent))

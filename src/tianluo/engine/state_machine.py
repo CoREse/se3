@@ -710,49 +710,6 @@ class StateMachine:
 
         return self.create_flow(task_description, **kwargs), False
 
-    def _spec_diff_guard_enabled(self, step: Step) -> bool:
-        """Return True when the post-step spec-diff fallback guard applies to *step*.
-
-        The guard (the second hard layer of the spec-write protection) catches a
-        write to ``tianluo/specs/**`` that a step performed by going *around* the
-        PreToolUse hook — most notably a ``Bash`` redirect / ``sed`` / ``tee``,
-        which the tool-matcher hook (Write|Edit|NotebookEdit) never observes. It
-        applies to every step NOT in the shared exemption set
-        :data:`context_builder.SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all
-        sync steps ``sync_scan`` / ``sync_analyze`` / ``sync_resolve`` /
-        ``sync_respond``), and only when
-        ``spec_write_protection.diff_fallback_enabled`` is on.
-
-        The exemption decision references the shared constant — never a bare
-        ``step.step_type != UPDATE_SPEC`` literal — so the diff layer can never
-        disagree with the soft-injection and PreToolUse-hook layers about which
-        steps may legitimately write specs. Any config-loading fault degrades
-        safely to *disabled* (the PreToolUse hook remains the primary guard).
-        """
-        # The merge-side steps run in the MAIN checkout and legitimately land
-        # whatever the merged branch changed — including a spec file edited on
-        # that branch. The spec-diff guard (scoped to the flow's own edits) would
-        # misfire on merged-in spec content, so it never applies to them.
-        if step.step_type in (StepType.MERGE_INTEGRATE, StepType.VERSION_RECONCILE):
-            return False
-        try:
-            from .context_builder import SPEC_WRITE_ALLOWED_STEPS
-
-            if step.step_type.value in SPEC_WRITE_ALLOWED_STEPS:
-                return False
-
-            from ..config import load_spec_write_protection_config
-
-            cfg = load_spec_write_protection_config(self.project_root)
-            return bool(cfg.diff_fallback_enabled)
-        except Exception:
-            logger.debug(
-                "Failed to resolve spec-diff guard for step '%s'",
-                step.step_type.value,
-                exc_info=True,
-            )
-            return False
-
     def _acquire_merge_step_lock(
         self, lock, flow: FlowInstance, step: Step, history_root: Path
     ) -> None:
@@ -1045,33 +1002,6 @@ class StateMachine:
 
         logger.info(f"Running step: {step.step_type.value}")
 
-        # Hard fallback layer (the second, post-hoc guard): snapshot every
-        # tianluo/specs/** file's content hash before a non-exempt step runs, so a
-        # within-step spec write that slipped past the PreToolUse hook (most
-        # notably a Bash redirect / sed / tee, which the tool-matcher hook never
-        # sees) can be detected after the handler returns. This guard only asks
-        # "did this step touch a spec file at all" — it is wholly orthogonal to
-        # verify_spec's in_scope/out_of_scope judgement and never inspects spec
-        # content semantics. ``update_spec`` and every sync step are exempt via
-        # the shared SPEC_WRITE_ALLOWED_STEPS set (see _spec_diff_guard_enabled).
-        # We capture full byte content (not just hashes) so the post-step guard
-        # can REVERT an illegal write, not merely flag it — a left-on-disk spec
-        # change would otherwise survive a later `luo run --resume` and leak
-        # through to commit.
-        spec_guard_before: Optional[Dict[str, bytes]] = None
-        if self._spec_diff_guard_enabled(step):
-            try:
-                from .spec_write_hook import capture_spec_contents
-
-                spec_guard_before = capture_spec_contents(self.project_root)
-            except Exception:
-                logger.debug(
-                    "Failed to snapshot specs before step '%s'",
-                    step.step_type.value,
-                    exc_info=True,
-                )
-                spec_guard_before = None
-
         # Step-scoped token-usage accumulator. Opened before the handler runs so
         # every LLM subprocess call made during this step (main call, retry,
         # rotation, two-phase JSON extraction) folds into one per-step total via
@@ -1107,68 +1037,6 @@ class StateMachine:
 
         finally:
             step.completed_at = datetime.now()
-
-            # Hard fallback layer: if a non-exempt step wrote any tianluo/specs/**
-            # file (detected by content-hash diff against the pre-step snapshot),
-            # fail the step. This backstops the PreToolUse hook against a Bash
-            # redirect / sed / tee that the tool-matcher hook never observes. We
-            # only override a non-FAILED status: a handler that already failed
-            # for some other reason keeps its own error (and on that path the
-            # spec write, if any, was already a side effect of a failing step).
-            # The exemption decision routes through SPEC_WRITE_ALLOWED_STEPS, so
-            # update_spec / all sync steps are never flagged. Best-effort: a
-            # fault in the check must never break the step.
-            if spec_guard_before is not None and step.status != StepStatus.FAILED:
-                try:
-                    from .spec_write_hook import (
-                        capture_spec_contents,
-                        diff_spec_files,
-                        restore_spec_files,
-                    )
-
-                    spec_guard_after = capture_spec_contents(self.project_root)
-                    changed = diff_spec_files(spec_guard_before, spec_guard_after)
-                    if changed:
-                        step.status = StepStatus.FAILED
-                        # Revert the illegal write so it cannot persist on disk:
-                        # restore each touched file to its pre-step content (or
-                        # delete a newly-created one). Without this, a left-on-disk
-                        # spec change survives a later `luo run --resume` (the
-                        # resumed pre-step snapshot already holds the tampered
-                        # content, the re-run diffs clean, and the change reaches
-                        # commit).
-                        revert_failed = restore_spec_files(
-                            self.project_root, spec_guard_before, changed
-                        )
-                        revert_note = (
-                            " The illegal spec change has been reverted to its "
-                            "pre-step state."
-                            if not revert_failed
-                            else (
-                                " WARNING: could not revert spec file(s): "
-                                f"{', '.join(revert_failed)}; remove the change "
-                                "manually before continuing."
-                            )
-                        )
-                        step.error_message = (
-                            f"Step '{step.step_type.value}' illegally modified "
-                            f"spec file(s) under tianluo/specs/: "
-                            f"{', '.join(changed)}. Writing spec files is the "
-                            f"dedicated responsibility of the update_spec step "
-                            f"and `luo sync`; no other step may create, modify, "
-                            f"or delete spec files. Changing existing code "
-                            f"behavior IS allowed — declare any needed spec "
-                            f"change through the plan spec_changes channel "
-                            f"(handled by verify_spec / update_spec) rather than "
-                            f"editing spec files in this step." + revert_note
-                        )
-                        logger.error(step.error_message)
-                except Exception:
-                    logger.debug(
-                        "Spec-diff fallback guard check failed for step '%s'",
-                        step.step_type.value,
-                        exc_info=True,
-                    )
 
             # Aggregate this step's token usage before persisting. Best-effort:
             # a fault here must never break the step / flow.

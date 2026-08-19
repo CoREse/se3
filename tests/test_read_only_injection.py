@@ -107,19 +107,21 @@ class TestGetReadOnlyInjection:
         assert "Glob" in result
 
 
-# --- Sync pseudo-step read-only classification (bugfix) ---
+# --- Read-only classification (STEP_POOL + internal pure-data steps) ---
 
 
-class TestSyncStepReadOnly:
-    """sync_scan/sync_analyze are read-only sync pseudo-steps; sync_resolve
-    is writable (its Way-A path edits tianluo/specs in place)."""
+class TestStepReadOnlyClassification:
+    """is_step_read_only resolves from exactly two sources: the STEP_POOL
+    ``read_only`` attribute and the internal pure-data sub-agent set. The retired
+    sync pseudo-steps are no longer a third source, so they classify as unknown."""
 
-    def test_is_step_read_only_sync_scan_and_analyze(self):
-        assert is_step_read_only("sync_scan") is True
-        assert is_step_read_only("sync_analyze") is True
-
-    def test_is_step_read_only_sync_resolve_is_false(self):
+    def test_is_step_read_only_retired_sync_steps_false(self):
+        # The sync engine is gone; its pseudo-step names are now just unknown
+        # step types and MUST NOT resurrect a third read-only source.
+        assert is_step_read_only("sync_scan") is False
+        assert is_step_read_only("sync_analyze") is False
         assert is_step_read_only("sync_resolve") is False
+        assert is_step_read_only("sync_respond") is False
 
     def test_is_step_read_only_writable_steps_false(self):
         assert is_step_read_only("implement") is False
@@ -143,13 +145,14 @@ class TestSyncStepReadOnly:
         assert is_step_read_only("code_index") is True
         assert is_step_read_only("migrate") is True
 
-    def test_injection_for_sync_scan_and_analyze_non_empty(self):
-        assert get_read_only_injection("sync_scan") != ""
-        assert "READ-ONLY" in get_read_only_injection("sync_scan")
-        assert get_read_only_injection("sync_analyze") != ""
-        assert "READ-ONLY" in get_read_only_injection("sync_analyze")
+    def test_injection_for_internal_pure_data_steps_non_empty(self):
+        assert get_read_only_injection("code_index") != ""
+        assert "READ-ONLY" in get_read_only_injection("code_index")
+        assert get_read_only_injection("migrate") != ""
+        assert "READ-ONLY" in get_read_only_injection("migrate")
 
-    def test_injection_for_sync_resolve_empty(self):
+    def test_injection_for_retired_sync_steps_empty(self):
+        assert get_read_only_injection("sync_scan") == ""
         assert get_read_only_injection("sync_resolve") == ""
 
 

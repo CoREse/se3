@@ -141,7 +141,7 @@ class _AgentStreamRunner:
         self._succeed = succeed
         self._model = model
 
-    def build_call_args(self, prompt, read_only, context_files=None, spec_guard_plugin=None):
+    def build_call_args(self, prompt, read_only, context_files=None):
         return ["-p", prompt]
 
     def detect_infra_error(self, returncode, output, stderr_tail):

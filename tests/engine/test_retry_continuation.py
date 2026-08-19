@@ -38,7 +38,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner
@@ -78,7 +78,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner
@@ -112,7 +112,7 @@ class TestLLMCallerRetryMode:
         mock_result.success = True
         mock_result.output = '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}'
         mock_runner.run_with_monitor.return_value = mock_result
-        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None, spec_guard_plugin=None: [
+        mock_runner.build_call_args.side_effect = lambda prompt, read_only, context_files=None: [
             "--output-format", "stream-json", "--verbose", "-p", prompt,
         ]
         mock_runner_cls.return_value = mock_runner
@@ -133,13 +133,10 @@ class TestLLMCallerRetryMode:
         prompt_idx = args_list.index("-p") + 1
         effective_prompt = args_list[prompt_idx]
 
-        # First attempt should use the original prompt as-is for the retry path:
-        # it begins with the original prompt and carries NO retry context. (The
-        # implement step legitimately gets the spec-write-protection constraint
-        # appended as a suffix — see get_spec_write_protection_injection — which
-        # is unrelated to retry behavior, so the assertion checks the prefix and
-        # the absence of retry context rather than exact equality.)
-        assert effective_prompt.startswith("Original task prompt")
+        # First attempt should use the original prompt verbatim: implement is a
+        # writable step, so no read-only injection applies and no retry context
+        # is prepended.
+        assert effective_prompt == "Original task prompt"
         assert "Previous conversation context" not in effective_prompt
         # _get_retry_context should NOT have been called (total_attempt == 0)
         mock_get_ctx.assert_not_called()

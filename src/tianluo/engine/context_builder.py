@@ -632,31 +632,6 @@ def ensure_code_index_fresh(
         logger.warning("code_index: lazy freshness refresh failed: %s", exc)
 
 
-# Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
-# `luo run` state-machine steps (so they are absent from STEP_POOL / StepType),
-# but their sub-agents must only read code and return spec text — never write
-# to disk. ``sync_resolve`` is deliberately excluded: its Way-A update path
-# edits ``tianluo/specs/<name>/spec.md`` in place via the Edit tool and therefore
-# must remain writable.
-_READ_ONLY_SYNC_STEPS = frozenset({"sync_scan", "sync_analyze"})
-
-# Sync-engine pseudo-steps that legitimately WRITE spec files via the LLM
-# (the Way-A in-place ``Edit`` of ``tianluo/specs/<name>/spec.md``). Listed here
-# in parallel with the read-only sync steps above so the two sync write paths
-# are registered side by side:
-#   - ``sync_resolve``  — drift resolution write-back (sync_engine.py:669)
-#   - ``sync_respond``  — high-risk spec drift update applied on human respond
-#                         (sync_engine.py:2104 → _apply_spec_drift_update →
-#                          _update_spec_via_llm:912 → llm_caller.call())
-# Any future sync step that writes spec MUST be registered here so it is
-# automatically exempted from all three spec-write guards (see
-# ``SPEC_WRITE_ALLOWED_STEPS``), preventing exemption-set drift.
-_WRITABLE_SYNC_STEPS = frozenset({"sync_resolve", "sync_respond"})
-
-# All sync-engine pseudo-steps (read + write paths), derived from the two
-# authoritative sets above.
-_ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
-
 # Internal LLMCaller step types that are NOT `luo run` state-machine steps (so
 # they are absent from STEP_POOL) but whose sub-agents are *pure functions*:
 # they only read code and RETURN structured text/JSON, while SE3's own code does
@@ -669,16 +644,6 @@ _ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
 #     SE3 writes tianluo/charter.md and the why-comments itself).
 _READ_ONLY_INTERNAL_STEPS = frozenset({"code_index", "migrate"})
 
-# The single authoritative set of steps allowed to write ``tianluo/specs/`` and
-# therefore exempted from the three-layer spec-write protection (soft
-# prompt injection, the PreToolUse hook, and the post-step diff fallback).
-# Derived — never hand-enumerated — so registering a new writable sync step in
-# ``_WRITABLE_SYNC_STEPS`` automatically propagates the exemption everywhere and
-# the set cannot silently drift (e.g. forgetting ``sync_respond``). Writing spec
-# files is the sole responsibility of ``update_spec`` (which consumes plan's
-# ``spec_changes`` declaration) and ``luo sync``.
-SPEC_WRITE_ALLOWED_STEPS = frozenset({"update_spec"}) | _ALL_SYNC_STEPS
-
 
 def is_step_read_only(step_type: str) -> bool:
     """Return True if ``step_type`` runs under read-only constraints.
@@ -686,12 +651,11 @@ def is_step_read_only(step_type: str) -> bool:
     Resolution order:
       1. ``luo run`` state-machine steps — looked up in STEP_POOL by name,
          honoring each step's ``read_only`` attribute.
-      2. Sync-engine read-only pseudo-steps (``sync_scan`` / ``sync_analyze``).
-      3. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
+      2. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
          agent only reads and returns text — SE3 does every write itself.
 
-    ``sync_resolve`` and every writable step (implement / update_spec / …)
-    return False. Unknown step types return False.
+    Every writable step (implement / commit / …) returns False, as do unknown
+    step types.
 
     This is the single source of truth for both the prompt-level read-only
     injection (:func:`get_read_only_injection`) and the tool-level
@@ -703,23 +667,20 @@ def is_step_read_only(step_type: str) -> bool:
         if info.get("name") == step_type:
             return bool(info.get("read_only", False))
 
-    return (
-        step_type in _READ_ONLY_SYNC_STEPS
-        or step_type in _READ_ONLY_INTERNAL_STEPS
-    )
+    return step_type in _READ_ONLY_INTERNAL_STEPS
 
 
 def get_read_only_injection(step_type: str, force: bool = False) -> str:
     """Get read-only constraint prompt injection for a step.
 
     Delegates the read-only decision to :func:`is_step_read_only`, which
-    covers both STEP_POOL steps and sync-engine read-only pseudo-steps.
+    covers both STEP_POOL steps and the internal pure-data sub-agent steps.
     If the step is read-only, returns a prompt constraint forbidding file
     modifications; otherwise returns an empty string.
 
     Args:
         step_type: Current step type name (e.g., "analyze", "implement",
-            "sync_scan")
+            "code_index")
         force: Emit the constraint even when ``step_type`` is not registry
             read-only. Used by a call-level read-only override (LLMCaller's
             ``force_read_only``) so a step whose handler writes files can still
@@ -747,85 +708,6 @@ def get_read_only_injection(step_type: str, force: bool = False) -> str:
         "- Use Bash for read-only commands (e.g., git log, git diff, ls, cat)\n\n"
         "Your sole purpose in this step is analysis and reasoning. "
         "Output your findings as structured data only."
-    )
-
-
-def _is_spec_write_protected_step(step_type: str) -> bool:
-    """Return True if ``step_type`` must be barred from writing spec files.
-
-    A step is spec-write-protected when it is a non-read-only LLM step (a
-    STEP_POOL step with ``uses_llm=True`` and ``read_only=False``) that is NOT
-    in :data:`SPEC_WRITE_ALLOWED_STEPS`. This currently covers ``implement``
-    (its three templates), ``propose``, ``design``, ``plan_tasks``, and — since
-    its read_only flip — ``charter_freshness``, and auto-extends to any future
-    non-read-only LLM step.
-
-    WHY (charter_freshness connateral effect): flipping charter_freshness to
-    read_only=False makes it match here, so its LLM call now also receives the
-    tianluo/specs/ write-protection injection. This is harmless and directionally
-    correct — the charter_freshness handler writes tianluo/charter.md, never
-    tianluo/specs/, so forbidding spec-file writes constrains nothing it needs.
-
-    The sync pseudo-steps are exempt without needing the explicit
-    ``SPEC_WRITE_ALLOWED_STEPS`` check, because they are absent from STEP_POOL
-    and so never match the lookup below; keeping the membership test is a
-    harmless, more-explicit double safeguard.
-    """
-    from .models import STEP_POOL
-
-    if step_type in SPEC_WRITE_ALLOWED_STEPS:
-        return False
-
-    for _st, info in STEP_POOL.items():
-        if info.get("name") == step_type:
-            return bool(info.get("uses_llm", False)) and not bool(
-                info.get("read_only", False)
-            )
-
-    return False
-
-
-def get_spec_write_protection_injection(step_type: str) -> str:
-    """Get the spec-write-protection constraint injection for a step.
-
-    Returns a prompt fragment, for every non-read-only LLM step except those in
-    :data:`SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all sync steps), that
-    forbids the step from creating/modifying/deleting any spec file under
-    ``tianluo/specs/`` while explicitly leaving it free to change existing code
-    behavior. Writing spec files is the dedicated responsibility of
-    ``update_spec`` / ``luo sync``; a step that changes behavior or believes a
-    project convention/architecture shift should be recorded notes that in its
-    summary, and the durable records of the charter refactor capture it — the
-    charter (``tianluo/charter.md``) and colocated why-comments, kept current by
-    their own mechanisms (the ``charter_freshness`` step and the implement
-    step's why-comment convention) — not this step writing a spec file.
-
-    Returns an empty string for steps that are not spec-write-protected.
-    """
-    if not _is_spec_write_protected_step(step_type):
-        return ""
-
-    return (
-        "\n\n## SPEC FILE WRITE PROTECTION\n"
-        "You are free to change existing code behavior as the task requires — "
-        "this constraint does NOT restrict what behavior you may implement.\n\n"
-        "It restricts only one thing: the spec files under `tianluo/specs/**` are "
-        "read-only for this step. Recording code into spec files is the "
-        "dedicated job of the `update_spec` step and `luo sync`, not of this "
-        "step.\n\n"
-        "Forbidden actions:\n"
-        "- Do NOT use Write, Edit, or NotebookEdit to create, modify, or delete "
-        "any file under `tianluo/specs/`\n"
-        "- Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, "
-        "`sed -i`, `tee`, `cp`/`mv` into `tianluo/specs/`)\n\n"
-        "If your change alters existing behavior or you believe a project "
-        "convention should be recorded, do NOT edit any spec file yourself — "
-        "just note it in your summary. Durable records live in the charter "
-        "(`tianluo/charter.md`, high-level conventions/architecture) and in "
-        "colocated why-comments (code-level intent); they are kept current by "
-        "their own dedicated mechanisms (the `charter_freshness` step and the "
-        "implement step's why-comment convention), not by writing a spec file "
-        "in this step."
     )
 
 
