@@ -2522,7 +2522,10 @@ class DaemonClient:
         # (the "chat history is missing its first round" symptom, #287). Retaining
         # the old cursor makes ``read_flow`` fall back to a full re-read from that
         # water mark next round, re-sending the dropped batch; the resulting
-        # overlap is absorbed by the server-side dedupe.
+        # overlap is absorbed by the server's history cache, whose append branch
+        # folds each record onto the cached bundle by ``(step_id, ordinal)`` —
+        # a re-delivered line is dropped, a rewritten one replaces its
+        # predecessor in place — so a re-send can never double a record.
         candidates = {read.flow_id: read.cursor for read in reads}
         # Retain the cursor of a terminal flow that produced no records this
         # round but is still the live engine.json flow (e.g. a FAILED flow

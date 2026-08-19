@@ -317,7 +317,7 @@ def test_seam_observable_and_readable_yet_never_registered(tmp_path):
 # The frontend is mirrored by :class:`_FrontendConsole`, a faithful port of the
 # reconcile invariants in ``server/static/app.js`` — ``recordKey`` (the stable
 # ``stepId#ordinal`` identity), ``reconcileAppendRecords`` (idempotent append),
-# and ``dedupeSnapshotDiscovery`` (content-aware full-snapshot de-dup). The JS
+# and ``dedupeSnapshotClones`` (content-aware full-snapshot de-dup). The JS
 # node harness (``tests/frontend/worktree_discovery_multiround.test.mjs``) pins
 # the real JS; this port lets the SAME records flow through the real Python hops
 # into a frontend without a browser.
@@ -333,7 +333,7 @@ class _FrontendConsole:
     Consumes the exact ``(mode, records)`` frames the daemon push loop hands the
     server relay (and which the server re-broadcasts over ``/ws/ui`` verbatim),
     reconciling them the way the WebUI does: a ``full`` snapshot replaces the
-    held records after :meth:`_dedupe_snapshot_discovery`, an ``append`` batch is
+    held records after :meth:`_dedupe_snapshot_clones`, an ``append`` batch is
     merged idempotently by :meth:`_record_key`. ``held`` is what the chat would
     render.
     """
@@ -369,21 +369,26 @@ class _FrontendConsole:
             return f"{step_id}#{ordinal}"
         return self._legacy_key(rec)
 
-    # -- dedupeSnapshotDiscovery: content-aware de-dup of a full snapshot ------
-    def _dedupe_snapshot_discovery(self, records):
+    # -- dedupeSnapshotClones: content-aware de-dup of a full snapshot --------
+    def _dedupe_snapshot_clones(self, records):
+        """Collapse a byte-identical clone of ANY step, keeping the first.
+
+        Mirrors the JS after it was generalized off discovery: the collapse rule
+        is unchanged (same record key AND same content signature), only its
+        scope widened, so a same-key/different-content record is still kept.
+        """
         seen: dict = {}
         out = []
         for rec in records:
-            if str(rec.get("step_type", "")).lower() == "discovery":
-                key = self._record_key(rec)
-                sig = self._legacy_key(rec)
-                sigs = seen.get(key)
-                if sigs is not None:
-                    if sig in sigs:  # byte-identical clone — drop
-                        continue
-                    sigs.add(sig)
-                else:
-                    seen[key] = {sig}
+            key = self._record_key(rec)
+            sig = self._legacy_key(rec)
+            sigs = seen.get(key)
+            if sigs is not None:
+                if sig in sigs:  # byte-identical clone — drop
+                    continue
+                sigs.add(sig)
+            else:
+                seen[key] = {sig}
             out.append(rec)
         return out
 
@@ -410,7 +415,7 @@ class _FrontendConsole:
         """Apply one daemon push frame exactly as the WebUI would."""
         recs = [dict(r) for r in records]
         if mode == protocol.HISTORY_MODE_FULL:
-            self.held = self._dedupe_snapshot_discovery(recs)
+            self.held = self._dedupe_snapshot_clones(recs)
         else:
             self._reconcile_append(recs)
 

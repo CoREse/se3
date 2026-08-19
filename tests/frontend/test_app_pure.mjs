@@ -4029,19 +4029,20 @@ retryAfterErrorMod.registerLiveAppendRetryAfterErrorTests({ app, check, findOne,
 const e2eConsistencyMod = await import("./live_append_e2e_consistency.test.mjs");
 e2eConsistencyMod.registerConsoleE2EConsistencyTests({ app, check, findOne, findAll });
 
-// Register the G3 worktree-mode merged-snapshot discovery de-dup guard. A flow
-// whose history is split across the main-repo root (discovery) and the worktree
-// root (later steps + its own copy of discovery) is merged by the daemon and
-// de-duped at the file layer; this frontend backstop ensures a `mode: full`
-// snapshot that still carries a duplicate discovery record renders it exactly
-// once, scoped strictly to discovery (later steps / recordKey identity intact).
+// Register the merged-snapshot clone de-dup guard. A flow whose history is
+// split across the main-repo root (discovery) and the worktree root (later
+// steps + its own copy of discovery) is merged by the daemon and de-duped at
+// the file layer, and the server's append reconcile keeps its cached bundle
+// clone-free; this frontend backstop ensures a `mode: full` snapshot that still
+// carries a byte-identical clone of ANY step renders it exactly once, while a
+// same-key/different-content record is never dropped.
 const snapshotDiscoveryMod = await import("./snapshot_discovery_dedup.test.mjs");
 snapshotDiscoveryMod.registerSnapshotDiscoveryDedupTests({ app, check, findOne, findAll });
 
 // Register the G3 worktree multi-round discovery reconcile guard. Pins that the
 // frontend consumes G1's per-physical-file disambiguated step_id so a worktree
 // flow's 2nd+ discovery round (primary file rounds + a ``.from-<branch>``
-// sidecar) all render, and that dedupeSnapshotDiscovery drops only a
+// sidecar) all render, and that dedupeSnapshotClones drops only a
 // byte-identical clone — never a legitimately-different record on ordinal reuse.
 const worktreeDiscoveryMod = await import("./worktree_discovery_multiround.test.mjs");
 worktreeDiscoveryMod.registerWorktreeDiscoveryMultiroundTests({ app, check, findOne, findAll });
