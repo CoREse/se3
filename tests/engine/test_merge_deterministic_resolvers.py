@@ -652,7 +652,7 @@ def test_the_merge_commits_cleanly_after_deterministic_resolution(conflicted_rep
 
 @pytest.fixture
 def orchestrator_repo(conflicted_repo, monkeypatch):
-    """``conflicted_repo`` with the LLM, guardrails and context-build disarmed."""
+    """``conflicted_repo`` with the LLM and context-build disarmed."""
     from tianluo.engine.merge import orchestrator as orch_mod
 
     # The short-circuit must return before any conflict context is built: that
@@ -662,9 +662,6 @@ def orchestrator_repo(conflicted_repo, monkeypatch):
         raise AssertionError("conflict context must not be built")
 
     monkeypatch.setattr(orch_mod, "build_conflict_context", _forbidden_context)
-    monkeypatch.setattr(
-        orch_mod.MergeOrchestrator, "_run_guardrails", lambda *a, **k: None
-    )
     return conflicted_repo
 
 

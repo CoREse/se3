@@ -1,12 +1,11 @@
 """MergeOrchestrator — Sequential merge of branches into current branch.
 
 Orchestrates the merge flow: for each branch, call git merge, handle
-clean merge / conflict / non-conflict-failure, run guardrails, and
-aggregate results.
+clean merge / conflict / non-conflict-failure, and aggregate results.
 """
 
 from __future__ import annotations
-from tianluo.runtime_paths import runtime_dir, runtime_dir_name, runtime_relpath
+from tianluo.runtime_paths import runtime_dir, runtime_relpath
 
 import json
 import logging
@@ -38,13 +37,6 @@ from .deterministic_resolvers import (
     resolve_deterministic,
 )
 from ...commands.merge.secret_redact import redact_text
-from .guardrail_repair import GuardrailRepairer, GuardrailRepairInconsistentState
-from .guardrails import (
-    MergeGuardrailsCheck,
-    _get_changed_spec_files,
-    _read_file_from_ref,
-    violation_set_hash,
-)
 from .human_call import HumanCallWriter, _generate_call_filename
 from .issue_renumber import (
     advance_next_id_to_max,
@@ -133,6 +125,23 @@ def _is_self_managed_dirty_path(path: str) -> bool:
     if any(path.startswith(pref) for pref in _SELF_MANAGED_DIRTY_PREFIXES):
         return True
     return path in _SELF_MANAGED_DIRTY_FILES
+
+
+def _read_file_from_ref(project_root: Path, rel_path: str, ref: str) -> Optional[str]:
+    """Read a file's content at a git ref. Returns ``None`` when unavailable.
+
+    Used to recover the pre-merge baseline of a file the merge modified, so
+    issue-reference rewriting can tell merge-authored lines from pre-existing
+    ones. A missing path at the ref is an ordinary outcome (the file is new),
+    not an error — hence ``None`` rather than a raise.
+    """
+    result = _run_git(
+        project_root, "show", f"{ref}:{rel_path}",
+        check=False, timeout=15,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -232,90 +241,6 @@ def _atomic_write_text(path: Path, content: str) -> None:
         raise
 
 
-# Default max repair iterations when no project config overrides it.
-# Stall is detected when two *consecutive repair-iteration* hashes match.
-# The initial gr_report hash is compared against last_hash so that even
-# with max_iterations=1 a no-op repair (iter-1 hash == initial hash) is
-# detected as a stall and escalated to human call.
-_DEFAULT_MAX_REPAIR_ITERATIONS = 2
-# Upper bound for user-configured max_iterations.  Values above this are
-# capped to prevent runaway LLM loops.  The cap is a safety guardrail,
-# not a tunable parameter — it is intentionally not exposed in tianluo.yaml.
-_MAX_REPAIR_ITERATIONS_HARD_CAP = 20
-
-if _DEFAULT_MAX_REPAIR_ITERATIONS < 1:
-    raise ValueError(
-        "_DEFAULT_MAX_REPAIR_ITERATIONS must be >= 1 so the repair loop executes at least "
-        "once and the exhausted-path fallback is well-defined."
-    )
-
-
-def _load_max_repair_iterations(project_root: Path) -> int:
-    """Read max repair iterations from tianluo.yaml, with safe fallback.
-
-    Looks under ``merge.guardrail_repair.max_iterations``.
-    Invalid or missing values fall back to the default.
-
-    Catches a narrow set of expected failure modes (import failures, I/O
-    errors from a stat-able-but-unreadable config, malformed YAML, or
-    unexpected return type from the loader) rather than a bare
-    ``except Exception``: this preserves the project's "no silent
-    except-Exception" rule while still tolerating the realistic config
-    failures.  Catching every exception would mask programmer errors in
-    the loader (yaml schema migrations, refactors of the loader's
-    return shape, etc.).
-    """
-    from ...config import load_project_yaml
-
-    try:
-        data, _src = load_project_yaml(project_root)
-    except (ImportError, OSError, ValueError, TypeError, AttributeError) as exc:
-        logger.warning(
-            "Failed to load project config for max_repair_iterations: %s "
-            "— using default %d",
-            exc, _DEFAULT_MAX_REPAIR_ITERATIONS,
-        )
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    if not data:
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    merge_data = data.get("merge", {})
-    if not isinstance(merge_data, dict):
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    gr_data = merge_data.get("guardrail_repair", {})
-    if not isinstance(gr_data, dict):
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    raw = gr_data.get("max_iterations")
-    if raw is None:
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    try:
-        val = int(raw)
-    except (TypeError, ValueError):
-        logger.warning(
-            "merge.guardrail_repair.max_iterations=%r is not a valid integer; "
-            "using default %d",
-            raw, _DEFAULT_MAX_REPAIR_ITERATIONS,
-        )
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    if val < 1:
-        logger.warning(
-            "merge.guardrail_repair.max_iterations=%d is below 1; "
-            "using default %d",
-            val, _DEFAULT_MAX_REPAIR_ITERATIONS,
-        )
-        return _DEFAULT_MAX_REPAIR_ITERATIONS
-    if val > _MAX_REPAIR_ITERATIONS_HARD_CAP:
-        logger.warning(
-            "merge.guardrail_repair.max_iterations=%d exceeds the hard cap "
-            "of %d (safety guardrail to prevent runaway LLM loops); "
-            "capping at %d.  To raise the cap, modify "
-            "_MAX_REPAIR_ITERATIONS_HARD_CAP in orchestrator.py — it is "
-            "intentionally NOT exposed in tianluo.yaml.",
-            val, _MAX_REPAIR_ITERATIONS_HARD_CAP, _MAX_REPAIR_ITERATIONS_HARD_CAP,
-        )
-        return _MAX_REPAIR_ITERATIONS_HARD_CAP
-    return val
-
-
 # Default git merge timeout (seconds).  60s covers most repos but may be
 # too tight for very large repos, cold filesystems, or git-LFS smudge.
 _DEFAULT_GIT_MERGE_TIMEOUT = 60
@@ -328,8 +253,10 @@ def _load_git_merge_timeout(project_root: Path) -> int:
     fall back to the default.
 
     Catches a narrow set of expected failure modes (import, I/O, parse,
-    type) rather than ``except Exception`` — see
-    ``_load_max_repair_iterations`` for the same rationale.
+    type) rather than ``except Exception``: this tolerates the realistic
+    config failures (a stat-able-but-unreadable file, malformed YAML, an
+    unexpected loader return shape) without masking programmer errors in
+    the loader itself, which a bare ``except Exception`` would swallow.
     """
     from ...config import load_project_yaml
 
@@ -368,115 +295,6 @@ def _load_git_merge_timeout(project_root: Path) -> int:
     return val
 
 
-class GuardrailRollbackError(RuntimeError):
-    """Raised when guardrails detected violations but rollback could not be performed.
-
-    Carries the path to the human call file so the caller can still
-    surface it in the report even though the rollback failed.
-    """
-
-    def __init__(self, message: str, call_file: Optional[Path] = None) -> None:
-        super().__init__(message)
-        self.call_file = call_file
-
-
-class GuardrailNoRollbackError(RuntimeError):
-    """Raised when guardrails detected violations but rollback was never attempted.
-
-    This happens when the pre-merge SHA is unavailable, so there is no
-    known state to roll back to.  The merge commit may still be on HEAD.
-    Distinct from ``GuardrailRollbackError``: here no rollback command was
-    issued at all, whereas ``GuardrailRollbackError`` means a rollback
-    command was issued and failed.
-    """
-
-    def __init__(self, message: str, call_file: Optional[Path] = None) -> None:
-        super().__init__(message)
-        self.call_file = call_file
-
-
-class GuardrailCallFileError(RuntimeError):
-    """Raised when guardrails detected violations, rollback succeeded, but the
-    human call file could not be written or printed.
-
-    This is distinct from ``GuardrailRollbackError``: here the working tree is
-    in a consistent (rolled-back) state, but the user has no call file to respond
-    to.  The caller should report the true failure mode rather than claiming
-    rollback failed.
-    """
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-
-
-class GuardrailRepairFailed(RuntimeError):
-    """Raised when fast-mode guardrail repair fails.
-
-    In ``fast`` strategy, post-merge guardrail violations are sent to the LLM
-    for repair. If the LLM cannot fix them, or if the repair process itself
-    fails, this exception is raised so the orchestrator can abort cleanly
-    without writing a human call file.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        failure_reason: FailureReason = FailureReason.GUARDRAIL_REPAIR_FAILED,
-        rollback_failed: bool = False,
-    ) -> None:
-        super().__init__(message)
-        self.failure_reason = failure_reason
-        self.rollback_failed = rollback_failed
-
-
-class GuardrailRepairStalled(RuntimeError):
-    """Raised when fast-mode guardrail repair makes no progress.
-
-    After LLM repair, if the violation set hash is unchanged for
-    consecutive iterations, we stop retrying and escalate to a human
-    call instead of aborting.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        call_file: Optional[Path] = None,
-        iteration_count: int = 0,
-        last_violation_hash: str = "",
-        failure_reason: FailureReason = FailureReason.GUARDRAIL_REPAIR_STALLED,
-    ) -> None:
-        super().__init__(message)
-        self.call_file = call_file
-        self.iteration_count = iteration_count
-        self.last_violation_hash = last_violation_hash
-        self.failure_reason = failure_reason
-
-
-class GuardrailRepairExhausted(GuardrailRepairStalled):
-    """Raised when fast-mode guardrail repair reaches max iterations.
-
-    Subclass of GuardrailRepairStalled so callers can distinguish the
-    exhausted path (max iterations reached without resolution, hash
-    kept changing) from the stalled path (consecutive identical hashes)
-    while still catching both with a single ``except GuardrailRepairStalled``.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        call_file: Optional[Path] = None,
-        iteration_count: int = 0,
-        last_violation_hash: str = "",
-    ) -> None:
-        super().__init__(
-            message,
-            call_file=call_file,
-            iteration_count=iteration_count,
-            last_violation_hash=last_violation_hash,
-            failure_reason=FailureReason.GUARDRAIL_REPAIR_EXHAUSTED,
-        )
-
-
 class EmptyRepoError(RuntimeError):
     """The repository has no commits (empty repo)."""
 
@@ -500,9 +318,8 @@ def _check_repo_state(project_root: Path) -> None:
         EmptyRepoError: when the repo has no commits.
         DetachedHeadError: when HEAD is not on a branch.
         ShallowRepoError: when the repo is a shallow clone.
-        UnsupportedRepoStateError: when submodules or sparse-checkout
-            are active (these can silently bypass guardrails or lose
-            runtime-sync data).
+        UnsupportedRepoStateError: when submodules are active (they can
+            silently lose runtime-sync data).
     """
     # Empty repo: no commits yet
     result = _run_git(
@@ -547,83 +364,6 @@ def _check_repo_state(project_root: Path) -> None:
             "runtime-sync data loss during merge. Deinitialize submodules "
             "or use --force to proceed at your own risk."
         )
-
-    # Sparse-checkout check: if tianluo/specs/** is excluded, guardrails
-    # would silently pass because _get_changed_spec_files returns empty.
-    # We do a *targeted* check (not just "is sparse-checkout active?")
-    # so a user with sparse-checkout that DOES include tianluo/specs/** is
-    # not unnecessarily blocked.  The detection has two phases:
-    #   1. ``git sparse-checkout list`` returns active patterns (cone or
-    #      non-cone).  An empty list => sparse-checkout inactive.
-    #   2. When patterns are present, we treat sparse-checkout as
-    #      *active* and ask git directly whether ``tianluo/specs`` is part
-    #      of the working tree.  ``git ls-files --error-unmatch
-    #      tianluo/specs`` returns rc=0 only when at least one file under
-    #      tianluo/specs is currently checked out — i.e., the path is part
-    #      of the active sparse cone.  When rc != 0 (typically code
-    #      1 with "did not match any file" or similar), we raise.
-    # Edge case: a brand-new repo without any tianluo/specs file would
-    # falsely flag as excluded even when the cone permits it.  In
-    # practice se3-managed repos always have at least one spec file
-    # committed, but to keep the check fail-closed without breaking
-    # bootstrapping we additionally consult the cone patterns: when the
-    # patterns explicitly mention "tianluo/specs" we treat it as included
-    # regardless of ls-files results.
-    result = _run_git(
-        project_root, "sparse-checkout", "list",
-        check=False, timeout=15,
-    )
-    if result.returncode == 0:
-        patterns_text = result.stdout.strip()
-        if patterns_text:
-            # Sparse-checkout is active.  Decide whether tianluo/specs is in
-            # the active set.  Two signals (either is sufficient):
-            #   (a) explicit pattern mentions ``tianluo/specs`` (safe for
-            #       both cone and non-cone modes — e.g. a cone-mode user
-            #       listing "se3" or "tianluo/specs" both include it; a
-            #       non-cone-mode user with pattern "/tianluo/specs/**"
-            #       similarly).
-            #   (b) ``git ls-files tianluo/specs`` returns at least one
-            #       checked-out file under that path.
-            patterns = [
-                line.strip().lstrip("/")
-                for line in patterns_text.splitlines()
-                if line.strip()
-            ]
-            # In cone mode, a directory pattern includes all descendants
-            # so any pattern that is tianluo/specs or a parent (se3, "" for
-            # root cone, "*") is sufficient.  Be conservative: accept
-            # the obvious matches.
-            runtime_name = runtime_dir_name(project_root)
-            specs_rel = f"{runtime_name}/specs"
-            included_by_pattern = False
-            for p in patterns:
-                normalised = p.rstrip("/")
-                if normalised in ("", "*", runtime_name, specs_rel) or \
-                        normalised.startswith(specs_rel):
-                    included_by_pattern = True
-                    break
-                # Cone mode descendant: pattern is tianluo/specs/foo etc.
-                # That doesn't include tianluo/specs itself but a sibling.
-                # In that case ls-files will tell us the truth.
-
-            included_by_lsfiles = False
-            if not included_by_pattern:
-                ls_result = _run_git(
-                    project_root, "ls-files",
-                    "--error-unmatch", specs_rel,
-                    check=False, timeout=15,
-                )
-                included_by_lsfiles = (ls_result.returncode == 0)
-
-            if not (included_by_pattern or included_by_lsfiles):
-                raise UnsupportedRepoStateError(
-                    f"Sparse-checkout is active and excludes {specs_rel}/**. "
-                    f"Spec guardrails would be silently bypassed. Re-include "
-                    f"{specs_rel} in your sparse-checkout patterns or use "
-                    f"--force to proceed at your own risk."
-                )
-
 
 # MergeReport is imported from result_model (typed successor).
 # The ``failure_reason`` field type is ``Optional[Union[str, FailureReason]]``
@@ -680,22 +420,20 @@ class _RecordingNullHumanCallWriter(HumanCallWriter):
         )
         return call_file
 
-    def write_guardrail_call(
+    def write_degraded_call(
         self,
         branch,
-        violations,
-        pre_merge_sha,
-        call_type="guardrail_violation",
-        iteration_count=None,
+        message,
+        pre_merge_sha="",
     ) -> Path:
         call_file = runtime_dir(self.project_root) / "calls" / _generate_call_filename(
-            "merge", f"{branch}_guardrail",
+            "merge", f"{branch}_degraded",
         )
         self.recorded_calls.append(
             {
-                "type": call_type,
+                "type": "degraded",
                 "branch": branch,
-                "violations": violations,
+                "message": message,
                 "pre_merge_sha": pre_merge_sha,
                 "call_file": call_file,
             }
@@ -712,9 +450,9 @@ class MergeOrchestrator:
 
     For each branch:
       1. ``git merge <branch> --no-edit``
-      2. Clean merge  → guardrails check → commit recorded, continue
+      2. Clean merge  → commit recorded, continue
       3. Conflict     → build context → LLM resolve → strategy decide
-         - ACCEPT  → write back → git add → git commit → guardrails → continue
+         - ACCEPT  → write back → git add → git commit → continue
          - HUMAN_CALL → write call file → pause (pending_human)
          - REJECT  → git merge --abort → stop
       4. Non-conflict failure → ``git merge --abort`` → stop
@@ -724,9 +462,9 @@ class MergeOrchestrator:
     A single ``MergeOrchestrator`` instance is **NOT** thread-safe and MUST
     NOT be reused across threads. The orchestrator carries per-branch
     mutable state on the instance — most importantly
-    ``_last_branch_repair_ran`` and ``_last_branch_repair_used_amend``,
-    set inside ``_run_guardrails`` (per branch) and read inside
-    ``_verify_post_merge_conditions`` (also per branch). The only reason
+    ``_last_branch_reconcile_left_fixup``, set while merging one branch and
+    read later when the post-aggregation topology check computes how many
+    fix-up commits sit between HEAD and the merge commit. The only reason
     these instance attributes are safe today is the single-threaded
     serial loop in ``execute()``: each branch resets the flags before
     its merge runs, and the next branch never overlaps with the
@@ -743,9 +481,9 @@ class MergeOrchestrator:
     git operations across branches, async LLM calls overlapping with
     git work) MUST replace these instance flags with per-call locals
     or a context-managed scope, otherwise post-condition routing will
-    silently use the wrong branch's amend flag and ``allow_fixup_parent``
-    will be applied to the wrong commit shape — re-introducing the
-    silent-merge-loss class of bugs A11/A12 was added to catch.
+    silently use the wrong branch's fix-up depth and walk back to the
+    wrong commit — re-introducing the silent-merge-loss class of bugs
+    A11/A12 was added to catch.
 
     A single orchestrator instance is intended to be created per merge
     invocation and discarded after ``execute()`` returns. Re-using an
@@ -785,16 +523,16 @@ class MergeOrchestrator:
         self.acquire_lock = acquire_lock
         self.log_file: Optional[Path] = None
         self._log_lines: list[str] = []
-        # K2: per-LLM-call trace shared across ConflictResolver and
-        # GuardrailRepairer so every LLM invocation issued during this
-        # merge run lands in a single jsonl trace under
-        # ``tianluo/logs/llm/``.  Started lazily by subcomponents.
+        # K2: per-LLM-call trace shared across the merge pipeline so every
+        # LLM invocation issued during this merge run lands in a single
+        # jsonl trace under ``tianluo/logs/llm/``.  Started lazily by
+        # subcomponents.
         from ...commands.merge.llm_trace import LLMTrace
 
         self._llm_trace = LLMTrace(project_root)
-        # K7 / A13: shared LLMCaller across ConflictResolver and
-        # GuardrailRepairer so prompt cache, quota, and retry state are
-        # reused within a single merge run.  Constructed lazily on first
+        # K7 / A13: shared LLMCaller across the merge pipeline so prompt
+        # cache, quota, and retry state are reused within a single merge
+        # run.  Constructed lazily on first
         # access so tests that don't exercise LLM calls avoid any
         # startup cost, and any import-time or config-read errors are
         # deferred until the LLM is actually needed.
@@ -816,50 +554,11 @@ class MergeOrchestrator:
             if suppress_human_call
             else HumanCallWriter(project_root)
         )
-        self._guardrails = MergeGuardrailsCheck(project_root)
-        self._repairer = GuardrailRepairer(
-            project_root,
-            llm_caller=self._lazy_llm_caller,
-            llm_trace=self._llm_trace,
-        )
         self._git_merge_timeout = _load_git_merge_timeout(project_root)
-        self._last_stall_iteration_count: Optional[int] = None
-        # A10: load max repair iterations from tianluo.yaml so users can
-        # tune ``merge.guardrail_repair.max_iterations`` without
-        # re-deploying the orchestrator.  Falls back to the module
-        # default on any read or parse failure (logged inside the
-        # loader).
-        self._max_repair_iterations = _load_max_repair_iterations(project_root)
-        # Defense-in-depth: the loader already clamps to >=1, but a future
-        # refactor (or a test that monkeypatches the loader to return 0)
-        # could bypass that clamp and leave the for-loop in
-        # ``_run_fast_repair_loop`` with an empty range — the
-        # exhausted-path block then references ``iteration`` outside the
-        # for-loop, raising UnboundLocalError instead of producing a
-        # clean failure.  Re-clamp here so the orchestrator is robust to
-        # any code path that produces a non-positive value.
-        if self._max_repair_iterations < 1:
-            logger.warning(
-                "Loaded _max_repair_iterations=%d is below 1; clamping to "
-                "the module default to keep the repair loop well-defined",
-                self._max_repair_iterations,
-            )
-            self._max_repair_iterations = _DEFAULT_MAX_REPAIR_ITERATIONS
-        # Per-branch flag: True when guardrail repair created a fix-up
-        # (or amend) commit on top of the merge commit during the
-        # current branch.  Gates ``allow_fixup_parent`` in the post-
-        # condition check so a stray hook commit on top of HEAD on a
-        # never-repaired branch still trips ``silent_merge_loss``.
-        self._last_branch_repair_ran: bool = False
-        # Track whether the repair used amend (True) or fix-up (False).
-        # Only fix-up mode requires allow_fixup_parent=True because HEAD
-        # is a single-parent commit on top of the merge; amend mode
-        # keeps HEAD as the merge commit itself.
-        self._last_branch_repair_used_amend: bool = False
         # Per-branch flag: True when issue-ID reconciliation appended a
         # fix-up commit (single parent) on top of the merge commit for the
-        # current branch. Counted alongside the repair fix-up when the
-        # post-aggregation topology check walks back to the merge commit.
+        # current branch. Counted by the post-aggregation topology check
+        # when it walks back to the merge commit.
         self._last_branch_reconcile_left_fixup: bool = False
         # Per-execute flag: True when SemVer aggregation took the
         # ``amend=False`` path (HEAD already published) and produced a
@@ -871,8 +570,8 @@ class MergeOrchestrator:
         self._aggregation_used_fixup: bool = False
         # Cumulative fix-up depth between HEAD and the merge commit
         # after aggregation finishes.  Composed of:
-        #   * +1 if the LAST branch's guardrail repair created a fix-up
-        #     commit (not amend) on top of the merge commit, AND
+        #   * +1 if the LAST branch's issue-ID reconciliation left a
+        #     fix-up commit on top of the merge commit, AND
         #   * +1 if SemVer aggregation took the amend=False path and
         #     stacked another commit on top.
         # Consumed by the post-aggregation HEAD topology check via
@@ -897,8 +596,8 @@ class MergeOrchestrator:
 
         Change C retires the orchestrator's self-written flow management: in
         library mode (``suppress_human_call=True``) the human-call writer is a
-        :class:`_RecordingNullHumanCallWriter` that *records* each escalation
-        (conflict / guardrail) rather than writing an ``tianluo/calls/`` file or
+        :class:`_RecordingNullHumanCallWriter` that *records* each conflict
+        escalation rather than writing an ``tianluo/calls/`` file or
         printing terminal instructions. The caller owns flow-control and reads
         the escalation off the returned :class:`MergeResult` (the CLI turns it
         into an exit code; a flow step drives PAUSED/confirm/resume). In the
@@ -979,8 +678,8 @@ class MergeOrchestrator:
     def _lazy_llm_caller(self) -> Optional[Any]:
         """Lazy construction of the shared LLMCaller instance.
 
-        Built on first access and cached so ConflictResolver and
-        GuardrailRepairer share the same instance within a merge run.
+        Built on first access and cached so every merge-pipeline
+        component shares the same instance within a merge run.
         """
         if not self._llm_caller_initialized:
             self._llm_caller_initialized = True
@@ -995,7 +694,7 @@ class MergeOrchestrator:
                 logger.warning(
                     "LLMCaller construction failed (project_root=%s): %s "
                     "— per-component fallback will lose shared prompt-cache "
-                    "and quota state across ConflictResolver / GuardrailRepairer.",
+                    "and quota state across the merge pipeline.",
                     self.project_root, exc,
                 )
                 self._llm_caller = None
@@ -1018,7 +717,6 @@ class MergeOrchestrator:
         result: Any,
         *,
         merge_commit_sha: Optional[str] = None,
-        warnings_repaired: bool = False,
         failure_detail: Optional[str] = None,
         git_merge_succeeded: bool = False,
     ) -> None:
@@ -1070,7 +768,6 @@ class MergeOrchestrator:
                     branch=branch,
                     success=True,
                     merge_commit_sha=merge_commit_sha,
-                    warnings_repaired=warnings_repaired,
                     git_merge_succeeded=True,
                 )
             )
@@ -1081,7 +778,6 @@ class MergeOrchestrator:
                     branch=branch,
                     success=True,
                     already_ancestor=True,
-                    warnings_repaired=warnings_repaired,
                     git_merge_succeeded=True,
                 )
             )
@@ -1107,23 +803,17 @@ class MergeOrchestrator:
         *,
         already_ancestor: bool,
         report: MergeReport,
-        allow_fixup_parent: bool = False,
     ) -> Optional[str]:
         """Verify post-merge conditions before declaring success.
 
         Defect B1 fix: every "successfully merged" return path MUST
         execute ancestry and (when applicable) merge-commit-shape checks.
-        If a guardrail rollback or any other intermediate step silently
-        lost the merge commit, this helper catches it and routes the
-        outcome to a typed ``silent_merge_loss`` failure rather than
-        falsely reporting success.
-
-        Args:
-            allow_fixup_parent: When ``True``, accept HEAD^1 as the merge
-                commit (fix-up layout produced by guardrail repair).
-                Callers MUST only set this on paths where guardrail
-                repair could legitimately have created a fix-up commit
-                on top of the merge.
+        If any intermediate step silently lost the merge commit, this
+        helper catches it and routes the outcome to a typed
+        ``silent_merge_loss`` failure rather than falsely reporting
+        success. HEAD MUST itself be the merge commit here: nothing in
+        the per-branch merge path stacks a commit on top of it before
+        this check runs, so a fix-up parent would signal a stray commit.
 
         Returns ``None`` when checks pass; otherwise returns the
         failure reason string (suitable for ``_merge_single_branch``
@@ -1135,7 +825,6 @@ class MergeOrchestrator:
                 assert_head_is_merge_commit(
                     self.project_root,
                     branch,
-                    allow_fixup_parent=allow_fixup_parent,
                     timeout=15,
                 )
         except PostConditionViolated as exc:
@@ -1610,11 +1299,6 @@ class MergeOrchestrator:
         current_branch = get_current_branch(self.project_root)
         self._current_branch = current_branch
 
-        # Defensive: clear stale instance state from any prior execution so
-        # that a later merge that stalls without setting this attribute does
-        # not pick up the value from a previous stall.
-        self._last_stall_iteration_count = None
-
         self._log("Merge orchestrator starting")
         self._log(f"Current branch: {current_branch}")
         self._log(f"Branches to merge ({len(branches)}): {', '.join(branches)}")
@@ -1624,10 +1308,10 @@ class MergeOrchestrator:
         # pre_merge_sha capture below): auto-commit self-managed issue state so
         # a branch that also touched tianluo/issues/.next_id can actually START its
         # merge and route the divergence through NextIdResolver. Placing this
-        # ahead of the pre_merge_sha capture makes the "chore: sync issue state"
-        # commit part of the rollback baseline — _rollback_to can never discard
-        # it — and ensures the pre-merge version read happens on the post-sync
-        # HEAD. Dirty tracked files outside the self-managed whitelist fail loud.
+        # ahead of the pre_merge_sha capture puts the "chore: sync issue state"
+        # commit behind the recorded pre-merge SHA, and ensures the pre-merge
+        # version read happens on the post-sync HEAD. Dirty tracked files
+        # outside the self-managed whitelist fail loud.
         if not self._preflight_dirty_tracked_files(report, branches):
             self._write_log()
             report.log_file = self.log_file
@@ -1712,9 +1396,6 @@ class MergeOrchestrator:
         for idx, branch in enumerate(branches):
             # Reset per-branch mutable state so a stall on an earlier branch
             # does not leak into a later branch's result formatting.
-            self._last_stall_iteration_count = None
-            self._last_branch_repair_ran = False
-            self._last_branch_repair_used_amend = False
             self._last_branch_reconcile_left_fixup = False
             self._log(f"--- Merging branch: {branch} ---")
 
@@ -1778,7 +1459,6 @@ class MergeOrchestrator:
                 branch,
                 result,
                 merge_commit_sha=outcome_sha,
-                warnings_repaired=self._last_branch_repair_ran,
                 git_merge_succeeded=outcome_git_merge_succeeded,
             )
 
@@ -1793,19 +1473,7 @@ class MergeOrchestrator:
                 if result == "already_merged":
                     report.already_ancestor_branches.append(branch)
                 else:
-                    # When the branch's merge ran guardrail repair (fast
-                    # mode), surface it via the dedicated
-                    # ``merged_with_warnings`` bucket so downstream
-                    # consumers (CLI rendering, ``to_legacy_dict``) can
-                    # tell repaired-merge branches from clean-merge ones.
-                    # The branch is also appended to ``merged_branches``
-                    # (above) so the legacy aggregate view continues to
-                    # report it; the new bucket is in addition to, not
-                    # in place of, that aggregate.
-                    if self._last_branch_repair_ran:
-                        report.merged_with_warnings.append(branch)
-                    else:
-                        report.newly_merged_branches.append(branch)
+                    report.newly_merged_branches.append(branch)
                 if pre_merge_sha and pre_merge_version:
                     # Compute merge-base for end-to-end diff semantics
                     if result == "already_merged":
@@ -2034,104 +1702,6 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
-            elif result == "guardrail_violation":
-                self._log(f"Branch '{branch}' rolled back due to guardrail violation")
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.pending_human = True
-                report.failed_branch = branch
-                report.failure_reason = FailureReason.GUARDRAIL_VIOLATION.legacy_string
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
-            elif result == "guardrail_violation_call_failed":
-                self._log(
-                    f"Branch '{branch}' guardrail violation detected. Rollback "
-                    f"succeeded, but the human call file could not be written. "
-                    f"Manual intervention required."
-                )
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.failed_branch = branch
-                report.failure_reason = FailureReason.GUARDRAIL_VIOLATION_CALL_FAILED.legacy_string
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
-            elif result == "guardrail_violation_no_rollback":
-                self._log(
-                    f"Branch '{branch}' guardrail violation detected. "
-                    f"Rollback was not attempted because pre_merge_sha was missing. "
-                    f"The merge commit may still be in HEAD. See the human call file."
-                )
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.pending_human = True
-                report.failed_branch = branch
-                report.failure_reason = FailureReason.GUARDRAIL_VIOLATION_NO_ROLLBACK.legacy_string
-                report.rollback_failed = False
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
-            elif result in ("guardrail_repair_stalled", "guardrail_repair_exhausted"):
-                iter_info = getattr(self, "_last_stall_iteration_count", None)
-                iter_str = f" after {iter_info} iteration(s)" if iter_info else ""
-                reason_word = "exhausted" if result == "guardrail_repair_exhausted" else "stalled"
-                self._log(
-                    f"Branch '{branch}' guardrail repair {reason_word}{iter_str} — "
-                    f"escalated to human review"
-                )
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.pending_human = True
-                report.failed_branch = branch
-                if not report.failure_reason:
-                    report.failure_reason = FailureReason.GUARDRAIL_REPAIR_STALLED.legacy_string
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
-            elif result == "rollback_failed":
-                self._log(
-                    f"Branch '{branch}' guardrail violation detected but ROLLBACK FAILED. "
-                    f"Working tree is in an inconsistent state. Manual intervention required."
-                )
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.rollback_failed = True
-                report.failed_branch = branch
-                report.failure_reason = FailureReason.ROLLBACK_FAILED.legacy_string
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
             elif result == "merge_abort_failed":
                 self._log(
                     f"Branch '{branch}' aborted but git merge --abort FAILED. "
@@ -2247,16 +1817,6 @@ class MergeOrchestrator:
                     report.failure_reason = FailureReason.FAST_ABORT.legacy_string
                 report.pending_human = False
                 report.version_aggregation_skipped = True
-                # If rollback_failed was set (e.g. by GuardrailRepairFailed),
-                # log a CRITICAL warning so the log file captures the severity
-                # even though merge_cmd.py will surface it in the CLI via
-                # its report.rollback_failed branch.
-                if report.rollback_failed:
-                    self._log(
-                        f"CRITICAL: Branch '{branch}' guardrail violation detected "
-                        f"but ROLLBACK FAILED. Working tree is in an inconsistent state. "
-                        f"Manual intervention required."
-                    )
                 self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
@@ -2434,27 +1994,6 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = FailureReason.RUNTIME_SYNC_TIMEOUT.legacy_string
                 break
-            elif result == "inconsistent_repair_state":
-                self._log(
-                    f"CRITICAL: Branch '{branch}' entered inconsistent repair state. "
-                    f"The repository may contain an unrolled-back repair commit on HEAD. "
-                    f"Subsequent branches are NOT attempted. Manual intervention required.",
-                    level=logging.ERROR,
-                )
-                if report.merged_branches:
-                    self._log(
-                        f"Version not bumped despite {len(report.merged_branches)} "
-                        f"successful merge(s) — re-run after resolving"
-                    )
-                report.success = False
-                report.failed_branch = branch
-                if not report.failure_reason:
-                    report.failure_reason = FailureReason.INCONSISTENT_REPAIR_STATE.legacy_string
-                report.version_aggregation_skipped = True
-                self._populate_unattempted(report, branches)
-                self._write_log()
-                report.log_file = self.log_file
-                return report
             else:
                 self._log(f"Branch '{branch}' merge returned unexpected result: {result}")
                 if report.merged_branches:
@@ -2523,16 +2062,11 @@ class MergeOrchestrator:
             # merge commit so the flag stays False there.
             self._aggregation_used_fixup = False
             self._aggregation_fixup_depth = 0
-            # Pre-aggregation: each single-parent fix-up commit the LAST
+            # Pre-aggregation: a single-parent fix-up commit the LAST
             # branch left on top of the merge commit adds one to the depth
             # the post-aggregation HEAD topology check must walk back to
-            # reach the merge commit. Two independent sources can stack:
-            # a fast-mode guardrail repair fix-up, and an issue-ID
-            # reconciliation fix-up (they commit in that order, both on top
-            # of the merge commit). An amend-mode repair leaves HEAD as the
-            # merge commit and contributes no depth.
-            if self._last_branch_repair_ran and not self._last_branch_repair_used_amend:
-                self._aggregation_fixup_depth += 1
+            # reach the merge commit. Issue-ID reconciliation is the one
+            # source of such a commit on the per-branch path.
             if self._last_branch_reconcile_left_fixup:
                 self._aggregation_fixup_depth += 1
             try:
@@ -2566,10 +2100,10 @@ class MergeOrchestrator:
                         # amend=True path was actually taken.  The amend
                         # rewrites HEAD in place, so the depth between
                         # HEAD and the merge commit is unchanged from
-                        # whatever the repair phase left:
+                        # whatever the per-branch phase left:
                         #   * No prior fix-up → HEAD is the merge commit
                         #     (depth 0 ⇒ allow_fixup_parent=False).
-                        #   * Prior repair fix-up → HEAD is amended
+                        #   * Prior reconcile fix-up → HEAD is amended
                         #     fix-up, merge commit at HEAD^1
                         #     (depth 1 ⇒ allow_fixup_parent=True,
                         #     max_fixup_depth=1).
@@ -2602,8 +2136,8 @@ class MergeOrchestrator:
                             # the branch name only enriches the error
                             # detail when it fails.
                             # Walk back up to the cumulative fix-up
-                            # depth (max 1 for repair-only or
-                            # aggregation-only, max 2 for repair+
+                            # depth (max 1 for reconcile-only or
+                            # aggregation-only, max 2 for reconcile+
                             # aggregation stacked).  Cap min depth at 1
                             # when ``allow_fixup_parent`` is True so the
                             # signature contract holds.
@@ -2859,9 +2393,8 @@ class MergeOrchestrator:
                         )
                         report.success = False
                         # Preserve any earlier, more specific failure
-                        # reason (e.g. a guardrails failure that already
-                        # set report.failure_reason). Only overwrite
-                        # when the report has not yet recorded one.
+                        # reason a merge phase already recorded on the
+                        # report. Only overwrite when none is set yet.
                         if not report.failure_reason:
                             report.failure_reason = (
                                 FailureReason.POSTCOND_VERSION_NOT_BUMPED.legacy_string
@@ -4149,9 +3682,9 @@ class MergeOrchestrator:
 
         Returns:
             One of: "merged", "conflict", "pending_human",
-            "guardrail_violation", "non_conflict_failure".
+            "non_conflict_failure".
         """
-        # Remember pre-merge HEAD for guardrails check and rollback
+        # Remember pre-merge HEAD for bump inference and diagnostics
         try:
             pre_merge_head = _run_git(
                 self.project_root, "rev-parse", "HEAD",
@@ -4190,7 +3723,7 @@ class MergeOrchestrator:
             return "non_conflict_failure"
 
         if result.returncode == 0:
-            # Clean merge — run guardrails on spec files
+            # Clean merge — capture the merge commit SHA
             rev_parse_result = None
             try:
                 rev_parse_result = _run_git(
@@ -4206,16 +3739,14 @@ class MergeOrchestrator:
                         f"git rev-parse HEAD failed (rc="
                         f"{rev_parse_result.returncode}, stderr="
                         f"{rev_parse_result.stderr.strip()}) after "
-                        f"clean merge of '{branch}'. Cannot verify "
-                        f"merge commit SHA; treating as failure."
+                        f"clean merge of '{branch}'."
                     )
                     post_merge_sha = ""
                 else:
                     post_merge_sha = rev_parse_result.stdout.strip()
             except subprocess.TimeoutExpired:
                 self._log(
-                    f"git rev-parse HEAD timed out after clean merge of '{branch}'. "
-                    "Cannot verify merge commit SHA; treating as failure."
+                    f"git rev-parse HEAD timed out after clean merge of '{branch}'."
                 )
                 post_merge_sha = ""
             if not post_merge_sha:
@@ -4224,10 +3755,17 @@ class MergeOrchestrator:
                     if rev_parse_result is not None
                     else "timeout"
                 )
+                # An unreadable HEAD costs us the no-op (already-ancestor)
+                # detection below, so a branch that was in fact already merged
+                # falls through to the merge-commit-shape assertion and fails
+                # as silent_merge_loss. That is the deliberate fail-closed
+                # direction: a rev-parse this basic failing points at git-state
+                # corruption, exactly where a silent success is most dangerous.
                 self._log(
                     f"WARNING: git rev-parse HEAD failed ({rc_str}) "
                     f"after clean merge of '{branch}'. This indicates possible git state "
-                    f"corruption; guardrails will fail closed."
+                    f"corruption; the already-ancestor short-circuit is skipped and "
+                    f"the post-condition checks below decide the outcome."
                 )
 
             # Detect no-op (already-up-to-date) merge: HEAD did not change
@@ -4249,137 +3787,14 @@ class MergeOrchestrator:
                     return sync_result
                 return "already_merged"
 
-            try:
-                guardrails_result = self._run_guardrails(
-                    pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
-                )
-            except GuardrailRepairStalled as exc:
-                self._log(
-                    f"Guardrail repair stalled for '{branch}' after "
-                    f"{exc.iteration_count} iteration(s) — escalated to human review"
-                )
-                report.human_call_file = exc.call_file
-                report.pending_human = True
-                report.failure_reason = exc.failure_reason.legacy_string
-                self._last_stall_iteration_count = exc.iteration_count
-                # Return the legacy string so the dispatch loop in execute()
-                # can match the existing string-keyed elif branches
-                # (e.g. "guardrail_repair_stalled", "guardrail_repair_exhausted").
-                # Returning the raw FailureReason enum would fall through to
-                # the catch-all "unexpected result" else branch and produce a
-                # misleading log message for operators.
-                return exc.failure_reason.legacy_string
-            except GuardrailRepairFailed as exc:
-                if exc.failure_reason is FailureReason.GUARDRAIL_CHECK_FAILED:
-                    self._log(
-                        f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
-                    )
-                elif exc.failure_reason is FailureReason.GUARDRAIL_REPAIR_STALLED_CALL_FAILED:
-                    self._log(
-                        f"Guardrail repair stalled for '{branch}' in fast mode: "
-                        f"rollback succeeded but the stalled human call file could not be written. {exc}"
-                    )
-                elif exc.failure_reason is FailureReason.GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED:
-                    self._log(
-                        f"Guardrail repair exhausted for '{branch}' in fast mode: "
-                        f"rollback succeeded but the exhausted human call file could not be written. {exc}"
-                    )
-                else:
-                    self._log(
-                        f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
-                    )
-                report.rollback_failed = getattr(exc, "rollback_failed", False)
-                report.failure_reason = exc.failure_reason.legacy_string
-                return "fast_abort"
-            except GuardrailCallFileError as exc:
-                self._log(
-                    f"Guardrail violation detected, rollback succeeded, but "
-                    f"call file could not be written: {exc}"
-                )
-                report.rollback_failed = False
-                report.failure_reason = FailureReason.GUARDRAIL_VIOLATION_CALL_FAILED.legacy_string
-                return "guardrail_violation_call_failed"
-            except GuardrailNoRollbackError as exc:
-                self._log(
-                    f"Guardrails check for '{branch}' failed: {exc}. "
-                    f"Rollback was not attempted because pre_merge_sha was missing. "
-                    f"The merge commit may still be in HEAD."
-                )
-                report.rollback_failed = False
-                if exc.call_file is not None:
-                    report.human_call_file = exc.call_file
-                return "guardrail_violation_no_rollback"
-            except GuardrailRepairInconsistentState as exc:
-                # A1-A4 safety contract: the repairer created a commit but
-                # could not capture pre_repair_sha, so rollback was refused.
-                # HEAD still contains the repair commit but the working tree
-                # was restored.  This is a hard-stop: subsequent branches must
-                # NOT run because the repo is in an inconsistent state.
-                self._log(
-                    f"CRITICAL: Guardrail repair for '{branch}' entered an "
-                    f"inconsistent state. {exc}",
-                    level=logging.ERROR,
-                )
-                report.failure_reason = FailureReason.INCONSISTENT_REPAIR_STATE.legacy_string
-                report.failure_detail = str(exc)
-                return "inconsistent_repair_state"
-            except (RuntimeError, subprocess.TimeoutExpired) as exc:
-                self._log(f"Rollback failed after guardrail violation: {exc}")
-                report.rollback_failed = True
-                if hasattr(exc, "call_file") and exc.call_file is not None:
-                    report.human_call_file = exc.call_file
-                return "rollback_failed"
-            if guardrails_result is not None:
-                report.human_call_file = guardrails_result
-                return "guardrail_violation"
-            # If fast-mode guardrail repair amended the commit, HEAD changed.
-            # Refresh post_merge_sha so any downstream logging stays accurate.
-            try:
-                rev_parse_refresh = _run_git(
-                    self.project_root, "rev-parse", "HEAD",
-                    check=False, timeout=15,
-                )
-                # G3 fix: a non-zero returncode produces an empty
-                # ``stdout.strip()`` that masquerades as a successful
-                # SHA read.  Surface a warning rather than letting an
-                # empty SHA flow downstream as if it were valid.
-                if rev_parse_refresh.returncode != 0:
-                    self._log(
-                        f"git rev-parse HEAD failed (rc="
-                        f"{rev_parse_refresh.returncode}, stderr="
-                        f"{rev_parse_refresh.stderr.strip()}) after "
-                        f"guardrails check for '{branch}'. Downstream "
-                        f"SHA may be stale."
-                    )
-                    # Keep the old post_merge_sha rather than clobber to ""
-                else:
-                    refreshed_sha = rev_parse_refresh.stdout.strip()
-                    if refreshed_sha:
-                        post_merge_sha = refreshed_sha
-            except subprocess.TimeoutExpired:
-                self._log(
-                    f"git rev-parse HEAD timed out after guardrails check for '{branch}'. "
-                    "Downstream SHA may be stale."
-                )
-                # Keep the old post_merge_sha (or empty if already unset)
             # B1 post-condition: confirm the merge commit is still on HEAD
             # before declaring success. Catches silent-loss bugs where a
-            # later step (rollback, future amend logic) drops the merge
-            # commit between commit-time and report-time.
-            #
-            # Fix-up tolerance is opt-in to fast-mode only, where
-            # GuardrailRepairer may have placed a fix-up commit on top of
-            # the merge commit. For default/strict, HEAD MUST itself be
-            # the merge commit.
+            # later step (a future amend, a hook) drops the merge commit
+            # between commit-time and report-time.
             pc_result = self._verify_post_merge_conditions(
                 branch,
                 already_ancestor=False,
                 report=report,
-                allow_fixup_parent=(
-                    self.strategy == MergeStrategy.FAST
-                    and self._last_branch_repair_ran
-                    and not self._last_branch_repair_used_amend
-                ),
             )
             if pc_result is not None:
                 return pc_result
@@ -4496,7 +3911,7 @@ class MergeOrchestrator:
 
         Returns:
             "merged" (if resolved and committed), "pending_human",
-            "guardrail_violation", "fast_abort", "context_build_failed"
+            "fast_abort", "context_build_failed"
             (when build_conflict_context itself raised, indicating the
             merge was aborted because we could not even prepare the
             resolver input — distinct from a real conflict-resolution
@@ -4583,19 +3998,13 @@ class MergeOrchestrator:
                 # Strict contract: any conflict escalates to human call.
                 # Write a degraded call file since we cannot build full context.
                 try:
-                    call_file = self._human_writer.write_guardrail_call(
+                    call_file = self._human_writer.write_degraded_call(
                         branch=branch,
-                        violations=[
-                            {
-                                "file_path": "N/A",
-                                "violation_type": "CONFLICT_CONTEXT_BUILD_FAILURE",
-                                "message": (
-                                    f"Conflict context could not be built: {exc}. "
-                                    f"The merge has been aborted. "
-                                    f"Please inspect the branch and resolve manually."
-                                ),
-                            }
-                        ],
+                        message=(
+                            f"Conflict context could not be built: {exc}. "
+                            f"The merge has been aborted. "
+                            f"Please inspect the branch and resolve manually."
+                        ),
                         pre_merge_sha=pre_merge_sha,
                     )
                     report.human_call_file = call_file
@@ -4694,7 +4103,6 @@ class MergeOrchestrator:
                         hunks=placeholder_hunks,
                         overall_confidence=Confidence.LOW,
                         flags={"strict_mode_placeholder": True},
-                        is_spec=cf.is_spec,
                     )
                 )
             placeholder_resolution = LLMResolution(
@@ -4750,7 +4158,6 @@ class MergeOrchestrator:
             theirs_head_message=context.theirs_head_message,
             ours_log_oneline=list(context.ours_log_oneline),
             theirs_log_oneline=list(context.theirs_log_oneline),
-            has_spec_files=context.has_spec_files,
             strategy=self.strategy,
         )
         max_iter = _load_max_conflict_resolve_iterations(self.project_root)
@@ -4815,8 +4222,7 @@ class MergeOrchestrator:
         # Fall back to synthesising one from the batch outcome if not
         # present (e.g. strict_batch which short-circuits).  The on-disk
         # state is the canonical artefact — this structured view is
-        # only used by downstream consumers (human-call writer,
-        # guardrails report).
+        # only used by downstream consumers (the human-call writer).
         resolution = None
         if decision.outcome is not None:
             resolution = getattr(decision.outcome, "_resolution", None)
@@ -4970,18 +4376,15 @@ class MergeOrchestrator:
         context: "ConflictContext",
         report: MergeReport,
     ) -> str:
-        """Write resolved content back, stage, commit, and run guardrails.
+        """Write resolved content back, stage, and commit the merge.
 
         Returns:
-            "merged" on success, "guardrail_violation" if guardrails fail
-            (after rollback), "resolution_validation_failed" if resolved
+            "merged" on success, "resolution_validation_failed" if resolved
             content fails validation (after abort), "resolution_write_failed"
             if writing or staging resolved files fails (after abort),
             "resolution_commit_failed" if the merge commit fails after
-            resolution (after abort), "rollback_failed" if guardrails detected
-            violations but rollback could not be completed,
-            "resolution_commit_timeout" if the post-resolution ``git commit``
-            timed out (after abort).
+            resolution (after abort), "resolution_commit_timeout" if the
+            post-resolution ``git commit`` timed out (after abort).
         """
         # Build the set of valid paths and path→ConflictFile mapping
         valid_paths = {cf.path for cf in context.files}
@@ -5299,173 +4702,34 @@ class MergeOrchestrator:
                 return "fast_abort"
             return "resolution_commit_failed"
 
-        # Run guardrails
+        # Record the resulting merge commit in the log. Read best-effort: the
+        # post-condition check below is what actually proves the commit is
+        # there, so a failed read only degrades the log line.
         try:
-            rev_parse_for_guardrails = _run_git(
+            head_after_commit = _run_git(
                 self.project_root, "rev-parse", "HEAD",
                 check=False, timeout=15,
             )
-            # G3 fix: a non-zero returncode produces an empty
-            # ``stdout.strip()`` that masquerades as a successful
-            # SHA read.  Fail closed rather than letting an empty
-            # SHA flow into ``_run_guardrails``.
-            if rev_parse_for_guardrails.returncode != 0:
-                self._log(
-                    "git rev-parse HEAD failed (rc=%d, stderr=%s) "
-                    "after merge commit for '%s'. Cannot verify "
-                    "post-merge SHA; guardrails will fail closed.",
-                    rev_parse_for_guardrails.returncode,
-                    rev_parse_for_guardrails.stderr.strip(),
-                    branch,
-                )
-                post_merge_sha = ""
-            else:
-                post_merge_sha = rev_parse_for_guardrails.stdout.strip()
+            committed_sha = (
+                head_after_commit.stdout.strip()
+                if head_after_commit.returncode == 0
+                else ""
+            ) or "<unavailable>"
         except subprocess.TimeoutExpired:
-            self._log(
-                "git rev-parse HEAD timed out after merge commit for '%s'. "
-                "Cannot verify post-merge SHA; guardrails will fail closed.",
-                branch,
-            )
-            post_merge_sha = ""
-        try:
-            guardrails_result = self._run_guardrails(
-                pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
-            )
-        except GuardrailRepairStalled as exc:
-            self._log(
-                f"Guardrail repair stalled for '{branch}' after "
-                f"{exc.iteration_count} iteration(s) — escalated to human review"
-            )
-            report.human_call_file = exc.call_file
-            report.pending_human = True
-            report.failure_reason = exc.failure_reason.legacy_string
-            self._last_stall_iteration_count = exc.iteration_count
-            # Return the legacy string so the dispatch loop in execute()
-            # can match the existing string-keyed elif branches
-            # (e.g. "guardrail_repair_stalled", "guardrail_repair_exhausted").
-            # Returning the raw FailureReason enum would fall through to
-            # the catch-all "unexpected result" else branch and produce a
-            # misleading log message for operators.
-            return exc.failure_reason.legacy_string
-        except GuardrailRepairFailed as exc:
-            if exc.failure_reason is FailureReason.GUARDRAIL_CHECK_FAILED:
-                self._log(
-                    f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
-                )
-            elif exc.failure_reason is FailureReason.GUARDRAIL_REPAIR_STALLED_CALL_FAILED:
-                self._log(
-                    f"Guardrail repair stalled for '{branch}' in fast mode: "
-                    f"rollback succeeded but the stalled human call file could not be written. {exc}"
-                )
-            elif exc.failure_reason is FailureReason.GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED:
-                self._log(
-                    f"Guardrail repair exhausted for '{branch}' in fast mode: "
-                    f"rollback succeeded but the exhausted human call file could not be written. {exc}"
-                )
-            else:
-                self._log(
-                    f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
-                )
-            report.rollback_failed = getattr(exc, "rollback_failed", False)
-            report.failure_reason = exc.failure_reason.legacy_string
-            return "fast_abort"
-        except GuardrailCallFileError as exc:
-            self._log(
-                f"Guardrail violation detected, rollback succeeded, but "
-                f"call file could not be written: {exc}"
-            )
-            report.rollback_failed = False
-            report.failure_reason = FailureReason.GUARDRAIL_VIOLATION_CALL_FAILED.legacy_string
-            return "guardrail_violation_call_failed"
-        except GuardrailNoRollbackError as exc:
-            self._log(
-                f"Guardrails check for '{branch}' failed: {exc}. "
-                f"Rollback was not attempted because pre_merge_sha was missing. "
-                f"The merge commit may still be in HEAD."
-            )
-            report.rollback_failed = False
-            if exc.call_file is not None:
-                report.human_call_file = exc.call_file
-            return "guardrail_violation_no_rollback"
-        except GuardrailRepairInconsistentState as exc:
-            # A1-A4 safety contract: the repairer created a commit but
-            # could not capture pre_repair_sha, so rollback was refused.
-            # HEAD still contains the repair commit but the working tree
-            # was restored.  This is a hard-stop: subsequent branches must
-            # NOT run because the repo is in an inconsistent state.
-            self._log(
-                f"CRITICAL: Guardrail repair for '{branch}' entered an "
-                f"inconsistent state. {exc}",
-                level=logging.ERROR,
-            )
-            report.failure_reason = FailureReason.INCONSISTENT_REPAIR_STATE.legacy_string
-            report.failure_detail = str(exc)
-            return "inconsistent_repair_state"
-        except (RuntimeError, subprocess.TimeoutExpired) as exc:
-            self._log(f"Rollback failed after guardrail violation: {exc}")
-            report.rollback_failed = True
-            if hasattr(exc, "call_file") and exc.call_file is not None:
-                report.human_call_file = exc.call_file
-            return "rollback_failed"
-        if guardrails_result is not None:
-            report.human_call_file = guardrails_result
-            return "guardrail_violation"
-
-        # Refresh SHA in case guardrail repair amended the commit
-        sha_fresh = True
-        try:
-            rev_parse_refresh = _run_git(
-                self.project_root, "rev-parse", "HEAD",
-                check=False, timeout=15,
-            )
-            # G3 fix: a non-zero returncode produces an empty
-            # ``stdout.strip()`` that masquerades as a successful
-            # SHA read.  Surface it as a stale-SHA condition so
-            # downstream consumers see the placeholder rather than
-            # an empty string.
-            if rev_parse_refresh.returncode != 0:
-                self._log(
-                    f"git rev-parse HEAD failed (rc="
-                    f"{rev_parse_refresh.returncode}, stderr="
-                    f"{rev_parse_refresh.stderr.strip()}) after "
-                    f"guardrails for '{branch}'. SHA may be stale."
-                )
-                sha_fresh = False
-                post_merge_sha = "<unavailable — rev-parse failed>"
-            else:
-                post_merge_sha = rev_parse_refresh.stdout.strip()
-                if not post_merge_sha:
-                    sha_fresh = False
-                    post_merge_sha = "<unavailable — empty stdout>"
-        except subprocess.TimeoutExpired:
-            self._log(
-                f"git rev-parse HEAD timed out after guardrails for '{branch}'. "
-                "SHA may be stale."
-            )
-            sha_fresh = False
-            # Clear the stale value so the log does not show a misleading SHA
-            post_merge_sha = "<unavailable — refresh timed out>"
-        sha_note = "" if sha_fresh else " (SHA may be stale)"
+            committed_sha = "<unavailable — rev-parse timed out>"
         self._log(
             f"LLM-resolved merge of '{branch}' committed successfully "
-            f"(SHA: {post_merge_sha}){sha_note}"
+            f"(SHA: {committed_sha})"
         )
+
         # B1 post-condition: confirm the LLM-resolved merge commit is on
-        # HEAD with branch ancestry intact. Mirrors the clean-merge path.
-        # Fix-up tolerance is opt-in to fast-mode AND only when guardrail
-        # repair actually ran (and may have created a fix-up commit). If
-        # repair never ran, HEAD must itself be the merge commit so a
-        # stray hook-installed commit cannot pass silently.
+        # HEAD with branch ancestry intact. Mirrors the clean-merge path:
+        # HEAD must itself be the merge commit so a stray hook-installed
+        # commit cannot pass silently.
         pc_result = self._verify_post_merge_conditions(
             branch,
             already_ancestor=False,
             report=report,
-            allow_fixup_parent=(
-                self.strategy == MergeStrategy.FAST
-                and self._last_branch_repair_ran
-                and not self._last_branch_repair_used_amend
-            ),
         )
         if pc_result is not None:
             return pc_result
@@ -5481,925 +4745,6 @@ class MergeOrchestrator:
         if sync_result:
             return sync_result
         return "merged"
-
-    def _run_guardrails(
-        self,
-        pre_sha: str,
-        post_sha: str,
-        branch: str,
-        strategy: MergeStrategy = MergeStrategy.SAFE,
-    ) -> Optional[Path]:
-        """Run guardrails check on spec files changed in the merge.
-
-        If violations are found or the check itself fails, rolls back to
-        ``pre_sha`` BEFORE writing the human call file so the call file's
-        message is always truthful.
-
-        In ``fast`` strategy, violations are fed to the LLM for repair instead
-        of escalating to a human call. If repair succeeds, the merge commit is
-        amended and ``None`` is returned. If repair fails,
-        ``GuardrailRepairFailed`` is raised (after rollback).
-
-        Args:
-            pre_sha: SHA of HEAD before the merge.
-            post_sha: SHA of the merge commit.
-            branch: The branch being merged.
-            strategy: The merge strategy tier.
-
-        Returns:
-            ``None`` if guardrails passed (or were repaired in fast mode).
-            ``Path`` to the human call file if violations were found or the
-            check itself failed (rollback performed, human call written).
-            Only returned for ``default`` and ``strict`` strategies.
-
-        Raises:
-            GuardrailRepairFailed: In ``fast`` strategy, when LLM repair of
-            guardrail violations fails after rollback.
-            RuntimeError: If the rollback (git reset --hard) fails. The
-            caller must escalate because the tree is in an inconsistent state.
-        """
-        if not pre_sha or not post_sha:
-            logger.warning(
-                "Guardrails check skipped for '%s': missing pre/post SHA "
-                "(pre_sha=%r, post_sha=%r). Treating as failure.",
-                branch, pre_sha, post_sha,
-            )
-
-            # Fast mode: abort immediately without human call (no rollback needed
-            # when SHA is missing — there is no known good state to roll back to)
-            if strategy == MergeStrategy.FAST:
-                if not pre_sha and not post_sha:
-                    missing_reason = "pre and post SHA"
-                    failure_reason = FailureReason.GUARDRAIL_MISSING_PRE_AND_POST_SHA
-                elif not pre_sha:
-                    missing_reason = "pre_sha"
-                    failure_reason = FailureReason.GUARDRAIL_MISSING_PRE_SHA
-                else:
-                    missing_reason = "post_sha"
-                    failure_reason = FailureReason.GUARDRAIL_MISSING_POST_SHA
-                raise GuardrailRepairFailed(
-                    f"Guardrails check skipped for '{branch}': missing {missing_reason} "
-                    f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
-                    f"Fast mode aborts without rollback or human call when SHAs "
-                    f"are missing — the merge commit may still be in HEAD.",
-                    failure_reason=failure_reason,
-                    rollback_failed=False,
-                )
-
-            # Non-fast: attempt rollback if pre_sha exists
-            if pre_sha:
-                try:
-                    self._rollback_to(pre_sha)
-                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                    call_message = (
-                        f"Guardrails check skipped: missing SHA "
-                        f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
-                        f"Rollback also failed: {rbe}."
-                    )
-                    self._log(call_message)
-                    raise RuntimeError(call_message) from rbe
-
-            call_message = (
-                f"Guardrails check skipped: missing SHA "
-                f"(pre_sha={pre_sha!r}, post_sha={post_sha!r})."
-            )
-            if not pre_sha:
-                call_message += (
-                    " NOTE: could not roll back because pre_merge_sha was also "
-                    "missing. The merge commit may still be in HEAD."
-                )
-            try:
-                call_file = self._human_writer.write_guardrail_call(
-                    branch=branch,
-                    violations=[
-                        {
-                            "file_path": "N/A",
-                            "violation_type": "MISSING_SHA",
-                            "message": call_message,
-                        }
-                    ],
-                    pre_merge_sha=pre_sha,
-                )
-            except Exception as exc:
-                self._log(f"Failed to write guardrail human call file: {exc}")
-                if pre_sha:
-                    call_err_msg = (
-                        f"Guardrails failed for '{branch}' (missing SHA) and the "
-                        f"human call file could not be written: {exc}. "
-                        f"The merge has been rolled back; manual intervention required."
-                    )
-                else:
-                    call_err_msg = (
-                        f"Guardrails failed for '{branch}' (missing SHA) and the "
-                        f"human call file could not be written: {exc}. "
-                        f"Rollback was NOT attempted because pre_merge_sha was missing. "
-                        f"The merge commit may still be in HEAD."
-                    )
-                raise GuardrailCallFileError(call_err_msg) from exc
-            try:
-                self._human_writer.print_instructions(call_file)
-            except Exception as exc:
-                self._log(
-                    f"WARNING: Failed to print instructions (call file was written "
-                    f"successfully): {exc}"
-                )
-            if not pre_sha:
-                raise GuardrailNoRollbackError(
-                    f"Guardrails check for '{branch}' could not roll back because "
-                    f"pre_merge_sha was missing. The merge commit may still be in HEAD.",
-                    call_file=call_file,
-                )
-            return call_file
-        try:
-            gr_report = self._guardrails.check_merge_result(pre_sha, post_sha)
-            if gr_report.passed:
-                self._log(f"Guardrails passed for merge of '{branch}'")
-                return None
-
-            # H5: when the guardrails check could not finish enumeration
-            # (e.g. an OSError mid-walk dropped one or more spec files),
-            # the violations list is NOT authoritative — a real violation
-            # in the unreadable file could be missed.  Treat as a fatal
-            # escalation regardless of strategy: skip fast-mode LLM repair
-            # and route to human call.  The CHECK_INCOMPLETE violation is
-            # already present in the list, so the operator can see why
-            # the check was incomplete; the LLM, however, has no trustworthy
-            # way to repair what was never seen.
-            if getattr(gr_report, "incomplete", False):
-                self._log(
-                    f"Guardrails check for '{branch}' is INCOMPLETE "
-                    f"({len(gr_report.violations)} violation(s) including "
-                    f"CHECK_INCOMPLETE entries) — escalating to human call "
-                    f"because the LLM cannot repair violations that were "
-                    f"never enumerated.",
-                    level=logging.WARNING,
-                )
-                # Re-classify under the safe-strategy escalation so the
-                # rollback + human call path below executes.
-                strategy = MergeStrategy.SAFE
-
-            # H1/H2: topology violations (CHECK_FAILURE with file_path="N/A")
-            # cannot be repaired by editing spec files — the LLM has no
-            # meaningful file path to write to.  Skip fast-mode LLM repair
-            # and route directly to rollback + human call.
-            topology_violations = [
-                v for v in gr_report.violations
-                if v.violation_type == "CHECK_FAILURE" and v.file_path == "N/A"
-            ]
-            if topology_violations and strategy == MergeStrategy.FAST:
-                self._log(
-                    f"Guardrails check for '{branch}' contains "
-                    f"{len(topology_violations)} topology violation(s) — "
-                    f"the LLM cannot fix merge topology by editing spec "
-                    f"files. Escalating to human call instead of fast-mode "
-                    f"LLM repair.",
-                    level=logging.WARNING,
-                )
-                strategy = MergeStrategy.SAFE
-
-            self._log(
-                f"Guardrails detected {len(gr_report.violations)} violation(s) "
-                f"for '{branch}' (reason: post-merge guardrails violation)"
-            )
-            for v in gr_report.violations:
-                self._log(f"  [{v.violation_type}] {v.file_path}: {v.message}")
-
-            # --- fast strategy: attempt LLM repair with iteration limit ---
-            if strategy == MergeStrategy.FAST:
-                # Mark that repair was attempted on this branch so the
-                # post-merge condition check accepts a fix-up commit on
-                # top of HEAD. Branches that never enter the repair path
-                # keep ``_last_branch_repair_ran=False`` and therefore
-                # require HEAD itself to be the merge commit, catching
-                # stray hook commits as ``silent_merge_loss``.
-                self._last_branch_repair_ran = True
-                # Use a local variable for the working violation set so we
-                # never mutate the original gr_report object.
-                current_violations = gr_report.violations
-
-                self._log(
-                    f"Fast strategy: attempting LLM repair of "
-                    f"{len(current_violations)} guardrail violation(s) "
-                    f"(max {self._max_repair_iterations} iterations)"
-                )
-
-                # Track the previous violation-set hash to detect stalls.
-                # A stall requires the same hash in *two consecutive repair
-                # iterations*, matching the spec's "连续 2 轮 hash 相同".
-                # Only the immediately previous hash is compared (not a set of
-                # all prior hashes) so that oscillating patterns which happen
-                # to revisit an earlier state after making progress are not
-                # falsely classified as stalled.
-                #
-                # Initialise last_hash with the initial violation-set hash so
-                # that even max_iterations=1 can detect a no-op repair (the
-                # first repair produces the same hash as the initial report).
-                last_hash: Optional[str] = violation_set_hash(current_violations)
-
-                # G3: track a sliding window of recent (hash, count) pairs
-                # so an alternating-flap pattern (the LLM oscillates
-                # between two equivalent-but-different violation sets,
-                # same root cause but with renamed files / reordered
-                # messages / cosmetic content shuffles) is escalated
-                # to a human call instead of churning the iteration cap
-                # without convergence. The window size is intentionally
-                # small (N=4) so a genuinely-progressing repair that
-                # legitimately revisits a previous state after making
-                # forward progress is not falsely classified as stalled.
-                #
-                # Two heuristics:
-                #   1. recent_hashes ring: same hash recurring within the
-                #      last N iterations is an oscillation, not progress.
-                #   2. recent_counts: when the violation count is
-                #      stationary across the window AND no consecutive
-                #      stall fired, this is the "different hash, same
-                #      count" alternating flap signature.
-                _STALL_WINDOW_SIZE = 4
-                recent_hashes: list[str] = [last_hash]
-                recent_counts: list[int] = [len(current_violations)]
-
-                # Gather original and merged spec contents.
-                # original_specs is read once (pre_sha never changes).
-                # merged_specs is refreshed each iteration from the current HEAD
-                # so that the LLM sees the latest state after any amendments by
-                # previous repair rounds.
-                #
-                # G3 fix (medium): catch ChangedSpecFilesIncomplete so a
-                # transient git-tooling failure does not silently
-                # downgrade to "no spec files changed" and bypass the
-                # repair loop. We surface the failure as a guardrail
-                # repair failure with the specific cause preserved.
-                from .guardrails import ChangedSpecFilesIncomplete
-                try:
-                    spec_files = _get_changed_spec_files(
-                        self.project_root, pre_sha, post_sha,
-                    )
-                except ChangedSpecFilesIncomplete as csi_exc:
-                    raise GuardrailRepairFailed(
-                        f"Cannot enumerate changed spec files for repair: "
-                        f"{csi_exc}",
-                        failure_reason=FailureReason.GUARDRAIL_REPAIR_FAILED,
-                    ) from csi_exc
-                original_specs: dict[str, str] = {}
-                for sp in spec_files:
-                    orig = _read_file_from_ref(self.project_root, sp, pre_sha)
-                    if orig is None:
-                        self._log(
-                            f"WARNING: Could not read original content of {sp} "
-                            f"from ref {pre_sha} — including placeholder "
-                            f"in repair prompt"
-                        )
-                        orig = f"[Content unavailable at ref {pre_sha}]"
-                    original_specs[sp] = orig
-
-                # Explicit counter mirrors the `iteration` loop variable so
-                # the after-loop blocks (max-iterations escalation,
-                # exhausted call-file writer) can reference it without
-                # relying on Python's leak-of-loop-variable semantics.  If
-                # ``_max_repair_iterations`` is ever 0 the for-loop body
-                # never executes and ``iteration`` would be UNDEFINED at
-                # the after-loop site, raising UnboundLocalError instead
-                # of a clean failure.  The loader clamp pins the value
-                # to >=1 today, but a future refactor or test
-                # monkeypatch could bypass that — this counter makes
-                # the after-loop reference robust regardless.
-                iteration_completed = 0
-                for iteration in range(1, self._max_repair_iterations + 1):
-                    iteration_completed = iteration
-                    # Refresh merged specs from current HEAD so the LLM sees
-                    # the latest state after any amendments from previous repair
-                    # rounds. Falls back to post_sha if HEAD cannot be read.
-                    try:
-                        head_result = _run_git(
-                            self.project_root, "rev-parse", "HEAD",
-                            check=False, timeout=15,
-                        )
-                        current_head = (
-                            head_result.stdout.strip()
-                            if head_result.returncode == 0 else ""
-                        )
-                    except subprocess.TimeoutExpired:
-                        current_head = ""
-                    read_ref = current_head if current_head else post_sha
-
-                    merged_specs: dict[str, str] = {}
-                    for sp in spec_files:
-                        merged = _read_file_from_ref(
-                            self.project_root, sp, read_ref,
-                        )
-                        if merged is None:
-                            # Fallback to original post_sha if HEAD ref read fails
-                            merged = _read_file_from_ref(
-                                self.project_root, sp, post_sha,
-                            )
-                            if merged is None:
-                                self._log(
-                                    f"WARNING: Could not read merged content of "
-                                    f"{sp} from ref {post_sha} — including "
-                                    f"placeholder in repair prompt"
-                                )
-                                merged = f"[Content unavailable at ref {post_sha}]"
-                        merged_specs[sp] = merged
-
-                    self._log(
-                        f"Fast strategy: repair iteration {iteration}/"
-                        f"{self._max_repair_iterations}"
-                    )
-
-                    # Defensive contract: refresh post_sha from the just-read
-                    # HEAD if the previous iteration's repair amended the
-                    # commit and the rollback restored HEAD to a different
-                    # SHA than our cached `post_sha`.  In the well-behaved
-                    # path the repairer always rolls back to the
-                    # pre-repair SHA on failure (which equals the original
-                    # `post_sha`), but downstream ancestry / topology
-                    # checks inside repair_violations would otherwise
-                    # operate against a dangling object if the rollback
-                    # ever leaves HEAD at a fix-up SHA. Pass the freshest
-                    # HEAD available as `post_sha` for the next call so
-                    # the contract is explicit rather than implicit.
-                    iter_post_sha = current_head if current_head else post_sha
-
-                    repair_result = self._repairer.repair_violations(
-                        branch=branch,
-                        pre_sha=pre_sha,
-                        post_sha=iter_post_sha,
-                        violations=current_violations,
-                        original_spec_contents=original_specs,
-                        merged_spec_contents=merged_specs,
-                    )
-
-                    if repair_result.success:
-                        self._log(
-                            f"Guardrail repair succeeded for '{branch}' at "
-                            f"iteration {iteration}: "
-                            f"{len(repair_result.repaired_files)} file(s) corrected"
-                        )
-                        # Surface partial repair warning at the
-                        # orchestrator level so log readers see when an
-                        # incomplete LLM response left some files
-                        # unaddressed even though the re-check passed
-                        # (e.g. side-effect clearance from another file's
-                        # repair masked the violation set).
-                        if repair_result.skipped_missing_content:
-                            self._log(
-                                f"WARNING: Guardrail repair for '{branch}' at "
-                                f"iteration {iteration} silently skipped "
-                                f"{len(repair_result.skipped_missing_content)} "
-                                f"file(s) for which the LLM produced no "
-                                f"corrected_content: "
-                                f"{', '.join(repair_result.skipped_missing_content)}. "
-                                f"Re-check passed regardless — the repair may have "
-                                f"benefited from side-effect clearance from another "
-                                f"file's repair, so the skipped files MAY still be "
-                                f"unaddressed.  Operators SHOULD inspect them.",
-                                level=logging.WARNING,
-                            )
-                        self._last_branch_repair_used_amend = (
-                            repair_result.used_amend
-                        )
-                        return None
-
-                    # Repair failed — re-run guardrails to get fresh violations
-                    self._log(
-                        f"Guardrail repair iteration {iteration} failed: "
-                        f"{repair_result.error}"
-                    )
-
-                    # After repair failure the repairer may have rolled HEAD
-                    # back to ``post_sha``, but we verify against the *current*
-                    # HEAD so a future refactor that changes rollback semantics
-                    # does not silently compare against a stale ref.
-                    try:
-                        current_head = _run_git(
-                            self.project_root, "rev-parse", "HEAD",
-                            check=False, timeout=15,
-                        ).stdout.strip()
-                    except subprocess.TimeoutExpired:
-                        current_head = post_sha
-                    try:
-                        fresh_report = self._guardrails.check_merge_result(
-                            pre_sha, current_head,
-                        )
-                    except Exception as exc:
-                        self._log(
-                            f"Guardrails re-check failed after repair: {exc}"
-                        )
-                        try:
-                            self._rollback_to(pre_sha)
-                        except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                            raise GuardrailRepairFailed(
-                                f"Guardrail repair failed at iteration {iteration} "
-                                f"and re-check crashed. Rollback also failed: {rbe}",
-                                failure_reason=FailureReason.GUARDRAIL_CHECK_FAILED,
-                                rollback_failed=True,
-                            ) from rbe
-                        raise GuardrailRepairFailed(
-                            f"Guardrail repair failed at iteration {iteration} "
-                            f"and re-check crashed: {exc}",
-                            failure_reason=FailureReason.GUARDRAIL_CHECK_FAILED,
-                        ) from exc
-
-                    if fresh_report.passed:
-                        # Verify HEAD has not drifted from post_sha before
-                        # accepting the side-effect clearance. If the repairer
-                        # left an amended commit, post_sha is stale and we
-                        # must refresh it for downstream callers.
-                        try:
-                            head_sha = _run_git(
-                                self.project_root, "rev-parse", "HEAD",
-                                check=False, timeout=15,
-                            ).stdout.strip()
-                        except subprocess.TimeoutExpired as exc:
-                            self._log(
-                                "ERROR: git rev-parse HEAD timed out during "
-                                f"side-effect clearance check at iteration {iteration}. "
-                                "Treating as fail-closed: cannot prove HEAD was not "
-                                "silently dropped while filesystem is hung.",
-                                level=logging.ERROR,
-                            )
-                            raise GuardrailRepairFailed(
-                                f"Guardrail repair side-effect clearance timed out "
-                                f"at iteration {iteration}: {exc}",
-                                failure_reason=FailureReason.POSTCOND_CHECK_TIMEOUT,
-                            ) from exc
-                        if head_sha and head_sha != post_sha:
-                            self._log(
-                                f"Guardrails passed on re-check after iteration "
-                                f"{iteration} — repair reported failure but "
-                                f"violations were cleared by side-effect; "
-                                f"HEAD moved from {post_sha[:8]} to "
-                                f"{head_sha[:8]}"
-                            )
-                            # Caller will refresh post_merge_sha when it sees
-                            # the merged return path.
-                        else:
-                            self._log(
-                                f"Guardrails passed on re-check after iteration "
-                                f"{iteration} — repair reported failure but "
-                                f"violations were cleared by side-effect; "
-                                f"accepting result"
-                            )
-                        # Even if guardrails coincidentally cleared between
-                        # iterations and HEAD has only "moved on top of" the
-                        # merge commit, we must still prove the branch is an
-                        # ancestor of the new HEAD before accepting success.
-                        # Without this fail-closed check, a HEAD drift caused
-                        # by the repairer that ALSO unwound the merge commit
-                        # would be silently treated as success.
-                        try:
-                            assert_branch_merged(
-                                self.project_root, branch, timeout=15,
-                            )
-                        except PostConditionViolated as exc:
-                            self._log(
-                                f"ERROR: side-effect clearance accepted by "
-                                f"guardrails but branch '{branch}' is no longer "
-                                f"merged into HEAD ({exc}). Failing closed to "
-                                f"prevent silent merge loss.",
-                                level=logging.ERROR,
-                            )
-                            raise GuardrailRepairFailed(
-                                f"Guardrails passed on re-check at iteration "
-                                f"{iteration} but branch '{branch}' is no "
-                                f"longer merged into HEAD: {exc}",
-                                failure_reason=FailureReason.SILENT_MERGE_LOSS,
-                            ) from exc
-                        except subprocess.TimeoutExpired as exc:
-                            self._log(
-                                f"ERROR: assert_branch_merged timed out during "
-                                f"side-effect clearance check at iteration "
-                                f"{iteration}: {exc}. Treating as fail-closed.",
-                                level=logging.ERROR,
-                            )
-                            raise GuardrailRepairFailed(
-                                f"Branch-merge ancestry check timed out at "
-                                f"iteration {iteration}: {exc}",
-                                failure_reason=FailureReason.POSTCOND_CHECK_TIMEOUT,
-                            ) from exc
-                        return None
-
-                    current_hash = violation_set_hash(fresh_report.violations)
-                    current_count = len(fresh_report.violations)
-                    self._log(
-                        f"Repair iteration {iteration}: violation hash "
-                        f"{current_hash[:8]}... "
-                        f"({current_count} violation(s))"
-                    )
-
-                    # G3 alternating-flap detection: examine recent
-                    # iterations BEFORE the consecutive-hash check below
-                    # so a stall that flaps between two equivalent
-                    # violation sets is also escalated to a human call.
-                    # The recurrence test fires when:
-                    #   (1) ``current_hash`` matches a hash from a recent
-                    #       iteration (i.e., the LLM oscillates back to a
-                    #       previous state instead of progressing), AND
-                    #   (2) the iteration count has reached at least 3
-                    #       so a single revisit doesn't trigger a false
-                    #       positive on a brief detour-then-return path.
-                    is_alternating_flap = False
-                    if (
-                        iteration >= 3
-                        and current_hash in recent_hashes
-                        and current_hash != last_hash
-                    ):
-                        # The hash is being revisited but not consecutively
-                        # — this is the alternating-flap signature. Treat
-                        # it as a stall to surface the situation to a
-                        # human reviewer rather than churning the
-                        # iteration cap.
-                        is_alternating_flap = True
-                    # Stable-count flap: every recent iteration produced
-                    # the same violation count (different files / messages
-                    # but same count). Stable count plus a window full of
-                    # distinct hashes signals an alternating pattern with
-                    # no convergence.
-                    is_stable_count_flap = False
-                    if (
-                        iteration >= _STALL_WINDOW_SIZE
-                        and len(recent_counts) >= _STALL_WINDOW_SIZE
-                        and len(set(recent_counts[-_STALL_WINDOW_SIZE:])) == 1
-                        and current_count == recent_counts[-1]
-                        and current_hash != last_hash
-                        and len(set(recent_hashes[-_STALL_WINDOW_SIZE:])) > 1
-                    ):
-                        is_stable_count_flap = True
-
-                    if (
-                        last_hash is not None and current_hash == last_hash
-                        or is_alternating_flap
-                        or is_stable_count_flap
-                    ):
-                        # Stalled — either:
-                        #   (a) violation set unchanged from previous repair
-                        #       iteration (consecutive identical hash, the
-                        #       canonical stall signature), OR
-                        #   (b) the violation set is alternating between
-                        #       equivalent-but-different states (G3 fix:
-                        #       same root cause masquerading via renamed
-                        #       files, reordered messages, or cosmetic
-                        #       content shuffles). Without this branch,
-                        #       a flapping repair burns the iteration cap
-                        #       and triggers abort-without-human, hiding
-                        #       the actual stall from the operator.
-                        if is_alternating_flap:
-                            stall_kind = "alternating-flap"
-                            stall_reason = (
-                                f"violation set hash {current_hash[:8]}... "
-                                f"recurred within the last "
-                                f"{_STALL_WINDOW_SIZE} iteration(s) — "
-                                f"alternating between equivalent violation states"
-                            )
-                        elif is_stable_count_flap:
-                            stall_kind = "stable-count-flap"
-                            stall_reason = (
-                                f"violation count stable at "
-                                f"{current_count} across the last "
-                                f"{_STALL_WINDOW_SIZE} iteration(s) "
-                                f"with distinct hashes — non-converging flap"
-                            )
-                        else:
-                            stall_kind = "consecutive-identical"
-                            stall_reason = (
-                                f"violation set hash {current_hash[:8]}... "
-                                f"unchanged from previous iteration"
-                            )
-                        self._log(
-                            f"Guardrail repair stalled at iteration {iteration} "
-                            f"({stall_kind}): {stall_reason}"
-                        )
-                        rollback_exc = None
-                        try:
-                            self._rollback_to(pre_sha)
-                        except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                            self._log(
-                                f"Rollback failed after stalled guardrail repair at "
-                                f"iteration {iteration}: {rbe}"
-                            )
-                            rollback_exc = rbe
-
-                        violation_dicts = self._violations_to_dicts(
-                            fresh_report.violations,
-                            branch=branch,
-                        )
-                        call_file: Optional[Path] = None
-                        try:
-                            call_file = self._human_writer.write_guardrail_call(
-                                branch=branch,
-                                violations=violation_dicts,
-                                pre_merge_sha=pre_sha,
-                                call_type="guardrail_repair_stalled",
-                                iteration_count=iteration,
-                            )
-                        except Exception as exc:
-                            self._log(
-                                f"Failed to write stalled guardrail call file: {exc}"
-                            )
-                            if rollback_exc is None:
-                                raise GuardrailRepairFailed(
-                                    f"Guardrail repair stalled at iteration {iteration} "
-                                    f"and call file could not be written: {exc}",
-                                    failure_reason=FailureReason.GUARDRAIL_REPAIR_STALLED_CALL_FAILED,
-                                ) from exc
-                            raise GuardrailRollbackError(
-                                f"Guardrail repair stalled at iteration {iteration}. "
-                                f"Rollback failed: {rollback_exc}. "
-                                f"Additionally, the human call file could not be written: {exc}. "
-                                f"Working tree may be in an inconsistent state. "
-                                f"Manual intervention required.",
-                                call_file=None,
-                            ) from exc
-
-                        try:
-                            self._human_writer.print_instructions(call_file)
-                        except Exception as exc:
-                            self._log(
-                                f"WARNING: Failed to print instructions (call file was written "
-                                f"successfully): {exc}"
-                            )
-
-                        if rollback_exc is not None:
-                            # B11 fix: render call_file defensively so a
-                            # logic error that left it None never produces
-                            # the literal string "None" in operator output.
-                            call_file_str = (
-                                str(call_file) if call_file is not None
-                                else "<unwritten>"
-                            )
-                            raise GuardrailRollbackError(
-                                f"Guardrail repair stalled at iteration {iteration} "
-                                f"but rollback failed. The human call file was written at "
-                                f"{call_file_str} for diagnostic evidence.",
-                                call_file=call_file,
-                            ) from rollback_exc
-
-                        raise GuardrailRepairStalled(
-                            f"Guardrail repair stalled after {iteration} "
-                            f"iteration(s): LLM could not reduce violations",
-                            call_file=call_file,
-                            iteration_count=iteration,
-                            last_violation_hash=current_hash,
-                            failure_reason=FailureReason.GUARDRAIL_REPAIR_STALLED,
-                        )
-
-                    last_hash = current_hash
-                    # G3: maintain bounded recent_hashes / recent_counts
-                    # ring buffers for the alternating-flap detector
-                    # above. Prepend then truncate so the most recent
-                    # entry sits at index -1 and the window is always
-                    # at most _STALL_WINDOW_SIZE entries.
-                    recent_hashes.append(current_hash)
-                    if len(recent_hashes) > _STALL_WINDOW_SIZE:
-                        recent_hashes = recent_hashes[-_STALL_WINDOW_SIZE:]
-                    recent_counts.append(current_count)
-                    if len(recent_counts) > _STALL_WINDOW_SIZE:
-                        recent_counts = recent_counts[-_STALL_WINDOW_SIZE:]
-                    # Update working violation list for next iteration's repair
-                    # prompt. Use a local variable rather than mutating the
-                    # original gr_report object so any retained references
-                    # elsewhere do not observe stale data.
-                    current_violations = fresh_report.violations
-                # WARNING: This is a ``for ... else`` pattern. The ``else``
-                # runs only when the loop completes all iterations WITHOUT
-                # an early ``return``, ``raise``, or ``break``. Adding a
-                # ``break`` here would silently skip the exhausted-iterations
-                # escalation below. If you need an early exit, use ``return``
-                # or ``raise``, or convert to an explicit ``exhausted`` flag.
-                else:
-                    # The else clause runs only when the loop completes all
-                    # iterations without an early return (repair success,
-                    # side-effect clearance, or stall exception).
-                    # Max iterations reached — violations persist but hash keeps
-                    # changing. Escalate to human call consistently with the stall
-                    # path instead of aborting outright.
-                    self._log(
-                        f"Guardrail repair exhausted after {self._max_repair_iterations} "
-                        f"iterations — escalating to human review"
-                    )
-                    rollback_exc = None
-                    try:
-                        self._rollback_to(pre_sha)
-                    except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                        self._log(
-                            f"Rollback failed after exhausted guardrail repair: {rbe}"
-                        )
-                        rollback_exc = rbe
-
-                    violation_dicts = self._violations_to_dicts(
-                        current_violations,
-                        branch=branch,
-                    )
-                    call_file: Optional[Path] = None
-                    try:
-                        call_file = self._human_writer.write_guardrail_call(
-                            branch=branch,
-                            violations=violation_dicts,
-                            pre_merge_sha=pre_sha,
-                            call_type="guardrail_repair_exhausted",
-                            iteration_count=iteration_completed,
-                        )
-                    except Exception as exc:
-                        self._log(
-                            f"Failed to write exhausted guardrail call file: {exc}"
-                        )
-                        if rollback_exc is None:
-                            raise GuardrailRepairFailed(
-                                f"Guardrail repair exhausted after {self._max_repair_iterations} "
-                                f"iterations and call file could not be written: {exc}",
-                                failure_reason=FailureReason.GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED,
-                            ) from exc
-                        raise GuardrailRollbackError(
-                            f"Guardrail repair exhausted after {self._max_repair_iterations} "
-                            f"iterations. Rollback failed: {rollback_exc}. "
-                            f"Additionally, the human call file could not be written: {exc}. "
-                            f"Working tree may be in an inconsistent state. "
-                            f"Manual intervention required.",
-                            call_file=None,
-                        ) from exc
-
-                    try:
-                        self._human_writer.print_instructions(call_file)
-                    except Exception as exc:
-                        self._log(
-                            f"WARNING: Failed to print instructions (call file was written "
-                            f"successfully): {exc}"
-                        )
-
-                    if rollback_exc is not None:
-                        # B11 fix: render call_file defensively so a
-                        # logic error that left it None never produces
-                        # the literal string "None" in operator output.
-                        call_file_str = (
-                            str(call_file) if call_file is not None
-                            else "<unwritten>"
-                        )
-                        raise GuardrailRollbackError(
-                            f"Guardrail repair exhausted after {self._max_repair_iterations} "
-                            f"iterations but rollback failed. The human call file "
-                            f"was written at {call_file_str} for diagnostic evidence.",
-                            call_file=call_file,
-                        ) from rollback_exc
-
-                    raise GuardrailRepairExhausted(
-                        f"Guardrail repair exhausted after {self._max_repair_iterations} "
-                        f"iteration(s): LLM could not reduce violations",
-                        call_file=call_file,
-                        iteration_count=iteration_completed,
-                        last_violation_hash=current_hash,
-                    )
-
-            # --- default / strict strategy: rollback + human call ---
-            try:
-                self._rollback_to(pre_sha)
-            except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                self._log(
-                    f"Rollback failed after guardrail violation for "
-                    f"'{branch}': {rbe}"
-                )
-                # Preserve actual violation details in the human call file
-                # even when rollback fails, so the operator knows what was
-                # weakened before the tree got into an inconsistent state.
-                violation_dicts = self._violations_to_dicts(
-                    gr_report.violations,
-                    branch=branch,
-                )
-                call_file: Optional[Path] = None
-                try:
-                    call_file = self._human_writer.write_guardrail_call(
-                        branch=branch,
-                        violations=violation_dicts,
-                        pre_merge_sha=pre_sha,
-                    )
-                except Exception as write_exc:
-                    self._log(
-                        f"Failed to write guardrail human call file: {write_exc}"
-                    )
-                    raise GuardrailRollbackError(
-                        f"Guardrails detected {len(gr_report.violations)} "
-                        f"violation(s) for '{branch}' but rollback failed: {rbe}. "
-                        f"Additionally, the human call file could not be written. "
-                        f"Working tree may be in an inconsistent state. "
-                        f"Manual intervention required.",
-                        call_file=None,
-                    ) from write_exc
-                raise GuardrailRollbackError(
-                    f"Guardrails detected {len(gr_report.violations)} "
-                    f"violation(s) for '{branch}' but rollback failed: {rbe}. "
-                    f"Working tree may be in an inconsistent state. "
-                    f"Manual intervention required.",
-                    call_file=call_file,
-                ) from rbe
-
-            call_file = None
-            try:
-                violation_dicts = self._violations_to_dicts(
-                    gr_report.violations,
-                    branch=branch,
-                )
-                call_file = self._human_writer.write_guardrail_call(
-                    branch=branch,
-                    violations=violation_dicts,
-                    pre_merge_sha=pre_sha,
-                )
-            except Exception as exc:
-                self._log(f"Failed to write guardrail human call file: {exc}")
-                raise GuardrailCallFileError(
-                    f"Guardrails detected violations for '{branch}' and the "
-                    f"human call file could not be written: {exc}. "
-                    f"The merge has been rolled back; manual intervention required."
-                ) from exc
-            try:
-                self._human_writer.print_instructions(call_file)
-            except Exception as exc:
-                self._log(
-                    f"WARNING: Failed to print instructions (call file was written "
-                    f"successfully): {exc}"
-                )
-            return call_file
-        except GuardrailRepairStalled:
-            raise  # re-raise stalled escalations without wrapping
-        except GuardrailRepairFailed:
-            raise  # re-raise fast-mode repair failures without wrapping
-        except GuardrailRollbackError:
-            raise  # re-raise so caller surfaces call_file in rollback_failed path
-        except GuardrailCallFileError:
-            raise  # re-raise so caller surfaces the call-file write failure
-        except GuardrailNoRollbackError:
-            raise  # re-raise so caller surfaces the no-rollback signal
-        except GuardrailRepairInconsistentState:
-            raise  # re-raise so caller can pin INCONSISTENT_REPAIR_STATE
-        except Exception as exc:
-            self._log(f"Guardrails check failed for '{branch}': {exc}")
-            if strategy == MergeStrategy.FAST:
-                # In fast mode the guardrail check crash is the primary failure;
-                # attempt rollback and surface rollback failure in the reason so
-                # the CLI can distinguish a simple check crash from a corrupted
-                # working tree.
-                rollback_ok = True
-                try:
-                    self._rollback_to(pre_sha)
-                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                    self._log(
-                        f"Rollback also failed after guardrails check crash: {rbe}"
-                    )
-                    rollback_ok = False
-                failure_reason = (
-                    FailureReason.GUARDRAIL_CHECK_FAILED_AND_ROLLBACK_FAILED
-                    if not rollback_ok else FailureReason.GUARDRAIL_CHECK_FAILED
-                )
-                raise GuardrailRepairFailed(
-                    f"Guardrails check itself crashed for '{branch}': {exc}. "
-                    f"No repair was attempted. Fast mode aborts without human call.",
-                    failure_reason=failure_reason,
-                    rollback_failed=not rollback_ok,
-                ) from exc
-            try:
-                self._rollback_to(pre_sha)
-            except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                # G3: include traceback for both the rollback exception
-                # and the outer guardrails exception so post-mortem
-                # analysis can see both stacks. ``raise ... from exc``
-                # only chains the outer guardrails exception; the
-                # rollback exception's stack is otherwise lost.
-                self._log(
-                    f"Rollback also failed after guardrails check crash: {rbe}",
-                    level=logging.ERROR,
-                    exc_info=True,
-                )
-                raise GuardrailRollbackError(
-                    f"Guardrails check itself crashed for '{branch}': {exc}. "
-                    f"Rollback also failed: {rbe!r}. "
-                    f"Working tree may be in an inconsistent state. "
-                    f"Manual intervention required.",
-                ) from exc
-            try:
-                call_file = self._human_writer.write_guardrail_call(
-                    branch=branch,
-                    violations=[
-                        {
-                            "file_path": "N/A",
-                            "violation_type": "CHECK_FAILURE",
-                            "message": f"Guardrails check raised an exception: {exc}",
-                        }
-                    ],
-                    pre_merge_sha=pre_sha,
-                )
-            except Exception as write_exc:
-                self._log(f"Failed to write guardrail human call file: {write_exc}")
-                raise GuardrailCallFileError(
-                    f"Guardrails check failed for '{branch}' and the "
-                    f"human call file could not be written: {write_exc}. "
-                    f"The merge has been rolled back; manual intervention required."
-                ) from write_exc
-            try:
-                self._human_writer.print_instructions(call_file)
-            except Exception as print_exc:
-                self._log(
-                    f"WARNING: Failed to print instructions (call file was written "
-                    f"successfully): {print_exc}"
-                )
-            return call_file
 
     def _preflight_dirty_tracked_files(
         self, report: MergeReport, branches: list[str]
@@ -6423,10 +4768,10 @@ class MergeOrchestrator:
         with :data:`FailureReason.DIRTY_WORKING_TREE` and the file list.
 
         Must run INSIDE the merge lock, AFTER _check_repo_state, and BEFORE the
-        pre_merge_sha capture — so the sync commit is part of the rollback
-        baseline (_rollback_to can never discard issue state) and the
-        pre-merge version read happens on the correct HEAD. The caller owns the
-        _write_log / report.log_file bookkeeping on the False path.
+        pre_merge_sha capture — so the sync commit lands behind the recorded
+        pre-merge SHA and the pre-merge version read happens on the correct
+        HEAD. The caller owns the _write_log / report.log_file bookkeeping on
+        the False path.
 
         Returns:
             True if the merge may proceed (clean, or self-managed files were
@@ -6670,81 +5015,6 @@ class MergeOrchestrator:
             return True
         self._log(f"git merge --abort failed: {redact_text(abort_result.stderr.strip())}")
         return False
-
-    @staticmethod
-    def _violations_to_dicts(violations: list, branch: str = "") -> list[dict]:
-        """Convert a list of GuardrailViolation objects to plain dicts.
-
-        Centralised so that rollback-failure and rollback-success paths in
-        ``_run_guardrails`` stay consistent when the data model changes.
-
-        Args:
-            violations: List of GuardrailViolation objects.
-            branch: Optional branch name. When provided, ``branch_name`` and
-                ``trigger_branch`` are injected into each violation's evidence
-                dict so the human call file shows which branch produced the
-                violation.
-        """
-        result = []
-        for v in violations:
-            d = {
-                "file_path": v.file_path,
-                "violation_type": v.violation_type,
-                "message": v.message,
-            }
-            if getattr(v, "evidence", None) is not None:
-                # Shallow copy: evidence dicts are consumed once (written to
-                # JSON) and then discarded. Explicitly copy known mutable
-                # fields so downstream mutation cannot affect the original.
-                ev = dict(v.evidence)
-                if "when_clauses" in ev and isinstance(ev["when_clauses"], list):
-                    ev["when_clauses"] = list(ev["when_clauses"])
-            else:
-                ev = {}
-            if branch:
-                ev["branch_name"] = branch
-                ev["trigger_branch"] = branch
-                ev["branch_kind"] = "merge"
-            if ev:
-                d["evidence"] = ev
-            result.append(d)
-        return result
-
-    def _rollback_to(self, sha: str) -> None:
-        """Hard reset to a previous SHA to undo a merge commit.
-
-        Raises:
-            RuntimeError: If git reset --hard fails or times out. Callers
-            must escalate because the working tree is in an inconsistent state.
-        """
-        if not sha:
-            return
-        try:
-            reset_result = _run_git(
-                self.project_root,
-                "reset",
-                "--hard",
-                sha,
-                check=False,
-                timeout=30,
-            )
-        except subprocess.TimeoutExpired as exc:
-            self._log(f"git reset --hard {sha} timed out: {exc}")
-            raise RuntimeError(
-                f"git reset --hard {sha} timed out: {exc}. "
-                f"Working tree may be in an inconsistent state. "
-                f"Manual intervention required."
-            ) from exc
-        if reset_result.returncode == 0:
-            self._log(f"git reset --hard {sha} succeeded — merge rolled back")
-        else:
-            error_msg = reset_result.stderr.strip()
-            self._log(f"git reset --hard failed: {error_msg}")
-            raise RuntimeError(
-                f"git reset --hard {sha} failed: {error_msg}. "
-                f"Working tree may be in an inconsistent state. "
-                f"Manual intervention required."
-            )
 
 
 def integrate(

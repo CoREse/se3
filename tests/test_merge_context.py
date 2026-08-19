@@ -7,7 +7,6 @@ from pathlib import Path
 
 from tianluo.engine.merge.conflict_context import (
     ConflictContext,
-    _is_spec_path,
     _looks_binary,
     _parse_hunks,
     build,
@@ -78,16 +77,6 @@ def _setup_basic_conflict(
 
 
 class TestPureHelpers:
-    def test_is_spec_path_matches_spec_md(self) -> None:
-        assert _is_spec_path("tianluo/specs/auth/spec.md") is True
-        assert _is_spec_path("tianluo/specs/nested/deep/spec.md") is True
-
-    def test_is_spec_path_rejects_non_spec(self) -> None:
-        assert _is_spec_path("tianluo/specs/auth/notes.md") is False
-        assert _is_spec_path("src/foo.py") is False
-        assert _is_spec_path("tianluo/state/foo.json") is False
-        assert _is_spec_path("tianluo/specs/spec.md") is False  # missing dir
-
     def test_looks_binary_detects_null_bytes(self) -> None:
         assert _looks_binary(b"hello\x00world") is True
         assert _looks_binary(b"hello world\n") is False
@@ -156,7 +145,6 @@ class TestBuildSingleFileSingleHunk:
         assert "=======" in cf.working_content
         assert ">>>>>>>" in cf.working_content
         assert cf.is_binary is False
-        assert cf.is_spec is False
 
     def test_hunk_line_numbers_recorded(self, tmp_path: Path) -> None:
         ours_branch, theirs_branch = _setup_basic_conflict(tmp_path)
@@ -194,23 +182,27 @@ class TestBuildSingleFileSingleHunk:
         assert any("theirs change" in line for line in ctx.theirs_log_oneline)
 
 
-class TestBuildSpecFile:
-    def test_spec_md_path_marked_is_spec(self, tmp_path: Path) -> None:
-        spec_path = "tianluo/specs/example/spec.md"
+class TestBuildNestedPath:
+    def test_deeply_nested_path_reported_verbatim(self, tmp_path: Path) -> None:
+        """A conflict several directories deep keeps its repo-relative path
+        and still collects all three sides of the content."""
+        nested_path = "docs/design/example/notes.md"
         ours_branch, theirs_branch = _setup_basic_conflict(
             tmp_path,
-            rel_path=spec_path,
-            base_content="### Requirement: Foo\n- SHALL do X\n",
-            ours_content="### Requirement: Foo\n- SHALL do X strictly\n",
-            theirs_content="### Requirement: Foo\n- SHALL do X gently\n",
+            rel_path=nested_path,
+            base_content="### Section\n- do X\n",
+            ours_content="### Section\n- do X strictly\n",
+            theirs_content="### Section\n- do X gently\n",
         )
         ctx = build(tmp_path, ours_branch, theirs_branch)
 
         assert len(ctx.files) == 1
         cf = ctx.files[0]
-        assert cf.path == spec_path
-        assert cf.is_spec is True
-        assert ctx.has_spec_files is True
+        assert cf.path == nested_path
+        assert cf.base_content == "### Section\n- do X\n"
+        assert cf.ours_content == "### Section\n- do X strictly\n"
+        assert cf.theirs_content == "### Section\n- do X gently\n"
+        assert len(cf.hunks) == 1
 
 
 class TestBuildBinaryFile:
@@ -302,8 +294,3 @@ class TestBuildMultipleFilesMultipleHunks:
                 assert lines[hunk.start_line - 1].startswith("<<<<<<<")
                 assert lines[hunk.end_line - 1].startswith(">>>>>>>")
                 assert hunk.end_line > hunk.start_line
-
-    def test_no_spec_files_flag_false(self, tmp_path: Path) -> None:
-        ours_branch, theirs_branch = _setup_basic_conflict(tmp_path)
-        ctx = build(tmp_path, ours_branch, theirs_branch)
-        assert ctx.has_spec_files is False

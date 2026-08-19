@@ -1,8 +1,13 @@
-"""Tests for strategy alignment: fast converges to ACCEPT/REJECT, strict placeholder."""
+"""Tests for strategy alignment: fast converges to ACCEPT/REJECT, strict placeholder.
+
+The spec-guardrails chain has been removed, so ``StrategyDecider.decide``
+no longer takes ``has_spec_files`` and no strategy tier gates on spec
+paths or a ``spec_guardrail_concern`` flag. The only escalation signal
+left is the explicit ``requires_human_review`` flag (global or per-file),
+plus per-hunk confidence in the strict fallback.
+"""
 
 from __future__ import annotations
-
-import pytest
 
 from tianluo.engine.merge.conflict_resolver import (
     Confidence,
@@ -20,8 +25,6 @@ def _make_resolution(
     overall_confidence: Confidence = Confidence.HIGH,
     hunk_confidence: Confidence = Confidence.HIGH,
     requires_human_review: bool = False,
-    spec_guardrail_concern: bool = False,
-    is_spec: bool = False,
 ) -> LLMResolution:
     """Build a mock LLMResolution."""
     return LLMResolution(
@@ -38,18 +41,11 @@ def _make_resolution(
                     ),
                 ],
                 overall_confidence=overall_confidence,
-                flags={
-                    "requires_human_review": requires_human_review,
-                    "spec_guardrail_concern": spec_guardrail_concern,
-                },
-                is_spec=is_spec,
+                flags={"requires_human_review": requires_human_review},
             ),
         ],
         overall_confidence=overall_confidence,
-        flags={
-            "requires_human_review": requires_human_review,
-            "spec_guardrail_concern": spec_guardrail_concern,
-        },
+        flags={"requires_human_review": requires_human_review},
     )
 
 
@@ -61,238 +57,119 @@ class TestFastStrategyAcceptOrRejectOnly:
         decider = StrategyDecider()
 
         test_cases = [
-            # (overall_conf, hunk_conf, is_spec, spec_guardrail, req_human)
-            (Confidence.HIGH, Confidence.HIGH, False, False, False),
-            (Confidence.HIGH, Confidence.HIGH, True, False, False),
-            (Confidence.LOW, Confidence.LOW, False, False, False),
-            (Confidence.LOW, Confidence.LOW, True, False, False),
-            (Confidence.MEDIUM, Confidence.MEDIUM, False, True, False),
-            (Confidence.MEDIUM, Confidence.MEDIUM, True, True, False),
-            (Confidence.HIGH, Confidence.HIGH, False, True, False),
-            (Confidence.HIGH, Confidence.HIGH, True, True, False),
-            (Confidence.HIGH, Confidence.HIGH, False, False, True),
-            (Confidence.HIGH, Confidence.HIGH, True, False, True),
+            # (overall_conf, hunk_conf, global_requires_human_review)
+            (Confidence.HIGH, Confidence.HIGH, False),
+            (Confidence.MEDIUM, Confidence.MEDIUM, False),
+            (Confidence.LOW, Confidence.LOW, False),
+            (Confidence.HIGH, Confidence.LOW, False),
+            (Confidence.HIGH, Confidence.HIGH, True),
+            (Confidence.LOW, Confidence.LOW, True),
         ]
 
-        for overall_c, hunk_c, is_spec, sgc, rhr in test_cases:
-            resolution = _make_resolution(
-                overall_confidence=overall_c,
-                hunk_confidence=hunk_c,
-                is_spec=is_spec,
-                spec_guardrail_concern=sgc,
-                requires_human_review=rhr,
-            )
-            decision = decider.decide(
-                resolution,
-                has_spec_files=is_spec,
-                strategy=MergeStrategy.FAST,
-            )
-            assert decision.action != DecisionAction.HUMAN_CALL, (
-                f"fast returned HUMAN_CALL for: "
-                f"overall={overall_c.value}, hunk={hunk_c.value}, "
-                f"is_spec={is_spec}, sgc={sgc}, rhr={rhr}"
-            )
+        for overall_c, hunk_c, rhr in test_cases:
+            for per_file_rhr in (False, True):
+                resolution = _make_resolution(
+                    overall_confidence=overall_c,
+                    hunk_confidence=hunk_c,
+                    requires_human_review=rhr,
+                )
+                resolution.files[0].flags["requires_human_review"] = per_file_rhr
+                decision = decider.decide(
+                    resolution, strategy=MergeStrategy.FAST,
+                )
+                assert decision.action != DecisionAction.HUMAN_CALL, (
+                    f"fast returned HUMAN_CALL for: "
+                    f"overall={overall_c.value}, hunk={hunk_c.value}, "
+                    f"global_rhr={rhr}, per_file_rhr={per_file_rhr}"
+                )
+                # The global flag is the ONLY reject gate in fast mode.
+                expected = (
+                    DecisionAction.REJECT if rhr else DecisionAction.ACCEPT
+                )
+                assert decision.action == expected
 
-    def test_fast_regular_low_confidence_accept(self) -> None:
-        """Low confidence on regular file in fast mode → ACCEPT."""
+    def test_fast_low_confidence_accept(self) -> None:
+        """Low confidence in fast mode → ACCEPT (confidence is informational)."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.LOW,
             hunk_confidence=Confidence.LOW,
-            is_spec=False,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.FAST,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == "Fast strategy: accepted"
 
-    def test_fast_regular_medium_confidence_accept(self) -> None:
-        """Medium confidence on regular file in fast mode → ACCEPT."""
+    def test_fast_medium_confidence_accept(self) -> None:
+        """Medium confidence in fast mode → ACCEPT."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.MEDIUM,
             hunk_confidence=Confidence.MEDIUM,
-            is_spec=False,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.FAST,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == "Fast strategy: accepted"
 
-    def test_fast_regular_requires_human_review_accept(self) -> None:
-        """requires_human_review on regular file in fast mode → ACCEPT.
+    def test_fast_per_file_requires_human_review_accepted_with_warning(
+        self,
+    ) -> None:
+        """Per-file requires_human_review in fast mode → ACCEPT + warning.
 
-        The flag is only checked at global level; per-file requires_human_review
-        on non-spec files is intentionally ignored in fast mode.
+        Fast mode's contract is to never park a merge waiting on a human,
+        so a per-file flag no longer rejects; it is accepted but the flag
+        is surfaced in the decision reason so the operator can audit it.
         """
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.LOW,
-            is_spec=False,
-            requires_human_review=False,
+            path="regular.txt",
+            requires_human_review=False,  # global is False
         )
-        # Set per-file flag (global is False)
         resolution.files[0].flags["requires_human_review"] = True
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.FAST,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == (
+            "Fast strategy: accepted; "
+            "WARNING: requires_human_review on regular.txt"
+        )
 
     def test_fast_global_requires_human_review_reject(self) -> None:
         """Global requires_human_review in fast mode → REJECT (abort, no human call)."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
-            is_spec=False,
             requires_human_review=True,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.FAST,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.REJECT
         assert "fast strategy aborts" in decision.reason.lower()
         assert "no human call" in decision.reason.lower()
 
-    def test_fast_spec_guardrail_concern_deferred_accept(self) -> None:
-        """spec_guardrail_concern on spec file → ACCEPT (deferred to post-merge)."""
+    def test_fast_mixed_confidence_files_accept(self) -> None:
+        """Several files with mixed confidence and no flags → ACCEPT."""
         decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-            is_spec=True,
-            spec_guardrail_concern=True,
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.ACCEPT
-        assert "deferred" in decision.reason.lower()
-
-    def test_fast_spec_low_confidence_reject(self) -> None:
-        """Low confidence on spec file in fast mode → REJECT."""
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-            is_spec=True,
-        )
-        resolution.files[0].overall_confidence = Confidence.LOW
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.REJECT
-        assert "fast strategy aborts" in decision.reason.lower()
-
-    def test_fast_spec_medium_confidence_reject(self) -> None:
-        """Medium confidence on spec file in fast mode → REJECT."""
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-            is_spec=True,
-        )
-        resolution.files[0].overall_confidence = Confidence.MEDIUM
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.REJECT
-
-    def test_fast_spec_requires_human_review_reject(self) -> None:
-        """requires_human_review on spec file in fast mode → REJECT."""
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-            is_spec=True,
-            requires_human_review=True,
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.REJECT
-        assert "fast strategy aborts" in decision.reason.lower()
-
-    def test_fast_spec_per_file_requires_human_review_reject(self) -> None:
-        """Per-file requires_human_review on spec file (global False) → REJECT.
-
-        This is the safety-critical path at strategy.py:241-244: when the
-        global requires_human_review flag is False but a spec file sets it
-        per-file, fast mode must still REJECT. The global path (line 220-224)
-        is NOT reached here, so the per-file check is what actually fires.
-        """
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-            is_spec=True,
-            requires_human_review=False,  # global is False
-        )
-        # Set per-file flag only — this must trigger the spec-file REJECT path
-        resolution.files[0].flags["requires_human_review"] = True
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.REJECT
-        assert "requires_human_review on spec file" in decision.reason
-        assert "fast strategy aborts" in decision.reason.lower()
-
-    def test_fast_mixed_regular_and_spec_accept(self) -> None:
-        """Mixed regular + spec files, spec has high confidence → ACCEPT."""
-        decider = StrategyDecider()
-        file_regular = FileResolution(
+        file_low = FileResolution(
             path="regular.txt",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.LOW, "low")],
             overall_confidence=Confidence.LOW,
             flags={},
-            is_spec=False,
         )
-        file_spec = FileResolution(
-            path="tianluo/specs/test/spec.md",
+        file_high = FileResolution(
+            path="docs/notes.md",
             resolved_content="ok",
             hunks=[HunkResolution(1, 3, Confidence.HIGH, "high")],
             overall_confidence=Confidence.HIGH,
             flags={},
-            is_spec=True,
         )
         resolution = LLMResolution(
-            files=[file_regular, file_spec],
+            files=[file_low, file_high],
             overall_confidence=Confidence.HIGH,
             flags={},
         )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.ACCEPT
-
-    def test_fast_mixed_regular_and_spec_low_spec_reject(self) -> None:
-        """Mixed regular + spec files, spec has LOW confidence → REJECT."""
-        decider = StrategyDecider()
-        file_regular = FileResolution(
-            path="regular.txt",
-            resolved_content="ok",
-            hunks=[HunkResolution(1, 3, Confidence.HIGH, "high")],
-            overall_confidence=Confidence.HIGH,
-            flags={},
-            is_spec=False,
-        )
-        file_spec = FileResolution(
-            path="tianluo/specs/test/spec.md",
-            resolved_content="ok",
-            hunks=[HunkResolution(1, 3, Confidence.LOW, "low")],
-            overall_confidence=Confidence.LOW,
-            flags={},
-            is_spec=True,
-        )
-        resolution = LLMResolution(
-            files=[file_regular, file_spec],
-            overall_confidence=Confidence.HIGH,
-            flags={},
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
-        )
-        assert decision.action == DecisionAction.REJECT
+        assert decision.reason == "Fast strategy: accepted"
 
 
 class TestStrictStrategyPlaceholder:
@@ -312,10 +189,9 @@ class TestStrictStrategyPlaceholder:
             overall_confidence=Confidence.HIGH,
             hunk_confidence=Confidence.HIGH,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.STRICT,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.STRICT)
         assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == "All hunks high confidence (strict strategy)"
 
     def test_strict_fallback_low_hunk_human_call(self) -> None:
         """Fallback path: low hunk confidence → HUMAN_CALL (not REJECT)."""
@@ -324,71 +200,83 @@ class TestStrictStrategyPlaceholder:
             overall_confidence=Confidence.HIGH,
             hunk_confidence=Confidence.LOW,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.STRICT,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.STRICT)
         assert decision.action == DecisionAction.HUMAN_CALL
 
-    def test_strict_fallback_spec_guardrail_human_call(self) -> None:
-        """Fallback path: spec_guardrail_concern → HUMAN_CALL."""
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            spec_guardrail_concern=True,
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.STRICT,
-        )
-        assert decision.action == DecisionAction.HUMAN_CALL
-
-
-class TestDefaultStrategyUnchanged:
-    """Default strategy behavior is unchanged by this alignment work."""
-
-    def test_default_high_confidence_accept(self) -> None:
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            hunk_confidence=Confidence.HIGH,
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
-        )
-        assert decision.action == DecisionAction.ACCEPT
-
-    def test_default_low_overall_accepted_without_flags(self) -> None:
-        """Confidence rating is informational under the LLM-as-editor model.
-
-        Safe strategy now only gates on explicit
-        ``requires_human_review`` / ``spec_guardrail_concern`` flags;
-        a LOW-confidence resolution without flags is accepted because
-        the cleared-marker scan is the only success signal.
-        """
-        decider = StrategyDecider()
-        resolution = _make_resolution(overall_confidence=Confidence.LOW)
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
-        )
-        assert decision.action == DecisionAction.ACCEPT
-
-    def test_default_spec_guardrail_human_call(self) -> None:
-        decider = StrategyDecider()
-        resolution = _make_resolution(
-            overall_confidence=Confidence.HIGH,
-            spec_guardrail_concern=True,
-        )
-        decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.SAFE,
-        )
-        assert decision.action == DecisionAction.HUMAN_CALL
-
-    def test_default_requires_human_review_human_call(self) -> None:
+    def test_strict_fallback_global_requires_human_review_human_call(self) -> None:
+        """Fallback path: global requires_human_review → HUMAN_CALL."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
             requires_human_review=True,
         )
-        decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
-        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.STRICT)
         assert decision.action == DecisionAction.HUMAN_CALL
+        assert decision.reason == (
+            "requires_human_review flag set (strict strategy)"
+        )
+
+    def test_strict_fallback_per_file_requires_human_review_human_call(self) -> None:
+        """Fallback path: per-file requires_human_review → HUMAN_CALL."""
+        decider = StrategyDecider()
+        resolution = _make_resolution(
+            path="regular.txt",
+            overall_confidence=Confidence.HIGH,
+            requires_human_review=False,  # global is False
+        )
+        resolution.files[0].flags["requires_human_review"] = True
+        decision = decider.decide(resolution, strategy=MergeStrategy.STRICT)
+        assert decision.action == DecisionAction.HUMAN_CALL
+        assert "regular.txt" in decision.reason
+
+
+class TestSafeStrategy:
+    """Safe strategy gates on the explicit human-review flag only."""
+
+    def test_safe_high_confidence_accept(self) -> None:
+        decider = StrategyDecider()
+        resolution = _make_resolution(
+            overall_confidence=Confidence.HIGH,
+            hunk_confidence=Confidence.HIGH,
+        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.SAFE)
+        assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == "No human-review flags set (safe strategy)"
+
+    def test_safe_low_overall_accepted_without_flags(self) -> None:
+        """Confidence rating is informational under the LLM-as-editor model.
+
+        Safe strategy only gates on the explicit ``requires_human_review``
+        flag; a LOW-confidence resolution without flags is accepted because
+        the cleared-marker scan is the only success signal.
+        """
+        decider = StrategyDecider()
+        resolution = _make_resolution(overall_confidence=Confidence.LOW)
+        decision = decider.decide(resolution, strategy=MergeStrategy.SAFE)
+        assert decision.action == DecisionAction.ACCEPT
+        assert decision.reason == "No human-review flags set (safe strategy)"
+
+    def test_safe_global_requires_human_review_human_call(self) -> None:
+        decider = StrategyDecider()
+        resolution = _make_resolution(
+            overall_confidence=Confidence.HIGH,
+            requires_human_review=True,
+        )
+        decision = decider.decide(resolution, strategy=MergeStrategy.SAFE)
+        assert decision.action == DecisionAction.HUMAN_CALL
+        assert decision.reason == (
+            "requires_human_review flag set (safe strategy)"
+        )
+
+    def test_safe_per_file_requires_human_review_human_call(self) -> None:
+        """A per-file flag alone still escalates under safe."""
+        decider = StrategyDecider()
+        resolution = _make_resolution(
+            path="regular.txt",
+            overall_confidence=Confidence.HIGH,
+            requires_human_review=False,  # global is False
+        )
+        resolution.files[0].flags["requires_human_review"] = True
+        decision = decider.decide(resolution, strategy=MergeStrategy.SAFE)
+        assert decision.action == DecisionAction.HUMAN_CALL
+        assert "regular.txt" in decision.reason

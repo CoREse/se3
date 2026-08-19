@@ -657,28 +657,6 @@ class TestFailureTitleAndSummary:
         assert title == "Merge failed"
         assert "git merge conflict" in summary
 
-    def test_guardrail_violation(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_violation")
-        assert title == "Merge failed"
-        assert "post-merge guardrails violation" in summary
-
-    def test_guardrail_repair_failed(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_repair_failed")
-        assert title == "Merge aborted"
-        assert "fast strategy could not auto-repair" in summary
-
-    def test_guardrail_repair_stalled(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_repair_stalled")
-        assert title == "Merge paused for human review"
-        assert "fast strategy could not auto-repair" in summary
-        assert "repair stalled" in summary
-
-    def test_guardrail_repair_exhausted(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_repair_exhausted")
-        assert title == "Merge paused for human review"
-        assert "fast strategy could not auto-repair" in summary
-        assert "repair exhausted" in summary
-
     def test_merge_timed_out(self) -> None:
         title, summary = _failure_title_and_summary("merge_timed_out")
         assert title == "Merge aborted"
@@ -731,23 +709,6 @@ class TestFailureTitleAndSummary:
         assert "binary file conflict requires human review" in summary
         assert "fast strategy" not in summary  # must not hardcode strategy
 
-    def test_guardrail_missing_post_sha(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_missing_post_sha")
-        assert title == "Merge aborted"
-        assert "post-merge commit SHA was unavailable" in summary
-
-    def test_guardrail_missing_pre_sha(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_missing_pre_sha")
-        assert title == "Merge aborted"
-        assert "pre-merge commit SHA was unavailable" in summary
-        assert "merge commit may still be in HEAD" in summary
-
-    def test_guardrail_missing_pre_and_post_sha(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_missing_pre_and_post_sha")
-        assert title == "Merge aborted"
-        assert "both pre-merge and post-merge commit SHAs were unavailable" in summary
-        assert "merge commit may still be in HEAD" in summary
-
     def test_resolution_commit_timeout(self) -> None:
         title, summary = _failure_title_and_summary("resolution_commit_timeout")
         assert title == "Merge aborted"
@@ -757,12 +718,6 @@ class TestFailureTitleAndSummary:
         title, summary = _failure_title_and_summary("pending_human")
         assert title == "Merge paused for human review"
         assert "requires your decision" in summary
-
-    def test_guardrail_violation_no_rollback(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_violation_no_rollback")
-        assert title == "Merge failed"
-        assert "post-merge guardrails violation" in summary
-        assert "could not roll back" in summary
 
     def test_conflict_context_failed(self) -> None:
         title, summary = _failure_title_and_summary("conflict_context_failed")
@@ -778,16 +733,21 @@ class TestFailureTitleAndSummary:
         assert "failed to build conflict context" in summary
         assert "paused for human review" in summary
 
-    def test_guardrail_violation_call_failed(self) -> None:
-        title, summary = _failure_title_and_summary("guardrail_violation_call_failed")
-        assert title == "Merge failed"
-        assert "guardrails violation" in summary
-        assert "call file" in summary
-
     def test_rollback_failed(self) -> None:
         title, summary = _failure_title_and_summary("rollback_failed")
         assert title == "Merge failed"
-        assert "git rollback failed after guardrail violation" in summary
+        assert "git rollback failed" in summary
+
+    def test_retired_guardrail_reason_falls_through_to_generic(self) -> None:
+        """An archived report naming the removed guardrails chain still renders.
+
+        The guardrail failure reasons no longer exist, but merge logs and
+        archived reports on disk still carry them; the renderer must degrade to
+        the generic branch rather than raise or print an empty summary.
+        """
+        title, summary = _failure_title_and_summary("guardrail_violation")
+        assert title == "Merge failed"
+        assert "guardrail_violation" in summary
 
     def test_conflict_context_failed_call_file_write_failed(self) -> None:
         title, summary = _failure_title_and_summary(
@@ -871,42 +831,6 @@ class TestFailureReasonRendering:
         assert captured[0]["title"] == "Merge failed"
         assert "git merge conflict" in captured[0]["content"]
 
-    def test_guardrail_violation_rendering(self, tmp_path: Path, monkeypatch) -> None:
-        """failure_reason='guardrail_violation' → 'Merge failed' title + guardrails summary."""
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_violation",
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 1
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge failed"
-        assert "post-merge guardrails violation" in captured[0]["content"]
-
-    def test_guardrail_repair_failed_rendering(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """failure_reason='guardrail_repair_failed' → 'Merge aborted' title."""
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_repair_failed",
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 1
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge aborted"
-        assert "auto-repair guardrails violation" in captured[0]["content"]
-
     def test_fast_abort_rendering(self, tmp_path: Path, monkeypatch) -> None:
         """failure_reason='fast_abort' → 'Merge aborted' title + fast summary."""
         _init_repo(tmp_path)
@@ -941,89 +865,6 @@ class TestFailureReasonRendering:
         assert captured[0]["title"] == "Merge aborted"
         assert "fast strategy merge failed" in captured[0]["content"]
         assert "conflict" not in captured[0]["content"].lower()
-
-    def test_guardrail_violation_call_failed_rendering(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """failure_reason='guardrail_violation_call_failed' → correct title in failure branch.
-
-        No call file was written, so pending_human must be False and exit code is 1 (not 130).
-        """
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_violation_call_failed",
-            pending_human=False,
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 1
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge failed"
-        assert "guardrails violation" in captured[0]["content"]
-        assert "call file" in captured[0]["content"]
-
-    def test_guardrail_violation_pending_human_rendering(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """pending_human + guardrail_violation → 'Merge failed' title (not generic 'Merge Paused')."""
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_violation",
-            pending_human=True,
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 130
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge failed"
-        assert "post-merge guardrails violation" in captured[0]["content"]
-
-    def test_guardrail_missing_post_sha_rendering(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """failure_reason='guardrail_missing_post_sha' -> 'Merge aborted' title."""
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_missing_post_sha",
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 1
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge aborted"
-        assert "post-merge commit SHA was unavailable" in captured[0]["content"]
-
-    def test_guardrail_missing_pre_sha_rendering(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """failure_reason='guardrail_missing_pre_sha' -> 'Merge aborted' title with HEAD warning."""
-        _init_repo(tmp_path)
-        from tianluo.engine.merge.orchestrator import MergeReport
-
-        report = MergeReport(
-            success=False,
-            failed_branch="feature",
-            failure_reason="guardrail_missing_pre_sha",
-        )
-        captured = self._mock_orchestrator_report(monkeypatch, report)
-        exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 1
-        assert len(captured) == 1
-        assert captured[0]["title"] == "Merge aborted"
-        assert "pre-merge commit SHA was unavailable" in captured[0]["content"]
-        assert "merge commit may still be in HEAD" in captured[0]["content"]
 
     def test_binary_file_conflict_rendering(
         self, tmp_path: Path, monkeypatch
@@ -1092,7 +933,7 @@ class TestFailureReasonRendering:
         report = MergeReport(
             success=False,
             failed_branch="feature",
-            failure_reason="guardrail_repair_stalled",
+            failure_reason="rollback_failed",
             rollback_failed=True,
             human_call_file="tianluo/calls/merge_20260101_000000_feature.json",
         )
@@ -1480,9 +1321,9 @@ class TestAppendHumanCallLines:
             recorded_escalations=[
                 {"type": "conflict", "branch": "feature/x"},
                 {
-                    "type": "guardrail_violation",
+                    "type": "degraded",
                     "branch": "feature/y",
-                    "violations": ["touched tianluo/specs"],
+                    "message": "conflict context could not be built",
                 },
             ],
         )
@@ -1494,8 +1335,7 @@ class TestAppendHumanCallLines:
         assert "Call file:" not in rendered
         # The escalation payload and the rerun recovery ARE surfaced.
         assert "conflict: feature/x" in rendered
-        assert "guardrail_violation: feature/y" in rendered
-        assert "touched tianluo/specs" in rendered
+        assert "degraded: feature/y" in rendered
         assert "rerun `luo merge`" in rendered
 
     def test_suppress_no_escalation_renders_nothing(self):

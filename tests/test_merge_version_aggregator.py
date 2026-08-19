@@ -969,12 +969,11 @@ class TestOrchestratorVersionAggregation:
                         resolved_content="",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -1258,14 +1257,13 @@ class TestOrchestratorVersionAggregation:
                             for h in cf.hunks
                         ],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=cf.is_spec,
+                        flags={"requires_human_review": False},
                     )
                 )
             return LLMResolution(
                 files=files,
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(

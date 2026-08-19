@@ -66,7 +66,6 @@ def _make_conflict_file(rel_path: str, working_content: str) -> ConflictFile:
         base_exists=True,
         ours_exists=True,
         theirs_exists=True,
-        is_spec=False,
         is_binary=False,
     )
 
@@ -83,7 +82,6 @@ def _make_batch_context(tmp_path: Path, strategy: MergeStrategy) -> BatchContext
         theirs_head_message="theirs change",
         ours_log_oneline=[],
         theirs_log_oneline=[],
-        has_spec_files=False,
         strategy=strategy,
     )
 

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from tianluo.engine.merge.human_call import DEGRADED_CALL_TYPE
 from tianluo.engine.merge.orchestrator import MergeOrchestrator, MergeReport
 
 
@@ -553,9 +554,16 @@ class TestMergeOrchestrator:
         assert report.final_version is None
         assert report.version_aggregation_skipped is True
 
-    def test_rev_parse_head_failure_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
-        """If the initial rev-parse HEAD in _merge_single_branch fails, the merge
-        is still attempted but guardrails fail-closed due to empty pre_sha."""
+    def test_pre_merge_rev_parse_head_failure_does_not_block_merge(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A failed pre-merge rev-parse HEAD degrades gracefully.
+
+        The pre-merge SHA is only diagnostic (bump inference / issue-ID
+        reconciliation); losing it must not fail a merge that git
+        performed successfully. The post-condition checks — which run
+        git themselves — are what actually prove the merge landed.
+        """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
         _create_branch(tmp_path, "feature")
@@ -593,33 +601,37 @@ class TestMergeOrchestrator:
             "tianluo.engine.merge.orchestrator._run_git", patch_run_git
         )
 
-        # Pin to ``safe`` so the fail-closed path writes a human-call file
-        # (the new default ``fast`` aborts without one).
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
-        # The merge itself succeeds (git merge feature works), but because
-        # pre_merge_sha in _merge_single_branch was empty, guardrails
-        # fail-closed with CHECK_FAILURE. Rollback was never attempted
-        # because there was no SHA to roll back to. The orchestrator reports
-        # guardrail_violation_no_rollback so the user sees an honest diagnosis.
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation_no_rollback"
+        # git merge itself succeeded and the post-condition checks confirm
+        # the merge commit is on HEAD, so the merge is reported as a success
+        # even though the pre-merge SHA could not be captured. No human call
+        # is raised and nothing is rolled back.
+        assert report.success is True
+        assert report.failed_branch is None
+        assert report.failure_reason is None
         assert report.rollback_failed is False
-        assert report.pending_human is True
-        assert report.human_call_file is not None
+        assert report.pending_human is False
+        assert report.human_call_file is None
+        assert "feature" in report.merged_branches
 
-        # The merge commit IS still on HEAD because rollback couldn't be
-        # attempted (no pre_sha). The call file should mention this.
-        call_data = json.loads(report.human_call_file.read_text())
-        assert any(
-            "could not roll back" in v["message"].lower()
-            for v in call_data["violations"]
-        )
+        # The merge commit is on HEAD and differs from the pre-merge HEAD.
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head != pre_head
+        assert report.outcomes[0].merge_commit_sha == post_head
 
-    def test_strict_rev_parse_head_failure_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
-        """If pre_sha is missing in strict mode, guardrails fail-closed with no rollback."""
+    def test_strict_pre_merge_rev_parse_head_failure_does_not_block_merge(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """strict strategy: a missing pre-merge SHA is equally non-fatal.
+
+        Strict only diverges from safe on *conflict* handling; a clean
+        merge whose pre-merge SHA read failed still succeeds.
+        """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
         _create_branch(tmp_path, "feature")
@@ -651,16 +663,25 @@ class TestMergeOrchestrator:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
         report = orch.execute(["feature"])
 
-        # Same as default: missing pre_sha -> GuardrailNoRollbackError
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation_no_rollback"
+        # Same as safe: a missing pre_sha does not fail the merge.
+        assert report.success is True
+        assert report.failed_branch is None
+        assert report.failure_reason is None
         assert report.rollback_failed is False
-        assert report.pending_human is True
-        assert report.human_call_file is not None
+        assert report.pending_human is False
+        assert report.human_call_file is None
+        assert "feature" in report.merged_branches
 
-    def test_rev_parse_head_timeout_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
-        """If rev-parse HEAD after a clean merge times out, guardrails fail-closed."""
+    def test_rev_parse_head_timeout_after_clean_merge_still_succeeds(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A post-merge rev-parse HEAD timeout is logged but not fatal.
+
+        The merge-commit SHA read after a clean merge is diagnostic; the
+        post-condition checks re-run git independently and are what prove
+        the merge landed. The timeout must therefore surface in the merge
+        log without failing an otherwise-good merge.
+        """
         import subprocess as _sp
 
         _init_repo(tmp_path)
@@ -691,27 +712,23 @@ class TestMergeOrchestrator:
             "tianluo.engine.merge.orchestrator._run_git", patch_run_git,
         )
 
-        # Pin to ``safe`` so the fail-closed path writes a human-call file
-        # (the new default ``fast`` aborts without one).
         orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
-        # The merge succeeds but post-merge rev-parse times out, so
-        # guardrails fail-closed.  pre_sha is available, so rollback is
-        # attempted and should succeed.  Result: guardrail_violation.
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation"
+        # The merge succeeds: the post-condition checks verified the merge
+        # commit independently of the timed-out SHA read.
+        assert report.success is True
+        assert report.failed_branch is None
+        assert report.failure_reason is None
         assert report.rollback_failed is False
-        assert report.pending_human is True
-        assert report.human_call_file is not None
+        assert report.pending_human is False
+        assert report.human_call_file is None
+        assert "feature" in report.merged_branches
 
-        # Verify the call file mentions the missing SHA
-        call_data = json.loads(report.human_call_file.read_text())
-        assert any(
-            "missing SHA" in v["message"]
-            for v in call_data["violations"]
-        )
+        # The timeout must still be visible to an operator in the merge log.
+        assert report.log_file is not None
+        log_text = report.log_file.read_text()
+        assert "git rev-parse HEAD timed out after clean merge of 'feature'" in log_text
 
     def test_merge_report_defaults(self) -> None:
         report = MergeReport()
@@ -720,97 +737,6 @@ class TestMergeOrchestrator:
         assert report.failed_branch is None
         assert report.failure_reason is None
         assert report.pending_human is False
-
-    def test_rollback_failed_sets_flag(self, tmp_path: Path, monkeypatch) -> None:
-        """If guardrails detect violations but rollback fails, report.rollback_failed=True."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        # Create feature branch that weakens a spec (SHALL -> SHOULD)
-        _create_branch(tmp_path, "feature")
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        _commit(tmp_path, "weaken spec")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock _rollback_to to simulate git reset --hard failure
-        def mock_rollback(self, sha):
-            raise RuntimeError("git reset --hard failed: mock failure")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
-            mock_rollback,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        assert report.success is False
-        assert report.rollback_failed is True
-        assert report.failure_reason == "rollback_failed"
-        assert report.failed_branch == "feature"
-
-    def test_guardrail_print_instructions_failure_not_rollback(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """If write_guardrail_call succeeds but print_instructions raises,
-        report.failure_reason must be 'guardrail_violation', not
-        'rollback_failed'. The call file on disk must still exist.
-        """
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        # Create feature branch that weakens a spec (SHALL -> SHOULD)
-        _create_branch(tmp_path, "feature")
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        _commit(tmp_path, "weaken spec")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Monkeypatch print_instructions to simulate broken pipe
-        def mock_print_instructions(self, call_file):
-            raise BrokenPipeError("mock broken pipe")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.human_call.HumanCallWriter.print_instructions",
-            mock_print_instructions,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        assert report.success is False
-        assert report.rollback_failed is False
-        assert report.failure_reason == "guardrail_violation"
-        assert report.failed_branch == "feature"
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
 
     def test_conflict_human_call_print_instructions_failure_preserved(
         self, tmp_path: Path, monkeypatch
@@ -861,12 +787,11 @@ class TestMergeOrchestrator:
                         resolved_content="",
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True},
             )
 
         monkeypatch.setattr(
@@ -898,66 +823,6 @@ class TestMergeOrchestrator:
         assert report.human_call_file.exists()
 
         # HEAD should be unchanged (no merge commit)
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_guardrail_write_call_failure_after_rollback_not_rollback_failed(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """If write_guardrail_call raises AFTER a successful rollback,
-        report.failure_reason must be 'guardrail_violation_call_failed', not
-        'rollback_failed', and report.rollback_failed must be False.
-        """
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        # Create feature branch that weakens a spec (SHALL -> SHOULD)
-        _create_branch(tmp_path, "feature")
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        _commit(tmp_path, "weaken spec")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Monkeypatch write_guardrail_call to simulate disk-full after rollback
-        def mock_write_guardrail_call(*args, **kwargs):
-            raise RuntimeError("disk full")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
-            mock_write_guardrail_call,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        # The true failure mode is "rollback succeeded, call file write failed"
-        assert report.success is False
-        assert report.rollback_failed is False
-        assert report.failure_reason == "guardrail_violation_call_failed"
-        assert report.failed_branch == "feature"
-
-        # HEAD should be restored to pre-merge state (rollback succeeded)
         post_head = subprocess.run(
             ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
@@ -1157,74 +1022,6 @@ class TestMergeOrchestrator:
         # failure_reason must use 'fast_failure:' prefix, not 'fast_abort:'
         assert report.failure_reason.startswith("fast_failure")
         assert "refusing to merge unrelated histories" in report.failure_reason
-        assert report.pending_human is False
-
-    def test_inconsistent_repair_state_halts_sequence(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """GuardrailRepairInconsistentState → hard-stop with string failure_reason.
-
-        Regression for critical issue #1 (missing elif branch) and high
-        issue #2 (IntEnum assigned instead of string).
-        """
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        # Create two feature branches that weaken the spec (SHALL -> SHOULD).
-        # Branch-a will be merged first and trigger the inconsistent state.
-        # Branch-b should NOT be attempted (hard-stop contract).
-        _create_branch(tmp_path, "branch-a")
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        _commit(tmp_path, "weaken spec on a")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        _create_branch(tmp_path, "branch-b")
-        (tmp_path / "b.txt").write_text("b\n")
-        _commit(tmp_path, "add b")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock the repairer to raise GuardrailRepairInconsistentState.
-        def mock_repair(self, *args, **kwargs):
-            from tianluo.engine.merge.guardrail_repair import (
-                GuardrailRepairInconsistentState,
-            )
-            raise GuardrailRepairInconsistentState(
-                "pre_repair_sha is missing — rollback refused"
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["branch-a", "branch-b"])
-
-        # Hard-stop: branch-a is failed, branch-b is unattempted
-        assert report.success is False
-        assert report.failed_branch == "branch-a"
-        assert report.failure_reason == "inconsistent_repair_state"
-        assert isinstance(report.failure_reason, str)
-        assert report.failure_detail is not None
-        assert "pre_repair_sha" in report.failure_detail
-        assert "branch-b" in report.unattempted_branches
         assert report.pending_human is False
 
     def test_version_bump_postcondition_failure_flips_success_false(
@@ -1558,12 +1355,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -1616,12 +1412,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True},
             )
 
         monkeypatch.setattr(
@@ -1675,12 +1470,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="bad",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "bad")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True},
             )
 
         # Force REJECT via the new ``resolve_and_decide`` entry point
@@ -1722,48 +1516,8 @@ class TestMergeOrchestratorConflictResolution:
         ).stdout.strip()
         assert post_head == pre_head
 
-    def test_fast_spec_guardrail_concern_accepted(self, tmp_path: Path, monkeypatch) -> None:
-        """fast strategy + spec_guardrail_concern → ACCEPT (deferred to post-merge guardrails).
-
-        The LLM's spec_guardrail_concern flag is ignored in _decide_fast;
-        post-merge guardrails handle real violations. Since shared.txt is not
-        a real spec file, guardrails pass and the merge succeeds.
-        """
-        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
-
-        def mock_resolve(self, context, strategy):
-            from tianluo.engine.merge.conflict_resolver import (
-                Confidence, FileResolution, HunkResolution, LLMResolution,
-            )
-            return LLMResolution(
-                files=[
-                    FileResolution(
-                        path="shared.txt",
-                        resolved_content="line1\nRESOLVED\nline3\n",
-                        hunks=[HunkResolution(1, 5, Confidence.HIGH, "ok")],
-                        overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": True},
-                        is_spec=True,
-                    ),
-                ],
-                overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": True},
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute([feature_branch])
-
-        # spec_guardrail_concern is deferred; merge succeeds
-        assert report.success is True
-        assert feature_branch in report.merged_branches
-        assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
-
-    def test_fast_strategy_conflict_markers_in_non_spec_file_abort(self, tmp_path: Path, monkeypatch) -> None:
-        """fast strategy + non-spec file with conflict markers in resolved_content → abort.
+    def test_fast_strategy_conflict_markers_in_resolution_abort(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy + conflict markers left in resolved_content → abort.
 
         Even in fast mode, resolved content that still contains git conflict
         markers must be rejected before being committed. The first-pass
@@ -1783,12 +1537,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="line1\n<<<<<<< HEAD\nBASE\n=======\nFEATURE\n>>>>>>> branch\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -1863,12 +1616,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "ok")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -1953,12 +1705,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="",  # empty → deletion
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "delete it")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2036,13 +1787,12 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="a resolved\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged a")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                     # b.txt intentionally omitted
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2137,12 +1887,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="",  # empty → would trigger deletion path
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "binary")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2215,8 +1964,7 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="resolved\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "ok")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                     # … and a bogus path that the extra-files pre-check catches.
                     FileResolution(
@@ -2224,12 +1972,11 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="evil content",
                         hunks=[HunkResolution(1, 1, Confidence.HIGH, "bad")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2315,12 +2062,11 @@ class TestAbortMergeFailureHandling:
                         resolved_content="resolved",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True},
             )
 
         monkeypatch.setattr(
@@ -2364,7 +2110,7 @@ class TestAbortMergeFailureHandling:
             return LLMResolution(
                 files=[],  # incomplete — missing shared.txt
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2392,6 +2138,7 @@ class TestAbortMergeFailureHandling:
             ["git", "-C", str(tmp_path), "merge", "--abort"],
             capture_output=True,
         )
+
 
 class TestMergeOrchestratorCleanupInteraction:
     """Tests for --delete-merged interaction with aggregation failures."""
@@ -2531,65 +2278,6 @@ class TestMergeOrchestratorCleanupInteraction:
         assert report.failure_reason == "version_higher_than_target"
         assert report.final_version == "5.0.0"
 
-    def test_guardrails_exception_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
-        """If MergeGuardrailsCheck.check_merge_result raises, the merge is
-        treated as a violation (fail closed), rolled back, and a human call
-        file is written."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        # Create a feature branch that changes a regular file (no spec changes)
-        _create_branch(tmp_path, "feature")
-        (tmp_path / "code.py").write_text("def auth(): return True\n")
-        _commit(tmp_path, "change code")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # Mock check_merge_result to raise — simulates a bug in the checker
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.MergeGuardrailsCheck.check_merge_result",
-            lambda self, pre, post: (_ for _ in ()).throw(RuntimeError("mock diff parser blowup")),
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        # Should be treated as guardrail violation (fail closed)
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation"
-        assert report.pending_human is True
-
-        # HEAD should be restored to pre-merge state
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-        # Human call file should exist (generic CHECK_FAILURE)
-        calls_dir = tmp_path / "tianluo" / "calls"
-        call_files = list(calls_dir.glob("merge_*_guardrail.json"))
-        assert len(call_files) == 1
-        data = json.loads(call_files[0].read_text())
-        assert data["type"] == "guardrail_violation"
-        assert any(v["violation_type"] == "CHECK_FAILURE" for v in data["violations"])
-
     def test_delete_merged_with_dirty_worktree_skips_and_reports_success(self, tmp_path: Path) -> None:
         """Successful merge + delete_merged=True with dirty worktree → success=True, skipped_dirty populated."""
         _init_repo(tmp_path)
@@ -2697,12 +2385,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="some text that claims to resolve binary",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "binary")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2809,12 +2496,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",  # empty → deletion
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "delete it")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -2959,12 +2645,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",  # empty -> deletion
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "delete it")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3040,12 +2725,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3151,12 +2835,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",  # empty -> deletion
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "maybe delete")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3249,12 +2932,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",  # empty → deletion
                         hunks=[],  # no hunks → fall back to overall_confidence
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3333,12 +3015,11 @@ class TestMergeOrchestratorCleanupInteraction:
                         resolved_content="",  # empty → deletion
                         hunks=[],  # no hunks → fall back to overall_confidence
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3421,12 +3102,11 @@ class TestStrictShortCircuit:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3540,8 +3220,9 @@ class TestStrictShortCircuit:
         """strict + build_conflict_context raises -> write degraded call, pending_human.
 
         Strict's contract is 'any conflict escalates directly to human call'.
-        When context building fails, a degraded guardrail-style call is written
-        so the user still has a call file to respond to.
+        When context building fails, a degraded call file (type
+        ``merge_context_unavailable``) is written so the user still has a
+        call file to respond to.
         """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
@@ -3744,12 +3425,11 @@ class TestFastAbortBehavior:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "ok")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True},
             )
 
         monkeypatch.setattr(
@@ -3787,8 +3467,12 @@ class TestFastAbortBehavior:
         calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
-    def test_fast_per_file_requires_human_review_on_non_spec_accept(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + per-file requires_human_review on non-spec file → ACCEPT (merge succeeds)."""
+    def test_fast_per_file_requires_human_review_accepted(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + per-file requires_human_review flag → ACCEPT (merge succeeds).
+
+        Only a *global* requires_human_review flag REJECTs under the fast
+        strategy; per-file flags are accepted with a warning log.
+        """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -3802,12 +3486,11 @@ class TestFastAbortBehavior:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "ok")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": True},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3819,7 +3502,7 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Must succeed — per-file requires_human_review on non-spec is dropped in fast mode
+        # Must succeed — a per-file requires_human_review flag is dropped in fast mode
         assert report.success is True
         assert report.pending_human is False
         assert feature_branch in report.merged_branches
@@ -3877,12 +3560,11 @@ class TestFastAbortBehavior:
                         resolved_content="a resolved\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged a")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3929,12 +3611,11 @@ class TestFastAbortBehavior:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -3995,12 +3676,11 @@ class TestFastAbortBehavior:
                         resolved_content="line1\n<<<<<<< HEAD\nBASE\n=======\nFEATURE\n>>>>>>> branch\nline3\n",
                         hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -4103,12 +3783,11 @@ class TestFastAbortBehavior:
                         resolved_content="some text that claims to resolve binary",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "binary")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -4186,12 +3865,11 @@ class TestFastAbortBehavior:
                         resolved_content="a resolved\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged a")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -4253,12 +3931,11 @@ class TestFastAbortBehavior:
                         resolved_content="a resolved\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged a")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -4296,127 +3973,9 @@ class TestFastAbortBehavior:
         calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
-    def test_fast_spec_file_low_confidence_aborts_no_call_file(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + per-file LOW confidence on spec file -> REJECT, abort, no call file.
 
-        This is the safety-critical path at strategy.py:247-251: spec files
-        with non-HIGH overall_confidence must cause REJECT in fast mode.
-        The orchestrator must translate that REJECT into a clean abort with
-        no human call file.
-        """
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-
-        # Set up a spec file and create conflicting branches
-        spec_dir = tmp_path / "tianluo" / "specs" / "test"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate.\n")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "Add spec"],
-            check=True, capture_output=True,
-        )
-
-        _create_branch(tmp_path, "feature")
-        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate inputs.\n")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "Update spec on feature"],
-            check=True, capture_output=True,
-        )
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate all.\n")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "Update spec on main"],
-            check=True, capture_output=True,
-        )
-
-        # Mock LLM: returns LOW overall_confidence for the spec file
-        def mock_resolve(self, context, strategy):
-            from tianluo.engine.merge.conflict_resolver import (
-                Confidence, FileResolution, HunkResolution, LLMResolution,
-            )
-            return LLMResolution(
-                files=[
-                    FileResolution(
-                        path="tianluo/specs/test/spec.md",
-                        resolved_content="## Requirement: Auth\n\nThe system SHALL validate all inputs.\n",
-                        hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged")],
-                        overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=True,
-                    ),
-                ],
-                overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        calls_before = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Must fail with resolution_rejected (not pending_human)
-        assert report.success is False
-        assert report.pending_human is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "resolution_rejected"
-        assert report.human_call_file is None
-
-        # Working tree should be clean after abort
-        assert _is_working_tree_clean(tmp_path) is True
-
-        # HEAD unchanged
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-        # No new call files should have been created
-        calls_after = list((tmp_path / "tianluo" / "calls").glob("merge_*.json")) if (tmp_path / "tianluo" / "calls").exists() else []
-        assert len(calls_after) == len(calls_before)
-
-
-class TestGuardrailsStrategyAware:
-    """Tests for strategy-aware _run_guardrails behavior."""
-
-    def _setup_spec_repo(self, tmp_path: Path) -> str:
-        """Init repo with a spec file. Returns default branch name."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-        return default_branch
+class TestConflictEscalationFailurePaths:
+    """Tests for conflict escalation and call-file failure handling."""
 
     def _create_conflict_repo(self, tmp_path: Path) -> tuple[str, str]:
         """Create repo with conflicting branches. Returns (default_branch, feature_branch)."""
@@ -4448,895 +4007,11 @@ class TestGuardrailsStrategyAware:
         )
         return default_branch, "feature"
 
-    def test_fast_guardrail_violation_llm_repair_success(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + SHALL->SHOULD guardrail violation -> LLM repair -> merge succeeds."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        # Create feature branch that weakens spec
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock GuardrailRepairer to succeed
-        def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        # Mock check_merge_result to pass (since repairer is mocked)
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from tianluo.engine.merge.guardrails import GuardrailReport
-            return GuardrailReport(passed=True, violations=[])
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_merge_result,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Should succeed because repairer fixed the violation
-        assert report.success is True, f"Expected success, got failure_reason={report.failure_reason}"
-        assert "feature" in report.merged_branches
-
-        # HEAD should have changed (merge commit created)
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head != pre_head
-
-    def test_fast_guardrail_violation_llm_repair_stalled_escalates(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + guardrail violation + LLM repair stalled -> pending_human with call file."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock GuardrailRepairer to always fail (no progress)
-        def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(
-                success=False,
-                error="LLM could not fix the weakening",
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Stalled repair escalates to human call
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_stalled"
-        assert report.pending_human is True
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
-
-        # HEAD should be restored to pre-merge state
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_default_guardrail_violation_unchanged(self, tmp_path: Path) -> None:
-        """default + guardrail violation -> still rollback + human call (unchanged)."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        # Should fail with guardrail_violation and human call
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation"
-        assert report.pending_human is True
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
-
-        # HEAD should be restored
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_strict_guardrail_violation_unchanged(self, tmp_path: Path) -> None:
-        """strict + guardrail violation -> rollback + human call (no LLM repair)."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
-        report = orch.execute(["feature"])
-
-        # strict should behave like default for guardrails: rollback + human call
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation"
-        assert report.pending_human is True
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
-
-        # HEAD should be restored
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_fast_clean_merge_guardrail_violation_repair(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + clean merge that touches spec + guardrail violation -> LLM repair."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock repairer to succeed
-        def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=True, repaired_files=["tianluo/specs/base/spec.md"])
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        # Mock check_merge_result to pass (since repairer is mocked)
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from tianluo.engine.merge.guardrails import GuardrailReport
-            return GuardrailReport(passed=True, violations=[])
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_merge_result,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        assert report.success is True
-        assert "feature" in report.merged_branches
-
-    def test_fast_guardrail_missing_pre_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + missing pre_sha in guardrails -> guardrail_missing_pre_sha (no rollback attempted)."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        _create_branch(tmp_path, "feature")
-        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Patch the SECOND "rev-parse HEAD" call (pre_merge_sha inside
-        # _merge_single_branch, line 639) to fail.
-        call_count = 0
-
-        def patch_rev_parse(project_root, *args, check=True, timeout=30):
-            nonlocal call_count
-            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
-                call_count += 1
-                if call_count == 2:
-                    class FakeResult:
-                        returncode = 1
-                        stdout = ""
-                        stderr = "mock failure"
-                    return FakeResult()
-            import tianluo.engine.worktree as _wt
-            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator._run_git", patch_rev_parse
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Missing pre_sha in fast mode -> GuardrailRepairFailed with guardrail_missing_pre_sha
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_missing_pre_sha"
-        # rollback_failed=False because no rollback was attempted (pre_sha missing)
-        assert report.rollback_failed is False
-        assert report.pending_human is False
-        assert report.human_call_file is None
-
-    def test_fast_guardrail_missing_post_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + missing post_sha in guardrails -> guardrail_missing_post_sha."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        _create_branch(tmp_path, "feature")
-        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Patch the THIRD "rev-parse HEAD" call (post_merge_sha inside
-        # _merge_single_branch after clean merge, line 680) to fail.
-        call_count = 0
-
-        def patch_rev_parse(project_root, *args, check=True, timeout=30):
-            nonlocal call_count
-            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
-                call_count += 1
-                if call_count == 3:
-                    class FakeResult:
-                        returncode = 1
-                        stdout = ""
-                        stderr = "mock failure"
-                    return FakeResult()
-            import tianluo.engine.worktree as _wt
-            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator._run_git", patch_rev_parse
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Missing post_sha in fast mode -> GuardrailRepairFailed with guardrail_missing_post_sha
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_missing_post_sha"
-        assert report.rollback_failed is False  # rollback was not needed (no commit to roll back)
-        assert report.pending_human is False
-        assert report.human_call_file is None
-
-    def test_fast_guardrail_crash_and_rollback_fails(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + check_merge_result crashes + rollback fails -> rollback_failed=True."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        # Create feature branch that weakens spec
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock check_merge_result to raise (simulating crash)
-        def mock_check_crash(self, pre_sha: str, post_sha: str):
-            raise RuntimeError("Simulated guardrails check crash")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_crash,
-        )
-
-        # Mock _rollback_to to fail
-        def mock_rollback_fails(self, sha: str) -> None:
-            raise RuntimeError("Simulated rollback failure")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
-            mock_rollback_fails,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Both check crash and rollback failure should be reported
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_check_failed_and_rollback_failed"
-        assert report.rollback_failed is True  # KEY: rollback failure must be surfaced
-        assert report.pending_human is False
-        assert report.human_call_file is None
-
-    def test_fast_guardrail_crash_rollback_succeeds(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + check_merge_result crashes + rollback succeeds -> fast_abort."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        # Create feature branch that weakens spec
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # Mock check_merge_result to raise (simulating crash)
-        def mock_check_crash(self, pre_sha: str, post_sha: str):
-            raise RuntimeError("Simulated guardrails check crash")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_crash,
-        )
-
-        # Rollback succeeds (real _rollback_to), so only check crash is reported
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_check_failed"
-        assert report.rollback_failed is False
-        assert report.pending_human is False
-        assert report.human_call_file is None
-
-        # HEAD should be restored to pre-merge state
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_fast_repairs_guardrail_violation(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + SHALL->SHOULD: mock repairer's LLM to return fix; merge succeeds with amend."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        # Create feature branch that weakens spec
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # Mock GuardrailRepairer's LLM call to return corrected content
-        def mock_call_llm(self, prompt):
-            import json
-            return json.dumps({
-                "files": [{
-                    "path": "tianluo/specs/base/spec.md",
-                    "corrected_content": (
-                        "## Requirement: Auth\n\n"
-                        "The system SHALL validate all user inputs.\n"
-                    ),
-                }]
-            }, ensure_ascii=False, indent=2)
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
-            mock_call_llm,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Should succeed because repairer fixed the violation
-        assert report.success is True, (
-            f"Expected success, got failure_reason={report.failure_reason}"
-        )
-        assert "feature" in report.merged_branches
-        assert report.pending_human is False
-        assert report.human_call_file is None
-
-        # HEAD should have changed (merge commit created)
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head != pre_head
-
-        # Spec should have been repaired (SHALL restored)
-        spec_content = (spec_dir / "spec.md").read_text()
-        assert "SHALL" in spec_content
-        assert "SHOULD" not in spec_content
-
-    def test_fast_repair_stalled_creates_call_file(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + guardrail violation + repair stalled -> pending_human with call file."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # Mock repairer to always fail (no progress)
-        def mock_repair(self, branch, pre_sha, post_sha, violations,
-                        original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=False, error="LLM could not fix")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Stalled repair escalates to human call
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_stalled"
-        assert report.pending_human is True
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
-
-        # HEAD restored
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-        # Call file should be the stalled type (detected at iteration 1 because
-        # last_hash is initialised with the initial violation-set hash, so a
-        # no-op repair on the first iteration is immediately detected as a
-        # stall — this ensures stall detection works even with
-        # max_iterations=1).
-        import json
-        data = json.loads(report.human_call_file.read_text())
-        assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 1
-        assert len(data["violations"]) >= 1
-
-    def test_fast_repair_hash_changes_aborts_after_max(
+    def test_fast_apply_resolution_sha_read_timeout_still_succeeds(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """fast + repair changes hash each round -> exhausted after max iterations.
-
-        The mock alternates between two violation hashes.  With last_hash
-        tracking only the immediately previous iteration, the oscillation
-        back to the initial hash is not detected as a stall within 2 iterations.
-        Instead, max iterations are exhausted and the report is escalated to a
-        human call via GuardrailRepairExhausted (subclass of GuardrailRepairStalled).
-        """
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        check_call_count = [0]
-
-        # Mock repairer to always fail
-        def mock_repair(self, branch, pre_sha, post_sha, violations,
-                        original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(success=False, error="LLM could not fix")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        # Mock guardrails re-check to return violations with different
-        # strong_line evidence each time so the stable key (and thus hash)
-        # changes, but violations are never empty.  Because the mock is also
-        # used for the initial check, the first result (odd) sets the initial
-        # hash; iteration 1 (even) produces a different hash; iteration 2
-        # (odd) returns the SAME hash as the initial check.  Because last_hash
-        # only compares the immediately previous iteration, this oscillation
-        # is NOT detected as a stall (iter2 hash A != iter1 hash B).
-        def mock_check(self, pre_sha: str, post_sha: str):
-            check_call_count[0] += 1
-            from tianluo.engine.merge.guardrails import GuardrailReport, GuardrailViolation
-            if check_call_count[0] % 2 == 1:
-                evidence = {
-                    "strong_line": "The system SHALL validate inputs.",
-                    "weak_line": "The system SHOULD validate inputs.",
-                    "pairing_score": 0.9,
-                }
-            else:
-                evidence = {
-                    "strong_line": "The system SHALL check permissions.",
-                    "weak_line": "The system SHOULD check permissions.",
-                    "pairing_score": 0.9,
-                }
-            return GuardrailReport(
-                passed=False,
-                violations=[
-                    GuardrailViolation(
-                        file_path="tianluo/specs/base/spec.md",
-                        violation_type="WEAKENING",
-                        message="SHALL weakened to SHOULD",
-                        evidence=evidence,
-                    ),
-                ],
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Oscillating hash not detected as stall within max iterations ->
-        # exhausted -> human call (via GuardrailRepairExhausted subclass)
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_exhausted"
-        assert report.pending_human is True
-        assert report.human_call_file is not None
-        assert report.human_call_file.exists()
-
-        # HEAD restored
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_default_guardrail_checker_crash_call_file_fails(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """default + guardrails checker crashes + rollback ok + call file fails
-        -> GuardrailCallFileError propagated, failure_reason set correctly."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        pre_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        # Mock check_merge_result to crash (not report violations)
-        def mock_check_crash(self, pre_sha: str, post_sha: str):
-            raise RuntimeError("mock guardrails checker crash")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_crash,
-        )
-
-        # Mock write_guardrail_call to fail after rollback succeeds
-        def mock_write_guardrail_call(self, branch, violations, pre_merge_sha):
-            raise RuntimeError("mock call file write failure")
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
-            mock_write_guardrail_call,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
-        report = orch.execute(["feature"])
-
-        # Should surface the call-file failure, not rollback failure.
-        # No call file was written, so pending_human is False (not a pending state).
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_violation_call_failed"
-        assert report.pending_human is False
-        # Rollback succeeded, so HEAD should be restored
-        post_head = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-        assert post_head == pre_head
-
-    def test_fast_clean_merge_guardrail_repair_sha_refresh_timeout(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """fast + clean merge + guardrail repair succeeds + SHA refresh times out
-        -> merge still succeeds (SHA refresh is best-effort)."""
-        default_branch = self._setup_spec_repo(tmp_path)
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        # Mock repairer's LLM call to return corrected content
-        def mock_call_llm(self, prompt):
-            import json
-            return json.dumps({
-                "files": [{
-                    "path": "tianluo/specs/base/spec.md",
-                    "corrected_content": (
-                        "## Requirement: Auth\n\n"
-                        "The system SHALL validate all user inputs.\n"
-                    ),
-                }]
-            }, ensure_ascii=False, indent=2)
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
-            mock_call_llm,
-        )
-
-        # Patch _run_git to timeout on the SHA refresh after guardrails check.
-        # In the clean-merge path the refresh is at orchestrator.py:737-748.
-        import tianluo.engine.worktree as _wt
-        rev_parse_count = 0
-        original_run_git = _wt._run_git
-
-        def patched_run_git(project_root, *args, check=True, timeout=30):
-            nonlocal rev_parse_count
-            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
-                rev_parse_count += 1
-                # Count: 1=execute pre-merge, 2=_merge_single_branch pre,
-                # 3=post-clean-merge, 4=repairer post-amend,
-                # 5=orchestrator SHA refresh after guardrails
-                if rev_parse_count == 5:
-                    raise subprocess.TimeoutExpired(
-                        cmd=["git", "rev-parse", "HEAD"], timeout=15,
-                    )
-            return original_run_git(project_root, *args, check=check, timeout=timeout)
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator._run_git", patched_run_git,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Merge should still succeed despite SHA refresh timeout
-        assert report.success is True, (
-            f"Expected success, got failure_reason={report.failure_reason}"
-        )
-        assert "feature" in report.merged_branches
-        assert report.pending_human is False
-
-    def test_fast_apply_resolution_guardrail_sha_refresh_timeout(
-        self, tmp_path: Path, monkeypatch
-    ) -> None:
-        """fast + conflict resolved + guardrails pass + SHA refresh times out
-        -> merge still succeeds (SHA refresh is best-effort)."""
+        """fast + conflict resolved + post-commit SHA read times out
+        -> merge still succeeds (the SHA read is best-effort logging)."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -5350,29 +4025,19 @@ class TestGuardrailsStrategyAware:
                         resolved_content="line1\nRESOLVED\nline3\n",
                         hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged both")],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
             "tianluo.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        # Mock _run_guardrails to return None (simulate pass / repair success)
-        def mock_run_guardrails(self, pre_sha, post_sha, branch, strategy=None):
-            return None
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
-            mock_run_guardrails,
-        )
-
-        # Patch _run_git to timeout on the SHA refresh in _apply_resolution.
-        # In _apply_resolution the refresh is at orchestrator.py:1388-1408.
+        # Patch _run_git to timeout on the post-commit SHA read that
+        # _apply_resolution performs purely to log the merge commit.
         import tianluo.engine.worktree as _wt
         rev_parse_count = 0
         original_run_git = _wt._run_git
@@ -5382,8 +4047,8 @@ class TestGuardrailsStrategyAware:
             if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
                 rev_parse_count += 1
                 # Count: 1=execute pre-merge, 2=_merge_single_branch pre,
-                # 3=_apply_resolution post-commit, 4=_apply_resolution SHA refresh
-                if rev_parse_count == 4:
+                # 3=_apply_resolution post-commit SHA read (logging only)
+                if rev_parse_count == 3:
                     raise subprocess.TimeoutExpired(
                         cmd=["git", "rev-parse", "HEAD"], timeout=15,
                     )
@@ -5396,7 +4061,7 @@ class TestGuardrailsStrategyAware:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Merge should still succeed despite SHA refresh timeout
+        # Merge should still succeed despite the SHA read timing out
         assert report.success is True, (
             f"Expected success, got failure_reason={report.failure_reason}"
         )
@@ -5412,8 +4077,9 @@ class TestGuardrailsStrategyAware:
         write degraded human call and return pending_human.
 
         Strict's contract is 'any conflict escalates directly to human call'.
-        When context build fails, a degraded guardrail-style call is written
-        so the user still has a call file to respond to.
+        When context build fails, a degraded call file (type
+        ``merge_context_unavailable``) is written so the user still has a
+        call file to respond to.
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -5467,13 +4133,12 @@ class TestGuardrailsStrategyAware:
         assert report.failure_reason == "conflict_context_failed"
         assert report.human_call_file is not None
         assert report.human_call_file.exists()
-        # Call file is guardrail-style with CONFLICT_CONTEXT_BUILD_FAILURE
+        # Degraded call file: minimal payload carrying the failure message
         call_data = json.loads(report.human_call_file.read_text())
-        assert call_data["type"] == "guardrail_violation"
-        assert any(
-            v["violation_type"] == "CONFLICT_CONTEXT_BUILD_FAILURE"
-            for v in call_data["violations"]
-        )
+        assert call_data["type"] == DEGRADED_CALL_TYPE
+        assert call_data["branch"] == "feature"
+        assert "mock context build failure" in call_data["message"]
+        assert set(call_data["options"]) == {"accept", "abort", "manual"}
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -5609,12 +4274,11 @@ class TestGuardrailsStrategyAware:
                         resolved_content="",
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -5702,12 +4366,11 @@ class TestGuardrailsStrategyAware:
                         resolved_content="",
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
+                        flags={"requires_human_review": False},
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -5808,10 +4471,10 @@ class TestGuardrailsStrategyAware:
         assert report.failure_reason == "merge_abort_failed"
         assert report.human_call_file is None
 
-    def test_strict_build_context_failure_write_guardrail_call_fails(
+    def test_strict_build_context_failure_write_degraded_call_fails(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """strict + build_conflict_context fails + write_guardrail_call also fails -
+        """strict + build_conflict_context fails + write_degraded_call also fails -
         failure_reason is 'conflict_context_failed_call_file_write_failed'.
         """
         _init_repo(tmp_path)
@@ -5851,13 +4514,13 @@ class TestGuardrailsStrategyAware:
             mock_build_context,
         )
 
-        # Mock HumanCallWriter.write_guardrail_call to raise
-        def mock_write_guardrail_call(*args, **kwargs):
+        # Mock HumanCallWriter.write_degraded_call to raise
+        def mock_write_degraded_call(*args, **kwargs):
             raise RuntimeError("disk full")
 
         monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_guardrail_call",
-            mock_write_guardrail_call,
+            "tianluo.engine.merge.orchestrator.HumanCallWriter.write_degraded_call",
+            mock_write_degraded_call,
         )
 
         pre_head = subprocess.run(
@@ -6525,14 +5188,13 @@ class TestRuntimeSyncIntegration:
                             for h in cf.hunks
                         ],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=cf.is_spec,
+                        flags={"requires_human_review": False},
                     )
                 )
             return LLMResolution(
                 files=files,
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -6625,14 +5287,13 @@ class TestRuntimeSyncIntegration:
                             for h in cf.hunks
                         ],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=cf.is_spec,
+                        flags={"requires_human_review": False},
                     )
                 )
             return LLMResolution(
                 files=files,
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -6766,14 +5427,13 @@ class TestRuntimeSyncIntegration:
                             for h in cf.hunks
                         ],
                         overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=cf.is_spec,
+                        flags={"requires_human_review": False},
                     )
                 )
             return LLMResolution(
                 files=files,
                 overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": False},
             )
 
         monkeypatch.setattr(
@@ -7883,7 +6543,7 @@ class TestRuntimeSyncIntegration:
         # Force _verify_post_merge_conditions to return the timeout token
         monkeypatch.setattr(
             "tianluo.engine.merge.orchestrator.MergeOrchestrator._verify_post_merge_conditions",
-            lambda self, branch, *, already_ancestor, report, allow_fixup_parent=False: "postcond_check_timeout",
+            lambda self, branch, *, already_ancestor, report: "postcond_check_timeout",
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
@@ -7892,124 +6552,6 @@ class TestRuntimeSyncIntegration:
         assert report.success is False
         assert report.failed_branch == "feature"
         assert report.failure_reason == "postcond_check_timeout"
-
-    def test_fast_side_effect_clearance_timeout_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
-        """fast mode: _run_guardrails raises GuardrailRepairFailed with
-        failure_reason='postcond_check_timeout' -> state machine routes it
-        to the report correctly (fail-closed)."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        _create_branch(tmp_path, "feature")
-        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        from tianluo.commands.merge.failure_reason import FailureReason
-        from tianluo.engine.merge.orchestrator import GuardrailRepairFailed
-
-        def mock_run_guardrails(self, pre_sha, post_sha, branch, strategy):
-            raise GuardrailRepairFailed(
-                "side-effect clearance timed out",
-                failure_reason=FailureReason.POSTCOND_CHECK_TIMEOUT,
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
-            mock_run_guardrails,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        assert report.success is False
-        assert report.failed_branch == "feature"
-        assert report.failure_reason == "postcond_check_timeout"
-        assert report.pending_human is False
-
-    def test_fast_side_effect_clearance_head_unchanged(self, tmp_path: Path, monkeypatch) -> None:
-        """fast mode: repair fails but guardrails pass on re-check, and
-        HEAD is unchanged -> merge succeeds (side-effect clearance accepted)."""
-        _init_repo(tmp_path)
-        default_branch = _get_default_branch(tmp_path)
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHALL validate all user inputs.\n"
-        )
-        (tmp_path / "code.py").write_text("def auth(): pass\n")
-        _commit(tmp_path, "initial")
-
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
-            check=True, capture_output=True,
-        )
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        (spec_dir / "spec.md").write_text(
-            "## Requirement: Auth\n\n"
-            "The system SHOULD validate all user inputs.\n"
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "checkout", default_branch],
-            check=True, capture_output=True,
-        )
-
-        def mock_repair(self, branch, pre_sha, post_sha, violations,
-                        original_spec_contents, merged_spec_contents):
-            from tianluo.engine.merge.guardrail_repair import RepairResult
-            return RepairResult(
-                success=False,
-                error="mock repair failure",
-                repaired_files=[],
-            )
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
-            mock_repair,
-        )
-
-        check_call_count = 0
-
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str):
-            from tianluo.engine.merge.guardrails import GuardrailReport
-            nonlocal check_call_count
-            check_call_count += 1
-            if check_call_count == 1:
-                from tianluo.engine.merge.guardrails import GuardrailViolation
-                return GuardrailReport(
-                    passed=False,
-                    violations=[GuardrailViolation(
-                        violation_type="must_not_weaken",
-                        file_path="tianluo/specs/base/spec.md",
-                        message="SHALL weakened to SHOULD",
-                    )],
-                )
-            return GuardrailReport(passed=True, violations=[])
-
-        monkeypatch.setattr(
-            "tianluo.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
-            mock_check_merge_result,
-        )
-
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
-        report = orch.execute(["feature"])
-
-        # Should succeed because guardrails passed on re-check and HEAD
-        # is unchanged (repairer rolled back to post_sha).
-        assert report.success is True, (
-            f"Expected success, got failure_reason={report.failure_reason}"
-        )
-        assert "feature" in report.merged_branches
 
 
 class TestRuntimeSyncCollisionVersionAggregation:

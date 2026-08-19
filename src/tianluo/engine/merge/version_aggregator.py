@@ -760,17 +760,17 @@ def aggregate_and_apply(
         with ``"VersionNotAdvanced: "``.  Callers SHOULD distinguish
         this from real failure modes (write/git errors).
 
-    **Spec departure for fix-up-on-top-of-merge layouts**: when the
-    last branch's guardrail repair created a fix-up commit on top of
+    **Departure for fix-up-on-top-of-merge layouts**: when a post-merge
+    step (issue-ID reconciliation) created a fix-up commit on top of
     the merge commit (so HEAD is the fix-up, HEAD^1 is the merge),
     ``amend=True`` runs ``git commit --amend --no-edit`` against the
     fix-up commit — NOT against the merge commit underneath.  The
     pyproject.toml change is therefore attached to the fix-up commit
     while the merge commit (HEAD^1) is preserved untouched.  This is a
-    practical departure from the spec wording ``amended onto the last
-    merge commit``: rewriting the merge commit and re-creating the
-    fix-up on top would require interactive-rebase machinery and is
-    deliberately out of scope.  The merge commit itself is NEVER lost
+    practical departure from "amended onto the last merge commit":
+    rewriting the merge commit and re-creating the fix-up on top would
+    require interactive-rebase machinery and is deliberately out of
+    scope.  The merge commit itself is NEVER lost
     and post-condition checks accept this layout via
     ``allow_fixup_parent=True``.
     """

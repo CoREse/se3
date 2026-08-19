@@ -26,95 +26,6 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class EvidenceRecord:
-    """Typed evidence payload attached to a guardrail violation.
-
-    The legacy code attached a ``dict`` to ``GuardrailViolation.evidence``
-    which made field typos invisible at construction time —
-    ``evidence={"strng_line": "..."}`` would silently produce a
-    violation with a missing strong-line message downstream.
-
-    H4: This dataclass enumerates every recognised evidence field and
-    fails fast at construction (``TypeError`` from the dataclass
-    constructor) when an unknown keyword is supplied.  Every field is
-    optional so a single class can carry evidence for any violation
-    type — see the ``violation_type`` discriminator on
-    :class:`GuardrailViolation`.
-
-    Backward-compatibility: :meth:`to_dict` serialises the record back
-    to a plain dict (omitting ``None``-valued fields) so existing
-    consumers that rely on dict-style access (e.g.
-    ``evidence.get("strong_line")``) continue to work without changes.
-    """
-
-    # --- Pairing evidence (WEAKENING) ---
-    strong_line: Optional[str] = None
-    weak_line: Optional[str] = None
-    strong_line_no: Optional[int] = None
-    weak_line_no: Optional[int] = None
-    pairing_score: Optional[float] = None
-    prefix_score: Optional[float] = None
-    all_pairings: Optional[list[dict]] = None
-
-    # --- Deletion evidence (DELETE) ---
-    deleted_line: Optional[str] = None
-    deleted_line_no: Optional[int] = None
-    when_clause: Optional[str] = None
-    when_clauses: Optional[list[str]] = None
-
-    # --- Branch / detector context ---
-    branch_name: Optional[str] = None
-    trigger_branch: Optional[str] = None
-    branch_kind: Optional[str] = None  # e.g. "primary", "corner-case"
-
-    # --- Topology evidence (CHECK_FAILURE from H1/H2) ---
-    pre_sha: Optional[str] = None
-    post_sha: Optional[str] = None
-    parent_count: Optional[int] = None
-    min_parents: Optional[int] = None
-    topology_check: Optional[str] = None  # "ancestry" | "parent_count"
-
-    # --- Incomplete-check evidence (H5) ---
-    exception_type: Optional[str] = None
-    exception_msg: Optional[str] = None
-
-    # --- Spec volume-governance evidence (size checks) ---
-    size_bytes: Optional[int] = None
-    limit_bytes: Optional[int] = None
-    spec_name: Optional[str] = None
-    requirement_name: Optional[str] = None
-
-    def to_dict(self) -> dict[str, Any]:
-        """Serialize to a dict, omitting fields whose value is ``None``.
-
-        Designed to round-trip with :meth:`from_dict`; consumers that
-        store the dict in JSON (call files, log entries) will see only
-        the populated keys.
-        """
-        result: dict[str, Any] = {}
-        for f in dataclass_fields(self):
-            value = getattr(self, f.name)
-            if value is not None:
-                result[f.name] = value
-        return result
-
-    @classmethod
-    def from_dict(cls, data: Optional[dict[str, Any]]) -> Optional["EvidenceRecord"]:
-        """Build an :class:`EvidenceRecord` from a dict.
-
-        Unknown keys are NOT silently dropped — they become a
-        ``TypeError`` from the dataclass constructor, which is the H4
-        fail-fast behaviour the spec calls for.
-
-        Returns ``None`` when *data* is ``None`` or empty so callers
-        can transparently handle the no-evidence case.
-        """
-        if not data:
-            return None
-        return cls(**data)
-
-
-@dataclass
 class MergeOutcome:
     """Outcome for a single branch merge attempt.
 
@@ -136,8 +47,10 @@ class MergeOutcome:
     # merge attempt (a no-op).  Distinct from ``success`` because a
     # no-op does not produce a new merge commit.
     already_ancestor: bool = False
-    # Whether the merge succeeded but the guardrails check reported
-    # warnings that were repaired (fast mode) or accepted (default).
+    # Whether the merge succeeded but a post-merge check reported
+    # warnings that were repaired or accepted. No merge phase sets this
+    # today; the field and its ``merged_with_warnings`` bucket stay so
+    # archived reports that recorded it still round-trip.
     warnings_repaired: bool = False
     # SHA of the merge commit produced for this branch, or ``None`` if
     # no merge commit was created (failure, no-op, or pending-human).
@@ -193,8 +106,9 @@ class MergeReport:
     # Branches that were already ancestors of HEAD (no-op, no commit).
     # Named ``already_ancestor_branches`` to match the legacy model field.
     already_ancestor_branches: list[str] = field(default_factory=list)
-    # Branches that merged but had guardrail warnings that were
-    # repaired or accepted (still a success, but flagged).
+    # Branches whose ``warnings_repaired`` outcome flag was set (still a
+    # success, but flagged). Populated only from archived reports — see
+    # ``MergeOutcome.warnings_repaired``.
     merged_with_warnings: list[str] = field(default_factory=list)
     # Backward-compatible aggregate (legacy field).  When non-empty, this
     # is returned by the ``merged_branches`` property; otherwise the
@@ -276,6 +190,11 @@ class MergeReport:
     ambiguous_issue_references: list = field(default_factory=list)
 
     # --- Rollback state ---
+    # No live merge phase sets this: the spec-guardrails chain that used to roll
+    # a merge back on violation is gone, and every other failure path aborts the
+    # merge rather than resetting past it. The field and the CLI branch that
+    # reads it survive so an archived report that recorded a failed rollback
+    # still renders instead of losing its most severe signal.
     rollback_failed: bool = False
 
     # --- Bump inference diagnostics ---
