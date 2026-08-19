@@ -328,7 +328,6 @@ class FileResolution:
     hunks: list[HunkResolution] = field(default_factory=list)
     overall_confidence: Confidence = Confidence.LOW
     flags: dict[str, bool] = field(default_factory=dict)
-    is_spec: bool = False
 
 
 @dataclass
@@ -363,7 +362,6 @@ class BatchContext:
     theirs_head_message: str = ""
     ours_log_oneline: list[str] = field(default_factory=list)
     theirs_log_oneline: list[str] = field(default_factory=list)
-    has_spec_files: bool = False
     strategy: MergeStrategy = MergeStrategy.FAST
 
 
@@ -437,7 +435,7 @@ class ConflictResolver:
                 across the merge pipeline (D9).  When supplied, every
                 conflict resolution call reuses the same caller so that
                 its prompt cache, retry budget, and trace stream remain
-                continuous with downstream guardrail repair calls.  When
+                continuous across the merge run.  When
                 ``None``, a fresh caller scoped to ``"merge_conflict"`` is
                 built lazily on first use.
             llm_trace: Optional :class:`LLMTrace` for per-call jsonl
@@ -514,7 +512,6 @@ class ConflictResolver:
             theirs_head_message=context.theirs_head_message,
             ours_log_oneline=list(context.ours_log_oneline),
             theirs_log_oneline=list(context.theirs_log_oneline),
-            has_spec_files=context.has_spec_files,
             strategy=strategy,
         )
 
@@ -552,10 +549,7 @@ class ConflictResolver:
                 # written downstream.
                 resolved_content = cf.working_content
                 confidence = Confidence.LOW
-                flags = {
-                    "requires_human_review": True,
-                    "spec_guardrail_concern": cf.is_spec,
-                }
+                flags = {"requires_human_review": True}
             else:
                 # Read the on-disk content the LLM produced (may be
                 # missing if the LLM deleted the file as a valid
@@ -593,17 +587,11 @@ class ConflictResolver:
                     read_back_failed_paths.append(cf.path)
                 if read_failure:
                     confidence = Confidence.LOW
-                    flags = {
-                        "requires_human_review": True,
-                        "spec_guardrail_concern": cf.is_spec,
-                    }
+                    flags = {"requires_human_review": True}
                     any_unresolved = True
                 else:
                     confidence = Confidence.HIGH
-                    flags = {
-                        "requires_human_review": False,
-                        "spec_guardrail_concern": False,
-                    }
+                    flags = {"requires_human_review": False}
 
             # Synthesise a single hunk spanning the resolved file so the
             # downstream apply path has a placeholder for any consumers
@@ -640,19 +628,13 @@ class ConflictResolver:
                     hunks=safe_hunks,
                     overall_confidence=confidence,
                     flags=flags,
-                    is_spec=cf.is_spec,
                 )
             )
 
         overall_conf = (
             Confidence.LOW if any_unresolved else Confidence.HIGH
         )
-        overall_flags = {
-            "requires_human_review": any_unresolved,
-            "spec_guardrail_concern": (
-                any_unresolved and any(cf.is_spec for cf in context.files)
-            ),
-        }
+        overall_flags = {"requires_human_review": any_unresolved}
         synthesized = LLMResolution(
             files=file_resolutions,
             overall_confidence=overall_conf,
@@ -910,14 +892,6 @@ class ConflictResolver:
                 lines.append(f"  {line}")
             lines.append("")
 
-        if context.has_spec_files:
-            lines.append(
-                "⚠️  SPEC FILES PRESENT: do NOT delete requirements, weaken "
-                "SHALL→SHOULD or MUST→SHOULD, weaken quantifiers (all→some), "
-                "or delete scenarios. Merge both sides' content faithfully."
-            )
-            lines.append("")
-
         if history:
             lines.append("## Previous Iteration Outcomes")
             lines.append(
@@ -956,8 +930,6 @@ class ConflictResolver:
             abs_path = context.project_root / cf.path
             lines.append(f"### `{cf.path}`")
             lines.append(f"Absolute path: `{abs_path}`")
-            if cf.is_spec:
-                lines.append("[SPEC FILE — spec-guardrail rules apply]")
             if cf.is_binary:
                 lines.append(
                     "[BINARY FILE — cannot be auto-edited. Choose a side "
@@ -1015,10 +987,9 @@ class ConflictResolver:
         """Call LLM with the given prompt.
 
         Reuses ``self._llm_caller`` when one was injected at construction
-        time, so prompt cache and retry budget stay shared with
-        :class:`GuardrailRepairer` and any other merge-pipeline caller
-        (see D9).  Falls back to a freshly-built caller when none was
-        supplied.
+        time, so prompt cache and retry budget stay shared with any other
+        merge-pipeline caller (see D9).  Falls back to a freshly-built
+        caller when none was supplied.
 
         K2: If an :class:`LLMTrace` was injected, the call is timed and
         recorded as a jsonl entry.

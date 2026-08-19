@@ -437,9 +437,8 @@ flow 都按其所属 owner 隔离。首次启用的动线是：
 |------|------|
 | `luo run [TASK]` | 统一入口。驱动 flow engine 状态机（见[上文的状态机图](#流程状态机)）。参数：`--resume` / `-r`、`--type` / `-t`、`--change` / `-c`、`--flow-id`、`--discover` / `-d`、`--from-issue`、`--output-format`、`--preset`、`--worktree`。 |
 | `luo init` | 初始化新项目：写 `tianluo.yaml`、`tianluo/charter.md`、`.gitignore`，按需 `git init`。参数：`--project-root` / `-p`、`--name` / `-n`、`--force` / `-f`。 |
-| `luo guardrails <spec-file>` | 对文件跑 tianluo guardrails（检测被删除的行 / 被弱化的语言）；`--sizes` 跑项目级的尺寸检查。供 `luo merge` 共用。参数：`--original` / `-o <baseline-file>`。 |
 | `luo merge <branch> [<branch> ...]` | 按序把多个分支合并到当前 HEAD，冲突由 LLM 驱动解决，随后从合入的 intent 中调和出最终版本号。参数：`--strategy` / `-s` `fast\|safe\|strict`、`--delete-merged` / `-d`、`--no-delete-merged`。`tianluo/` 下的运行时数据按分层策略同步。 |
-| `luo merge-respond <call-file>` | 处理 `luo merge` 在冲突或 guardrail 违规升级为人工 call 时写出的人工决策文件。 |
+| `luo merge-respond <call-file>` | 处理 `luo merge` 在冲突升级为人工 call 时写出的人工决策文件。 |
 | `luo merge-unlock` | 查看并释放项目的 merge 锁（`tianluo/state/merge.lock`）。总是报告持有者 PID、其存活状态与锁路径。陈旧锁自动清理；被**本机**存活进程持有的锁除非加 `--force` / `-f` 否则拒绝释放。归**另一台机器**所有的锁永不自动打破——释放它永远是一次显式的运维决策。 |
 | `luo salvage` | 对异常终止的 session 做尽力抢救：宽容地加载 state、commit 残留 diff、为未完成工作补 issue、归档 session。参数：`--project-root` / `-p <path>`。 |
 | `luo end-session [FLOW_ID]` | 结束并归档一个 session：终止存活的 `luo run` 进程（并清掉其 pid 文件）、归档 state。`--worktree` session 会像完成的运行那样被归档——worktree 归档、终态提升、history 同步、隔离分支与 worktree 移除——但其未完成的工作**不会**被合并。参数：`--project-root` / `-p`、`--pid`、`--no-archive-worktree`。 |

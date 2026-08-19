@@ -152,8 +152,8 @@ class TestCleanupSafeDelete:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # delete_branch must NOT have been called for impl/f/G1
@@ -204,8 +204,8 @@ class TestCleanupSafeDelete:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # delete_branch invoked with impl/f/G1
@@ -266,8 +266,8 @@ class TestCleanupSafeDelete:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         delete_targets = [c.args[1] for c in mock_del.call_args_list]
@@ -323,8 +323,8 @@ class TestOverallStatusReflectsMergeFailures:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         assert step.outputs["completion_status"] == "failed"
@@ -370,8 +370,8 @@ class TestOverallStatusReflectsMergeFailures:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         assert step.outputs["completion_status"] == "complete"

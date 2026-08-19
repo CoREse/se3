@@ -130,11 +130,13 @@ class TestBaselineLoopsWithinBudget:
         # Section header + the specific baseline id are listed.
         assert "BASELINE (PRE-EXISTING) TEST FAILURES" in instr
         assert BASELINE_ID in instr
-        # Wording: equal treatment / parallel-not-preempt / guardrails / code-first.
+        # Wording: equal treatment / parallel-not-preempt / project constraints
+        # / code-first.
         assert "EQUAL priority" in instr
         assert "PARALLEL" in instr
-        assert "guardrail" in instr.lower()
-        assert "SHALL" in instr and "MUST" in instr
+        assert "charter" in instr.lower()
+        assert "INVARIANT:" in instr
+        assert "MUST NOT" in instr
 
     def test_given_up_recorded_only_on_exhaustion_not_while_looping(self, tmp_path):
         flow = _make_flow(tmp_path)

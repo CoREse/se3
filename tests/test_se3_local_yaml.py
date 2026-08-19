@@ -510,36 +510,6 @@ class TestContextBuilderLocal:
         injection = get_issue_discovery_injection("plan", tmp_path)
         assert injection != ""
 
-    def test_spec_names_injection_reads_local(self, tmp_path):
-        from tianluo.engine.context_builder import (
-            SPEC_NAMES_INJECTION_DEFAULT_STEPS,
-            get_spec_names_injection,
-        )
-
-        # Set up a specs/ dir so the function has something to enumerate.
-        spec_dir = tmp_path / "tianluo" / "specs" / "alpha"
-        spec_dir.mkdir(parents=True)
-        (spec_dir / "spec.md").write_text("# alpha")
-
-        # 'commit' is NOT a default whitelist member.
-        assert "commit" not in SPEC_NAMES_INJECTION_DEFAULT_STEPS
-        # commit is in the FORBIDDEN set, so even with an override it is
-        # short-circuited; pick a step that is neither default nor
-        # forbidden — 'analyze' fits.
-        from tianluo.engine.context_builder import SPEC_NAMES_INJECTION_FORBIDDEN_STEPS
-        assert "analyze" not in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS
-        assert "analyze" not in SPEC_NAMES_INJECTION_DEFAULT_STEPS
-
-        # Without config, 'analyze' is not in the whitelist → empty.
-        assert get_spec_names_injection("analyze", tmp_path) == ""
-
-        # With tianluo.local.yaml override, 'analyze' is whitelisted.
-        (tmp_path / "tianluo.local.yaml").write_text(
-            "spec_names_injection:\n  steps:\n    - analyze\n"
-        )
-        injection = get_spec_names_injection("analyze", tmp_path)
-        assert injection != ""
-
 
 # ---------------------------------------------------------------------------
 # Malformed tianluo.local.yaml — loaders fall back to defaults AND log a warning

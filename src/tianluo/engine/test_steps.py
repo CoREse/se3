@@ -27,10 +27,11 @@ class TestAnalyzeStep:
     def test_analyze_success(self, MockLLMCaller, MockCollector):
         """Test successful analysis produces classification fields.
 
-        The retired spec-selection mechanism no longer produces real
-        ``spec_content`` / ``relevant_specs`` / ``selected_items`` — they are
-        emitted empty so defensive downstream consumers degrade cleanly, and
-        the legacy ``selected_specs`` key never appears.
+        The retired spec-selection mechanism no longer produces
+        ``relevant_specs`` / ``selected_items`` — they are emitted empty so
+        defensive downstream consumers degrade cleanly — and no longer emits
+        ``spec_content`` at all. The legacy ``selected_specs`` key never
+        appears either.
         """
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -68,8 +69,9 @@ class TestAnalyzeStep:
         assert len(step.outputs["project_summary"]) > 0
         # Retired spec-selection outputs are present but empty
         assert step.outputs["relevant_specs"] == []
-        assert step.outputs["spec_content"] == ""
         assert step.outputs["selected_items"] == []
+        # The spec content channel is gone entirely.
+        assert "spec_content" not in step.outputs
         # The legacy selected_specs key must never appear
         assert "selected_specs" not in step.outputs
 
@@ -1028,27 +1030,31 @@ class TestLLMCallerIntegration:
         assert mock_runner.run_with_monitor.call_count == 2
 
 
-class TestContextBuilder:
-    """Tests for context builder after dead code removal."""
+class TestContextBuilderSpecSurfaceRemoved:
+    """The spec-loading surface of context_builder is gone with the spec mirror.
 
-    def test_dead_methods_removed(self):
-        """Verify dead methods are no longer available."""
-        from .context_builder import ContextBuilder
+    ContextBuilder existed only to resolve the specs directory and read spec
+    files; both jobs died with ``tianluo/specs/``, so the class itself — and the
+    spec-name injection built on it — no longer exist.
+    """
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            builder = ContextBuilder(Path(tmpdir))
-            assert not hasattr(builder, "build_step_context")
-            assert not hasattr(builder, "_build_header")
-            assert not hasattr(builder, "get_step_prompt_template")
+    def test_context_builder_class_removed(self):
+        from . import context_builder
 
-    def test_retained_methods_exist(self):
-        """Verify retained methods still work."""
-        from .context_builder import ContextBuilder
+        assert not hasattr(context_builder, "ContextBuilder")
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            builder = ContextBuilder(Path(tmpdir))
-            assert hasattr(builder, "specs_dir")
-            assert hasattr(builder, "_load_spec_content")
+    def test_spec_names_injection_removed(self):
+        from . import context_builder
+
+        assert not hasattr(context_builder, "get_spec_names_injection")
+        assert not hasattr(context_builder, "SPEC_NAMES_INJECTION_DEFAULT_STEPS")
+        assert not hasattr(context_builder, "SPEC_NAMES_INJECTION_FORBIDDEN_STEPS")
+
+    def test_charter_injection_retained(self):
+        """The charter is the surviving project-convention injection surface."""
+        from .context_builder import get_charter_injection
+
+        assert callable(get_charter_injection)
 
 
 class TestIssueDiscoveryInjection:

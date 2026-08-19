@@ -43,12 +43,9 @@
    - [`merge`](#merge)
    - [`conflict_resolver`](#conflict_resolver)
    - [`claude_subprocess`](#claude_subprocess)
-   - [`spec_write_protection`](#spec_write_protection)
    - [`server`](#server)
    - [`presets`](#presets)
 3. [Legacy / 历史遗留配置](#legacy--历史遗留配置)
-   - [`spec_governance`](#spec_governance)
-   - [`spec_loading`](#spec_loading)
    - [引擎已不再读取的配置块](#引擎已不再读取的配置块)
 4. [排错:改了配置却没有任何变化](#排错改了配置却没有任何变化)
 
@@ -147,7 +144,7 @@ loader 全部回落到内置默认值。发生这种情况时 loader 会打印�
 | `confirmation.steps` | 是 | **条目级**,规则同 `agents`。 |
 | `language` | 是 | **字段级。**`language` / `spec_language` 各自独立:项目设了就取项目的,否则取全局的。 |
 | `server` | 是 | **整块。**项目的 `server:` 段整体替换全局的(不做深度合并)。 |
-| 其余全部 | 否 | 只读项目文件(`workflow`、`test`、`implement`、`steps`、`version`、`documentation`、`code_index`、`merge`、`conflict_resolver`、`claude_subprocess`、`spec_write_protection`、`investigation`、`presets`、`pricing` ……)。 |
+| 其余全部 | 否 | 只读项目文件(`workflow`、`test`、`implement`、`steps`、`version`、`documentation`、`code_index`、`merge`、`conflict_resolver`、`claude_subprocess`、`investigation`、`presets`、`pricing` ……)。 |
 
 ### 遗留的 `se3.yaml` / `se3.local.yaml`
 
@@ -453,8 +450,9 @@ config 组,也不得出现以文件集合、模块边界或代码分层定义的
 真实代码做。两个 runner 的 headless subagent 支持均已确认(`claude -p` 实测
 暴露 Agent/subagent 工具;codex subagent 默认启用、非交互 `codex exec` 下
 可用),但 codex 仅在被明确指示时才 spawn subagent,故 implement prompt 会
-显式写出该许可。PLAN 仍产出粗颗粒的 proposal / design,供人工 gate 审阅,以及
-fix 迭代时作为 `{design_section}` 上下文注入。
+显式写出该许可。PLAN 也不再产出 proposal / design:其全部输出就是调度数据
+(task_groups 加 `total_complexity` / `estimated_effort`),人工 gate 审阅的正是
+这份数据。项目约定改由 charter 与 code-index 注入 implement 调用。
 
 **`plan_granularity`** 仅在 `capability` 下生效:
 
@@ -1095,23 +1093,9 @@ tianluo 作为 worker 拉起的 Claude CLI 子进程的设置。
 > 累加:argv 中后出现的第二个会整体覆盖第一个,连它选定的 `model` 一起覆盖。本项目
 > 曾被这一点咬过:一个守卫把自己的 `--settings` 追加在某个 agent 包装脚本的
 > `--settings` 之后,包装脚本指定的 model 被静默丢弃,实际跑的是 user settings 里的
-> model。引擎现在改用 `--plugin-dir` 安装它的 spec 写保护守卫 —— 该参数是会话级的、
-> 可重复、且**叠加式**加载,因此不会覆盖 agent 的 `--settings`。如果你自己的
+> model。因此引擎自己永远不会追加 `--settings`。如果你自己的
 > `agents.<name>.cmd` 是一个会传 `--settings` 的包装脚本,请确保最终 argv 里只有它
 > 这一个。注意 `--setting-sources`(即本配置 key)是另一个参数、语义不同,不受影响。
-
-### `spec_write_protection`
-
-两层互相独立的硬防护,阻止不该写 spec 的 step 写入 `tianluo/specs/**`。
-
-| Key | 类型 | 默认值 | 含义 |
-|-----|------|--------|------|
-| `hook_enabled` | bool | `true` | 安装 `PreToolUse` 的 spec 写入 hook —— 主要的实时拦截层。 |
-| `diff_fallback_enabled` | bool | `true` | 运行 step 之后的 spec diff 兜底检查 —— 捕捉 hook 看不见的 Bash 重定向写入。 |
-
-两个 key 都**快速失败**:非布尔值(或非 mapping 的段)会抛 `ConfigError`,因此像
-`hook_enabled: "false"` 这样的笔误无法悄悄关掉守卫。整段缺失则两者都取默认值
-(全部开启)。
 
 ### `server`
 
@@ -1219,43 +1203,12 @@ preset 重定向到任意 `prompt_file`。在这里声明一个 preset、却既�
 
 ## Legacy / 历史遗留配置
 
-下面这些块名来自已退役的 **spec 镜像**时代 —— 那时 `tianluo/specs/**` 是一份受治理
-的代码镜像。该镜像已经退役 —— 代码是唯一真相源,经由 code-index、
-`tianluo/charter.md` 以及同位的 why-comments 对外暴露。保留下面这些块,是因为它们
-仍能被解析(其中一个甚至仍在驱动一项真实检查),而不是因为它们还描述着当前的知识
-模型。这里没有任何东西值得在新项目里配置。
-
-### `spec_governance`
-
-spec 文件体积的字节预算与一个执法档位。容错:非法值告警并回落,永不抛错。
-
-| Key | 类型 | 默认值 | 含义 |
-|-----|------|--------|------|
-| `base_max_bytes` | 正 int | `32768`(32 KiB) | `base` spec(历史上每个 step 都全量注入的那一份)的预算。 |
-| `index_render_threshold` | 正 int | `16384`(16 KiB) | 超过此阈值时,`luo spec index` 的输出会被折叠为分组句柄。**空转** —— spec 索引渲染器已随 spec 体系一同退役;保留该字段只为向后兼容,它不驱动任何渲染器。 |
-| `spec_file_warn_bytes` | 正 int | `65536`(64 KiB) | 单个 spec 文件达到此体积时,guardrails 报出 `SIZE_SPEC_FILE` 违规。 |
-| `requirement_warn_bytes` | 正 int | `8192`(8 KiB) | 单个 Requirement 达到此体积时,guardrails 报出 `SIZE_REQUIREMENT` 违规。 |
-| `guardrails_size_tier` | `warn` \| `enforce` | `warn` | `warn` 打印违规并以 `0` 退出;`enforce` 打印违规并以 `1` 退出,而且会让超预算的 spec 像内容违规那样**阻断一次 merge**。 |
-
-**它们如今还被什么用着(已对照代码核实):**三个字节阈值由
-`engine/merge/guardrails.py` 中的 `check_spec_sizes()` 读取,而该函数由
-`luo guardrails` 命令调用 —— 档位为 `enforce` 时,merge 的 guardrail 检查也会调用它。
-`guardrails_size_tier` 还额外决定 `luo guardrails` 的退出码。但 `check_spec_sizes`
-遍历的是 `tianluo/specs/<name>/spec.md`;在一个后 spec 时代的项目里该目录并不存在,
-于是这项检查无物可量,这些阈值也就没有任何可观测的效果。它们**不**被 code-index 的
-降级逻辑使用 —— 那是 [`code_index.degrade_trigger_*`](#code_index),另一个块。
-
-### `spec_loading`
-
-| Key | 类型 | 默认值 | 含义 |
-|-----|------|--------|------|
-| `steps` | mapping `<step> → items` \| `full_spec` | `{}` | 按 step 的 spec 内容加载模式:`items`(头部 + 选中的若干 requirement)对 `full_spec`(整个 spec 文件)。非法值会被跳过并告警,于是内置默认值生效。 |
-
-**完全空转。**`SpecLoadingConfig` / `load_spec_loading_config()` 在 `config.py` 之外
-没有任何调用方(已用全仓 grep 核实,覆盖 `src/` 与 `tests/`)。历史上 `update_spec`
-默认取 `full_spec`;它已转向 index-first 协议、完全不再消费 spec 文本,而那份
-默认 full_spec 的集合如今是空的。`mode_for()` 对每个 step 都返回 `items`。设置这个块
-不会改变任何事情。
+旧版 `tianluo.yaml` 里有些块名来自已退役的 **spec 镜像**时代 —— 那时
+`tianluo/specs/**` 是一份受治理的代码镜像。该镜像已经退役 —— 代码是唯一真相源,
+经由 code-index、`tianluo/charter.md` 以及同位的 why-comments 对外暴露。
+`spec_governance`、`spec_loading`、`spec_write_protection`(以及
+`merge.guardrail_repair`)这几个块如今连 loader 都不存在了:配置里残留的块会被直接
+忽略,留着无害,但也没有任何意义。
 
 ### 引擎已不再读取的配置块
 
@@ -1315,7 +1268,7 @@ print(load_language_config(p))
 
 其余 loader 的形状相同:`TestConfig.load(p)`、`ImplementConfig.load(p)`、
 `StepConfig.load(p)`、`load_version_config(p)`、`load_server_config(p)`、
-`load_claude_subprocess_config(p)`、`load_spec_write_protection_config(p)`、
+`load_claude_subprocess_config(p)`、
 `load_conflict_resolver_config(p)`、`load_step_agents(p, "implement")`、
 `load_self_check_resolution(p)`。
 

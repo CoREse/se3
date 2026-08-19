@@ -1,7 +1,7 @@
 """Project context collector for the flow engine.
 
-Collects project-wide context (git status, flow history, backlog, specs)
-into a structured dict. Used by the PROJECT_SUMMARY step and `luo summary` CLI.
+Collects project-wide context (git status, flow history, backlog) into a
+structured dict. Used by the PROJECT_SUMMARY step and `luo summary` CLI.
 """
 
 from __future__ import annotations
@@ -10,8 +10,6 @@ from tianluo.runtime_paths import runtime_dir
 import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-
-from .context_builder import ContextBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +24,12 @@ class ProjectContextCollector:
         """Collect all project context into a structured dict.
 
         Returns:
-            Dict with keys: git, flow_engine, backlog, specs
+            Dict with keys: git, flow_engine, backlog
         """
         return {
             "git": self._collect_git(),
             "flow_engine": self._collect_flow_engine(),
             "backlog": self._collect_backlog(),
-            "specs": self._collect_specs(),
         }
 
     def _collect_git(self) -> Dict[str, Any]:
@@ -91,28 +88,3 @@ class ProjectContextCollector:
                 phase = line_stripped.split(":", 1)[1].strip().rstrip("*")
 
         return {"slug": slug, "title": title, "status": status, "phase": phase}
-
-    def _collect_specs(self) -> List[str]:
-        """List available spec names."""
-        builder = ContextBuilder(self.project_root)
-        return list_spec_names(builder.specs_dir)
-
-
-def list_spec_names(specs_dir: Path) -> List[str]:
-    """List spec directory names, excluding internal dirs (prefixed with _).
-
-    Args:
-        specs_dir: Path to the specs directory
-
-    Returns:
-        Sorted list of spec names
-    """
-    if not specs_dir.exists():
-        return []
-
-    names = []
-    for entry in specs_dir.iterdir():
-        if entry.is_dir() and not entry.name.startswith("_"):
-            names.append(entry.name)
-
-    return sorted(names)

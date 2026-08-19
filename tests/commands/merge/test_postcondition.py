@@ -151,14 +151,14 @@ class TestAssertHeadIsMergeCommit:
         assert exc_info.value.reason is FailureReason.POSTCOND_HEAD_NOT_MERGE_COMMIT
 
     def test_allow_fixup_parent_happy_path(self, repo: Path) -> None:
-        """HEAD is a fix-up commit on top of a merge commit (fast-mode repair)."""
+        """HEAD is a fix-up commit on top of a merge commit (issue-ID reconciliation)."""
         _create_branch(repo, "feat/a")
         _add_commit(repo, "a.txt", "a", "feat a")
         _git(repo, "checkout", "master")
         _merge_branch(repo, "feat/a")
         # Place a fix-up commit on top of the merge commit, mirroring
-        # the orchestrator's fast-mode guardrail repair layout.
-        _add_commit(repo, "fix.txt", "fix", "fix(specs): repair guardrail violations from 'feat/a'")
+        # the orchestrator's issue-ID reconciliation layout.
+        _add_commit(repo, "fix.txt", "fix", "fix: reconcile issue IDs from 'feat/a'")
         # Without allow_fixup_parent, this would fail (HEAD has 1 parent).
         with pytest.raises(PostConditionViolated):
             assert_head_is_merge_commit(repo, "feat/a")
@@ -179,8 +179,8 @@ class TestAssertHeadIsMergeCommit:
             assert_head_is_merge_commit(repo, "feat/a", allow_fixup_parent=True)
 
     def test_allow_fixup_parent_depth_2_accepts_stacked_layout(self, repo: Path) -> None:
-        """Fix #8 (self-check): when fast-mode repair leaves a fix-up commit
-        AND non-amend version aggregation stacks a bump commit on top, HEAD
+        """Fix #8 (self-check): when issue-ID reconciliation leaves a fix-up
+        commit AND non-amend version aggregation stacks a bump commit on top, HEAD
         is two single-parent commits above the merge commit.  With
         ``allow_fixup_parent=True, max_fixup_depth=2`` the post-condition
         must accept this layout (depth=2)."""
@@ -188,10 +188,10 @@ class TestAssertHeadIsMergeCommit:
         _add_commit(repo, "a.txt", "a", "feat a")
         _git(repo, "checkout", "master")
         _merge_branch(repo, "feat/a")
-        # Layer 1: simulated guardrail-repair fix-up commit on top of merge.
+        # Layer 1: simulated issue-ID reconciliation fix-up commit on top of merge.
         _add_commit(
             repo, "fix.txt", "fix",
-            "fix(specs): repair guardrail violations from 'feat/a'",
+            "fix: reconcile issue IDs from 'feat/a'",
         )
         # Layer 2: simulated non-amend version-bump commit on top of the
         # fix-up.  HEAD is now [bump → fix-up → merge_commit] (depth=2).

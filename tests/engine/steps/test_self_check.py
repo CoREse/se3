@@ -13,7 +13,6 @@ from tianluo.engine.steps.self_check import (
     _format_changes,
     _format_review_scope,
     _format_test_results,
-    _format_spec_content,
     _format_fix_context,
     _issue_signature,
     _validate_and_filter_issues,
@@ -431,16 +430,6 @@ class TestFormatTestResults:
         }
         result = _format_test_results(results)
         assert "Overall passed: True" in result
-
-
-class TestFormatSpecContent:
-    def test_empty(self):
-        assert _format_spec_content({}) == "No specifications provided."
-
-    def test_single_spec(self):
-        result = _format_spec_content({"base": "Content here"})
-        assert "### base" in result
-        assert "Content here" in result
 
 
 class TestFormatFixContext:

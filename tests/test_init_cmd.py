@@ -680,33 +680,15 @@ class TestGitHelpers:
         assert gitignore.read_text() == DEFAULT_GITIGNORE_TEMPLATE
 
 
-class TestReadSpecBaseLoading:
-    """Tests for base spec auto-loading via ContextBuilder."""
+class TestSpecLoadingSurfaceRemoved:
+    """`luo init` no longer scaffolds specs, and nothing loads them.
 
-    def test_base_spec_loaded_when_exists(self, tmp_path):
-        """ContextBuilder._load_spec_content auto-loads base spec when it exists."""
-        from tianluo.engine.context_builder import ContextBuilder
+    ContextBuilder was the spec-file reader behind the retired `tianluo/specs/`
+    mirror; it went away with the mirror rather than being kept as an empty
+    husk.
+    """
 
-        # Create base spec
-        specs_dir = tmp_path / "tianluo" / "specs" / "base"
-        specs_dir.mkdir(parents=True)
-        (specs_dir / "spec.md").write_text("# Base spec content")
+    def test_context_builder_removed(self):
+        from tianluo.engine import context_builder
 
-        builder = ContextBuilder(tmp_path)
-        content = builder._load_spec_content("base")
-
-        assert content is not None
-        assert "Base spec content" in content
-
-    def test_base_spec_none_when_missing(self, tmp_path):
-        """_load_spec_content returns None when base spec doesn't exist."""
-        from tianluo.engine.context_builder import ContextBuilder
-
-        # Create specs dir without base spec
-        specs_dir = tmp_path / "tianluo" / "specs"
-        specs_dir.mkdir(parents=True)
-
-        builder = ContextBuilder(tmp_path)
-        content = builder._load_spec_content("base")
-
-        assert content is None
+        assert not hasattr(context_builder, "ContextBuilder")

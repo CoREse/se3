@@ -26,9 +26,6 @@ class TestFailureReasonValues:
     def test_fast_abort(self) -> None:
         assert FailureReason.FAST_ABORT == 400
 
-    def test_guardrail_violation(self) -> None:
-        assert FailureReason.GUARDRAIL_VIOLATION == 500
-
     def test_rollback_failed(self) -> None:
         assert FailureReason.ROLLBACK_FAILED == 600
 
@@ -62,7 +59,6 @@ class TestLegacyString:
 
     def test_legacy_string_property(self) -> None:
         assert FailureReason.MERGE_CONFLICT.legacy_string == "merge_conflict"
-        assert FailureReason.GUARDRAIL_VIOLATION.legacy_string == "guardrail_violation"
         assert FailureReason.FAST_ABORT.legacy_string == "fast_abort"
 
     def test_from_legacy_string_exact_match(self) -> None:
@@ -106,6 +102,16 @@ class TestLegacyString:
         reason, detail = from_legacy_string("totally_unknown_reason")
         assert reason is FailureReason.UNEXPECTED
         assert detail == "totally_unknown_reason"
+
+    def test_from_legacy_string_retired_guardrail_violation(self) -> None:
+        """Archived merge reports written before the spec-guardrails chain was
+        removed still carry ``"guardrail_violation"``. The enum member is gone,
+        but parsing must stay tolerant: the string degrades to UNEXPECTED and
+        is preserved verbatim as the detail instead of raising.
+        """
+        reason, detail = from_legacy_string("guardrail_violation")
+        assert reason is FailureReason.UNEXPECTED
+        assert detail == "guardrail_violation"
 
     def test_from_legacy_string_compound_fast_abort(self) -> None:
         reason, detail = from_legacy_string("fast_abort: subprocess timed out")

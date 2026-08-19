@@ -1,7 +1,7 @@
 """Context builder for automatic context collection.
 
-Automatically gathers relevant context from specs, previous outputs,
-project state, and code for LLM calls.
+Automatically gathers relevant context from previous outputs, project
+state, and code for LLM calls.
 """
 
 from __future__ import annotations
@@ -124,23 +124,6 @@ ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 # config would inject the prompt fragment with nothing to collect the result,
 # so the summarize handler no longer calls the injection at all.
 ISSUE_DISCOVERY_DEFAULT_STEPS: list[str] = []
-
-# Steps explicitly forbidden from spec names injection
-SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = frozenset({"summarize", "commit"})
-
-# Default steps that receive the available-specs names injection.
-# Note: deprecated step types (propose/design) are NOT listed here — their
-# stub handlers forward to the unified plan_handler, which keys its injection
-# on "plan". There is therefore no code path that would lookup "design" or
-# "propose" against this whitelist.
-SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
-    "plan",
-    "plan_tasks",
-    "implement",
-    "verify_spec",
-    "update_spec",
-    "self_check",
-]
 
 # Steps explicitly forbidden from runtime environment injection.
 # These are mechanical steps where awareness of read-only luo history/issue
@@ -302,105 +285,6 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     return ISSUE_DISCOVERY_PROMPT
 
 
-def get_spec_names_injection(
-    step_type: str,
-    project_root: Path,
-    relevant_specs: list[str] | None = None,
-) -> str:
-    """Get the available-specs names prompt injection for a step.
-
-    Lists all available specs under ``tianluo/specs/`` and declares which are already
-    loaded into the prompt (from ``relevant_specs``), so the LLM can optionally
-    consult additional specs on demand via the read-only ``luo spec`` index
-    commands (``luo spec index`` / ``luo spec show``) if the analyze step missed
-    them — never by reading a whole ``spec.md`` file.
-
-    Args:
-        step_type: Current step type name (e.g., "plan", "implement").
-        project_root: Project root directory for loading config and specs.
-        relevant_specs: Spec names already loaded into the prompt. May be ``None``
-            or empty; treated as "no specs loaded" in that case.
-
-    Returns:
-        Spec-names injection string to append to prompt, or empty string when the
-        step is not in the whitelist.
-    """
-    # Forbidden steps never get injection — short-circuit before any I/O.
-    # This also makes a later re-check unnecessary: yaml cannot re-enable a
-    # forbidden step because the early return fires first.
-    if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
-        return ""
-
-    # Read whitelist from the active project YAML (tianluo.local.yaml when
-    # present, otherwise tianluo.yaml). Routing through load_project_yaml
-    # ensures malformed-local-shadow warnings surface here too rather
-    # than depending on some other loader having run first.
-    whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
-    from ..config import load_project_yaml
-
-    config, _src = load_project_yaml(project_root)
-    # Use `or {}` rather than the default arg so that an explicit
-    # `spec_names_injection: null` (common when users "disable" a key)
-    # falls through to defaults instead of raising AttributeError
-    # on the subsequent .get("steps") call.
-    section = config.get("spec_names_injection") if isinstance(config, dict) else None
-    section = section or {}
-    if isinstance(section, dict):
-        configured_steps = section.get("steps")
-        # Only accept list overrides; silently ignore malformed values
-        # (e.g. a bare string / dict from a user typo) which would
-        # otherwise turn the `in` check into surprising substring or
-        # key-lookup semantics.
-        if isinstance(configured_steps, list):
-            whitelist = configured_steps
-
-    if step_type not in whitelist:
-        return ""
-
-    # Scan the resolved specs dir (tianluo/specs preferred, specs/ fallback,
-    # openspec/specs legacy) so projects using the fallback layout get the
-    # correct listing.
-    specs_dir = ContextBuilder._resolve_specs_dir(project_root)
-    all_spec_names: list[str] = []
-    if specs_dir.exists():
-        for entry in specs_dir.iterdir():
-            if entry.is_dir() and (entry / "spec.md").exists():
-                all_spec_names.append(entry.name)
-    all_spec_names.sort()
-
-    # Defensive filter: upstream inputs can occasionally contain non-string
-    # entries (e.g. dicts from a malformed analyze output). `sorted()` on a
-    # mixed-type list would raise TypeError — silently drop non-strings.
-    # The `isinstance(list)` guard also prevents a bare string from being
-    # iterated character-by-character (yielding bogus per-letter entries).
-    if isinstance(relevant_specs, list):
-        loaded_spec_names = sorted(s for s in relevant_specs if isinstance(s, str))
-    else:
-        loaded_spec_names = []
-    loaded_display = ", ".join(loaded_spec_names) if loaded_spec_names else "none"
-    all_display = ", ".join(all_spec_names) if all_spec_names else "(none found)"
-
-    return (
-        "\n\n## Available Specifications\n"
-        f"All available specs in this project: {all_display}.\n\n"
-        f"Specs already loaded above: {loaded_display}.\n\n"
-        "If a spec above is not yet included but you believe it is relevant to "
-        "the current task, you MAY consult it on demand through the read-only "
-        "`luo spec` index commands (run them via Bash):\n"
-        "- `luo spec index` — root view: every spec's name, a one-sentence "
-        "locator, and item count. Start here.\n"
-        "- `luo spec index <spec> [<group>...]` — drill into one spec's "
-        "Requirement index; trailing group-path components open a folded domain "
-        "group or a `pN` page.\n"
-        "- `luo spec show <spec>::<requirement>` — read the authoritative body of "
-        "ONE Requirement (plus its physical location).\n"
-        "Do NOT read an entire `spec.md` file with the Read tool (large specs "
-        "exceed the Read size limit); navigate with `luo spec index` and fetch "
-        "only the specific Requirement bodies you need with `luo spec show`. "
-        "Only consult specs that directly help the task — avoid reading broadly."
-    )
-
-
 def get_charter_injection(project_root: Path) -> str:
     """Get the full-charter prompt injection.
 
@@ -408,9 +292,9 @@ def get_charter_injection(project_root: Path) -> str:
     spec and plays exactly one runtime role: it is injected **in full, into
     every step, unconditionally**, doubling as the conventions channel for the
     sandboxed LLM sub-process (which cannot read CLAUDE.md and obtains
-    project-level conventions only through what luo injects). This helper is the
-    charter half of the injection-surface switch that replaces the retired
-    ``get_spec_names_injection`` (spec-name list) path.
+    project-level conventions only through what luo injects). It is the sole
+    surviving project-convention injection surface — the spec-name listing it
+    replaced was removed along with the spec mirror.
 
     Returns the charter wrapped in a labelled section (prefixed with ``\\n\\n``
     so it concatenates cleanly onto a prompt suffix), or ``""`` when the charter
@@ -632,31 +516,6 @@ def ensure_code_index_fresh(
         logger.warning("code_index: lazy freshness refresh failed: %s", exc)
 
 
-# Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
-# `luo run` state-machine steps (so they are absent from STEP_POOL / StepType),
-# but their sub-agents must only read code and return spec text — never write
-# to disk. ``sync_resolve`` is deliberately excluded: its Way-A update path
-# edits ``tianluo/specs/<name>/spec.md`` in place via the Edit tool and therefore
-# must remain writable.
-_READ_ONLY_SYNC_STEPS = frozenset({"sync_scan", "sync_analyze"})
-
-# Sync-engine pseudo-steps that legitimately WRITE spec files via the LLM
-# (the Way-A in-place ``Edit`` of ``tianluo/specs/<name>/spec.md``). Listed here
-# in parallel with the read-only sync steps above so the two sync write paths
-# are registered side by side:
-#   - ``sync_resolve``  — drift resolution write-back (sync_engine.py:669)
-#   - ``sync_respond``  — high-risk spec drift update applied on human respond
-#                         (sync_engine.py:2104 → _apply_spec_drift_update →
-#                          _update_spec_via_llm:912 → llm_caller.call())
-# Any future sync step that writes spec MUST be registered here so it is
-# automatically exempted from all three spec-write guards (see
-# ``SPEC_WRITE_ALLOWED_STEPS``), preventing exemption-set drift.
-_WRITABLE_SYNC_STEPS = frozenset({"sync_resolve", "sync_respond"})
-
-# All sync-engine pseudo-steps (read + write paths), derived from the two
-# authoritative sets above.
-_ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
-
 # Internal LLMCaller step types that are NOT `luo run` state-machine steps (so
 # they are absent from STEP_POOL) but whose sub-agents are *pure functions*:
 # they only read code and RETURN structured text/JSON, while SE3's own code does
@@ -669,16 +528,6 @@ _ALL_SYNC_STEPS = _READ_ONLY_SYNC_STEPS | _WRITABLE_SYNC_STEPS
 #     SE3 writes tianluo/charter.md and the why-comments itself).
 _READ_ONLY_INTERNAL_STEPS = frozenset({"code_index", "migrate"})
 
-# The single authoritative set of steps allowed to write ``tianluo/specs/`` and
-# therefore exempted from the three-layer spec-write protection (soft
-# prompt injection, the PreToolUse hook, and the post-step diff fallback).
-# Derived — never hand-enumerated — so registering a new writable sync step in
-# ``_WRITABLE_SYNC_STEPS`` automatically propagates the exemption everywhere and
-# the set cannot silently drift (e.g. forgetting ``sync_respond``). Writing spec
-# files is the sole responsibility of ``update_spec`` (which consumes plan's
-# ``spec_changes`` declaration) and ``luo sync``.
-SPEC_WRITE_ALLOWED_STEPS = frozenset({"update_spec"}) | _ALL_SYNC_STEPS
-
 
 def is_step_read_only(step_type: str) -> bool:
     """Return True if ``step_type`` runs under read-only constraints.
@@ -686,12 +535,11 @@ def is_step_read_only(step_type: str) -> bool:
     Resolution order:
       1. ``luo run`` state-machine steps — looked up in STEP_POOL by name,
          honoring each step's ``read_only`` attribute.
-      2. Sync-engine read-only pseudo-steps (``sync_scan`` / ``sync_analyze``).
-      3. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
+      2. Internal pure-data sub-agent steps (``code_index`` / ``migrate``) whose
          agent only reads and returns text — SE3 does every write itself.
 
-    ``sync_resolve`` and every writable step (implement / update_spec / …)
-    return False. Unknown step types return False.
+    Every writable step (implement / commit / …) returns False, as do unknown
+    step types.
 
     This is the single source of truth for both the prompt-level read-only
     injection (:func:`get_read_only_injection`) and the tool-level
@@ -703,23 +551,20 @@ def is_step_read_only(step_type: str) -> bool:
         if info.get("name") == step_type:
             return bool(info.get("read_only", False))
 
-    return (
-        step_type in _READ_ONLY_SYNC_STEPS
-        or step_type in _READ_ONLY_INTERNAL_STEPS
-    )
+    return step_type in _READ_ONLY_INTERNAL_STEPS
 
 
 def get_read_only_injection(step_type: str, force: bool = False) -> str:
     """Get read-only constraint prompt injection for a step.
 
     Delegates the read-only decision to :func:`is_step_read_only`, which
-    covers both STEP_POOL steps and sync-engine read-only pseudo-steps.
+    covers both STEP_POOL steps and the internal pure-data sub-agent steps.
     If the step is read-only, returns a prompt constraint forbidding file
     modifications; otherwise returns an empty string.
 
     Args:
         step_type: Current step type name (e.g., "analyze", "implement",
-            "sync_scan")
+            "code_index")
         force: Emit the constraint even when ``step_type`` is not registry
             read-only. Used by a call-level read-only override (LLMCaller's
             ``force_read_only``) so a step whose handler writes files can still
@@ -747,85 +592,6 @@ def get_read_only_injection(step_type: str, force: bool = False) -> str:
         "- Use Bash for read-only commands (e.g., git log, git diff, ls, cat)\n\n"
         "Your sole purpose in this step is analysis and reasoning. "
         "Output your findings as structured data only."
-    )
-
-
-def _is_spec_write_protected_step(step_type: str) -> bool:
-    """Return True if ``step_type`` must be barred from writing spec files.
-
-    A step is spec-write-protected when it is a non-read-only LLM step (a
-    STEP_POOL step with ``uses_llm=True`` and ``read_only=False``) that is NOT
-    in :data:`SPEC_WRITE_ALLOWED_STEPS`. This currently covers ``implement``
-    (its three templates), ``propose``, ``design``, ``plan_tasks``, and — since
-    its read_only flip — ``charter_freshness``, and auto-extends to any future
-    non-read-only LLM step.
-
-    WHY (charter_freshness connateral effect): flipping charter_freshness to
-    read_only=False makes it match here, so its LLM call now also receives the
-    tianluo/specs/ write-protection injection. This is harmless and directionally
-    correct — the charter_freshness handler writes tianluo/charter.md, never
-    tianluo/specs/, so forbidding spec-file writes constrains nothing it needs.
-
-    The sync pseudo-steps are exempt without needing the explicit
-    ``SPEC_WRITE_ALLOWED_STEPS`` check, because they are absent from STEP_POOL
-    and so never match the lookup below; keeping the membership test is a
-    harmless, more-explicit double safeguard.
-    """
-    from .models import STEP_POOL
-
-    if step_type in SPEC_WRITE_ALLOWED_STEPS:
-        return False
-
-    for _st, info in STEP_POOL.items():
-        if info.get("name") == step_type:
-            return bool(info.get("uses_llm", False)) and not bool(
-                info.get("read_only", False)
-            )
-
-    return False
-
-
-def get_spec_write_protection_injection(step_type: str) -> str:
-    """Get the spec-write-protection constraint injection for a step.
-
-    Returns a prompt fragment, for every non-read-only LLM step except those in
-    :data:`SPEC_WRITE_ALLOWED_STEPS` (``update_spec`` + all sync steps), that
-    forbids the step from creating/modifying/deleting any spec file under
-    ``tianluo/specs/`` while explicitly leaving it free to change existing code
-    behavior. Writing spec files is the dedicated responsibility of
-    ``update_spec`` / ``luo sync``; a step that changes behavior or believes a
-    project convention/architecture shift should be recorded notes that in its
-    summary, and the durable records of the charter refactor capture it — the
-    charter (``tianluo/charter.md``) and colocated why-comments, kept current by
-    their own mechanisms (the ``charter_freshness`` step and the implement
-    step's why-comment convention) — not this step writing a spec file.
-
-    Returns an empty string for steps that are not spec-write-protected.
-    """
-    if not _is_spec_write_protected_step(step_type):
-        return ""
-
-    return (
-        "\n\n## SPEC FILE WRITE PROTECTION\n"
-        "You are free to change existing code behavior as the task requires — "
-        "this constraint does NOT restrict what behavior you may implement.\n\n"
-        "It restricts only one thing: the spec files under `tianluo/specs/**` are "
-        "read-only for this step. Recording code into spec files is the "
-        "dedicated job of the `update_spec` step and `luo sync`, not of this "
-        "step.\n\n"
-        "Forbidden actions:\n"
-        "- Do NOT use Write, Edit, or NotebookEdit to create, modify, or delete "
-        "any file under `tianluo/specs/`\n"
-        "- Do NOT use Bash to write spec files either (e.g., `>`/`>>` redirects, "
-        "`sed -i`, `tee`, `cp`/`mv` into `tianluo/specs/`)\n\n"
-        "If your change alters existing behavior or you believe a project "
-        "convention should be recorded, do NOT edit any spec file yourself — "
-        "just note it in your summary. Durable records live in the charter "
-        "(`tianluo/charter.md`, high-level conventions/architecture) and in "
-        "colocated why-comments (code-level intent); they are kept current by "
-        "their own dedicated mechanisms (the `charter_freshness` step and the "
-        "implement step's why-comment convention), not by writing a spec file "
-        "in this step."
     )
 
 
@@ -928,61 +694,6 @@ def _detect_main_repo_root(worktree_path: Path) -> Path | None:
     except Exception:
         pass
     return None
-
-
-class ContextBuilder:
-    """Provides spec directory resolution and spec content loading.
-
-    Used by the analyze and discovery handlers (via ContextBuilder.load_specs_for_step)
-    to locate and load specification files from the project's specs directory.
-    """
-
-    def __init__(self, project_root: Path):
-        """Initialize context builder.
-
-        Args:
-            project_root: Project root directory
-        """
-        self.project_root = Path(project_root)
-        self.specs_dir = self._resolve_specs_dir(self.project_root)
-
-    @staticmethod
-    def _resolve_specs_dir(project_root: Path) -> Path:
-        """Resolve specs directory: tianluo/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
-        primary = runtime_dir(project_root) / "specs"
-        fallback = project_root / "specs"
-        legacy = project_root / "openspec" / "specs"
-        if primary.exists():
-            return primary
-        if fallback.exists():
-            return fallback
-        return legacy
-
-    def _load_spec_content(self, spec_name: str) -> Optional[str]:
-        """Load spec content by name.
-
-        Args:
-            spec_name: Name of spec (e.g., "flow-engine")
-
-        Returns:
-            Spec content or None
-        """
-        # Try different paths
-        paths = [
-            self.specs_dir / spec_name / "spec.md",
-            self.specs_dir / f"{spec_name}.md",
-            self.project_root / spec_name,
-            self.project_root / f"{spec_name}.md",
-        ]
-
-        for path in paths:
-            if path.exists():
-                try:
-                    return path.read_text(encoding="utf-8")
-                except Exception as e:
-                    logger.warning(f"Failed to read spec {path}: {e}")
-
-        return None
 
 
 def build_llm_review_prompt(
@@ -1166,7 +877,7 @@ the detailed breakdown happens inside the implementation call, not here.
 ## Original Task (the tasks to be grouped live in here)
 {task_description}
 
-## Output of the PLAN Step (proposal / design / task_groups)
+## Output of the PLAN Step (task_groups)
 {step_output_text}
 {revision_section}
 ## The Grouping Doctrine Being Reviewed
@@ -1250,7 +961,7 @@ def build_plan_confirm_prompt(
     and cross-revision max_iterations counting are reused unchanged.
 
     Args:
-        step_output: The outputs from the plan step (proposal/design/task_groups)
+        step_output: The outputs from the plan step (task_groups, complexity, …)
         task_description: Original task description from the flow
         revision_feedback: Previous revision feedback if this is a re-review
         project_root: Project root directory for language config
@@ -1278,7 +989,7 @@ def build_plan_confirm_prompt(
             # the current doctrine is the safer reading of an unknown flow.
             resolved_decomposition = PlanModeResolver.DEFAULT_DECOMPOSITION
 
-    # Format plan output for display (proposal/design/task_groups, etc.).
+    # Format plan output for display (task_groups, total_complexity, etc.).
     output_parts = []
     for key, value in step_output.items():
         if key.startswith("_"):
@@ -1334,7 +1045,7 @@ for this review.
 ## Original Task (the requirements live in here)
 {task_description}
 
-## Output of the PLAN Step (proposal / design / task_groups)
+## Output of the PLAN Step (task_groups)
 {step_output_text}
 {revision_section}
 ## Review Procedure (follow in order)
@@ -1342,9 +1053,8 @@ for this review.
    Original Task above and break it into a numbered list of discrete, atomic
    requirements. A single sentence may contain several requirements; split them.
 2. **Check requirement-by-requirement coverage**: for each requirement, check
-   whether the plan's task_groups contain at least one task that covers it
-   (consult the proposal and design as supporting context). In other words,
-   verify that **every requirement has a corresponding task**.
+   whether the plan's task_groups contain at least one task that covers it.
+   In other words, verify that **every requirement has a corresponding task**.
 3. **List uncovered requirements**: explicitly call out any requirement that has
    no corresponding task, or that is only partially covered. These coverage gaps
    are the reason to request a revision.

@@ -4,8 +4,7 @@ Gathers everything an LLM needs to resolve a single ``git merge``'s
 conflicts: merge metadata (ours/theirs branch names, merge-base SHA,
 HEAD commit SHAs + messages), the four versions of every conflicting
 file (base / ours / theirs / working tree with ``<<<<<<<`` markers),
-hunk line ranges, recent oneline log between base and each side, and
-spec-file identification.
+hunk line ranges, and the recent oneline log between base and each side.
 """
 
 from __future__ import annotations
@@ -20,8 +19,6 @@ from ..worktree import _run_git, get_conflicting_files
 
 logger = logging.getLogger(__name__)
 
-
-_SPEC_PATH_RE = re.compile(r"^(?:tianluo|se3)/specs/.+/spec\.md$")
 
 _DEFAULT_LOG_LIMIT = 20
 
@@ -96,7 +93,6 @@ class ConflictFile:
     ours_exists: bool = False
     theirs_exists: bool = False
     hunks: list[ConflictHunk] = field(default_factory=list)
-    is_spec: bool = False
     is_binary: bool = False
     # D6/D8: track lossy / non-UTF-8 decoding so consumers can warn the
     # user and route to human review instead of silently corrupting
@@ -121,7 +117,6 @@ class ConflictContext:
     ours_log_oneline: list[str] = field(default_factory=list)
     theirs_log_oneline: list[str] = field(default_factory=list)
     files: list[ConflictFile] = field(default_factory=list)
-    has_spec_files: bool = False
 
 
 def _git_show_bytes(
@@ -358,12 +353,6 @@ def _path_matches_binary_pattern(rel_path: str, patterns: list[str]) -> bool:
     return False
 
 
-def _is_spec_path(path: str) -> bool:
-    """Return True when ``path`` matches ``tianluo/specs/**/spec.md``."""
-    normalized = path.replace("\\", "/")
-    return bool(_SPEC_PATH_RE.match(normalized))
-
-
 # D3: git tolerates conflict markers that are preceded by up to 7
 # spaces (used inside embedded code blocks).  We use a regex when
 # scanning for hunks so indented markers are recognised.
@@ -532,7 +521,6 @@ def _build_conflict_file(
             ours_exists=ours_exists,
             theirs_exists=theirs_exists,
             hunks=[],
-            is_spec=_is_spec_path(rel_path),
             is_binary=True,
         )
         return cf
@@ -573,7 +561,6 @@ def _build_conflict_file(
         ours_exists=ours_exists,
         theirs_exists=theirs_exists,
         hunks=hunks,
-        is_spec=_is_spec_path(rel_path),
         is_binary=False,
         decoding_lossy=lossy,
         decoding_encoding=encoding,
@@ -620,14 +607,12 @@ def build(
     binary_patterns = _read_gitattributes_binary_paths(project_root)
 
     files: list[ConflictFile] = []
-    has_spec = False
     for rel_path in conflict_files:
-        cf = _build_conflict_file(
-            project_root, rel_path, binary_patterns=binary_patterns,
+        files.append(
+            _build_conflict_file(
+                project_root, rel_path, binary_patterns=binary_patterns,
+            )
         )
-        files.append(cf)
-        if cf.is_spec:
-            has_spec = True
 
     return ConflictContext(
         project_root=project_root,
@@ -645,5 +630,4 @@ def build(
             project_root, base_sha, theirs_sha, limit=log_limit,
         ),
         files=files,
-        has_spec_files=has_spec,
     )

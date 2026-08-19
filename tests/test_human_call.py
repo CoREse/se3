@@ -3,9 +3,9 @@
 Covers:
 - F1: Collision-resistant filename generation
 - F2: Atomic write with fsync
-- F3: Orphan file guardrail re-check
-- F4: Violation dict validation (raise instead of <unknown>)
+- F3: Orphan resolution files are always rejected
 - F5: Naming convention (__ instead of -)
+- Degraded call files (``merge_context_unavailable``)
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from tianluo.engine.merge.conflict_resolver import (
     LLMResolution,
 )
 from tianluo.engine.merge.human_call import (
+    DEGRADED_CALL_TYPE,
     HumanCallWriter,
     _atomic_write_json,
     _generate_call_filename,
@@ -72,7 +73,6 @@ def _make_resolution(
 def _make_file_resolution(
     path: str = "foo.txt",
     resolved_content: str = "resolved\n",
-    is_spec: bool = False,
 ) -> FileResolution:
     return FileResolution(
         path=path,
@@ -87,7 +87,6 @@ def _make_file_resolution(
         ],
         overall_confidence=Confidence.HIGH,
         flags={},
-        is_spec=is_spec,
     )
 
 
@@ -224,19 +223,19 @@ class TestAtomicWriteJson:
         assert len(tmp_files) == 0, f"Leftover tmp files after error: {tmp_files}"
 
 
-# --------- F3: orphan file guardrail re-check ---------
+# --------- F3: every orphan resolution file is rejected ---------
 
 
 class TestOrphanFileHandling:
-    def test_orphan_file_detected_and_flagged(self, tmp_path: Path) -> None:
-        """Non-spec orphans are rejected and recorded under
-        ``rejected_orphans`` rather than passed through to ``files``.
+    def test_orphan_file_rejected_and_recorded(self, tmp_path: Path) -> None:
+        """An orphan is rejected and recorded under ``rejected_orphans``
+        rather than passed through to ``files``.
 
-        F3 (extended): orphan files not in context.files cannot be
-        guardrails-validated for non-spec paths, and the LLM should
-        never invent paths outside the conflict context.  The
-        rejected orphan is surfaced via ``rejected_orphans`` so the
-        operator can audit what the LLM tried to write.
+        F3: a resolution file whose path is not present in the conflict
+        context is content the LLM invented — there is nothing to
+        validate it against, so it is always rejected.  The rejected
+        orphan is surfaced via ``rejected_orphans`` so the operator can
+        audit what the LLM tried to write.
         """
         writer = HumanCallWriter(tmp_path)
         ctx = _make_context(
@@ -249,7 +248,6 @@ class TestOrphanFileHandling:
                     ours_content="ours",
                     theirs_content="theirs",
                     working_content="<<<<<<<\nours\n=======\ntheirs\n>>>>>>>\n",
-                    is_spec=False,
                 ),
             ],
         )
@@ -265,15 +263,16 @@ class TestOrphanFileHandling:
         call_file = writer.write_call(ctx, res, decision)
         data = json.loads(call_file.read_text(encoding="utf-8"))
 
-        # Only the matching file is included; the non-spec orphan is rejected.
-        assert len(data["files"]) == 1
-        assert data["files"][0]["path"] == "foo.txt"
+        # Only the matching file is included; the orphan is rejected.
+        assert [f["path"] for f in data["files"]] == ["foo.txt"]
         assert "is_orphan" not in data["files"][0]
-        # The non-spec orphan is recorded for the operator to audit.
-        assert "rejected_orphans" in data
-        assert any(
-            r["path"] == "orphan.txt" for r in data["rejected_orphans"]
-        ), data.get("rejected_orphans")
+        # The orphan is recorded for the operator to audit.
+        assert len(data["rejected_orphans"]) == 1
+        orphan = data["rejected_orphans"][0]
+        assert orphan["path"] == "orphan.txt"
+        assert orphan["reason"] == "orphan path not present in the conflict context"
+        assert orphan["evidence"]["content_preview"] == "resolved orphan"
+        assert orphan["evidence"]["content_size"] == len("resolved orphan")
 
     def test_no_orphan_when_all_match(self, tmp_path: Path) -> None:
         """When all resolution files match context files, no orphan flag."""
@@ -288,7 +287,6 @@ class TestOrphanFileHandling:
                     ours_content="ours",
                     theirs_content="theirs",
                     working_content="conflict",
-                    is_spec=False,
                 ),
             ],
         )
@@ -304,46 +302,21 @@ class TestOrphanFileHandling:
 
         assert len(data["files"]) == 1
         assert "is_orphan" not in data["files"][0]
-        assert "orphan_guardrails_violations" not in data
+        assert "rejected_orphans" not in data
 
-    def test_orphan_spec_file_guardrails_checked(self, tmp_path: Path) -> None:
-        """Orphan spec files must be checked against guardrails."""
+    def test_every_orphan_rejected_regardless_of_path_shape(
+        self, tmp_path: Path,
+    ) -> None:
+        """EVERY orphan is rejected — no path shape is privileged.
+
+        The retired spec-guardrails chain used to treat orphans under
+        ``tianluo/specs/**`` differently (reading the original from the
+        ours-side ref and re-running guardrails).  Now every orphan gets
+        the same uniform rejection, so a spec-shaped path, a nested
+        path and a plain path must all land in ``rejected_orphans``
+        with the same reason and none of them in ``files``.
+        """
         writer = HumanCallWriter(tmp_path)
-        # Create a git repo so _read_original_for_orphan can work
-        import subprocess
-        subprocess.run(
-            ["git", "init", str(tmp_path)],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "config", "user.email", "t@test.com"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
-            check=True, capture_output=True,
-        )
-
-        spec_dir = tmp_path / "tianluo" / "specs" / "base"
-        spec_dir.mkdir(parents=True)
-        spec_file = spec_dir / "spec.md"
-        spec_file.write_text(
-            "## Requirement\n\n- SHALL validate all inputs.\n",
-            encoding="utf-8",
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "base"],
-            check=True, capture_output=True,
-        )
-        head_sha = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
         ctx = _make_context(
             tmp_path,
             files=[
@@ -354,236 +327,122 @@ class TestOrphanFileHandling:
                     ours_content="ours",
                     theirs_content="theirs",
                     working_content="conflict",
-                    is_spec=False,
                 ),
             ],
-            ours_head_sha=head_sha,
         )
-        # Orphan spec file that weakens SHALL to SHOULD
+        orphan_paths = [
+            "tianluo/specs/base/spec.md",
+            "deeply/nested/dir/thing.py",
+            "toplevel.txt",
+        ]
         res = _make_resolution(
             _make_file_resolution(path="foo.txt"),
-            _make_file_resolution(
-                path="tianluo/specs/base/spec.md",
-                resolved_content="## Requirement\n\n- SHOULD validate all inputs.\n",
-                is_spec=True,
-            ),
+            *[
+                _make_file_resolution(path=op, resolved_content=f"content for {op}")
+                for op in orphan_paths
+            ],
         )
         decision = StrategyDecision(
-            action=DecisionAction.HUMAN_CALL,
-            reason="test",
+            action=DecisionAction.HUMAN_CALL, reason="test",
         )
         call_file = writer.write_call(ctx, res, decision)
         data = json.loads(call_file.read_text(encoding="utf-8"))
 
-        # Should have orphan guardrails violations
-        assert "orphan_guardrails_violations" in data
-        violations = data["orphan_guardrails_violations"]
-        assert len(violations) >= 1
-        assert any(
-            v["violation_type"] == "WEAKENING" and "SHALL" in v["message"]
-            for v in violations
-        )
+        assert [f["path"] for f in data["files"]] == ["foo.txt"]
+        rejected = data["rejected_orphans"]
+        assert [r["path"] for r in rejected] == orphan_paths
+        assert {r["reason"] for r in rejected} == {
+            "orphan path not present in the conflict context"
+        }
+        # The retired spec-specific evidence keys are not emitted.
+        for r in rejected:
+            assert "has_spec_keywords" not in r["evidence"]
+            assert "spec_keyword_count" not in r["evidence"]
+            assert "looks_like_spec_path" not in r["evidence"]
 
-    def test_orphan_new_spec_file_no_violation(self, tmp_path: Path) -> None:
-        """A completely new orphan spec file has no original to weaken."""
+    def test_orphan_evidence_flags_conflict_markers(self, tmp_path: Path) -> None:
+        """Leftover conflict markers in orphan content are surfaced."""
         writer = HumanCallWriter(tmp_path)
-        import subprocess
-        subprocess.run(
-            ["git", "init", str(tmp_path)],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "config", "user.email", "t@test.com"],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "config", "user.name", "Test"],
-            check=True, capture_output=True,
-        )
-        # Commit something so HEAD exists
-        (tmp_path / "README.md").write_text("hello")
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "add", "."],
-            check=True, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(tmp_path), "commit", "-m", "base"],
-            check=True, capture_output=True,
-        )
-        head_sha = subprocess.run(
-            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-
-        ctx = _make_context(
-            tmp_path,
-            files=[],
-            ours_head_sha=head_sha,
-        )
-        # Orphan spec file that does NOT exist in HEAD
+        ctx = _make_context(tmp_path, files=[])
         res = _make_resolution(
             _make_file_resolution(
-                path="tianluo/specs/new/spec.md",
-                resolved_content="## Requirement\n\n- SHALL do something.\n",
-                is_spec=True,
+                path="orphan.txt",
+                resolved_content="<<<<<<< HEAD\na\n=======\nb\n>>>>>>> x\n",
             ),
         )
         decision = StrategyDecision(
-            action=DecisionAction.HUMAN_CALL,
-            reason="test",
+            action=DecisionAction.HUMAN_CALL, reason="test",
         )
         call_file = writer.write_call(ctx, res, decision)
         data = json.loads(call_file.read_text(encoding="utf-8"))
 
-        # No guardrails violations for new file
-        assert "orphan_guardrails_violations" not in data or data.get("orphan_guardrails_violations") == []
+        assert data["files"] == []
+        assert data["rejected_orphans"][0]["evidence"]["has_conflict_markers"] is True
 
 
-# --------- F4: violation dict validation ---------
+# --------- degraded call files (context unavailable) ---------
 
 
-class TestGuardrailCallViolationValidation:
-    def test_valid_violations_succeed(self, tmp_path: Path) -> None:
-        """Valid violation dicts produce a valid call file."""
+class TestWriteDegradedCall:
+    def test_writes_degraded_call_file(self, tmp_path: Path) -> None:
+        """A degraded call carries the new ``merge_context_unavailable`` type
+        plus the branch, pre-merge SHA and operator-facing message."""
         writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                "violation_type": "WEAKENING",
-                "message": "SHALL weakened to SHOULD",
-            }
-        ]
-        call_file = writer.write_guardrail_call(
+        call_file = writer.write_degraded_call(
             branch="feature",
-            violations=violations,
+            message="build_conflict_context raised: boom",
             pre_merge_sha="abc123",
         )
+        assert call_file.exists()
+        assert call_file.parent == tmp_path / "tianluo" / "calls"
+
         data = json.loads(call_file.read_text(encoding="utf-8"))
-        assert data["violations"][0]["file_path"] == "tianluo/specs/base/spec.md"
-        assert data["violations"][0]["violation_type"] == "WEAKENING"
-        assert data["violations"][0]["message"] == "SHALL weakened to SHOULD"
+        assert data["type"] == DEGRADED_CALL_TYPE == "merge_context_unavailable"
+        assert data["branch"] == "feature"
+        assert data["pre_merge_sha"] == "abc123"
+        assert data["message"] == "build_conflict_context raised: boom"
+        assert set(data["options"]) == {"accept", "abort", "manual"}
+        assert data["created_at"]
+        # Instructions must name the exact response file the operator writes.
+        assert f"{call_file.name}.response" in data["instructions"]
+        assert "build_conflict_context raised: boom" in data["instructions"]
+        # A degraded call has no per-file resolution to write back.
+        assert "files" not in data
 
-    def test_missing_file_path_raises_valueerror(self, tmp_path: Path) -> None:
-        """Missing file_path must raise ValueError, not substitute <unknown>."""
+    def test_degraded_call_defaults_pre_merge_sha_to_empty(
+        self, tmp_path: Path,
+    ) -> None:
         writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "violation_type": "WEAKENING",
-                "message": "SHALL weakened to SHOULD",
-            }
-        ]
-        with pytest.raises(ValueError, match="missing required keys"):
-            writer.write_guardrail_call(
-                branch="feature",
-                violations=violations,
-                pre_merge_sha="abc123",
-            )
-
-    def test_missing_violation_type_raises_valueerror(self, tmp_path: Path) -> None:
-        """Missing violation_type must raise ValueError."""
-        writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                "message": "SHALL weakened to SHOULD",
-            }
-        ]
-        with pytest.raises(ValueError, match="missing required keys"):
-            writer.write_guardrail_call(
-                branch="feature",
-                violations=violations,
-                pre_merge_sha="abc123",
-            )
-
-    def test_missing_message_raises_valueerror(self, tmp_path: Path) -> None:
-        """Missing message must raise ValueError."""
-        writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                "violation_type": "WEAKENING",
-            }
-        ]
-        with pytest.raises(ValueError, match="missing required keys"):
-            writer.write_guardrail_call(
-                branch="feature",
-                violations=violations,
-                pre_merge_sha="abc123",
-            )
-
-    def test_non_dict_violation_raises_typeerror(self, tmp_path: Path) -> None:
-        """Non-dict violation must raise TypeError."""
-        writer = HumanCallWriter(tmp_path)
-        violations = ["not a dict"]
-        with pytest.raises(TypeError, match="expected dict violation"):
-            writer.write_guardrail_call(
-                branch="feature",
-                violations=violations,
-                pre_merge_sha="abc123",
-            )
-
-    def test_multiple_missing_keys_in_error(self, tmp_path: Path) -> None:
-        """Error message should list all missing keys."""
-        writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                # missing violation_type AND message
-            }
-        ]
-        with pytest.raises(ValueError, match="violation_type") as exc_info:
-            writer.write_guardrail_call(
-                branch="feature",
-                violations=violations,
-                pre_merge_sha="abc123",
-            )
-        assert "message" in str(exc_info.value)
-
-    def test_extra_keys_preserved(self, tmp_path: Path) -> None:
-        """Extra keys in violation dict should be preserved."""
-        writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                "violation_type": "WEAKENING",
-                "message": "SHALL weakened to SHOULD",
-                "evidence": {"strong_line": "SHALL x", "weak_line": "SHOULD x"},
-                "custom_field": "custom_value",
-            }
-        ]
-        call_file = writer.write_guardrail_call(
-            branch="feature",
-            violations=violations,
-            pre_merge_sha="abc123",
-        )
+        call_file = writer.write_degraded_call("feature", "no context")
         data = json.loads(call_file.read_text(encoding="utf-8"))
-        v = data["violations"][0]
-        assert v["evidence"]["strong_line"] == "SHALL x"
-        assert v["custom_field"] == "custom_value"
+        assert data["pre_merge_sha"] == ""
+
+    def test_degraded_calls_do_not_collide(self, tmp_path: Path) -> None:
+        """Two degraded calls for the same branch get distinct files."""
+        writer = HumanCallWriter(tmp_path)
+        first = writer.write_degraded_call("feature", "one")
+        second = writer.write_degraded_call("feature", "two")
+        assert first != second
+        assert json.loads(first.read_text(encoding="utf-8"))["message"] == "one"
+        assert json.loads(second.read_text(encoding="utf-8"))["message"] == "two"
 
 
 # --------- F5: naming convention ---------
 
 
 class TestNamingConvention:
-    def test_branch_slash_becomes_double_underscore_in_guardrail_call(self, tmp_path: Path) -> None:
-        """Branch names with / must use __ in guardrail call filenames."""
+    def test_branch_slash_becomes_double_underscore_in_degraded_call(self, tmp_path: Path) -> None:
+        """Branch names with / must use __ in degraded call filenames."""
         writer = HumanCallWriter(tmp_path)
-        violations = [
-            {
-                "file_path": "tianluo/specs/base/spec.md",
-                "violation_type": "WEAKENING",
-                "message": "SHALL weakened to SHOULD",
-            }
-        ]
-        call_file = writer.write_guardrail_call(
+        call_file = writer.write_degraded_call(
             branch="feature/foo/bar",
-            violations=violations,
+            message="context unavailable",
             pre_merge_sha="abc123",
         )
         name = call_file.name
         assert "feature__foo__bar" in name
         assert "feature-foo-bar" not in name
+        assert "/" not in name
 
     def test_branch_slash_becomes_double_underscore_in_merge_call(self, tmp_path: Path) -> None:
         """Branch names with / must use __ in merge call filenames."""

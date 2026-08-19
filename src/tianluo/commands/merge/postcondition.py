@@ -412,18 +412,18 @@ def assert_head_is_merge_commit(
     commit on HEAD is actually a merge (not e.g. a fast-forward or
     an unrelated commit pushed after the merge).
 
-    **Fix-up commit tolerance** (opt-in):  After guardrail repair, a
-    fix-up commit may be placed on top of the merge commit.  In that
-    case HEAD itself has 1 parent, but HEAD^1 is the merge commit.
-    Pass ``allow_fixup_parent=True`` from the repair-completed path
-    to accept this layout.  The default is ``False`` so that a stray
-    commit appended on top of a merge (e.g. by a hook) does NOT pass
-    the post-condition silently for clean-merge / LLM-resolved
+    **Fix-up commit tolerance** (opt-in):  A post-merge step such as
+    issue-ID reconciliation may place a fix-up commit on top of the
+    merge commit.  In that case HEAD itself has 1 parent, but HEAD^1 is
+    the merge commit.  Pass ``allow_fixup_parent=True`` from a caller
+    that knows such a step ran.  The default is ``False`` so that a
+    stray commit appended on top of a merge (e.g. by a hook) does NOT
+    pass the post-condition silently for clean-merge / LLM-resolved
     callers.
 
-    **Stacked fix-up tolerance**: When fast-mode guardrail repair
-    creates a fix-up commit AND the subsequent version aggregation
-    runs in non-amend mode (HEAD already published), HEAD ends up as
+    **Stacked fix-up tolerance**: When a fix-up commit is created AND
+    the subsequent version aggregation runs in non-amend mode (HEAD
+    already published), HEAD ends up as
     ``[bump_commit → fix_up_commit → merge_commit]`` — depth 2.  Pass
     ``max_fixup_depth=2`` (or higher) to walk back further.  Each
     intermediate commit must itself be a single-parent (linear) commit
@@ -440,8 +440,7 @@ def assert_head_is_merge_commit(
     function alone cannot prove that all N expected branches landed:
     callers SHOULD pair this assertion with explicit
     ``assert_branch_merged`` calls per branch (which performs the
-    ancestry check) so coverage is shape-and-membership.  See the
-    spec-guardrails Requirement section for the contract.
+    ancestry check) so coverage is shape-and-membership.
 
     Args:
         project_root: Path to the git repository.
@@ -999,8 +998,8 @@ def check_all(
             ``pyproject.toml``).
         min_parents: Minimum parent count for HEAD merge-commit check.
         allow_fixup_parent: When ``True``, accept an ancestor of HEAD
-            as the merge commit (fix-up layout produced by guardrail
-            repair, optionally stacked under a non-amend version-bump
+            as the merge commit (fix-up layout produced by a post-merge
+            step, optionally stacked under a non-amend version-bump
             commit).  Default ``False``.
         max_fixup_depth: When ``allow_fixup_parent=True``, walk back
             up to this many parents looking for a merge commit.

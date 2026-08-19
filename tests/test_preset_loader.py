@@ -67,6 +67,17 @@ class TestBuiltinLayer:
         # Nothing was copied into the project tree.
         assert not (project_root / "tianluo" / "prompts").exists()
 
+    def test_builtin_prompts_carry_no_spec_corpus_references(self, project_root):
+        # The retired tianluo/specs/ mirror must not survive in packaged
+        # prompt bodies: those go verbatim into the LLM prompt, and naming a
+        # directory the framework no longer maintains either wastes a tool
+        # round or (in a legacy project with a stale tree on disk) re-installs
+        # the spec-over-code inversion this refactor removed.
+        for name in preset_loader._BUILTIN_PRESET_METADATA:
+            _ptype, text, _layer = resolve(name, project_root)
+            assert "tianluo/specs" not in text, name
+            assert "se3/specs" not in text, name
+
 
 class TestProjectOverride:
     def test_project_overrides_builtin_same_name(self, project_root):

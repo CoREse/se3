@@ -1,8 +1,11 @@
 """Plan step handler.
 
 Unified planning step that replaces the separate propose, design, and plan_tasks steps.
-Produces a complete plan document with proposal, design, and task groups in a single LLM call.
-Adapts prompt depth based on task_type (feature/bugfix/small).
+Produces the task-group scheduling data for a flow in a single LLM call: the
+groups themselves plus their complexity/effort estimate. PLAN no longer emits a
+proposal or a design document — project conventions come from the charter and
+the code-index, and how a group decomposes internally is the implement call's
+own planning / sub-agent job.
 """
 
 from __future__ import annotations
@@ -38,7 +41,7 @@ def _is_capability(decomposition: Any) -> bool:
     )
 
 
-# --- Prompt sections (composed based on task_type depth) ---
+# --- Prompt sections (composed based on the flow's decomposition doctrine) ---
 
 PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create a complete implementation plan for the following task.
 
@@ -70,38 +73,13 @@ matches grep (regex `pattern` by default, `-i`/`-F`/`-m`).
 
 # Two-segment marker only: USER_CONTENT region is empty.
 # The plan step has no user-literal field at the prompt-assembly point —
-# every template field (task_description, proposal, design, project_context)
-# is either upstream LLM output or framework-derived. The web console
+# every template field (task_description, project_context, scope) is either
+# upstream LLM output or framework-derived. The web console
 # therefore falls back to rendering the whole post-BEGIN tail inside the
 # collapsed system-prompt chip.
 PLAN_PROMPT_HEADER = inject_boundary(PLAN_PROMPT_HEADER, "## Project Context\n")
 
-PROPOSAL_SECTION = """## Part 1: Proposal
-Create a change proposal that includes:
-1. **Summary**: Brief description of the change (2-3 sentences)
-2. **Motivation**: Why this change is needed
-3. **Files to Modify**: List of existing files that will be changed
-4. **Files to Create**: List of new files to be created (if any)
-5. **Risks**: Potential risks or considerations
-"""
-
-DESIGN_SECTION = """## Part 2: Design
-Create a design document that includes:
-1. **Overview**: High-level description of the solution
-2. **Architecture Decisions**: Key decisions with rationale and alternatives considered
-3. **Components**: Main components/modules with responsibilities
-4. **Data Flow**: How data moves through the system
-5. **Testing Strategy**: How to verify the implementation
-"""
-
-DESIGN_SECTION_BUGFIX = """## Part 2: Design (lightweight)
-Since this is a bugfix, provide a lightweight design:
-1. **Overview**: Brief description of the fix approach
-2. **Components**: Which components are affected
-3. **Testing Strategy**: How to verify the fix
-"""
-
-TASKS_SECTION = """## {part_label}: Task Groups
+TASKS_SECTION = """## Instructions: Task Groups
 Break down the implementation into logical task groups:
 
 ### Grouping Principles
@@ -133,7 +111,7 @@ Complexity guidelines:
 # implement call cannot carry it, with the in-group breakdown deliberately left
 # to the runner. Mixing both sets of sizing advice into one section would leave
 # the model to guess which unit it is being asked for.
-CAPABILITY_TASKS_SECTION = """## {part_label}: Task Groups (task units)
+CAPABILITY_TASKS_SECTION = """## Instructions: Task Groups (task units)
 Split the implementation into coarse task groups. The unit of grouping is a
 **task** — one coherent piece of work the user would regard as a single thing.
 The ONLY criterion for splitting a task any further is: **can a single
@@ -225,26 +203,6 @@ CAPABILITY_JSON_SCHEMA = """\
 Respond in JSON format:
 ```json
 {
-    "plan": {
-        "proposal": {
-            "summary": "...",
-            "motivation": "...",
-            "files_to_modify": ["file1.py", "file2.py"],
-            "files_to_create": ["new_file.py"],
-            "risks": ["risk1", "risk2"]
-        },
-        "design": {
-            "overview": "...",
-            "architecture_decisions": [
-                {"decision": "...", "rationale": "...", "alternatives_considered": "..."}
-            ],
-            "components": [
-                {"name": "...", "responsibilities": "...", "interfaces": "..."}
-            ],
-            "data_flow": "...",
-            "testing_strategy": "..."
-        }
-    },
     "task_groups": [
         {
             "group_id": "G1",
@@ -276,36 +234,20 @@ Important:
 - Do NOT emit a `tasks` array. Groups carry only the five fields above; the
   in-group breakdown is produced by the implement runner's own planning /
   sub-agent system at execution time.
-- `plan.proposal` and `plan.design` are still required in full: they are what
-  the human gate reviews and what later fix iterations read back as design
-  context.
 """
 
-# Full depth output schema for feature/discovery
-FULL_JSON_SCHEMA = """\
+# Granular (legacy) doctrine output schema. WHY one schema rather than the
+# former full/medium/shallow trio: the three differed only in the proposal /
+# design block they asked for, the placeholder wording of their examples, and
+# the trailing `Important:` notes that only the full variant carried. With
+# proposal/design gone the remaining difference is pure information the other
+# two lacked, so the merge converges on the full variant rather than on their
+# intersection — taking the intersection would silently drop the grouping
+# conventions from bugfix and small flows.
+GRANULAR_JSON_SCHEMA = """\
 Respond in JSON format:
 ```json
 {{
-    "plan": {{
-        "proposal": {{
-            "summary": "...",
-            "motivation": "...",
-            "files_to_modify": ["file1.py", "file2.py"],
-            "files_to_create": ["new_file.py"],
-            "risks": ["risk1", "risk2"]
-        }},
-        "design": {{
-            "overview": "...",
-            "architecture_decisions": [
-                {{"decision": "...", "rationale": "...", "alternatives_considered": "..."}}
-            ],
-            "components": [
-                {{"name": "...", "responsibilities": "...", "interfaces": "..."}}
-            ],
-            "data_flow": "...",
-            "testing_strategy": "..."
-        }}
-    }},
     "task_groups": [
         {{
             "group_id": "G1",
@@ -338,102 +280,6 @@ Important:
 - Each group will be implemented in a **separate LLM call with isolated context**
 """
 
-# Medium depth output schema for bugfix
-MEDIUM_JSON_SCHEMA = """\
-Respond in JSON format:
-```json
-{{
-    "plan": {{
-        "proposal": {{
-            "summary": "...",
-            "motivation": "...",
-            "files_to_modify": ["file1.py"],
-            "files_to_create": [],
-            "risks": ["risk1"]
-        }},
-        "design": {{
-            "overview": "...",
-            "architecture_decisions": [],
-            "components": [
-                {{"name": "...", "responsibilities": "..."}}
-            ],
-            "data_flow": "",
-            "testing_strategy": "..."
-        }}
-    }},
-    "task_groups": [
-        {{
-            "group_id": "G1",
-            "name": "...",
-            "description": "...",
-            "group_order": 1,
-            "depends_on": [],
-            "tasks": [
-                {{
-                    "id": 1,
-                    "description": "...",
-                    "complexity": "small|medium|large",
-                    "estimated_loc": 30,
-                    "acceptance_criteria": ["criterion 1"],
-                    "files": ["file1.py"],
-                    "depends_on": []
-                }}
-            ]
-        }}
-    ],
-    "total_complexity": "small|medium|large",
-    "estimated_effort": "brief estimate"
-}}
-```
-"""
-
-# Shallow depth output schema for small (and any other shallow-depth type)
-SHALLOW_JSON_SCHEMA = """\
-Respond in JSON format:
-```json
-{{
-    "plan": {{
-        "proposal": {{
-            "summary": "...",
-            "motivation": "",
-            "files_to_modify": [],
-            "files_to_create": [],
-            "risks": []
-        }},
-        "design": {{
-            "overview": "",
-            "architecture_decisions": [],
-            "components": [],
-            "data_flow": "",
-            "testing_strategy": ""
-        }}
-    }},
-    "task_groups": [
-        {{
-            "group_id": "G1",
-            "name": "...",
-            "description": "...",
-            "group_order": 1,
-            "depends_on": [],
-            "tasks": [
-                {{
-                    "id": 1,
-                    "description": "...",
-                    "complexity": "small|medium|large",
-                    "estimated_loc": 30,
-                    "acceptance_criteria": ["criterion 1"],
-                    "files": ["file1.py"],
-                    "depends_on": []
-                }}
-            ]
-        }}
-    ],
-    "total_complexity": "small|medium|large",
-    "estimated_effort": "brief estimate"
-}}
-```
-"""
-
 REVISION_SECTION = """
 ## Previous Plan (to revise)
 {previous_output}
@@ -461,7 +307,7 @@ These files MUST NOT appear as the target of an `implement` group, task, or fix
 iteration. The engine itself will compute the new version from the actual
 changes and write the version file during the `commit` step. If the user's
 request is *literally only* "bump the version", produce zero file changes in
-the plan and explain in the proposal summary that the version bump will be
+the plan and explain in the group description that the version bump will be
 handled automatically by the engine.
 """
 
@@ -546,32 +392,17 @@ def render_root_cause_section(report: Any, exhausted: bool = False) -> str:
     return "\n" + body
 
 
-def _get_prompt_depth(task_type: str) -> str:
-    """Determine prompt depth based on task_type.
-
-    Returns: 'full', 'medium', or 'shallow'
-    """
-    if task_type in ("feature", "discovery"):
-        return "full"
-    elif task_type in ("bugfix", "fix"):
-        return "medium"
-    else:  # small, review, etc.
-        return "shallow"
-
-
 # Phase-1 hints for the two-phase JSON extraction. The capability hint must
 # NOT show a `tasks` array: the hint is what the extractor echoes back as the
 # expected shape, so a stale example would reintroduce the per-task listing the
 # doctrine just removed.
 GRANULAR_JSON_SCHEMA_HINT = (
-    '{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, '
-    '"task_groups": [{"group_id": "G1", "name": "...", '
+    '{"task_groups": [{"group_id": "G1", "name": "...", '
     '"tasks": [{"id": 1, "description": "..."}]}], "total_complexity": "..."}'
 )
 
 CAPABILITY_JSON_SCHEMA_HINT = (
-    '{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, '
-    '"task_groups": [{"group_id": "G1", "name": "...", "description": "...", '
+    '{"task_groups": [{"group_id": "G1", "name": "...", "description": "...", '
     '"group_order": 1, "depends_on": []}], "total_complexity": "..."}'
 )
 
@@ -848,17 +679,21 @@ def _build_prompt(
     scope: str,
     project_summary: str,
     revision_section: str,
-    depth: str,
     root_cause_section: str = "",
     decomposition: Any = PlanDecomposition.GRANULAR,
     granularity: Any = PlanGranularity.AUTO,
 ) -> str:
-    """Build the plan prompt adapted by doctrine and depth.
+    """Build the plan prompt for the flow's decomposition doctrine.
 
     ``decomposition`` selects the doctrine: the capability branch asks for
     coarse groups sized to one autonomous implement call, the granular branch
-    reproduces the legacy per-task listing byte for byte. ``granularity`` only
-    applies to the capability branch.
+    reproduces the legacy per-task listing. ``granularity`` only applies to the
+    capability branch.
+
+    WHY there is no depth parameter any more: depth (full/medium/shallow)
+    existed only to pick which proposal/design sections to ask for and which of
+    the three otherwise-identical schemas to append. PLAN emits neither
+    artifact now, so every task_type gets the same scheduling-data contract.
     """
     parts = []
 
@@ -878,20 +713,7 @@ def _build_prompt(
         parts.append(root_cause_section.strip("\n"))
 
     if _is_capability(decomposition):
-        # Proposal / design keep their depth-adapted shape: the human gate and
-        # the fix loop's {design_section} read them regardless of doctrine.
-        if depth == "full":
-            parts.append(PROPOSAL_SECTION)
-            parts.append(DESIGN_SECTION)
-            part_label = "Part 3"
-        elif depth == "medium":
-            parts.append(PROPOSAL_SECTION)
-            parts.append(DESIGN_SECTION_BUGFIX)
-            part_label = "Part 3"
-        else:  # shallow
-            part_label = "Instructions"
         parts.append(CAPABILITY_TASKS_SECTION.format(
-            part_label=part_label,
             granularity_directive=_granularity_directive(granularity),
         ))
         parts.append(ARTIFACT_SPLIT_GUARDRAIL)
@@ -899,22 +721,9 @@ def _build_prompt(
         parts.append(CAPABILITY_JSON_SCHEMA)
         return "\n".join(parts)
 
-    if depth == "full":
-        parts.append(PROPOSAL_SECTION)
-        parts.append(DESIGN_SECTION)
-        parts.append(TASKS_SECTION.format(part_label="Part 3"))
-        parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(FULL_JSON_SCHEMA)
-    elif depth == "medium":
-        parts.append(PROPOSAL_SECTION)
-        parts.append(DESIGN_SECTION_BUGFIX)
-        parts.append(TASKS_SECTION.format(part_label="Part 3"))
-        parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(MEDIUM_JSON_SCHEMA)
-    else:  # shallow
-        parts.append(TASKS_SECTION.format(part_label="Instructions"))
-        parts.append(VERSION_FILE_GUARDRAIL)
-        parts.append(SHALLOW_JSON_SCHEMA)
+    parts.append(TASKS_SECTION)
+    parts.append(VERSION_FILE_GUARDRAIL)
+    parts.append(GRANULAR_JSON_SCHEMA)
 
     return "\n".join(parts)
 
@@ -922,8 +731,7 @@ def _build_prompt(
 def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the unified plan step.
 
-    Generates a complete plan (proposal + design + task groups) in a single
-    LLM call. Adapts prompt depth based on task_type.
+    Generates the flow's task-group scheduling data in a single LLM call.
 
     Args:
         step: The current step being executed
@@ -954,9 +762,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     else:
         revision_section = ""
 
-    # Determine prompt depth
-    depth = _get_prompt_depth(task_type)
-
     # The doctrine/granularity this flow entered. Read back rather than
     # re-decided: a resumed or revised plan must be produced under the same
     # model the flow already committed to, so its groups stay comparable to
@@ -970,7 +775,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         scope=scope,
         project_summary=project_summary,
         revision_section=revision_section,
-        depth=depth,
         root_cause_section=render_root_cause_section(
             step.inputs.get("root_cause_report"),
             exhausted=bool(step.inputs.get("investigation_exhausted")),
@@ -1017,8 +821,8 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt += runtime_env
 
     logger.info(
-        "Generating plan (depth=%s, decomposition=%s, granularity=%s) for: %s...",
-        depth, mode.decomposition.value, mode.granularity.value,
+        "Generating plan (decomposition=%s, granularity=%s) for: %s...",
+        mode.decomposition.value, mode.granularity.value,
         task_description[:60],
     )
 
@@ -1042,7 +846,6 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return StepStatus.FAILED
 
         # Extract and store outputs
-        plan = result.get("plan", {})
         task_groups = result.get("task_groups", [])
 
         if capability:
@@ -1070,15 +873,12 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 )
                 return StepStatus.FAILED
 
-        # Ensure plan has required sub-structures with defaults
-        if "proposal" not in plan:
-            plan["proposal"] = {"summary": task_description, "motivation": "", "files_to_modify": [], "files_to_create": [], "risks": []}
-        if "design" not in plan:
-            plan["design"] = {"overview": "", "architecture_decisions": [], "components": [], "data_flow": "", "testing_strategy": ""}
-
-        step.outputs["plan"] = plan
+        # WHY no ``plan`` wrapper output: it only ever carried the proposal /
+        # design pair, so it would now persist as an empty dict that reads as a
+        # plan the step failed to produce. Flows recorded before this change
+        # keep theirs, and `_render_plan` / the web console still render them —
+        # the removal is write-side only.
         step.outputs["task_groups"] = task_groups
-        step.outputs["spec_changes"] = result.get("spec_changes", [])
         step.outputs["total_complexity"] = result.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = result.get("estimated_effort", "")
         step.outputs[PLAN_DECOMPOSITION_KEY] = mode.decomposition.value
@@ -1113,12 +913,13 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         total_tasks = sum(
             len(g.get("tasks", [])) for g in task_groups if isinstance(g, dict)
         )
-        logger.info(f"Plan generated (depth={depth}): {len(task_groups)} groups, {total_tasks} tasks")
-        logger.info(f"Summary: {plan.get('proposal', {}).get('summary', '')[:80]}...")
+        logger.info(
+            "Plan generated: %d groups, %d tasks", len(task_groups), total_tasks,
+        )
 
         # Display formatted output
         try:
-            _display_plan(plan, task_groups, depth)
+            _display_plan(task_groups)
         except Exception as e:
             logger.warning(f"Failed to format plan output: {e}")
 
@@ -1130,23 +931,10 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.FAILED
 
 
-def _display_plan(plan: dict, task_groups: list, depth: str) -> None:
+def _display_plan(task_groups: list) -> None:
     """Display the plan output with Rich formatting."""
-    from ..display import render_proposal, render_design
     console = get_console()
 
-    proposal = plan.get("proposal", {})
-    design = plan.get("design", {})
-
-    # Render proposal section (unless shallow depth produced empty one)
-    if proposal.get("summary"):
-        render_proposal(proposal)
-
-    # Render design section (if non-trivial)
-    if design.get("overview"):
-        render_design(design)
-
-    # Render task groups
     if task_groups:
         formatter = TaskFormatter(console=console)
         tree_panel = formatter.format_tasks(task_groups, mode="tree")

@@ -668,7 +668,6 @@ def resolve_merge_conflicts_with_context(
     conflict_files: list[str],
     task_description: str,
     group_summaries: list[dict],
-    spec_content: str,
     max_retries: int = 3,
     flow_id: str | None = None,
     step_id: str | None = None,
@@ -676,7 +675,7 @@ def resolve_merge_conflicts_with_context(
     """Resolve merge conflicts using LLM with full task context.
 
     For each conflicting file, sends the file content (with conflict markers)
-    to the LLM along with task description, group summaries, and spec context.
+    to the LLM along with task description and group summaries.
     Verifies the output contains no conflict markers before writing.
 
     Retries up to *max_retries* times.  Does NOT fall back to ``--theirs``.
@@ -686,7 +685,6 @@ def resolve_merge_conflicts_with_context(
         conflict_files: List of conflicting file paths (relative to project_root)
         task_description: Overall task description for LLM context
         group_summaries: ``[{group_id, summary, files_changed}, ...]``
-        spec_content: Spec summary text for LLM context
         max_retries: Maximum resolution attempts
         flow_id: Optional flow ID for history recording
         step_id: Optional step ID for history recording
@@ -733,7 +731,6 @@ def resolve_merge_conflicts_with_context(
                 "main branch.\n\n"
                 f"## Task Description\n{task_description}\n\n"
                 f"## What Each Group Did\n{summaries_text}\n\n"
-                f"## Project Conventions\n{spec_content}\n\n"
                 f"## Conflicting File: {filepath}\n\n"
                 f"```\n{content}\n```\n\n"
                 "Output ONLY the fully resolved file content. "

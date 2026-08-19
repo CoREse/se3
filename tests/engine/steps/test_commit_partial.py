@@ -38,8 +38,7 @@ class TestCommitMessageFromVersionAnalyze:
         flow = _make_flow()
         step = _make_step({
             "commit_message": "Add scope mechanism to verify_spec issues",
-            "proposal": {"summary": "This should not be used"},
-            "implement_summary": "This should also not be used",
+            "implement_summary": "This should not be used",
         })
         msg = _generate_commit_message(flow, step)
         first_line = msg.split("\n")[0]
@@ -72,22 +71,22 @@ class TestCommitMessageFromVersionAnalyze:
         assert first_line.startswith("feature: ")
 
     def test_empty_commit_message_falls_through(self):
-        """Empty commit_message falls through to proposal summary."""
+        """Empty commit_message falls through to implement_summary."""
         flow = _make_flow()
         step = _make_step({
             "commit_message": "",
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
         })
         msg = _generate_commit_message(flow, step)
         first_line = msg.split("\n")[0]
         assert "Fix auth token refresh logic" in first_line
 
     def test_none_commit_message_falls_through(self):
-        """None commit_message falls through to proposal summary."""
+        """None commit_message falls through to implement_summary."""
         flow = _make_flow()
         step = _make_step({
             "commit_message": None,
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
         })
         msg = _generate_commit_message(flow, step)
         first_line = msg.split("\n")[0]
@@ -101,7 +100,7 @@ class TestCommitPartialCompletion:
         """Missing completion_status defaults to 'complete' — no incomplete section."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
         })
         msg = _generate_commit_message(flow, step)
         assert "Incomplete tasks" not in msg
@@ -110,7 +109,7 @@ class TestCommitPartialCompletion:
         """Explicit 'complete' status produces no incomplete section."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
             "completion_status": "complete",
             "incomplete_tasks": [],
         })
@@ -121,7 +120,7 @@ class TestCommitPartialCompletion:
         """Partial completion with string tasks lists them in the body."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
             "completion_status": "partial",
             "incomplete_tasks": ["Update CLAUDE.md permissions", "Add migration script"],
         })
@@ -134,7 +133,7 @@ class TestCommitPartialCompletion:
         """Partial completion with dict tasks shows description and reason."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
             "completion_status": "partial",
             "incomplete_tasks": [
                 {"description": "Edit .claude/config", "reason": "restricted file"},
@@ -148,7 +147,7 @@ class TestCommitPartialCompletion:
         """Partial status but empty incomplete_tasks — no section added."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
             "completion_status": "partial",
             "incomplete_tasks": [],
         })
@@ -156,10 +155,10 @@ class TestCommitPartialCompletion:
         assert "Incomplete tasks" not in msg
 
     def test_subject_line_reflects_completed_work(self):
-        """Subject line uses the proposal summary (what was done), not planned."""
+        """Subject line uses the implement summary (what was done), not planned."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {"summary": "Fix auth token refresh logic"},
+            "implement_summary": "Fix auth token refresh logic",
             "completion_status": "partial",
             "incomplete_tasks": ["Update docs"],
         })
@@ -168,16 +167,31 @@ class TestCommitPartialCompletion:
         assert "Fix auth token refresh logic" in first_line
 
     def test_implement_summary_used_as_fallback(self):
-        """When proposal has no summary, implement_summary is used."""
+        """With no version_analyze commit_message, implement_summary is used."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {},
             "implement_summary": "Refactored auth module and updated tests",
             "completion_status": "complete",
         })
         msg = _generate_commit_message(flow, step)
         first_line = msg.split("\n")[0]
         assert "Refactored auth module and updated tests" in first_line
+
+    def test_legacy_proposal_input_is_ignored(self):
+        """A resumed legacy flow may still carry `proposal`; commit skips it.
+
+        PLAN no longer emits a proposal, so the rung was removed from the
+        chain rather than left reading a key nothing writes.
+        """
+        flow = _make_flow(task_description="Fix memory leak in cache")
+        step = _make_step({
+            "proposal": {"summary": "Legacy proposal summary"},
+            "implement_summary": "",
+        })
+        msg = _generate_commit_message(flow, step)
+        first_line = msg.split("\n")[0]
+        assert "Legacy proposal summary" not in first_line
+        assert "Fix memory leak in cache" in first_line
 
 
 class TestCommitMessageTemplateFallback:
@@ -187,7 +201,6 @@ class TestCommitMessageTemplateFallback:
         """Task description is used directly when no summary available."""
         flow = _make_flow(task_description="Fix memory leak in cache")
         step = _make_step({
-            "proposal": {},
             "implement_summary": "",
         })
         msg = _generate_commit_message(flow, step)
@@ -199,7 +212,6 @@ class TestCommitMessageTemplateFallback:
         long_desc = "A" * 80
         flow = _make_flow(task_description=long_desc)
         step = _make_step({
-            "proposal": {},
             "implement_summary": "",
         })
         msg = _generate_commit_message(flow, step)
@@ -211,7 +223,6 @@ class TestCommitMessageTemplateFallback:
         """Commit message generation never calls LLM."""
         flow = _make_flow()
         step = _make_step({
-            "proposal": {},
             "implement_summary": "",
         })
         # This should succeed without any LLM infrastructure

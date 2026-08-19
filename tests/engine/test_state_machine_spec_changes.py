@@ -1,9 +1,11 @@
-"""Tests for _build_step_inputs forwarding spec_changes and design_doc.
+"""Tests for _build_step_inputs after the PLAN spec_changes channel retired.
 
 Verifies:
-1. PLAN outputs spec_changes → verify_spec and update_spec receive it
-2. PLAN outputs design_doc (from plan.design) → update_spec receives it
-3. When PLAN has no spec_changes, downstream steps are unaffected
+1. PLAN no longer forwards a ``spec_changes`` input to any downstream step,
+   even when a legacy persisted flow still carries the key in its outputs
+2. PLAN no longer forwards ``proposal`` / ``design_doc`` either — a legacy
+   flow whose PLAN outputs still carry them is read without reviving them
+3. The rest of PLAN's outputs are unaffected by the channel removal
 """
 
 from __future__ import annotations
@@ -24,24 +26,13 @@ from tianluo.engine.state_machine import StateMachine
 
 def _make_flow(tmp_path: Path, task_description: str = "Test task") -> FlowInstance:
     """Create a flow with PLAN completed in step history."""
-    # Ensure a minimal tianluo/specs directory exists so that full_spec loading
-    # (used by update_spec by default) does not fail on missing directory.
-    specs_dir = tmp_path / "tianluo" / "specs"
-    specs_dir.mkdir(parents=True, exist_ok=True)
-    (specs_dir / "base").mkdir(exist_ok=True)
-    (specs_dir / "base" / "spec.md").write_text(
-        "<!-- spec-format: v1 -->\n\n# Base\n\n## Purpose\n\nTest.\n",
-        encoding="utf-8",
-    )
-
-    flow = FlowInstance(
+    return FlowInstance(
         flow_id="test-flow-sm-sc",
         task_description=task_description,
         task_type="feature",
         status=FlowStatus.RUNNING,
         change_path=tmp_path / "changes" / "test",
     )
-    return flow
 
 
 def _add_completed_step(
@@ -55,25 +46,24 @@ def _add_completed_step(
     return step
 
 
-class TestSpecChangesForwarding:
-    """Test _build_step_inputs forwards spec_changes from PLAN to downstream steps."""
+class TestSpecChangesNotForwarded:
+    """PLAN's retired spec_changes channel reaches no downstream step."""
 
     @pytest.fixture
     def sm(self, tmp_path):
         return StateMachine(tmp_path)
 
     @pytest.fixture
-    def flow_with_plan(self, tmp_path):
-        """Flow with a completed PLAN step that has spec_changes."""
+    def flow_with_legacy_spec_changes(self, tmp_path):
+        """A persisted flow whose PLAN step still carries spec_changes.
+
+        Old flows on disk keep the key; resuming one must not revive the
+        channel — the key is simply ignored.
+        """
         flow = _make_flow(tmp_path)
         _add_completed_step(flow, StepType.ANALYZE, {
             "task_type": "feature",
             "scope": "src/",
-            "selected_items": [
-                {"spec": "base", "requirement_name": "Project Identity"}
-            ],
-            "spec_content": "items-mode content",
-            "relevant_specs": ["base"],
         })
         _add_completed_step(flow, StepType.PLAN, {
             "plan": {
@@ -101,32 +91,42 @@ class TestSpecChangesForwarding:
         })
         return flow
 
+    @pytest.mark.parametrize(
+        "step_type",
+        [
+            StepType.VERIFY_SPEC,
+            StepType.UPDATE_SPEC,
+            StepType.IMPLEMENT,
+            StepType.VERSION_ANALYZE,
+        ],
+    )
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_verify_spec_receives_spec_changes(self, _cfg, sm, flow_with_plan):
-        inputs = sm._build_step_inputs(flow_with_plan, StepType.VERIFY_SPEC)
-        assert "spec_changes" in inputs
-        assert len(inputs["spec_changes"]) == 1
-        assert inputs["spec_changes"][0]["spec_name"] == "flow-engine"
-        assert inputs["spec_changes"][0]["change_type"] == "add_requirement"
+    def test_no_step_receives_spec_changes(
+        self, _cfg, sm, flow_with_legacy_spec_changes, step_type,
+    ):
+        inputs = sm._build_step_inputs(flow_with_legacy_spec_changes, step_type)
+        assert "spec_changes" not in inputs
 
+    @pytest.mark.parametrize(
+        "step_type",
+        [StepType.UPDATE_SPEC, StepType.IMPLEMENT, StepType.COMMIT],
+    )
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_receives_spec_changes(self, _cfg, sm, flow_with_plan):
-        inputs = sm._build_step_inputs(flow_with_plan, StepType.UPDATE_SPEC)
-        assert "spec_changes" in inputs
-        assert len(inputs["spec_changes"]) == 1
-        assert inputs["spec_changes"][0]["target"] == "Requirement: New Feature"
+    def test_legacy_plan_proposal_and_design_are_not_revived(
+        self, _cfg, sm, flow_with_legacy_spec_changes, step_type,
+    ):
+        """A persisted plan.proposal / plan.design is read, never forwarded.
 
-    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_receives_design_doc(self, _cfg, sm, flow_with_plan):
-        inputs = sm._build_step_inputs(flow_with_plan, StepType.UPDATE_SPEC)
-        assert "design_doc" in inputs
-        assert inputs["design_doc"]["overview"] == "High-level design"
-        assert len(inputs["design_doc"]["architecture_decisions"]) == 1
-        assert len(inputs["design_doc"]["components"]) == 1
+        The old flow still renders in `luo history show`; what stopped is the
+        step-to-step channel, so no downstream prompt can pick them back up.
+        """
+        inputs = sm._build_step_inputs(flow_with_legacy_spec_changes, step_type)
+        assert "design_doc" not in inputs
+        assert "proposal" not in inputs
 
 
-class TestNoSpecChanges:
-    """Test that missing/empty spec_changes doesn't break existing behavior."""
+class TestPlanForwardingUnaffected:
+    """Removing the channel leaves PLAN's remaining forwarding intact."""
 
     @pytest.fixture
     def sm(self, tmp_path):
@@ -139,11 +139,6 @@ class TestNoSpecChanges:
         _add_completed_step(flow, StepType.ANALYZE, {
             "task_type": "bugfix",
             "scope": "src/",
-            "selected_items": [
-                {"spec": "base", "requirement_name": "Project Identity"}
-            ],
-            "spec_content": "items-mode content",
-            "relevant_specs": ["base"],
         })
         _add_completed_step(flow, StepType.PLAN, {
             "plan": {
@@ -151,58 +146,32 @@ class TestNoSpecChanges:
                 "design": {"overview": "Fix approach"},
             },
             "task_groups": [{"group_id": "G1", "name": "fix", "tasks": []}],
-            # No spec_changes key at all
         })
         return flow
 
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_verify_spec_gets_empty_list_when_no_spec_changes(self, _cfg, sm, flow_without_spec_changes):
-        inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.VERIFY_SPEC)
-        assert inputs["spec_changes"] == []
-
-    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_gets_empty_list_when_no_spec_changes(self, _cfg, sm, flow_without_spec_changes):
-        inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.UPDATE_SPEC)
-        assert inputs["spec_changes"] == []
-
-    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_design_doc_still_forwarded_without_spec_changes(self, _cfg, sm, flow_without_spec_changes):
-        inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.UPDATE_SPEC)
-        assert inputs["design_doc"]["overview"] == "Fix approach"
-
-    @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_other_plan_outputs_unaffected(self, _cfg, sm, flow_without_spec_changes):
-        """task_groups and proposal still forwarded normally."""
+        """task_groups is still forwarded normally."""
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.IMPLEMENT)
         assert inputs["task_groups"] == [{"group_id": "G1", "name": "fix", "tasks": []}]
-        assert inputs["design_doc"]["overview"] == "Fix approach"
-
-
-class TestEmptyDesignDoc:
-    """Test that empty/missing design in plan doesn't break update_spec."""
-
-    @pytest.fixture
-    def sm(self, tmp_path):
-        return StateMachine(tmp_path)
 
     @patch("tianluo.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_empty_design_forwarded_as_empty_dict(self, _cfg, sm, tmp_path):
-        flow = _make_flow(tmp_path)
-        _add_completed_step(flow, StepType.ANALYZE, {
-            "task_type": "small",
-            "scope": "src/",
-            "selected_items": [
-                {"spec": "base", "requirement_name": "Project Identity"}
-            ],
-            "spec_content": "items-mode content",
-            "relevant_specs": ["base"],
-        })
-        _add_completed_step(flow, StepType.PLAN, {
-            "plan": {
-                "proposal": {"summary": "quick fix"},
-                # No "design" key
-            },
-            "task_groups": [],
-        })
-        inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
-        assert inputs["design_doc"] == {}
+    def test_deprecated_design_step_still_forwards_its_output(
+        self, _cfg, sm, flow_without_spec_changes,
+    ):
+        """Legacy DESIGN/PROPOSE flows resume unchanged — only PLAN stopped."""
+        _add_completed_step(
+            flow_without_spec_changes,
+            StepType.DESIGN,
+            {"design_doc": {"overview": "legacy design"}},
+        )
+        _add_completed_step(
+            flow_without_spec_changes,
+            StepType.PROPOSE,
+            {"proposal": {"summary": "legacy proposal"}},
+        )
+        inputs = sm._build_step_inputs(
+            flow_without_spec_changes, StepType.UPDATE_SPEC,
+        )
+        assert inputs["design_doc"]["overview"] == "legacy design"
+        assert inputs["proposal"]["summary"] == "legacy proposal"

@@ -866,12 +866,6 @@ class LLMCaller:
         # build per-spec dependency sets.
         self._last_touched_files: Set[str] = set()
 
-        # Cached resolution of the spec-write guard settings path for this step.
-        # Computed once (config read + settings-file generation), then reused
-        # across this instance's internal attempts. ``_UNSET`` until first use.
-        self._spec_guard_settings_computed = False
-        self._spec_guard_settings_value: Optional[Path] = None
-
         # Agent management
         # Resolution order when ``agents`` is not explicitly provided:
         #   1. Per-step override from ``llm_caller.steps.<step_type>`` — if
@@ -1081,26 +1075,13 @@ class LLMCaller:
             prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 
         # Inject read-only constraint for read-only steps
-        from .context_builder import (
-            get_read_only_injection,
-            get_spec_write_protection_injection,
-        )
+        from .context_builder import get_read_only_injection
         read_only_constraint = get_read_only_injection(
             self.step_type, force=self.force_read_only
         )
         if read_only_constraint:
             prompt = f"{prompt}{read_only_constraint}"
             logger.debug(f"Injected read-only constraint for step '{self.step_type}'")
-
-        # Inject spec-write protection for non-read-only LLM steps (except
-        # update_spec / sync). Appended in the same style as the read-only
-        # constraint (no [Additional user instruction] header).
-        spec_write_constraint = get_spec_write_protection_injection(self.step_type)
-        if spec_write_constraint:
-            prompt = f"{prompt}{spec_write_constraint}"
-            logger.debug(
-                f"Injected spec-write protection for step '{self.step_type}'"
-            )
 
         # Dispatch to appropriate handler based on mode
         if mode == "two_phase":
@@ -1365,57 +1346,6 @@ class LLMCaller:
                     return cand_result
 
         return None
-
-    def _resolve_spec_guard_settings(self) -> Optional[Path]:
-        """Resolve the spec-write guard ``--plugin-dir`` path for this step.
-
-        Returns the guard plugin directory (installing the PreToolUse
-        spec-write hook) when this step must be barred from writing
-        ``tianluo/specs/``, else ``None``.
-
-        The enable decision references ONLY the shared exemption set
-        :data:`context_builder.SPEC_WRITE_ALLOWED_STEPS` — never a local literal
-        list — so ``update_spec`` and ALL sync steps (``sync_scan`` /
-        ``sync_analyze`` / ``sync_resolve`` / ``sync_respond``) are exempt and
-        keep writing specs unimpeded. This is the exact site where a missing
-        ``sync_respond`` in the exemption set would (wrongly) install the hook
-        and have its legitimate Way-A ``Edit`` denied; deriving the set upstream
-        prevents that drift.
-
-        The result is computed once and cached on the instance (config read +
-        idempotent plugin generation), then reused across internal attempts. Any
-        failure degrades safely to ``None`` (no hook) — the post-step diff
-        fallback remains as the second line of defense.
-        """
-        if self._spec_guard_settings_computed:
-            return self._spec_guard_settings_value
-
-        self._spec_guard_settings_computed = True
-        self._spec_guard_settings_value = None
-        try:
-            from .context_builder import SPEC_WRITE_ALLOWED_STEPS
-
-            if self.step_type in SPEC_WRITE_ALLOWED_STEPS:
-                return None
-
-            from ..config import load_spec_write_protection_config
-
-            cfg = load_spec_write_protection_config(self.project_root)
-            if not cfg.hook_enabled:
-                return None
-
-            from .spec_write_hook import ensure_guard_plugin
-
-            self._spec_guard_settings_value = ensure_guard_plugin(self.project_root)
-        except Exception:
-            logger.debug(
-                "Failed to prepare spec-write guard settings for step '%s'",
-                self.step_type,
-                exc_info=True,
-            )
-            self._spec_guard_settings_value = None
-
-        return self._spec_guard_settings_value
 
     def _get_phase1_cache_path(self) -> Optional[Path]:
         """Return the Phase 1 cache file path for this step, or None if no context."""
@@ -1913,7 +1843,6 @@ class LLMCaller:
                     prompt=effective_prompt,
                     read_only=is_step_read_only(self.step_type) or self.force_read_only,
                     context_files=context_files,
-                    spec_guard_plugin=self._resolve_spec_guard_settings(),
                 )
                 if invocation_intent != AgentInvocationIntent.DEFAULT:
                     # Third-party runners compiled against the pre-intent

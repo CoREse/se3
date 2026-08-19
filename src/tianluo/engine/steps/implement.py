@@ -220,13 +220,9 @@ Preferred alternatives, in order:
 ## Task Type
 {task_type}
 {root_cause_section}
-{design_section}
 
 ## Task Groups
 {task_groups}
-
-## Project Conventions
-{spec_summary}
 
 ## Instructions
 1. Read the relevant source files before making changes.
@@ -292,16 +288,12 @@ Preferred alternatives, in order:
 ## Task Type
 {task_type}
 {root_cause_section}
-{design_section}
 
 ## Current Group Tasks
 {current_group}
 
 ## Previous Groups Context
 {previous_results}
-
-## Project Conventions
-{spec_summary}
 
 ## Instructions
 1. Read the relevant source files before making changes.
@@ -363,10 +355,6 @@ Preferred alternatives, in order:
 
 ## Task Description
 {task_description}
-
-## Project Conventions
-{spec_summary}
-{design_section}
 {root_cause_section}
 ## Fix Instructions
 {fix_instructions}
@@ -499,8 +487,8 @@ planning / sub-agent job.
 )
 
 # Two-segment marker only: USER_CONTENT region is empty.
-# implement consumes upstream LLM artifacts (design / task_groups /
-# changes_made / test_results) and framework-derived task_description;
+# implement consumes upstream LLM artifacts (task_groups / changes_made /
+# test_results) and framework-derived task_description;
 # nothing at this assembly point is a user-literal field. The web console
 # renders the whole post-BEGIN tail inside the collapsed system-prompt chip.
 IMPLEMENT_PROMPT = inject_boundary(IMPLEMENT_PROMPT, "## Task Description\n")
@@ -611,8 +599,6 @@ def _run_holistic_implement(
     project_root: Path,
     task_description: str,
     task_type: str,
-    design_section: str,
-    spec_summary: str,
     root_cause_section: str,
     injection: str,
     retry_count: int,
@@ -623,14 +609,7 @@ def _run_holistic_implement(
     call: a small task, a single capability group (or one forced by
     ``plan_granularity: single``), and a resumed legacy ``direct`` flow.
     """
-    # WHY the design survives into the whole-task call: a single capability
-    # group is not "no plan" — PLAN still produced the proposal/design that a
-    # configured `confirmation.steps.plan` gate may have had a human approve,
-    # and the grouped and fix-iteration paths both carry it. Only the legacy
-    # `direct` mode below genuinely holds no plan, so it alone renders empty.
-    rendered_design = design_section
     if mode == HOLISTIC_MODE_LEGACY_DIRECT:
-        rendered_design = ""
         # WHY a distinct wording rather than reusing the single-group text: this
         # mode is reported only for a legacy `direct` flow that holds no groups
         # at all, so telling the agent "PLAN sized this as a single capability
@@ -719,7 +698,6 @@ def _run_holistic_implement(
     prompt = HOLISTIC_IMPLEMENT_PROMPT.format(
         task_description=task_description,
         task_type=task_type,
-        design_section=rendered_design,
         execution_mode=execution_mode,
         analysis_context=json.dumps(
             analysis_context, indent=2, ensure_ascii=False, default=str,
@@ -727,7 +705,6 @@ def _run_holistic_implement(
         continuation_context=json.dumps(
             continuation, indent=2, ensure_ascii=False, default=str,
         ) if continuation else "No previous partial attempt.",
-        spec_summary=spec_summary,
         root_cause_section=root_cause_section,
     )
     if injection:
@@ -765,8 +742,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     task_type = step.inputs.get("task_type") or flow.task_type or "feature"
     holistic_mode = _holistic_execution_mode(step, flow)
-    design_doc = step.inputs.get("design_doc", {})
-    spec_content = step.inputs.get("spec_content", {})
     fix_context = step.inputs.get("fix_context")
     fix_instructions = step.inputs.get("fix_instructions")
     is_fix_iteration = step.inputs.get("is_fix_iteration", False)
@@ -799,18 +774,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # visible if a downstream path fails before we recompute.
     if "session_commits" not in step.outputs:
         step.outputs["session_commits"] = []
-
-    # Format design section (shared across paths)
-    design_section = ""
-    if design_doc:
-        if isinstance(design_doc, dict):
-            design_section = "## Design Document\n" + json.dumps(
-                design_doc, indent=2, ensure_ascii=False
-            )
-        else:
-            design_section = f"## Design Document\n{design_doc}"
-
-    spec_summary = _format_spec_brief(spec_content)
 
     # Root-cause report from a preceding INVESTIGATE round, if any. Rendered
     # once and shared by every prompt path below (single call, grouped,
@@ -848,17 +811,12 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         fix_history = step.inputs.get("fix_history", [])
         fix_history_text = _format_fix_history(fix_history)
         fix_context_text = _format_fix_context_structured(fix_context)
-        # For FIX_PROMPT, design_section needs self-contained spacing:
-        # non-empty → "\n{content}\n", empty → "\n" (single blank line).
-        fix_design = f"\n{design_section}" if design_section else ""
         prompt = FIX_PROMPT.format(
             task_description=task_description,
             fix_instructions=fix_instructions,
             fix_context=fix_context_text,
             fix_iteration=fix_iteration,
             fix_history=fix_history_text,
-            spec_summary=spec_summary,
-            design_section=fix_design,
             root_cause_section=root_cause_section,
         )
         if injection:
@@ -904,8 +862,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root=project_root,
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
-            spec_summary=spec_summary,
             root_cause_section=root_cause_section,
             injection=injection,
             retry_count=retry_count,
@@ -929,9 +885,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = IMPLEMENT_PROMPT.format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             task_groups=task_groups_text,
-            spec_summary=spec_summary,
             root_cause_section=root_cause_section,
         )
         if injection:
@@ -974,9 +928,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = IMPLEMENT_PROMPT.format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             task_groups=task_groups_text,
-            spec_summary=spec_summary,
             root_cause_section=root_cause_section,
         )
         if injection:
@@ -1109,8 +1061,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         project_root=project_root,
                         task_description=task_description,
                         task_type=task_type,
-                        design_section=design_section,
-                        spec_summary=spec_summary,
                         injection=injection,
                         retry_count=retry_count,
                         root_cause_section=root_cause_section,
@@ -1151,8 +1101,6 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root=project_root,
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
-            spec_summary=spec_summary,
             injection=injection,
             retry_count=retry_count,
             root_cause_section=root_cause_section,
@@ -1247,10 +1195,8 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         prompt = _group_prompt_template(capability_mode).format(
             task_description=task_description,
             task_type=task_type,
-            design_section=design_section,
             current_group=json.dumps(group, indent=2, ensure_ascii=False),
             previous_results=prev_ctx,
-            spec_summary=spec_summary,
             root_cause_section=root_cause_section,
         )
         if injection:
@@ -1496,8 +1442,6 @@ def _make_execute_fn(
     step: Step,
     task_description: str,
     task_type: str,
-    design_section: str,
-    spec_summary: str,
     injection: str | None,
     retry_count: int,
     group_agent_info: dict[str, tuple[str, str | None]] | None = None,
@@ -1649,10 +1593,8 @@ def _make_execute_fn(
             prompt = _group_prompt_template(capability_mode).format(
                 task_description=task_description,
                 task_type=task_type,
-                design_section=design_section,
                 current_group=json.dumps(group, indent=2, ensure_ascii=False),
                 previous_results=prev_ctx,
-                spec_summary=spec_summary,
                 root_cause_section=root_cause_section,
             )
             if injection:
@@ -1933,7 +1875,6 @@ def _merge_leaf_branch(
     original_branch: str,
     task_description: str,
     group_summaries: list[dict],
-    spec_content: str,
     flow_id: str | None = None,
     merge_step_id: str | None = None,
 ) -> bool:
@@ -1991,7 +1932,6 @@ def _merge_leaf_branch(
             branch=branch,
             task_description=task_description,
             group_summaries=group_summaries,
-            spec_content=spec_content,
             flow_id=flow_id,
             merge_step_id=merge_step_id,
         )
@@ -2103,7 +2043,6 @@ def _attempt_merge_with_resolution(
     branch: str,
     task_description: str,
     group_summaries: list[dict],
-    spec_content: str,
     flow_id: str | None,
     merge_step_id: str | None,
 ) -> bool:
@@ -2159,7 +2098,7 @@ def _attempt_merge_with_resolution(
 
     if resolve_merge_conflicts_with_context(
         project_root, conflict_files, task_description,
-        group_summaries, spec_content,
+        group_summaries,
         flow_id=flow_id, step_id=merge_step_id,
     ):
         logger.info("Leaf merge conflicts resolved via LLM: %s", branch)
@@ -2407,8 +2346,6 @@ def _run_dag_parallel(
     project_root: Path,
     task_description: str,
     task_type: str,
-    design_section: str,
-    spec_summary: str,
     injection: str | None,
     retry_count: int,
     prior_outputs: dict[str, Any] | None = None,
@@ -2495,7 +2432,7 @@ def _run_dag_parallel(
                     merge_step_id = f"{step.step_id}_recover_{gid}"
                     success = _merge_leaf_branch(
                         project_root, branch, original_branch,
-                        task_description, [], spec_summary,
+                        task_description, [],
                         flow_id=flow.flow_id, merge_step_id=merge_step_id,
                     )
                     if success:
@@ -2607,8 +2544,6 @@ def _run_dag_parallel(
         step=step,
         task_description=task_description,
         task_type=task_type,
-        design_section=design_section,
-        spec_summary=spec_summary,
         injection=injection,
         retry_count=retry_count,
         group_agent_info=group_agent_info,
@@ -2673,7 +2608,7 @@ def _run_dag_parallel(
         merge_step_id = f"{step.step_id}_merge_{merge_idx}"
         success = _merge_leaf_branch(
             project_root, branch, original_branch,
-            task_description, group_summaries, spec_summary,
+            task_description, group_summaries,
             flow_id=flow.flow_id, merge_step_id=merge_step_id,
         )
         if not success:
@@ -3507,24 +3442,3 @@ def _format_fix_context_structured(fix_context: dict | str | None) -> str:
     return "\n".join(lines) if lines else "No additional context."
 
 
-def _format_spec_brief(spec_content) -> str:
-    """Format spec content for the implement prompt.
-
-    Accepts either a pre-rendered string (current spec_loader output) or a
-    legacy ``{spec_name: text}`` dict from older persisted flows.
-    """
-    if not spec_content:
-        return "No project conventions specified."
-
-    if isinstance(spec_content, str):
-        return spec_content
-
-    parts = []
-    for name, content in spec_content.items():
-        if content is None:
-            content = ""
-        parts.append(f"### {name}")
-        parts.append(content)
-        parts.append("")
-
-    return "\n".join(parts) if parts else "No project conventions specified."

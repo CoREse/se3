@@ -179,7 +179,6 @@ class TestLeafMergeRefValidation:
                 branch="impl/does-not-exist/G9",
                 task_description="t",
                 group_summaries=[],
-                spec_content="",
                 flow_id=None,
                 merge_step_id=None,
             )
@@ -206,7 +205,6 @@ class TestLeafMergeRefValidation:
             branch="impl/real/G1",
             task_description="t",
             group_summaries=[],
-            spec_content="",
             flow_id=None,
             merge_step_id=None,
         )

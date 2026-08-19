@@ -14,24 +14,12 @@ from pathlib import Path
 from typing import Optional
 
 from ..engine.display import render_text
+from ..engine.merge.human_call import NO_ACTIVE_MERGE_CALL_TYPES
 from ..i18n import t
 
 logger = logging.getLogger(__name__)
 
 _STRICT_SENTINEL = "[__SE3_STRICT_PLACEHOLDER__:"
-
-
-def _is_spec_path(path: str) -> bool:
-    """Return True when *path* points to a luo spec file.
-
-    Delegates to the canonical implementation in
-    :mod:`tianluo.engine.merge.guardrails` so the merge subsystem shares
-    one detector across modules.  The canonical implementation
-    normalises backslashes to forward slashes and rejects empty
-    intermediate path segments.
-    """
-    from tianluo.engine.merge.guardrails import _is_spec_path as _canonical
-    return _canonical(path)
 
 
 def _first_parent_sha(project_root: Path) -> str:
@@ -65,30 +53,6 @@ def _first_parent_sha(project_root: Path) -> str:
             f"(rev-list output: {result.stdout!r})"
         )
     return parts[1]
-
-
-def _head_parent_count(project_root: Path) -> int | None:
-    """Return the number of parents of HEAD, or ``None`` when undetermined.
-
-    A return value of ``0`` is a legitimate but extremely unusual state
-    (HEAD is the root commit). Returning ``0`` for a transient git
-    failure would silently mask octopus-merge detection in the
-    manual-resolution path; callers decide separately whether to treat
-    that masking as fatal. Returning ``None`` lets the caller render an
-    explicit "could not determine parent count" warning rather than
-    proceeding under a false-zero assumption.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(project_root), "rev-list", "--parents", "-n", "1", "HEAD"],
-            capture_output=True, text=True, check=False, timeout=15,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    parts = result.stdout.strip().split()
-    return max(0, len(parts) - 1)
 
 
 def _extract_version_from_string(content: str, filename: str) -> str | None:
@@ -139,8 +103,8 @@ def _check_version_unchanged(
       * a version file exists at both refs but the version is unchanged, OR
       * the version file IS present at the post_sha (HEAD) but unparseable
         (e.g. a corrupted pyproject.toml could not be parsed as TOML, or the
-        version field is missing). A spec-touching merge that broke the
-        version file's syntax must NOT be silently treated as a no-op:
+        version field is missing). A merge that broke the version file's
+        syntax must NOT be silently treated as a no-op:
         this branch surfaces the corruption as a hard failure so the
         operator does not conclude "merge success" against a broken
         version file.
@@ -221,8 +185,8 @@ def process_merge_response(
     # K1 fix: acquire the merge lock around the git-touching critical
     # section so a concurrent ``luo merge <branch>`` started by another
     # shell cannot race with us over the working tree, the index,
-    # ``git commit --no-edit``, ``git reset --hard``, and the spec-files
-    # guardrails check. Use the context-manager form so an exception
+    # ``git commit --no-edit`` and ``git reset --hard``. Use the
+    # context-manager form so an exception
     # raised between MergeLock construction and the try/finally entry
     # (e.g. a lazy import inside _process_merge_response_locked failing
     # before the function body executes) cannot leak the lock — the
@@ -284,196 +248,12 @@ def process_merge_response(
         return 1
 
 
-_PENDING_GUARDRAILS_SUFFIX = ".pending_guardrails"
-
-
-def _verify_pending_guardrails(
-    call_path: Path,
-    project_root: Path,
-    feedback: str,
-) -> int:
-    """Verify guardrails for a parked manual-resolution call file.
-
-    Reads the ``<call>.pending_guardrails`` marker (written by the
-    manual-resolution path), runs ``MergeGuardrailsCheck`` against the
-    user's just-created commit, and either deletes the marker on
-    success or rolls back HEAD to the pre-merge SHA on failure.
-
-    Returns a CLI exit code (0 = success, 1 = failure).
-    """
-    marker_path = Path(str(call_path) + _PENDING_GUARDRAILS_SUFFIX)
-    try:
-        marker_data = json.loads(marker_path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        render_text(
-            t("merge_respond.marker_parse_failed", marker_path=marker_path, exc=exc),
-            title=t("merge_respond.title.error"),
-        )
-        return 1
-
-    pre_sha = marker_data.get("pre_sha", "")
-    if not pre_sha:
-        render_text(
-            t("merge_respond.marker_missing_pre_sha", marker_path=marker_path),
-            title=t("merge_respond.title.error"),
-        )
-        return 1
-
-    head_result = subprocess.run(
-        ["git", "-C", str(project_root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=False, timeout=15,
-    )
-    if head_result.returncode != 0:
-        render_text(
-            t("merge_respond.read_head_failed", stderr=head_result.stderr.strip()),
-            title=t("merge_respond.title.error"),
-        )
-        return 1
-    post_sha = head_result.stdout.strip()
-
-    # If the user has not committed yet, HEAD is still pre_sha — refuse
-    # to proceed and tell them to commit first.
-    if post_sha == pre_sha:
-        render_text(
-            t("merge_respond.no_new_commit"),
-            title=t("merge_respond.title.manual_resolution_pending"),
-        )
-        return 1
-
-    # Guard against multi-commit advancement: if the user committed
-    # multiple times (intentionally or via amend), a hard reset would
-    # destroy intermediate work.
-    count_result = subprocess.run(
-        ["git", "-C", str(project_root), "rev-list", "--count", f"{pre_sha}..HEAD"],
-        capture_output=True, text=True, check=False, timeout=15,
-    )
-    if count_result.returncode == 0:
-        try:
-            commit_count = int(count_result.stdout.strip())
-        except ValueError:
-            commit_count = 0
-        if commit_count > 1:
-            render_text(
-                t(
-                    "merge_respond.multi_commit_advancement",
-                    commit_count=commit_count,
-                    pre_sha_short=pre_sha[:8],
-                ),
-                title=t("merge_respond.title.multi_commit"),
-            )
-            return 1
-
-    try:
-        from tianluo.engine.merge.guardrails import MergeGuardrailsCheck
-
-        guardrails = MergeGuardrailsCheck(project_root)
-        gr_report = guardrails.check_merge_result(pre_sha, post_sha)
-    except Exception as exc:
-        render_text(
-            t("merge_respond.guardrails_check_failed_manual", exc=exc),
-            title=t("merge_respond.title.error"),
-        )
-        return 1
-
-    if gr_report.passed:
-        try:
-            marker_path.unlink()
-        except OSError:
-            pass
-        render_text(
-            t("merge_respond.manual_accepted")
-            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else "")
-            + t("merge_respond.stash_recover_note"),
-            title=t("merge_respond.title.verified"),
-        )
-        return 0
-
-    # Guardrails failed — roll back the user's commit so the spec
-    # contract is honored, and surface the violations.
-    # K9: Before the hard reset, attempt to stash uncommitted work so
-    # that non-spec changes the user made after the merge are not
-    # silently destroyed.  Stash is best-effort: if it fails (e.g.
-    # no changes to stash, index locked), we continue with the reset
-    # after warning the user.
-    stash_attempted = False
-    stash_result = subprocess.run(
-        ["git", "-C", str(project_root), "stash", "push", "-m",
-         f"se3-merge-respond auto-stash before rollback to {pre_sha[:8]}"],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
-    if stash_result.returncode == 0:
-        stash_attempted = True
-    rollback_result = subprocess.run(
-        ["git", "-C", str(project_root), "reset", "--hard", pre_sha],
-        capture_output=True, text=True, check=False, timeout=30,
-    )
-    rollback_note = ""
-    if rollback_result.returncode != 0:
-        rollback_note = t(
-            "merge_respond.rollback_failed",
-            pre_sha_short=pre_sha[:8],
-            rc=rollback_result.returncode,
-            stderr=rollback_result.stderr.strip() or "unknown",
-        )
-        if stash_attempted:
-            rollback_note += t("merge_respond.rollback_failed_stash_note")
-    else:
-        rollback_note = t(
-            "merge_respond.rollback_success", pre_sha_short=pre_sha[:8]
-        )
-        if stash_attempted:
-            rollback_note += t("merge_respond.rollback_success_stash_note")
-        try:
-            marker_path.unlink()
-        except OSError:
-            pass
-
-    violations_lines = [
-        t(
-            "merge_respond.violation_line",
-            violation_type=v.violation_type,
-            file_path=v.file_path,
-            message=v.message,
-        )
-        for v in gr_report.violations
-    ]
-    render_text(
-        t("merge_respond.refused_violations_manual")
-        + "\n".join(violations_lines)
-        + rollback_note,
-        title=t("merge_respond.title.violations_rolled_back"),
-    )
-    return 1
-
-
 def _process_merge_response_locked(
     *,
     call_path: Path,
     project_root: Path,
 ) -> int:
     """Body of :func:`process_merge_response` executed under the merge lock."""
-
-    # Pending-guardrails marker handling: if the user previously chose
-    # "manual" on a spec-touching merge, we parked the call file and
-    # asked them to re-invoke after committing.  On re-entry we run
-    # guardrails before falling through to the normal response flow.
-    marker_path = Path(str(call_path) + _PENDING_GUARDRAILS_SUFFIX)
-    if marker_path.exists():
-        # Read feedback from the .response file if present, but tolerate
-        # absence — the marker takes precedence.
-        feedback = ""
-        response_path_marker = Path(str(call_path) + ".response")
-        if response_path_marker.exists():
-            try:
-                rdata = json.loads(response_path_marker.read_text(encoding="utf-8"))
-                feedback = rdata.get("feedback", "")
-            except Exception as exc:
-                logger.warning(
-                    "Failed to parse response file %s for pending-guardrails "
-                    "re-entry: %s — feedback discarded.",
-                    response_path_marker, exc,
-                )
-        return _verify_pending_guardrails(call_path, project_root, feedback)
 
     response_path = Path(str(call_path) + ".response")
     if not response_path.exists():
@@ -544,29 +324,6 @@ def _process_merge_response_locked(
                         affected_files=", ".join(sentinel_files),
                     ),
                     title=t("merge_respond.title.strict_placeholder"),
-                )
-                return 1
-
-            # Refuse to accept if the call file recorded orphan-spec
-            # guardrail violations: writing those resolutions would land
-            # spec changes that violate the guardrails contract. The
-            # user must use 'manual' and edit the spec files explicitly.
-            orphan_violations = call_data.get("orphan_guardrails_violations") or []
-            if orphan_violations:
-                lines = [
-                    t(
-                        "merge_respond.violation_line",
-                        violation_type=v.get("violation_type", "unknown"),
-                        file_path=v.get("file_path", "<unknown>"),
-                        message=v.get("message", ""),
-                    )
-                    for v in orphan_violations
-                ]
-                render_text(
-                    t("merge_respond.orphan_violations_header")
-                    + "\n".join(lines)
-                    + t("merge_respond.orphan_violations_footer"),
-                    title=t("merge_respond.title.orphan_violations"),
                 )
                 return 1
 
@@ -685,107 +442,6 @@ def _process_merge_response_locked(
                     )
                     return 1
 
-            # After successful commit, run guardrails on any spec files
-            # that were part of the resolution to close the gap between
-            # LLM-resolved and human-resolved merge paths.
-            #
-            # Per the spec contract (Mandatory guardrails after every
-            # `luo merge` commit), spec-touching merge commits with
-            # violations MUST be rolled back and escalated to a human
-            # call file — they cannot be silently downgraded to a
-            # warning + exit 0.
-            spec_paths = [
-                f["path"] for f in files
-                if _is_spec_path(f.get("path", ""))
-            ]
-            if spec_paths:
-                try:
-                    post_sha = subprocess.run(
-                        ["git", "-C", str(project_root), "rev-parse", "HEAD"],
-                        capture_output=True, text=True, check=True,
-                        timeout=15,
-                    ).stdout.strip()
-                    # G1: Use first-parent walk via rev-list --parents so
-                    # octopus merges with >2 parents are handled
-                    # consistently (the first parent is always the
-                    # ours-side pre-merge state).
-                    pre_sha = _first_parent_sha(project_root)
-                    parent_count = _head_parent_count(project_root)
-                    if parent_count is None:
-                        logger.warning(
-                            "merge-respond: could not determine HEAD parent "
-                            "count (rev-list failed). Octopus merges may go "
-                            "undetected; guardrails compare first-parent "
-                            "(ours-side) against HEAD as the conservative "
-                            "default."
-                        )
-                    elif parent_count > 2:
-                        logger.warning(
-                            "merge-respond: HEAD is an octopus merge (%d parents). "
-                            "Guardrails compare first-parent (ours-side) against HEAD; "
-                            "changes from other merged branches are also in the ancestry.",
-                            parent_count,
-                        )
-
-                    from tianluo.engine.merge.guardrails import MergeGuardrailsCheck
-                    guardrails = MergeGuardrailsCheck(project_root)
-                    gr_report = guardrails.check_merge_result(pre_sha, post_sha)
-
-                    if not gr_report.passed:
-                        violations_lines = [
-                            t(
-                                "merge_respond.violation_line",
-                                violation_type=v.violation_type,
-                                file_path=v.file_path,
-                                message=v.message,
-                            )
-                            for v in gr_report.violations
-                        ]
-                        # Hard-roll back to pre_sha so the guardrail-
-                        # violating commit does not stand. The spec
-                        # contract requires that spec-touching merge
-                        # commits with violations MUST NOT remain on
-                        # HEAD; downgrading to a warning would land a
-                        # guardrail-violating spec change with exit 0.
-                        rollback_result = subprocess.run(
-                            [
-                                "git", "-C", str(project_root),
-                                "reset", "--hard", pre_sha,
-                            ],
-                            capture_output=True, text=True,
-                            check=False, timeout=30,
-                        )
-                        rollback_note = ""
-                        if rollback_result.returncode != 0:
-                            rollback_note = t(
-                                "merge_respond.rollback_failed",
-                                pre_sha_short=pre_sha[:8],
-                                rc=rollback_result.returncode,
-                                stderr=rollback_result.stderr.strip() or "unknown",
-                            )
-                        else:
-                            rollback_note = t(
-                                "merge_respond.rollback_success_merge",
-                                pre_sha_short=pre_sha[:8],
-                            )
-                        render_text(
-                            t("merge_respond.refused_violations_merge")
-                            + "\n".join(violations_lines)
-                            + rollback_note,
-                            title=t("merge_respond.title.violations_rolled_back"),
-                        )
-                        return 1
-                except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
-                        RuntimeError) as exc:
-                    logger.warning(
-                        "Guardrails check failed after merge-respond: %s", exc
-                    )
-                    render_text(
-                        t("merge_respond.guardrails_incomplete"),
-                        title=t("merge_respond.title.guardrails_check_failed"),
-                    )
-                    return 1
-
             # Version bump verification: if the resolution touches a version
             # file, verify the version actually advanced from pre-merge.
             # This closes the gap between the orchestrator's main merge path
@@ -819,7 +475,8 @@ def _process_merge_response_locked(
             )
             return 0
 
-        # guardrail_violation type — no auto-write, user must fix manually
+        # Any other call type carries no per-file resolution to write back,
+        # so acceptance is only an acknowledgement — the user fixes by hand.
         render_text(
             t("merge_respond.accept_manual_fix")
             + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
@@ -828,10 +485,10 @@ def _process_merge_response_locked(
         return 0
 
     if choice == "abort":
-        if call_type == "guardrail_violation":
-            # For guardrail violations, the merge was already rolled back
-            # (git reset --hard). Attempting git merge --abort would fail
-            # because no merge is in progress. Report clean success instead.
+        if call_type in NO_ACTIVE_MERGE_CALL_TYPES:
+            # These call files are only produced after the merge was already
+            # aborted or rolled back, so `git merge --abort` would fail with
+            # "no merge to abort". Report clean success instead.
             render_text(
                 t("merge_respond.aborted_already_rolledback")
                 + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
@@ -861,91 +518,6 @@ def _process_merge_response_locked(
         return 0
 
     # choice == "manual"
-    #
-    # The user has chosen to resolve manually.  We cannot run guardrails
-    # right now because the working tree still has unresolved markers
-    # (or pre-resolution content).  When the merge touches spec files,
-    # exit 0 here would let a SHALL→SHOULD rewrite slip past the spec
-    # contract, so we *park* the call file by writing a sidecar marker
-    # and ask the user to re-invoke ``luo merge-respond`` after their
-    # commit.  The re-entry path (``_verify_pending_guardrails`` above)
-    # then runs ``MergeGuardrailsCheck`` against the new commit and
-    # rolls back HEAD on violation.
-    spec_paths_for_manual: list[str] = []
-    if call_type == "merge_conflict":
-        for f in call_data.get("files", []):
-            p = f.get("path", "")
-            if _is_spec_path(p):
-                spec_paths_for_manual.append(p)
-
-    if spec_paths_for_manual:
-        # G1: Determine the pre-merge SHA so the post-commit guardrails
-        # check has a known-good rollback target.  We use the call
-        # file's recorded ``ours_head_sha`` which is the orchestrator's
-        # captured pre-merge HEAD.  Falls back to first-parent walk
-        # when the field is absent (older call files).
-        pre_sha = call_data.get("ours_head_sha", "")
-        if not pre_sha:
-            try:
-                pre_sha = _first_parent_sha(project_root)
-            except RuntimeError:
-                pre_sha = ""
-
-        if not pre_sha:
-            render_text(
-                t("merge_respond.cannot_park_manual"),
-                title=t("merge_respond.title.error"),
-            )
-            return 1
-
-        parent_count = _head_parent_count(project_root)
-        if parent_count is None:
-            logger.warning(
-                "merge-respond: could not determine HEAD parent count "
-                "(rev-list failed). Octopus merges may go undetected; the "
-                "parked marker uses first-parent as the rollback target."
-            )
-        elif parent_count > 2:
-            logger.warning(
-                "merge-respond: HEAD is an octopus merge (%d parents). "
-                "The parked marker uses first-parent as rollback target; "
-                "changes from other merged branches are also in the ancestry.",
-                parent_count,
-            )
-
-        marker_path = Path(str(call_path) + _PENDING_GUARDRAILS_SUFFIX)
-        marker_data = {
-            "pre_sha": pre_sha,
-            "spec_paths": spec_paths_for_manual,
-        }
-        try:
-            marker_path.write_text(
-                json.dumps(marker_data, indent=2), encoding="utf-8",
-            )
-        except OSError as exc:
-            render_text(
-                t(
-                    "merge_respond.marker_write_failed",
-                    marker_path=marker_path,
-                    exc=exc,
-                    spec_paths=", ".join(spec_paths_for_manual),
-                ),
-                title=t("merge_respond.title.error"),
-            )
-            return 1
-
-        render_text(
-            t("merge_respond.manual_parked_header")
-            + "\n".join(
-                t("merge_respond.spec_path_line", path=p)
-                for p in spec_paths_for_manual
-            )
-            + t("merge_respond.manual_parked_footer", call_path=call_path)
-            + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),
-            title=t("merge_respond.title.manual_parked"),
-        )
-        return 0
-
     render_text(
         t("merge_respond.manual_resolve")
         + (t("merge_respond.feedback_suffix", feedback=feedback) if feedback else ""),

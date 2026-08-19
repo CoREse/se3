@@ -1236,8 +1236,7 @@ def _safe_read_and_stat(path: Path, source_se3: Path) -> tuple[bytes, os.stat_re
         # traversal MUST be implemented BEFORE the boundary is widened.
         # Failing to do so would expose the orchestrator to an
         # intermediate-directory symlink swap that bypasses the
-        # boundary check above.  This is a load-bearing requirement
-        # tracked by the spec-guardrails system.
+        # boundary check above.  This is a load-bearing requirement.
         fd2 = os.open(str(current_path), os.O_RDONLY | os.O_NOFOLLOW)
         try:
             stat_info = os.fstat(fd2)

@@ -1,7 +1,7 @@
 """Regression tests for G10 cross-cutting concerns (K2–K12).
 
 Covers:
-- K2: LLMTrace integration in ConflictResolver / GuardrailRepairer
+- K2: LLMTrace integration in ConflictResolver
 - K3: Log level calibration (error paths use ERROR, not INFO)
 - K4: SecretRedact in LLM trace prompts
 - K5/K6: Empty repo, detached HEAD, shallow clone detection
@@ -21,7 +21,6 @@ import pytest
 
 from tianluo.commands.merge.llm_trace import LLMTrace
 from tianluo.engine.merge.conflict_resolver import ConflictResolver
-from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
 from tianluo.engine.merge.human_call import _atomic_write_json
 from tianluo.engine.merge.orchestrator import (
     DetachedHeadError,
@@ -102,24 +101,6 @@ def test_conflict_resolver_records_error_in_trace(tmp_path: Path) -> None:
     call_kwargs = trace.record.call_args.kwargs
     assert call_kwargs["outcome"] == "error"
     assert "llm boom" in call_kwargs["error"]
-
-
-def test_guardrail_repairer_records_llm_trace(tmp_path: Path) -> None:
-    """GuardrailRepairer._call_llm writes to LLMTrace when injected."""
-    trace = MagicMock(spec=LLMTrace)
-    trace.record = MagicMock(return_value=1)
-
-    repairer = GuardrailRepairer(tmp_path, llm_trace=trace)
-    repairer._llm_caller = MagicMock()
-    repairer._llm_caller.call = MagicMock(return_value='{"files": []}')
-
-    result = repairer._call_llm("repair prompt")
-
-    assert result == {"files": []}  # parsed JSON dict
-    trace.record.assert_called_once()
-    call_kwargs = trace.record.call_args.kwargs
-    assert call_kwargs["agent"] == "guardrail_repair"
-    assert call_kwargs["outcome"] == "success"
 
 
 # ---------------------------------------------------------------------------

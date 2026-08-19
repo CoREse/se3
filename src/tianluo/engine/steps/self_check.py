@@ -671,7 +671,6 @@ only navigation clues. Never treat them as requirement sources and never emit a
 new finding with `expectation_source.type = "plan_task"`.
 
 ## What NOT to check
-- **Spec compliance** — this is handled by the verify_spec step, do NOT duplicate that check.
 - **Code style or formatting** — not actionable here.
 - **Performance optimization suggestions** — only flag if there's a clear correctness issue.
 - **Anything a dedicated downstream step owns** — as a fix-loop checker you MUST NOT report concerns that a later specialized step decides; that creates standoffs where implement cannot resolve them. In particular, the version number and version files (e.g. the `version` field in `pyproject.toml`) — whether and how to bump them — are decided by the downstream `version_analyze` step against the pre-session baseline; do NOT report "version not bumped" or "version number is wrong" as an issue.
@@ -1606,22 +1605,6 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_spec_content(spec_content) -> str:
-    if not spec_content:
-        return "No specifications provided."
-
-    if isinstance(spec_content, str):
-        return spec_content
-
-    parts = []
-    for name, content in spec_content.items():
-        parts.append(f"### {name}")
-        parts.append(content)
-        parts.append("")
-
-    return "\n".join(parts)
-
-
 def _format_fix_context(
     fix_iteration: int,
     max_iterations: int,
@@ -1630,10 +1613,10 @@ def _format_fix_context(
 ) -> str:
     """Format fix context for inclusion in the self_check prompt.
 
-    Thin wrapper around the shared ``render_fix_context`` helper —
-    delegates all branching/copy to a single source of truth shared with
-    verify_spec. prev_issues are rendered inline here (self_check has no
-    separate "Previous Verification" slot in its prompt).
+    Thin wrapper around the shared ``render_fix_context`` helper so the
+    fix-loop copy has a single source of truth. prev_issues are rendered
+    inline here (self_check has no separate "Previous Verification" slot in
+    its prompt).
     """
     return render_fix_context(
         fix_iteration,

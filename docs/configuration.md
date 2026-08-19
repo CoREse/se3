@@ -44,12 +44,9 @@ wins.
    - [`merge`](#merge)
    - [`conflict_resolver`](#conflict_resolver)
    - [`claude_subprocess`](#claude_subprocess)
-   - [`spec_write_protection`](#spec_write_protection)
    - [`server`](#server)
    - [`presets`](#presets)
 3. [Legacy / historical configuration](#legacy--historical-configuration)
-   - [`spec_governance`](#spec_governance)
-   - [`spec_loading`](#spec_loading)
    - [Blocks the engine no longer reads](#blocks-the-engine-no-longer-reads)
 4. [Troubleshooting: "I changed the config and nothing happened"](#troubleshooting-i-changed-the-config-and-nothing-happened)
 
@@ -157,7 +154,7 @@ from the project file only:
 | `confirmation.steps` | Yes | **Entry-level**, same rule as `agents`. |
 | `language` | Yes | **Field-level.** Each of `language` / `spec_language` independently takes the project value when set, otherwise the global one. |
 | `server` | Yes | **Whole-block.** A project `server:` section wholly replaces the global one (no deep merge). |
-| everything else | No | Project file only (`workflow`, `test`, `implement`, `steps`, `version`, `documentation`, `code_index`, `merge`, `conflict_resolver`, `claude_subprocess`, `spec_write_protection`, `investigation`, `presets`, `pricing`, …). |
+| everything else | No | Project file only (`workflow`, `test`, `implement`, `steps`, `version`, `documentation`, `code_index`, `merge`, `conflict_resolver`, `claude_subprocess`, `investigation`, `presets`, `pricing`, …). |
 
 ### Legacy `se3.yaml` / `se3.local.yaml`
 
@@ -509,9 +506,10 @@ execution time. Both runners support headless subagents — `claude -p` exposes
 the Agent (subagent) tool, and codex ships subagents enabled by default under
 non-interactive `codex exec` — but codex only spawns them when explicitly
 instructed, so the implement prompts state that permission explicitly. PLAN
-still produces its coarse proposal / design output, which is what a human gate
-reviews and what is injected as `{design_section}` context during fix
-iterations.
+produces no proposal and no design document either: its whole output is the
+scheduling data (the groups plus `total_complexity` / `estimated_effort`), and
+that is what a human gate reviews. Project conventions reach the implement call
+through the charter and the code-index instead.
 
 **`plan_granularity`** applies only under `capability`:
 
@@ -1285,26 +1283,11 @@ raises too.
 > argv wholly overrides the first, including the `model` it selects. This bit
 > this project once, when a guard appended its own `--settings` after an agent
 > wrapper's — the wrapper's model was silently discarded and the run used the
-> user settings' model instead. The engine now installs its spec-write guard via
-> `--plugin-dir`, which is session-scoped, repeatable, and loaded *additively*,
-> so it cannot clobber an agent's `--settings`. If your own
-> `agents.<name>.cmd` is a wrapper script that passes `--settings`, keep it the
-> only one in the final argv. Note that `--setting-sources` (this config key) is
-> a different flag with different semantics and is not affected.
-
-### `spec_write_protection`
-
-Two independent hard layers guarding `tianluo/specs/**` against writes from
-steps that are not allowed to write specs.
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `hook_enabled` | bool | `true` | Install the `PreToolUse` spec-write hook — the primary, real-time block. |
-| `diff_fallback_enabled` | bool | `true` | Run the post-step spec-diff fallback — the backstop that catches Bash-redirect writes the hook cannot see. |
-
-Both keys are **fail-fast**: a non-boolean value (or a non-mapping section)
-raises `ConfigError`, so a typo such as `hook_enabled: "false"` cannot silently
-disable the guard. An absent section yields both defaults (fully on).
+> user settings' model instead. The engine therefore never appends a
+> `--settings` of its own. If your own `agents.<name>.cmd` is a wrapper script
+> that passes `--settings`, keep it the only one in the final argv. Note that
+> `--setting-sources` (this config key) is a different flag with different
+> semantics and is not affected.
 
 ### `server`
 
@@ -1421,49 +1404,13 @@ conventional location and errors if it genuinely does not exist.
 
 ## Legacy / historical configuration
 
-These block names date from the retired **spec-mirror** era, when
-`tianluo/specs/**` was a governed mirror of the code. That mirror has been
-retired — the code is the single source of truth, exposed through the code-index,
-`tianluo/charter.md`, and colocated why-comments. The blocks below are kept
-because they still parse (and, in one case, still drive a real check), not
-because they describe the current knowledge model. Nothing here is worth
-configuring in a new project.
-
-### `spec_governance`
-
-Byte budgets and an enforcement tier for spec-file volume. Fault-tolerant: an
-illegal value warns and falls back, never raises.
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `base_max_bytes` | positive int | `32768` (32 KiB) | Budget for the `base` spec (the one historically injected in full into every step). |
-| `index_render_threshold` | positive int | `16384` (16 KiB) | Threshold above which `luo spec index` output was folded into group handles. **Inert** — the spec index renderer was retired with the spec system; the field is retained for backward compatibility and drives no renderer. |
-| `spec_file_warn_bytes` | positive int | `65536` (64 KiB) | Per-spec-file size at or above which guardrails reports a `SIZE_SPEC_FILE` violation. |
-| `requirement_warn_bytes` | positive int | `8192` (8 KiB) | Single-Requirement size at or above which guardrails reports a `SIZE_REQUIREMENT` violation. |
-| `guardrails_size_tier` | `warn` \| `enforce` | `warn` | `warn` prints violations and exits `0`; `enforce` prints them and exits `1`, and additionally makes an over-budget spec **block a merge** the way a content violation does. |
-
-**What still uses them (verified against the code):** the three byte thresholds
-are read by `check_spec_sizes()` in `engine/merge/guardrails.py`, which is
-invoked by the `luo guardrails` command and — when the tier is `enforce` — by the
-merge guardrail check. `guardrails_size_tier` additionally selects the exit code
-of `luo guardrails`. But `check_spec_sizes` walks
-`tianluo/specs/<name>/spec.md`; in a post-spec project that directory is absent,
-so the check finds nothing to measure and these thresholds have no observable
-effect. They are **not** used by the code-index degrade logic — that is
-[`code_index.degrade_trigger_*`](#code_index), a separate block.
-
-### `spec_loading`
-
-| Key | Type | Default | Meaning |
-|-----|------|---------|---------|
-| `steps` | mapping `<step> → items` \| `full_spec` | `{}` | Per-step spec-content loading mode: `items` (header + selected requirements) vs `full_spec` (the entire spec file). Invalid values are skipped with a warning so the built-in default applies. |
-
-**Fully inert.** `SpecLoadingConfig` / `load_spec_loading_config()` have no
-callers anywhere outside `config.py` (verified by a whole-repo grep of `src/`
-and `tests/`). Historically `update_spec` defaulted to `full_spec`; it moved to
-the index-first protocol and no longer consumes spec text at all, and the
-default-full-spec set is now empty. `mode_for()` returns `items` for every step.
-Setting this block changes nothing.
+Some block names in older `tianluo.yaml` files date from the retired
+**spec-mirror** era, when `tianluo/specs/**` was a governed mirror of the code.
+That mirror has been retired — the code is the single source of truth, exposed
+through the code-index, `tianluo/charter.md`, and colocated why-comments. The
+`spec_governance`, `spec_loading` and `spec_write_protection` blocks (and
+`merge.guardrail_repair`) no longer have a loader at all: an existing block is
+simply ignored, and keeping it in your config is harmless but pointless.
 
 ### Blocks the engine no longer reads
 
@@ -1530,7 +1477,7 @@ print(load_language_config(p))
 Other loaders follow the same shape: `TestConfig.load(p)`,
 `ImplementConfig.load(p)`, `StepConfig.load(p)`, `load_version_config(p)`,
 `load_server_config(p)`, `load_claude_subprocess_config(p)`,
-`load_spec_write_protection_config(p)`, `load_conflict_resolver_config(p)`,
+`load_conflict_resolver_config(p)`,
 `load_step_agents(p, "implement")`, `load_self_check_resolution(p)`.
 
 A checklist for the remaining cases:

@@ -467,10 +467,10 @@ def _split_merged_buckets(
     When *project_root* is provided, the fallback queries git ancestry so
     that already-ancestor branches are not misclassified as newly merged.
 
-    Branches in ``merged_with_warnings`` (fast-mode guardrail repair ran)
-    are included in the ``newly_merged`` bucket here because they DID
-    produce a new merge commit — the bucket separation in the report is
-    for downstream consumers that want to filter on repaired-vs-clean.
+    Branches in ``merged_with_warnings`` (only populated by archived
+    reports) are included in the ``newly_merged`` bucket here because they
+    DID produce a new merge commit — the bucket separation in the report is
+    for downstream consumers that want to filter on flagged-vs-clean.
     """
     newly = list(getattr(report, "newly_merged_branches", []) or [])
     already = list(getattr(report, "already_ancestor_branches", []) or [])
@@ -1582,6 +1582,7 @@ def run_merge(
         render_text("\n".join(lines), title=t("cli.merge.complete_title"))
         return 0
     elif report.rollback_failed:
+        # Reached only for an archived report — see MergeReport.rollback_failed.
         reason_text = report.failure_reason or t("cli.merge.unknown")
         lines = [
             t("cli.merge.rollback_failed.summary", reason=reason_text),
@@ -1602,8 +1603,8 @@ def run_merge(
             lines.append(t("cli.merge.log_file", path=report.log_file))
         # Defense-in-depth: runtime_sync_collisions / idempotent / discarded
         # are populated only by _sync_runtime in lenient mode after a
-        # successful git merge, while rollback_failed only arises from
-        # guardrail rollback errors before runtime sync runs. The two are
+        # successful git merge, while rollback_failed arises from a rollback
+        # error before runtime sync runs. The two are
         # orthogonal in practice, but surfacing the full runtime-sync signal
         # set here ensures that if a future change ever makes them co-occur,
         # the output remains consistent across CLI branches.
@@ -1700,9 +1701,12 @@ def _failure_title_and_summary(
 ) -> tuple[str, str]:
     """Return (title, first_line) for a merge failure report.
 
-    Distinguishes git merge conflicts from post-merge guardrail violations
-    and fast-mode aborts so the user knows which category of failure
-    occurred.
+    Distinguishes git merge conflicts from fast-mode aborts and post-merge
+    failures so the user knows which category of failure occurred.
+
+    An unrecognised reason — including one recorded by a since-removed
+    merge phase and read back out of an archived report — falls through to
+    the generic branch rather than raising.
 
     Compound reasons such as ``"fast_abort: <stderr>"`` are matched by
     prefix so that diagnostic detail is not lost.
@@ -1734,16 +1738,6 @@ def _failure_title_and_summary(
             t("cli.merge.title.failed"),
             t("cli.merge.failure.merge_conflict"),
         )
-    if failure_reason == "guardrail_violation":
-        return (
-            t("cli.merge.title.failed"),
-            t("cli.merge.failure.guardrail_violation"),
-        )
-    if failure_reason == "guardrail_violation_no_rollback":
-        return (
-            t("cli.merge.title.failed"),
-            t("cli.merge.failure.guardrail_violation_no_rollback"),
-        )
     if failure_reason == "merge_abort_failed":
         return (
             t("cli.merge.title.aborted"),
@@ -1754,31 +1748,6 @@ def _failure_title_and_summary(
             t("cli.merge.title.not_started"),
             t("cli.merge.failure.dirty_working_tree"),
         )
-    if failure_reason == "guardrail_violation_call_failed":
-        return (
-            t("cli.merge.title.failed"),
-            t("cli.merge.failure.guardrail_violation_call_failed"),
-        )
-    if failure_reason == "guardrail_repair_stalled_call_failed":
-        return (
-            t("cli.merge.title.failed"),
-            t("cli.merge.failure.guardrail_repair_stalled_call_failed"),
-        )
-    if failure_reason == "guardrail_repair_exhausted_call_failed":
-        return (
-            t("cli.merge.title.failed"),
-            t("cli.merge.failure.guardrail_repair_exhausted_call_failed"),
-        )
-    if failure_reason == "guardrail_repair_stalled":
-        return (
-            t("cli.merge.title.paused"),
-            t("cli.merge.failure.guardrail_repair_stalled"),
-        )
-    if failure_reason == "guardrail_repair_exhausted":
-        return (
-            t("cli.merge.title.paused"),
-            t("cli.merge.failure.guardrail_repair_exhausted"),
-        )
     if failure_reason == "human_call_write_failed":
         return (
             t("cli.merge.title.failed"),
@@ -1788,21 +1757,6 @@ def _failure_title_and_summary(
         return (
             t("cli.merge.title.failed"),
             t("cli.merge.failure.incomplete_resolution_call_failed"),
-        )
-    if failure_reason == "guardrail_check_failed":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_check_failed"),
-        )
-    if failure_reason == "guardrail_check_failed_and_rollback_failed":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_check_failed_and_rollback_failed"),
-        )
-    if failure_reason == "guardrail_repair_failed":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_repair_failed"),
         )
     if failure_reason == "conflict_context_failed":
         if pending_human:
@@ -1873,21 +1827,6 @@ def _failure_title_and_summary(
         return (
             t("cli.merge.title.failed"),
             t("cli.merge.failure.rollback_failed"),
-        )
-    if failure_reason == "guardrail_missing_post_sha":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_missing_post_sha"),
-        )
-    if failure_reason == "guardrail_missing_pre_sha":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_missing_pre_sha"),
-        )
-    if failure_reason == "guardrail_missing_pre_and_post_sha":
-        return (
-            t("cli.merge.title.aborted"),
-            t("cli.merge.failure.guardrail_missing_pre_and_post_sha"),
         )
     if failure_reason == "pending_human":
         return (

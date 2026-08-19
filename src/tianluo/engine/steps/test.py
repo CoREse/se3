@@ -1042,7 +1042,7 @@ def _build_baseline_fix_section(active_baseline: List[str]) -> str:
     Lists the active baseline (inherited) failures the fix loop is also expected
     to repair, with a tightly-scoped relaxation of the user-prompt focus limits
     that applies ONLY to these annotated ids — never to introduced failures and
-    never past the luo guardrails' SHALL/MUST contracts.
+    never past the project's charter constraints and code invariants.
     """
     bullet_ids = "\n".join(f"  - {tid}" for tid in active_baseline)
     return (
@@ -1059,10 +1059,10 @@ def _build_baseline_fix_section(active_baseline: List[str]) -> str:
         "boundaries.\n"
         "  - You MAY step beyond the user-prompt's stated scope / focus limits, "
         "but ONLY as far as needed to fix these listed baseline failures.\n"
-        "  - You MUST NOT cross any luo guardrail: do not delete, weaken, or "
-        "modify the SHALL / MUST contracts of any spec. The spec guardrails "
+        "  - You MUST NOT cross the project-side constraints: the charter, "
+        "the WHY: / INVARIANT: comments, and the code invariants they record "
         "apply in full.\n"
-        "  - Code-first: do NOT revert a legitimate spec/code change merely to "
+        "  - Code-first: do NOT revert a legitimate code change merely to "
         "placate a brittle test. When a test is stale relative to a correct "
         "change, the right fix is to UPDATE the test (e.g. 44 → 45), not to undo "
         "the change.\n\n"

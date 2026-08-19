@@ -14,10 +14,9 @@ collects them into a single ``IntEnum`` so that:
     ``from_legacy_string``, which accepts both the bare reason and the
     compound prefix forms used in older code paths.
 
-The legacy string surface (used by ``MergeReport.failure_reason``,
-``GuardrailRepairFailed.failure_reason`` and a small number of test
-fixtures) remains a public contract for the duration of the
-deprecation window. Callers that have already migrated to the typed
+The legacy string surface (used by ``MergeReport.failure_reason`` and a
+small number of test fixtures) remains a public contract for the duration
+of the deprecation window. Callers that have already migrated to the typed
 enum SHOULD use :class:`FailureReason` directly; callers that have not
 SHOULD use :func:`from_legacy_string` to translate legacy strings into
 enum values.
@@ -69,25 +68,10 @@ class FailureReason(IntEnum):
     FAST_ABORT = 400
     FAST_FAILURE = 401
 
-    # --- 5xx: guardrail violations (post-merge spec checks) -------------
-    GUARDRAIL_VIOLATION = 500
-    GUARDRAIL_VIOLATION_NO_ROLLBACK = 501
-    GUARDRAIL_VIOLATION_CALL_FAILED = 502
-    GUARDRAIL_CHECK_FAILED = 503
-    GUARDRAIL_CHECK_FAILED_AND_ROLLBACK_FAILED = 504
-    GUARDRAIL_MISSING_PRE_SHA = 505
-    GUARDRAIL_MISSING_POST_SHA = 506
-    GUARDRAIL_MISSING_PRE_AND_POST_SHA = 507
-    GUARDRAIL_REPAIR_FAILED = 510
-    GUARDRAIL_REPAIR_STALLED = 511
-    GUARDRAIL_REPAIR_STALLED_CALL_FAILED = 512
-    GUARDRAIL_REPAIR_EXHAUSTED = 513
-    GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED = 514
-    # Inconsistent state: a repair commit exists on HEAD but rollback was
-    # refused because pre_repair_sha was missing. The working tree was
-    # restored but HEAD still contains the repair commit — manual
-    # intervention is required and subsequent branches must not run.
-    INCONSISTENT_REPAIR_STATE = 520
+    # 5xx was the post-merge spec-guardrails family. The guardrails chain is
+    # gone, so no new report carries those reasons; ``from_legacy_string``
+    # still resolves any that survive in an archived report by falling
+    # through to ``UNEXPECTED`` with the raw spelling preserved as detail.
 
     # --- 6xx: rollback failures -----------------------------------------
     ROLLBACK_FAILED = 600
@@ -189,29 +173,6 @@ _LEGACY_STRING_MAP: dict[str, FailureReason] = {
     # 4xx
     "fast_abort": FailureReason.FAST_ABORT,
     "fast_failure": FailureReason.FAST_FAILURE,
-    # 5xx
-    "guardrail_violation": FailureReason.GUARDRAIL_VIOLATION,
-    "guardrail_violation_no_rollback": FailureReason.GUARDRAIL_VIOLATION_NO_ROLLBACK,
-    "guardrail_violation_call_failed": FailureReason.GUARDRAIL_VIOLATION_CALL_FAILED,
-    "guardrail_check_failed": FailureReason.GUARDRAIL_CHECK_FAILED,
-    "guardrail_check_failed_and_rollback_failed": (
-        FailureReason.GUARDRAIL_CHECK_FAILED_AND_ROLLBACK_FAILED
-    ),
-    "guardrail_missing_pre_sha": FailureReason.GUARDRAIL_MISSING_PRE_SHA,
-    "guardrail_missing_post_sha": FailureReason.GUARDRAIL_MISSING_POST_SHA,
-    "guardrail_missing_pre_and_post_sha": (
-        FailureReason.GUARDRAIL_MISSING_PRE_AND_POST_SHA
-    ),
-    "guardrail_repair_failed": FailureReason.GUARDRAIL_REPAIR_FAILED,
-    "guardrail_repair_stalled": FailureReason.GUARDRAIL_REPAIR_STALLED,
-    "guardrail_repair_stalled_call_failed": (
-        FailureReason.GUARDRAIL_REPAIR_STALLED_CALL_FAILED
-    ),
-    "guardrail_repair_exhausted": FailureReason.GUARDRAIL_REPAIR_EXHAUSTED,
-    "guardrail_repair_exhausted_call_failed": (
-        FailureReason.GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED
-    ),
-    "inconsistent_repair_state": FailureReason.INCONSISTENT_REPAIR_STATE,
     # 6xx
     "rollback_failed": FailureReason.ROLLBACK_FAILED,
     # 7xx

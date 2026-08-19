@@ -474,7 +474,7 @@ class TestBomAndUtf16Decoding:
 
 
 class TestSharedLLMCaller:
-    """D9: ConflictResolver / GuardrailRepairer accept injected caller."""
+    """D9: ConflictResolver accepts an injected caller."""
 
     def test_resolver_uses_injected_caller(self, tmp_path: Path) -> None:
         """Under the LLM-as-editor model the LLM is invoked when a target
@@ -514,34 +514,6 @@ class TestSharedLLMCaller:
         # we only verify the field is None and falls through.
         r = ConflictResolver(tmp_path)
         assert r._llm_caller is None
-
-    def test_repairer_uses_injected_caller(self, tmp_path: Path) -> None:
-        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
-
-        stub = MagicMock()
-        repairer = GuardrailRepairer(tmp_path, llm_caller=stub)
-        assert repairer._llm_caller is stub
-
-    def test_repairer_lazy_caller_when_none_injected(
-        self, tmp_path: Path,
-    ) -> None:
-        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
-
-        repairer = GuardrailRepairer(tmp_path)
-        assert repairer._llm_caller is None
-
-    def test_both_components_share_same_caller(
-        self, tmp_path: Path,
-    ) -> None:
-        # The orchestrator pattern: one stub passed to both consumers.
-        from tianluo.engine.merge.guardrail_repair import GuardrailRepairer
-
-        shared = MagicMock()
-        resolver = ConflictResolver(tmp_path, llm_caller=shared)
-        repairer = GuardrailRepairer(tmp_path, llm_caller=shared)
-        assert resolver._llm_caller is shared
-        assert repairer._llm_caller is shared
-        assert resolver._llm_caller is repairer._llm_caller
 
 
 # -------------------- Integration: parse with bad hunk -----------------------

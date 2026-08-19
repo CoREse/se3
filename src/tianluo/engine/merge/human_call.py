@@ -13,7 +13,6 @@ import itertools
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import threading
 from dataclasses import asdict
@@ -22,12 +21,34 @@ from pathlib import Path
 from typing import Optional
 
 from ...commands.merge.secret_redact import redact_text
+from ...i18n import t
 from .conflict_context import ConflictContext
 from .conflict_resolver import LLMResolution
 from .runtime_sync import _safe_branch_label
 from .strategy import StrategyDecision
 
 logger = logging.getLogger(__name__)
+
+# Call-file ``type`` written when the merge was aborted before its conflict
+# context could be collected. Named separately from ``merge_conflict`` because
+# it carries no per-file resolution to write back — a responder must treat it
+# as "no active merge, resolve by hand".
+DEGRADED_CALL_TYPE = "merge_context_unavailable"
+
+# Call ``type`` values written by merge phases that already left the working
+# tree in a settled state (the merge was aborted or rolled back before the
+# call file was produced). INVARIANT: both the printer here and the responder
+# in ``commands/merge_respond.py`` must read this from one place — if they
+# disagree, the operator is told to run ``git merge --abort`` on a tree with
+# no merge in progress. The ``guardrail_*`` entries name call files written by
+# the retired spec guardrails chain; they are kept so an operator answering a
+# call file left over from before that removal is not met with an error.
+NO_ACTIVE_MERGE_CALL_TYPES = (
+    DEGRADED_CALL_TYPE,
+    "guardrail_violation",
+    "guardrail_repair_stalled",
+    "guardrail_repair_exhausted",
+)
 
 # Module-level atomic sequence counter for unique filenames within a process.
 # Together with pid and microsecond timestamp, guarantees no collision even
@@ -233,68 +254,21 @@ def _atomic_write_json(call_file: Path, call_data: dict) -> None:
                 pass
 
 
-def _read_original_for_orphan(
-    project_root: Path, rel_path: str, base_ref: str,
-) -> Optional[str]:
-    """Read the original content of a file for orphan guardrails check.
+def _scan_orphan_content_for_evidence(resolved_content: str) -> dict:
+    """Scan a rejected orphan's resolved content for suspicious evidence.
 
-    Tries ``base_ref`` first (pre-merge HEAD), then falls back to plain
-    ``HEAD``.  Returns ``None`` when the file does not exist in either ref.
-    """
-    refs_to_try = []
-    if base_ref:
-        refs_to_try.append(base_ref)
-    refs_to_try.append("HEAD")
-    for ref in refs_to_try:
-        result = subprocess.run(
-            ["git", "-C", str(project_root), "show", f"{ref}:{rel_path}"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=15,
-        )
-        if result.returncode == 0:
-            return result.stdout
-    return None
-
-
-def _is_spec_path(path: str) -> bool:
-    """Return True when ``path`` matches ``tianluo/specs/**/spec.md``.
-
-    Delegates to :func:`tianluo.engine.merge.guardrails._is_spec_path` so
-    every module shares the same canonical implementation (defect from
-    self-check round 7 — divergent regex / pathlib detectors caused
-    silent bypasses across the merge subsystem).
-    """
-    from .guardrails import _is_spec_path as _canonical_is_spec_path
-
-    return _canonical_is_spec_path(path)
-
-
-def _scan_orphan_content_for_evidence(
-    rel_path: str, resolved_content: str,
-) -> dict:
-    """Scan a rejected orphan's resolved content for guardrail-style evidence.
-
-    F3 extension: orphan files that cannot undergo a diff-based guardrail
-    check (non-spec paths or spec paths missing a base ref) still need
-    structured evidence about WHAT the LLM smuggled in, so the human
-    operator reviewing the call file can decide whether the content
-    represents a bug or a legitimate creative resolution.
+    F3 extension: an orphan file — one the LLM wrote at a path that was
+    never part of the conflict context — is always rejected, but the
+    human operator reviewing the call file still needs structured
+    evidence about WHAT was smuggled in, so they can decide whether the
+    content represents a bug or a legitimate creative resolution.
 
     Returns a dict with at minimum ``content_size``, ``content_preview``,
     plus optional flags surfacing suspicious patterns:
       - ``has_conflict_markers``: ``<<<<<<<`` / ``=======`` / ``>>>>>>>``
         leftover markers (the LLM should have resolved these).
-      - ``has_spec_keywords``: spec-style normative keywords (SHALL,
-        MUST, SHOULD, REQUIRED, REQUIREMENT, WHEN, THEN, GIVEN) found
-        in a non-spec orphan path. Smuggling spec content into a
-        non-spec file is a classic guardrail-evasion pattern.
       - ``oversize``: True when content exceeds 256 KB (1 MiB triggers
         ``critical_oversize``). Surfaces unbounded LLM responses.
-      - ``looks_like_spec_path``: True when the path contains "spec"
-        but does not match the strict ``tianluo/specs/**/spec.md`` pattern,
-        indicating possible path-name evasion.
     """
     evidence: dict = {
         "content_size": len(resolved_content) if resolved_content else 0,
@@ -312,31 +286,12 @@ def _scan_orphan_content_for_evidence(
     ):
         evidence["has_conflict_markers"] = True
 
-    # Detect spec-style normative keywords. The list is intentionally
-    # narrower than the full _WEAKEN_PATTERNS regex set to avoid
-    # false positives — we only flag clearly-prescriptive keywords.
-    import re as _re_mod
-    _SPEC_KEYWORD_PATTERN = _re_mod.compile(
-        r"\b(SHALL|MUST(?:\s+NOT)?|SHOULD(?:\s+NOT)?|REQUIRED|"
-        r"REQUIREMENT|WHEN|THEN|GIVEN)\b"
-    )
-    matches = _SPEC_KEYWORD_PATTERN.findall(resolved_content)
-    is_spec = _is_spec_path(rel_path)
-    if matches and not is_spec:
-        # Spec-style content in a non-spec orphan is suspicious.
-        evidence["has_spec_keywords"] = True
-        evidence["spec_keyword_count"] = len(matches)
-
     # Oversize content protection.
     size = len(resolved_content)
     if size > 256 * 1024:
         evidence["oversize"] = True
     if size > 1024 * 1024:
         evidence["critical_oversize"] = True
-
-    # Path-name evasion: looks like a spec path but isn't strictly one.
-    if not is_spec and "spec" in rel_path.lower():
-        evidence["looks_like_spec_path"] = True
 
     return evidence
 
@@ -405,7 +360,6 @@ class HumanCallWriter:
 
             entry: dict = {
                 "path": cf.path,
-                "is_spec": cf.is_spec,
                 "is_binary": cf.is_binary,
                 "hunks": [
                     {"start_line": h.start_line, "end_line": h.end_line}
@@ -438,114 +392,22 @@ class HumanCallWriter:
             file_entries.append(entry)
 
         # Detect orphan files: resolution files not present in context.files.
-        # These must pass guardrails before being included (fixes defect F3).
-        orphan_files = []
-        orphan_guardrails_violations = []
+        # An orphan is content the LLM invented at a path that was never part
+        # of the conflict, so there is nothing to validate it against and it
+        # is always rejected (fixes defect F3). Rejected orphans are surfaced
+        # to the human reviewer via ``rejected_orphans`` — never written back
+        # and never advertised in ``files`` as actionable — together with
+        # evidence about what the LLM tried to write.
         rejected_orphans: list[dict] = []
-        # K3: Guard against empty ours_head_sha — without a pre-merge base
-        # ref, the orphan guardrails check compares against HEAD, which
-        # after a merge commit would be the merge commit itself, making
-        # the check tautological.
-        _has_base_ref = bool(context.ours_head_sha)
         for rf in resolution_files:
             if rf.path not in context_paths:
-                # F3 (extended): every orphan must be validated, not just
-                # spec paths. A buggy or malicious LLM can smuggle
-                # arbitrary content into any orphan path that isn't in
-                # context.files. Three cases:
-                #
-                #   1. Spec file with base ref + original present:
-                #      run guardrail diff (existing behavior).
-                #   2. Spec file with no base ref or no original:
-                #      reject outright — we cannot validate.
-                #   3. Non-spec file (any state):
-                #      reject outright — non-spec orphan writes are
-                #      smuggled content, the LLM should never invent
-                #      paths outside the conflict context.
-                #
-                # Rejected orphans are reported to the human reviewer
-                # via ``rejected_orphans`` so the operator can see what
-                # the LLM tried to write.
-                is_spec = _is_spec_path(rf.path)
-                if is_spec and _has_base_ref:
-                    original = _read_original_for_orphan(
-                        self.project_root, rf.path, context.ours_head_sha,
-                    )
-                    if original is not None:
-                        from .guardrails import check_spec_diff
-                        orphan_guardrails_violations.extend(
-                            check_spec_diff(
-                                original, rf.resolved_content, file_path=rf.path,
-                            )
-                        )
-                        orphan_files.append(rf)
-                    else:
-                        # Spec file does not exist at base_ref: this is
-                        # a brand-new spec the LLM is fabricating.
-                        # Reject — guardrails cannot be applied to a
-                        # file that has no original counterpart.
-                        # F3 (extended): still scan the resolved content
-                        # for guardrail-like patterns so the operator
-                        # has evidence of what was attempted.
-                        suspicious = _scan_orphan_content_for_evidence(
-                            rf.path, rf.resolved_content,
-                        )
-                        rejected_orphans.append({
-                            "path": rf.path,
-                            "reason": (
-                                "spec orphan with no original at base ref "
-                                "— cannot run guardrail diff"
-                            ),
-                            "evidence": suspicious,
-                        })
-                else:
-                    # Non-spec orphan OR spec orphan without a usable
-                    # base ref: refuse to pass through.
-                    # F3 (extended): even though we cannot run a
-                    # diff-based guardrails check (no comparable
-                    # original), we still scan the resolved content
-                    # for guardrail-style invariant violations so the
-                    # operator gets actionable evidence about what
-                    # the LLM smuggled into a path it should not
-                    # touch (e.g., spec-style SHALL/MUST patterns
-                    # written into a non-spec file, conflict markers
-                    # left behind, or excessive content sizes).
-                    suspicious = _scan_orphan_content_for_evidence(
-                        rf.path, rf.resolved_content,
-                    )
-                    rejected_orphans.append({
-                        "path": rf.path,
-                        "reason": (
-                            "non-spec orphan path"
-                            if not is_spec
-                            else "spec orphan with no usable base ref"
-                        ),
-                        "evidence": suspicious,
-                    })
-
-        for rf in orphan_files:
-            entry = {
-                "path": rf.path,
-                "is_spec": _is_spec_path(rf.path),
-                "is_binary": False,
-                "is_orphan": True,
-                "hunks": [],
-                "llm_resolution": {
-                    "resolved_content": rf.resolved_content,
-                    "overall_confidence": rf.overall_confidence.value,
-                    "hunks": [
-                        {
-                            "start_line": h.start_line,
-                            "end_line": h.end_line,
-                            "confidence": h.confidence.value,
-                            "reasoning": h.reasoning,
-                        }
-                        for h in rf.hunks
-                    ],
-                    "flags": rf.flags,
-                },
-            }
-            file_entries.append(entry)
+                rejected_orphans.append({
+                    "path": rf.path,
+                    "reason": "orphan path not present in the conflict context",
+                    "evidence": _scan_orphan_content_for_evidence(
+                        rf.resolved_content,
+                    ),
+                })
 
         if resolution is not None:
             llm_overall_confidence = resolution.overall_confidence.value
@@ -586,17 +448,6 @@ class HumanCallWriter:
         if strategy is not None:
             call_data["strategy"] = strategy
 
-        if orphan_guardrails_violations:
-            call_data["orphan_guardrails_violations"] = [
-                {
-                    "file_path": v.file_path,
-                    "violation_type": v.violation_type,
-                    "message": v.message,
-                    "evidence": v.evidence,
-                }
-                for v in orphan_guardrails_violations
-            ]
-
         # F3 (extended): record rejected orphan writes so the operator
         # can see what the LLM tried to smuggle through.  Rejected
         # orphans are NOT added to ``files`` (file_entries) because the
@@ -610,189 +461,103 @@ class HumanCallWriter:
 
         return call_file
 
-    def write_guardrail_call(
+    def write_degraded_call(
         self,
         branch: str,
-        violations: list[dict],
-        pre_merge_sha: str,
-        call_type: str = "guardrail_violation",
-        iteration_count: Optional[int] = None,
+        message: str,
+        pre_merge_sha: str = "",
     ) -> Path:
-        """Write a human call file for a guardrail violation after merge.
+        """Write a minimal call file when full conflict context is unavailable.
+
+        The strict strategy's contract is that every conflict reaches a
+        human. When ``build_conflict_context`` itself fails there is no
+        three-way content to show, but silently aborting would drop the
+        escalation the contract promises — so a degraded call file carrying
+        the failure message stands in for the full one.
 
         Args:
-            branch: The branch that was being merged when the violation was detected.
-            violations: List of violation dicts with file_path, violation_type, message.
-            pre_merge_sha: The SHA of HEAD before the merge (for rollback).
-            call_type: Type label for the call file. Defaults to
-                ``"guardrail_violation"``; use ``"guardrail_repair_stalled"``
-                when the fast-mode repair loop made no progress.
-            iteration_count: Number of repair iterations attempted before
-                escalation. Only included when non-None.
+            branch: The branch whose merge was aborted.
+            message: Operator-facing explanation of why context is missing.
+            pre_merge_sha: HEAD before the merge, recorded for reference.
 
         Returns:
             Path to the written call file.
-
-        Raises:
-            TypeError: If a violation is not a dict.
-            ValueError: If a violation dict is missing required keys
-                (``file_path``, ``violation_type``, ``message``).
-                This is a hard failure — downstream consumers must never
-                receive ``<unknown>`` placeholders (fixes defect F4).
         """
         calls_dir = runtime_dir(self.project_root) / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         call_file = calls_dir / _generate_call_filename(
-            "merge", f"{branch}_guardrail",
+            "merge", f"{branch}_degraded",
         )
-
-        # Build type-specific instructions so the human knows whether the
-        # LLM already attempted repairs.
-        if call_type in ("guardrail_repair_stalled", "guardrail_repair_exhausted"):
-            if call_type == "guardrail_repair_stalled":
-                repair_note = (
-                    f"LLM repair was attempted {iteration_count} time(s) but could not "
-                    f"reduce the violations — the repair loop stalled. "
-                )
-            else:
-                repair_note = (
-                    f"LLM repair was attempted {iteration_count} time(s) but "
-                    f"exhausted the maximum allowed iterations without resolving "
-                    f"all violations. "
-                )
-            instructions = (
-                f"Guardrail violations detected after merging '{branch}'. "
-                f"{repair_note}"
-                f"The merge has been rolled back via `git reset --hard {pre_merge_sha}`. "
-                f"Review the violations below and choose how to proceed. "
-                f"To respond, create a file named '{call_file.name}.response' "
-                f"in the same directory with JSON: {{\"choice\": \"accept|abort|manual\", "
-                f"\"feedback\": \"optional notes\"}}. "
-                f"For 'accept': fix the spec files manually, then re-run `luo merge`. "
-                f"For 'abort': no further action needed, the rollback is complete. "
-                f"For 'manual': inspect and fix the spec files, then re-run `luo merge`."
-            )
-        else:
-            instructions = (
-                f"Guardrail violations detected after merging '{branch}'. "
-                f"The merge has been rolled back via `git reset --hard {pre_merge_sha}`. "
-                f"Review the violations below and choose how to proceed. "
-                f"To respond, create a file named '{call_file.name}.response' "
-                f"in the same directory with JSON: {{\"choice\": \"accept|abort|manual\", "
-                f"\"feedback\": \"optional notes\"}}. "
-                f"For 'accept': fix the spec files manually, then re-run `luo merge`. "
-                f"For 'abort': no further action needed, the rollback is complete. "
-                f"For 'manual': inspect and fix the spec files, then re-run `luo merge`."
-            )
-
-        # Defensive: validate required keys in violation dicts so the call
-        # file JSON does not silently carry None/missing values.
-        # Missing required keys now raise instead of substituting '<unknown>'
-        # (fixes defect F4).
-        validated_violations: list[dict] = []
-        for v in violations:
-            if not isinstance(v, dict):
-                raise TypeError(
-                    f"write_guardrail_call: expected dict violation, got "
-                    f"{type(v).__name__}: {v!r}"
-                )
-            missing_keys = [
-                k for k in ("file_path", "violation_type", "message") if k not in v
-            ]
-            if missing_keys:
-                raise ValueError(
-                    f"write_guardrail_call: violation dict missing required "
-                    f"keys {missing_keys}: {v!r}"
-                )
-            validated_violations.append({
-                "file_path": v["file_path"],
-                "violation_type": v["violation_type"],
-                "message": v["message"],
-                **{k: v[k] for k in v if k not in ("file_path", "violation_type", "message")},
-            })
-
         call_data: dict = {
-            "type": call_type,
+            "type": DEGRADED_CALL_TYPE,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch,
             "pre_merge_sha": pre_merge_sha,
-            "violations": validated_violations,
+            "message": message,
             "options": {
-                "accept": "Accept the merge despite guardrail violations — run `git reset --hard` rollback has already been done; manually fix spec and re-merge",
-                "abort": "Keep the rollback — the merge has been aborted and working tree restored to pre-merge state",
-                "manual": "Resolve manually — inspect the violations, fix the spec files, then re-run the merge",
+                "accept": "Acknowledge — inspect the branch and merge manually",
+                "abort": "Nothing further to abort — the merge was already aborted",
+                "manual": "Resolve manually — inspect the branch, then re-run `luo merge`",
             },
-            "instructions": instructions,
+            "instructions": (
+                f"The merge of '{branch}' was aborted before conflict context "
+                f"could be collected: {message} "
+                f"To respond, create a file named '{call_file.name}.response' "
+                f"in the same directory with JSON: {{\"choice\": "
+                f"\"accept|abort|manual\", \"feedback\": \"optional notes\"}}."
+            ),
         }
-        if iteration_count is not None:
-            call_data["iteration_count"] = iteration_count
-
         _atomic_write_json(call_file, call_data)
-        logger.info("Created guardrail human call file: %s", call_file)
-
+        logger.info("Created degraded merge human call file: %s", call_file)
         return call_file
 
     def print_instructions(self, call_file: Path) -> None:
-        """Print user-facing instructions for responding to the call."""
+        """Print user-facing instructions for responding to the call.
+
+        WHY the call file is re-read here: the printed next steps must match
+        its ``type``. A degraded call is written only after the merge was
+        already aborted, so the conflict guidance ("edit the markers, then
+        ``git merge --abort``") would send the operator at a tree with no
+        merge in progress, where that command fails outright.
+        """
         try:
             call_data = json.loads(call_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            # Display-path only: a missing or malformed call file should
-            # degrade gracefully to the empty-context branch below rather
-            # than abort instruction printing.  Narrow exception list per
-            # the "no silent except Exception" gate — anything else
-            # (KeyboardInterrupt, MemoryError, programmer bugs) propagates.
+        except (OSError, ValueError):
+            # Display path only: a missing or malformed call file degrades to
+            # the conflict variant rather than aborting instruction printing.
+            # ``json.JSONDecodeError`` subclasses ``ValueError``; anything
+            # broader (KeyboardInterrupt, programmer bugs) still propagates.
+            call_data = {}
+        if not isinstance(call_data, dict):
             call_data = {}
         call_type = call_data.get("type", "merge_conflict")
+        settled = call_type in NO_ACTIVE_MERGE_CALL_TYPES
 
         print(f"\n{'=' * 60}")
-        if call_type in ("guardrail_violation", "guardrail_repair_stalled", "guardrail_repair_exhausted"):
-            print("  Human review required for guardrail violation")
+        if settled:
+            print(f"  {t('merge_call.title.settled')}")
         else:
-            print("  Human review required for merge conflict")
+            print(f"  {t('merge_call.title.conflict')}")
         print(f"{'=' * 60}")
-        print(f"\nCall file: {call_file}")
-        print(f"\nTo respond, create: {call_file}.response")
-        print("\nWith JSON content:")
+        print(f"\n{t('merge_call.call_file', call_file=call_file)}")
+        response_file = f"{call_file}.response"
+        print(f"\n{t('merge_call.respond_create', response_file=response_file)}")
+        print(f"\n{t('merge_call.json_header')}")
+        # The response payload itself is data, not prose: it is typed verbatim
+        # into the .response file, so it stays out of the language catalogs.
         print('  {"choice": "accept|abort|manual", "feedback": "notes"}')
-        if call_type in ("guardrail_violation", "guardrail_repair_stalled", "guardrail_repair_exhausted"):
-            print("\nNext steps:")
-            print("  - Review the guardrail violations below")
-            print("  - Fix the spec files manually")
-            print("  - Re-run: luo merge <branch>")
-            violations = call_data.get("violations", [])
-            for v in violations[:2]:
-                print(f"\n  [{v.get('violation_type', 'UNKNOWN')}] {v.get('file_path', '')}")
-                msg = v.get("message", "")
-                if msg:
-                    print(f"    Message: {msg}")
-                evidence = v.get("evidence")
-                if evidence:
-                    if "strong_line" in evidence and "weak_line" in evidence:
-                        print(f"    Strong:  {evidence['strong_line']}")
-                        print(f"    Weak:    {evidence['weak_line']}")
-                        print(f"    Score:   {evidence.get('pairing_score', 'N/A')}")
-                        if "all_pairings" in evidence:
-                            ap = evidence["all_pairings"]
-                            if len(ap) > 1:
-                                print(f"    Additional pairings ({len(ap) - 1}):")
-                                for p in ap[1:]:
-                                    print(f"      - '{p['strong_line']}' -> '{p['weak_line']}'")
-                    elif "deleted_line" in evidence:
-                        print(f"    Deleted: {evidence['deleted_line']}")
-                    if "when_clauses" in evidence:
-                        clauses = evidence["when_clauses"]
-                        print(f"    Deleted scenarios ({len(clauses)}):")
-                        for wc in clauses[:2]:
-                            print(f"      - {wc}")
-                        if len(clauses) > 2:
-                            print(f"      ... and {len(clauses) - 2} more")
-            if len(violations) > 2:
-                print(f"\n  ... and {len(violations) - 2} more violation(s)")
+        if settled:
+            message = call_data.get("message")
+            if message:
+                print(f"\n{t('merge_call.why', message=message)}")
+            print(f"\n{t('merge_call.next_steps')}")
+            print(f"  - {t('merge_call.settled.nothing_to_do')}")
+            print(f"  - {t('merge_call.settled.inspect_branch')}")
+            print(f"  - {t('merge_call.settled.rerun')}")
         else:
-            print("\nThen resolve manually:")
-            print("  - Edit files to resolve conflicts")
-            print("  - Run: git add . && git commit  (to complete)")
-            print("  - Or run: git merge --abort      (to abort)")
+            print(f"\n{t('merge_call.conflict.resolve_manually')}")
+            print(f"  - {t('merge_call.conflict.edit_files')}")
+            print(f"  - {t('merge_call.conflict.commit')}")
+            print(f"  - {t('merge_call.conflict.abort')}")
         print(f"{'=' * 60}\n")

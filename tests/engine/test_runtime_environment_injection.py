@@ -38,7 +38,6 @@ BLACKLIST_COMMANDS = [
     "luo issue reset",
     "luo salvage",
     "luo merge",
-    "luo sync",
     "luo init",
 ]
 

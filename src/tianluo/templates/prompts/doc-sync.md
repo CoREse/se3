@@ -1,6 +1,6 @@
 Synchronize this project's published user-facing documentation with the
-current state of its code — the CLI / public interface, the specs, the
-project structure, and the version display.
+current state of its code — the CLI / public interface, the documented
+capabilities, the project structure, and the version display.
 
 This is a documentation-consistency pass. Do NOT change behavior, add
 features, or refactor source code — only bring the published docs back
@@ -39,8 +39,11 @@ localized siblings) into agreement with:
 - **CLI / public interface** — every command, subcommand, flag, and
   public entry point the project currently exposes. Remove docs for
   anything removed; add anything missing; correct any drifted behavior.
-- **Specs** — the README's description of capabilities must not
-  contradict the documented behavior under `tianluo/specs/`.
+- **Capabilities** — the README's description of what the project can do
+  must not contradict how the code actually behaves. The authorities are
+  the code itself, plus the knowledge assets that describe it: the project
+  charter (`tianluo/charter.md`) and the code-index
+  (`luo code-index` / `luo code-index show <path>`).
 - **Directory / project structure** — the package layout and any
   runtime-directory tree shown in the docs must match disk.
 - **Version display** — any version badge or version reference must
@@ -77,8 +80,8 @@ form a parallel set and MUST stay structurally aligned:
 - When a section is added, removed, or reworded in one language, mirror
   the change in every other variant — never let one drift ahead.
 - A translated variant is a faithful translation, not a divergent
-  document; keep terminology consistent with the specs (which are
-  authored in English).
+  document; keep terminology consistent with the identifiers used in the
+  code and with the charter / code-index wording.
 
 Follow the standard localized-naming convention: a language variant
 carries a BCP 47 short code as a dotted suffix on the base name —
@@ -93,8 +96,8 @@ do.
 ## Constraints (scope discipline)
 
 - Edit **only documentation** — the README(s), the docs tree (or its
-  equivalent), and their localized variants. Do NOT edit source code,
-  tests, or specs.
+  equivalent), and their localized variants. Do NOT edit source code or
+  tests.
 - Do not bump the version — the engine's `version_analyze` / `commit`
   steps own the version files. Only make the docs *display* the version
   that already exists in the project's version file.

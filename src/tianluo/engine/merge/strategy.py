@@ -1,7 +1,7 @@
 """StrategyDecider — Three-strategy decision matrix for conflict resolution.
 
 Implements safe/strict/fast decision logic based on LLM resolution
-confidence, spec guardrail flags, and file types.
+confidence and the flags the resolver attaches to each file.
 """
 
 from __future__ import annotations
@@ -52,72 +52,56 @@ class StrategyDecider:
     """Decide whether to accept, reject, or escalate to human review.
 
     Three strategies:
-    - safe:    high confidence + no spec_guardrail_concern → ACCEPT,
-               otherwise HUMAN_CALL (the legacy ``default`` tier).
+    - safe:    no requires_human_review flag → ACCEPT, otherwise
+               HUMAN_CALL (the legacy ``default`` tier).
     - strict:  short-circuited by orchestrator (_handle_conflict skips LLM
                and goes directly to human call). Retained as fallback.
     - fast:    ACCEPT or REJECT only — never HUMAN_CALL.
-               Regular files → aggressive accept (low confidence ok).
-               Spec files → REJECT on requires_human_review or low confidence.
-               spec_guardrail_concern is deferred to post-merge guardrails.
+               Aggressive accept (low confidence ok); REJECT only on an
+               explicit global requires_human_review flag.
     """
 
     def decide(
         self,
         resolution: LLMResolution,
-        has_spec_files: bool,
         strategy: MergeStrategy = MergeStrategy.SAFE,
     ) -> StrategyDecision:
         """Evaluate the LLM resolution and return a decision.
 
         Args:
             resolution: The LLM's structured resolution output.
-            has_spec_files: Whether the merge involves spec files.
             strategy: The conflict resolution strategy.
 
         Returns:
             StrategyDecision with action and reason.
         """
         if strategy == MergeStrategy.SAFE:
-            return self._decide_safe(resolution, has_spec_files)
+            return self._decide_safe(resolution)
         elif strategy == MergeStrategy.STRICT:
-            return self._decide_strict(resolution, has_spec_files)
+            return self._decide_strict(resolution)
         elif strategy == MergeStrategy.FAST:
             return self._decide_fast(resolution)
         else:
             logger.warning("Unknown strategy %s, falling back to safe", strategy)
-            return self._decide_safe(resolution, has_spec_files)
+            return self._decide_safe(resolution)
 
     def _decide_safe(
         self,
         resolution: LLMResolution,
-        has_spec_files: bool,
     ) -> StrategyDecision:
-        """Safe strategy: gate on explicit human-review / spec flags only.
+        """Safe strategy: gate on the explicit human-review flag only.
 
         Under the LLM-as-editor model (G3), success is observable on
         disk — ``ConflictResolver.resolve`` wraps :meth:`resolve_batch`
-        and synthesises a resolution whose ``requires_human_review`` /
-        ``spec_guardrail_concern`` flags reflect whether the LLM cleared
-        every conflict marker.  The decider therefore no longer gates
-        on the (now informational-only) ``overall_confidence``
-        rating — that would re-introduce the legacy JSON-decision
-        behaviour the new model deliberately replaced.  A
-        ``MEDIUM``-confidence resolution that cleared every marker is
-        accepted; only flag-bearing resolutions escalate to a human
-        MCP call.
-
-        Note:
-            ``has_spec_files`` is kept in the signature for API
-            consistency with ``decide()`` but is intentionally unused.
+        and synthesises a resolution whose ``requires_human_review``
+        flag reflects whether the LLM cleared every conflict marker.
+        The decider therefore no longer gates on the (now
+        informational-only) ``overall_confidence`` rating — that would
+        re-introduce the legacy JSON-decision behaviour the new model
+        deliberately replaced.  A ``MEDIUM``-confidence resolution that
+        cleared every marker is accepted; only flag-bearing resolutions
+        escalate to a human MCP call.
         """
-        # Check global flags first
-        if resolution.flags.get("spec_guardrail_concern", False):
-            return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason="spec_guardrail_concern flag set (safe strategy)",
-            )
-
         if resolution.flags.get("requires_human_review", False):
             return StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
@@ -126,11 +110,6 @@ class StrategyDecider:
 
         # Check per-file flags only; confidence rating is informational.
         for f in resolution.files:
-            if f.flags.get("spec_guardrail_concern", False):
-                return StrategyDecision(
-                    action=DecisionAction.HUMAN_CALL,
-                    reason=f"spec_guardrail_concern on file {f.path} (safe strategy)",
-                )
             if f.flags.get("requires_human_review", False):
                 return StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
@@ -140,16 +119,12 @@ class StrategyDecider:
         # All checks passed
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason=(
-                "No human-review / spec_guardrail_concern flags set "
-                "(safe strategy)"
-            ),
+            reason="No human-review flags set (safe strategy)",
         )
 
     def _decide_strict(
         self,
         resolution: LLMResolution,
-        has_spec_files: bool,
     ) -> StrategyDecision:
         """Strict strategy: placeholder — orchestrator short-circuits this path.
 
@@ -157,20 +132,8 @@ class StrategyDecider:
         ``_handle_conflict`` by skipping LLM resolution and writing a human
         call directly. This method is retained as a fallback for unexpected
         code paths (e.g., if the orchestrator's short-circuit is bypassed).
-
-        Note:
-            ``has_spec_files`` is kept in the signature for API consistency
-            with ``decide()`` but is intentionally unused; strict strategy
-            gates on per-hunk confidence, not on whether spec files are
-            present in the merge.
         """
         # Check global flags
-        if resolution.flags.get("spec_guardrail_concern", False):
-            return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason="spec_guardrail_concern flag set (strict strategy)",
-            )
-
         if resolution.flags.get("requires_human_review", False):
             return StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
@@ -179,11 +142,6 @@ class StrategyDecider:
 
         # Check every hunk in every file must be high confidence
         for f in resolution.files:
-            if f.flags.get("spec_guardrail_concern", False):
-                return StrategyDecision(
-                    action=DecisionAction.HUMAN_CALL,
-                    reason=f"spec_guardrail_concern on file {f.path} (strict strategy)",
-                )
             if f.flags.get("requires_human_review", False):
                 return StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
@@ -210,21 +168,20 @@ class StrategyDecider:
 
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason="All hunks high confidence, no guardrail concerns (strict strategy)",
+            reason="All hunks high confidence (strict strategy)",
         )
 
     def _decide_fast(
         self,
         resolution: LLMResolution,
     ) -> StrategyDecision:
-        """Fast strategy: aggressive accept for regular files; spec quality gates → REJECT.
+        """Fast strategy: aggressive accept; only a global human-review flag rejects.
 
         Fast mode NEVER returns HUMAN_CALL — only ACCEPT or REJECT.
-        - Regular (non-spec) files: always accepted regardless of confidence.
-        - Spec files: REJECTed if the LLM explicitly asks for human review or
-          reports low confidence.  ``spec_guardrail_concern`` is ignored here
-          because fast mode delegates spec violations to post-merge guardrails
-          (and, if needed, ``GuardrailRepairer``).
+        - Files are always accepted regardless of confidence.
+        - A global ``requires_human_review`` flag REJECTs the whole batch;
+          a per-file flag is accepted but logged, since fast mode's contract
+          is to never park a merge waiting on a human.
         - Any REJECT is translated by the orchestrator into a clean abort with
           no human call file written.
         """
@@ -235,47 +192,18 @@ class StrategyDecider:
                 reason="requires_human_review flag set (fast strategy aborts, no human call)",
             )
 
-        # Global spec_guardrail_concern → log and defer (post-merge guardrails handle it)
-        if resolution.flags.get("spec_guardrail_concern", False):
-            logger.info(
-                "Fast strategy: deferring global spec_guardrail_concern "
-                "to post-merge guardrails"
-            )
-
-        for f in resolution.files:
-            if f.is_spec:
-                if f.flags.get("spec_guardrail_concern", False):
-                    logger.info(
-                        "Fast strategy: deferring spec_guardrail_concern on "
-                        "spec file %s to post-merge guardrails",
-                        f.path,
-                    )
-                if f.flags.get("requires_human_review", False):
-                    return StrategyDecision(
-                        action=DecisionAction.REJECT,
-                        reason=f"requires_human_review on spec file {f.path} (fast strategy aborts, no human call)",
-                    )
-                # Spec files still need high confidence even in fast mode
-                if f.overall_confidence != Confidence.HIGH:
-                    return StrategyDecision(
-                        action=DecisionAction.REJECT,
-                        reason=f"overall confidence on spec file {f.path} is {f.overall_confidence.value}, not high (fast strategy aborts, no human call)",
-                    )
-        # Collect any pathological flags on non-spec files for visibility
+        # Collect any pathological per-file flags for visibility
         dropped_flags: list[str] = []
         for f in resolution.files:
-            if not f.is_spec:
-                if f.flags.get("spec_guardrail_concern", False):
-                    dropped_flags.append(f"spec_guardrail_concern on {f.path}")
-                if f.flags.get("requires_human_review", False):
-                    dropped_flags.append(f"requires_human_review on {f.path}")
-                    logger.warning(
-                        "Fast strategy accepted non-spec file %s despite per-file "
-                        "requires_human_review flag from LLM",
-                        f.path,
-                    )
+            if f.flags.get("requires_human_review", False):
+                dropped_flags.append(f"requires_human_review on {f.path}")
+                logger.warning(
+                    "Fast strategy accepted file %s despite per-file "
+                    "requires_human_review flag from LLM",
+                    f.path,
+                )
 
-        reason = "Fast strategy: accepted (spec_guardrail_concern deferred to post-merge guardrails)"
+        reason = "Fast strategy: accepted"
         if dropped_flags:
             reason += "; WARNING: " + ", ".join(dropped_flags)
 
@@ -367,7 +295,6 @@ class StrategyDecider:
             ours_log_oneline=list(context.ours_log_oneline),
             theirs_log_oneline=list(context.theirs_log_oneline),
             files=list(conflict_files),
-            has_spec_files=context.has_spec_files,
         )
         # Call ``resolve()`` with the positional signature that legacy
         # test mocks expect — ``(self, ctx, strategy)``.  The
@@ -440,9 +367,8 @@ class StrategyDecider:
         Never invokes a human MCP call.  When the LLM cannot clear all
         conflict markers within ``max_iterations``, the merge is
         rejected and the orchestrator aborts with a failure report.
-        Additional flag-based gates from :meth:`_decide_fast` (e.g.
-        spec-file low confidence) are also applied after the marker
-        check.
+        Additional flag-based gates from :meth:`_decide_fast` are also
+        applied after the marker check.
         """
         outcome = self._run_resolver(
             resolver, conflict_files, context, max_iterations,
@@ -458,11 +384,10 @@ class StrategyDecider:
                 outcome=outcome,
                 unresolved_files=list(outcome.unresolved),
             )
-        # Markers cleared — defer to the legacy flag-based gates for
-        # fast strategy (spec-file low confidence / explicit
-        # requires_human_review).  These still apply because the
-        # LLM-as-editor model trusts the LLM's signals about file
-        # quality on top of the on-disk marker scan.
+        # Markers cleared — defer to the legacy flag-based gate for
+        # fast strategy (explicit requires_human_review).  It still
+        # applies because the LLM-as-editor model trusts the LLM's
+        # signals about file quality on top of the on-disk marker scan.
         resolution = getattr(outcome, "_resolution", None)
         if resolution is not None:
             flag_decision = self._decide_fast(resolution)
@@ -490,8 +415,8 @@ class StrategyDecider:
         Mirrors the legacy ``default`` semantics but without ever
         delegating to take-theirs — humans, not the resolver, decide
         what to do when the LLM cannot converge.  Flag-based gates from
-        :meth:`_decide_safe` (explicit ``requires_human_review`` /
-        ``spec_guardrail_concern``) still apply after the marker check.
+        :meth:`_decide_safe` (explicit ``requires_human_review``) still
+        apply after the marker check.
         """
         outcome = self._run_resolver(
             resolver, conflict_files, context, max_iterations,
@@ -513,9 +438,7 @@ class StrategyDecider:
         # explicitly request human review.
         resolution = getattr(outcome, "_resolution", None)
         if resolution is not None:
-            flag_decision = self._decide_safe(
-                resolution, context.has_spec_files,
-            )
+            flag_decision = self._decide_safe(resolution)
             if flag_decision.action != DecisionAction.ACCEPT:
                 flag_decision.outcome = outcome
                 return flag_decision

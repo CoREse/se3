@@ -15,12 +15,6 @@ from .conflict_resolver import (
     LLMResolution,
     MergeStrategy,
 )
-from .guardrails import (
-    GuardrailReport,
-    GuardrailViolation,
-    MergeGuardrailsCheck,
-    check_spec_diff,
-)
 from .human_call import HumanCallWriter
 from .issue_renumber import (
     advance_next_id_to_max,
@@ -71,7 +65,6 @@ __all__ = [
     "AggregateResult",
     "build",
     "BypassedCollision",
-    "check_spec_diff",
     "CleanupManager",
     "CleanupReport",
     "Confidence",
@@ -86,8 +79,6 @@ __all__ = [
     "gc_worktree_runs",
     "WorktreeGCReport",
     "format_renumber_trace",
-    "GuardrailReport",
-    "GuardrailViolation",
     "historical_versions",
     "HumanCallWriter",
     "HunkResolution",
@@ -99,7 +90,6 @@ __all__ = [
     "LLMResolution",
     "mask_issue_references",
     "max_bump",
-    "MergeGuardrailsCheck",
     "MergeOrchestrator",
     "MergeReport",
     "MergeResult",

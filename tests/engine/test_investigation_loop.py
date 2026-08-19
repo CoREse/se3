@@ -609,7 +609,6 @@ class TestRootCausePromptSections:
             scope="S",
             project_summary="PS",
             revision_section="",
-            depth="medium",
             root_cause_section=section,
         )
 
@@ -631,7 +630,6 @@ class TestRootCausePromptSections:
             scope="S",
             project_summary="PS",
             revision_section="",
-            depth="medium",
         )
         assert _build_prompt(**kwargs, root_cause_section="") == _build_prompt(**kwargs)
         assert "Root-Cause" not in _build_prompt(**kwargs)
@@ -647,16 +645,16 @@ class TestRootCausePromptSections:
         section = render_root_cause_section(_report())
         rendered = [
             IMPLEMENT_PROMPT.format(
-                task_description="TD", task_type="bugfix", design_section="",
-                task_groups="TG", spec_summary="SS", root_cause_section=section,
+                task_description="TD", task_type="bugfix",
+                task_groups="TG", root_cause_section=section,
             ),
             IMPLEMENT_GROUP_PROMPT.format(
-                task_description="TD", task_type="bugfix", design_section="",
-                current_group="CG", previous_results="PR", spec_summary="SS",
+                task_description="TD", task_type="bugfix",
+                current_group="CG", previous_results="PR",
                 root_cause_section=section,
             ),
             FIX_PROMPT.format(
-                task_description="TD", spec_summary="SS", design_section="",
+                task_description="TD",
                 fix_instructions="FI", fix_context="FC", fix_history="FH",
                 fix_iteration=1, root_cause_section=section,
             ),
@@ -672,11 +670,11 @@ class TestRootCausePromptSections:
         from tianluo.engine.steps.implement import IMPLEMENT_PROMPT
 
         prompt = IMPLEMENT_PROMPT.format(
-            task_description="TD", task_type="bugfix", design_section="## D",
-            task_groups="TG", spec_summary="SS", root_cause_section="",
+            task_description="TD", task_type="bugfix",
+            task_groups="TG", root_cause_section="",
         )
         assert "Root-Cause" not in prompt
-        assert "## Task Type\nbugfix\n\n## D" in prompt
+        assert "## Task Type\nbugfix\n\n\n## Task Groups" in prompt
 
     def test_exhausted_budget_marks_the_section_low_confidence(self):
         from tianluo.engine.steps.plan import render_root_cause_section
@@ -709,15 +707,15 @@ class TestRootCausePromptSections:
 
         cases = [
             (IMPLEMENT_PROMPT, dict(
-                task_description="TD", task_type="bugfix", design_section="",
-                task_groups="TG", spec_summary="SS",
+                task_description="TD", task_type="bugfix",
+                task_groups="TG",
             )),
             (IMPLEMENT_GROUP_PROMPT, dict(
-                task_description="TD", task_type="bugfix", design_section="",
-                current_group="CG", previous_results="PR", spec_summary="SS",
+                task_description="TD", task_type="bugfix",
+                current_group="CG", previous_results="PR",
             )),
             (FIX_PROMPT, dict(
-                task_description="TD", spec_summary="SS", design_section="",
+                task_description="TD",
                 fix_instructions="FI", fix_context="FC", fix_history="FH",
                 fix_iteration=1,
             )),
