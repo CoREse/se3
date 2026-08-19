@@ -260,9 +260,11 @@ def test_gap_in_any_one_file_refuses_the_whole_frame():
         ([2, 3], 4, [0, 1, 2, 3]),
         # Overlap: a daemon re-sending a frame whose previous send failed (its
         # cursor only advances on a successful send) re-delivers line 1. Not a
-        # gap — the frontend's dedupe collapses it; refusing it would turn every
-        # retry into a full pull.
-        ([1, 2], 3, [0, 1, 1, 2]),
+        # gap — refusing it would turn every retry into a full pull. The append
+        # branch folds the re-delivered line onto the record the bundle already
+        # holds for that ``(step_id, ordinal)``, so the overlap costs nothing
+        # and only the genuinely new line 2 lands.
+        ([1, 2], 3, [0, 1, 2]),
     ],
 )
 def test_contiguous_and_overlapping_appends_apply(records, cursor, expected):

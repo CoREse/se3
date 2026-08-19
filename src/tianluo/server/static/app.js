@@ -8679,36 +8679,42 @@ function reconcileAppendRecords(existing, incoming) {
   };
 }
 
-// Defensive guard against a merged history snapshot that carries the SAME
-// discovery step's records twice. The worktree-mode read path can surface a
-// flow whose history is split across the main-repo root (where discovery ran
-// before the worktree fork) and the worktree root (the later steps plus its own
-// copy of discovery). The daemon merges the two roots and de-dups at the
-// physical step-file layer (see daemon/history.py), so in the normal case no
-// duplicate ever reaches the client. This is a belt-and-suspenders frontend
-// backstop: if a duplicate discovery record nonetheless arrives in a `mode:
-// full` snapshot — which the `mergeHistoryResponse` full path adopts wholesale
-// and which `dedupeAppendRecords` (append-only) does NOT cover — it would
-// render as a doubled discovery bubble. This pass drops a discovery record
-// whose `recordKey` was already seen EARLIER in the same snapshot ONLY when the
-// earlier record carried byte-identical content — a genuine clone. It keeps the
-// first occurrence and preserves order. It is scoped strictly to discovery
-// records: every non-discovery record passes through untouched (so the later
-// analyze/plan/implement steps and the recordKey identity / incremental cursor
-// of the rest of the conversation are unchanged), and when nothing is dropped
-// the original array reference is returned so the common path is a no-op.
+// Defensive guard against a `mode: full` history snapshot that carries the SAME
+// record twice. The `mergeHistoryResponse` full path adopts a snapshot
+// wholesale, and `dedupeAppendRecords` covers the append path only — so a clone
+// that reaches the client in a full snapshot renders as a doubled bubble with
+// nothing else to catch it.
+//
+// Two known producers. The worktree-mode read path can surface a flow whose
+// history is split across the main-repo root (where discovery ran before the
+// worktree fork) and the worktree root (the later steps plus its own copy of
+// discovery); the daemon merges the two roots and de-dups at the physical
+// step-file layer (see daemon/history.py). And a server whose history cache
+// accumulated clones from a re-delivered append would serve them in every full
+// snapshot it hands out — the defect where a live worktree flow's plan and
+// confirm records each rendered four times. Both are fixed at their source (the
+// daemon reader, and the server's `(step_id, ordinal)` append reconcile in
+// server/state.py); this pass is the belt-and-suspenders last line for a full
+// snapshot from ANY source — an older server, a cached replay — so it is
+// deliberately NOT scoped to discovery.
+//
+// It drops a record whose `recordKey` was already seen EARLIER in the same
+// snapshot ONLY when the earlier record carried byte-identical content — a
+// genuine clone. It keeps the first occurrence and preserves order, and when
+// nothing is dropped the original array reference is returned so the common
+// path is a no-op.
 //
 // WHY the content compare (not a bare `recordKey` de-dup): a worktree flow's
 // discovery is split across physical .jsonl files (the worktree primary plus a
 // ``.from-<branch>`` merge-back sidecar). G1's daemon reader gives each file a
 // distinct step_id so `stepId#ordinal` stays globally unique — but this guard
-// must not depend on that holding. If two discovery records ever collide on
-// `recordKey` yet carry DIFFERENT content they are NOT clones (the pathological
-// ordinal reuse that erased the 2nd+ discovery round pre-G1); dropping the
-// later one would silently lose a legitimate round. Comparing content first
-// keeps a true clone collapsed to one bubble while never deleting a distinct
-// record that merely reuses a physical ordinal.
-function dedupeSnapshotDiscovery(records) {
+// must not depend on that holding. If two records ever collide on `recordKey`
+// yet carry DIFFERENT content they are NOT clones (the pathological ordinal
+// reuse that erased the 2nd+ discovery round pre-G1); dropping the later one
+// would silently lose a legitimate round. Comparing content first keeps a true
+// clone collapsed to one bubble while never deleting a distinct record that
+// merely reuses a physical ordinal.
+function dedupeSnapshotClones(records) {
   if (!Array.isArray(records) || records.length < 2) return records;
   // recordKey -> the set of content signatures already kept for that key.
   const seen = new Map();
@@ -8717,9 +8723,9 @@ function dedupeSnapshotDiscovery(records) {
   for (const rec of records) {
     let norm = null;
     try { norm = normalizeRecord(rec); } catch (_) { norm = null; }
-    const isDiscovery =
-      !!norm && String(norm.stepType || "").toLowerCase() === "discovery";
-    if (isDiscovery) {
+    // A record we cannot normalize has no comparable signature, so it can never
+    // be PROVEN a clone — pass it through untouched rather than guess.
+    if (norm) {
       const key = recordKey(rec);
       const sig = legacyKeyFromNorm(norm);
       const sigs = seen.get(key);
@@ -9232,11 +9238,12 @@ function mergeHistoryDelivery(response, existing, requestBaseline) {
   // matching the prior behaviour.
   const preserved = liveRewrites.concat(liveAppends, pendingEchoes);
   return {
-    // Collapse any duplicate discovery record the merged worktree+main snapshot
-    // may carry (defensive backstop — the daemon already de-dups at the file
-    // layer) before folding in preserved live appends, so a split-root flow
-    // never shows a doubled discovery bubble on the full-replace path.
-    records: mergeSnapshotWithLiveAppends(dedupeSnapshotDiscovery(records), preserved),
+    // Collapse any byte-identical clone the snapshot may carry (defensive
+    // backstop — the daemon de-dups the split worktree+main roots at the file
+    // layer, and the server's append reconcile keeps its bundle clone-free)
+    // before folding in preserved live appends, so no step ever shows a doubled
+    // bubble on the full-replace path.
+    records: mergeSnapshotWithLiveAppends(dedupeSnapshotClones(records), preserved),
     progress,
     signature,
     cursor,
@@ -17346,7 +17353,7 @@ if (typeof module !== "undefined" && module.exports) {
     reconcileAppendRecords,
     mergeSnapshotWithLiveAppends,
     dedupeAppendRecords,
-    dedupeSnapshotDiscovery,
+    dedupeSnapshotClones,
     recordSortTs,
     stableMergeByTimestamp,
     historySnapshotUrl,

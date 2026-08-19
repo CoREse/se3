@@ -1506,7 +1506,28 @@ class ServerState:
                     )
                     return HistoryWriteOutcome(resolves_pull=False)
                 self._ensure_generation(existing)
-                existing["records"].extend(new_records)
+                # INVARIANT: a record the bundle already holds may never be
+                # stored a SECOND time. Overlap re-delivery is a designed-for
+                # input on this path — ``_detect_cursor_gap`` deliberately does
+                # not treat it as a gap, so a daemon that re-reads and re-sends
+                # a frame whose previous send failed, and a retried FAILED step
+                # that rewrites its jsonl in place, both land here re-carrying
+                # lines the bundle already has. The extreme shape is the
+                # running-worktree self-heal: every throttle window the daemon
+                # drains the WHOLE flow as a byte-capped ``full`` HEAD (refused
+                # as shrinking) plus ``append`` TAILS that overlap the water
+                # mark, so a bare ``extend`` grew the bundle by the flow's
+                # entire length per window — the chat rendering each record 4×
+                # and climbing. ``(step_id, ordinal)`` is the record's physical
+                # jsonl line identity, so folding on it is what makes a repeated
+                # drain a no-op: same line + same content is dropped, same line
+                # with NEW content replaces in place (the retry case) so the
+                # record count and order — hence ``bundle_signature`` and every
+                # outstanding progress-token offset — stay put and an in-sync
+                # client keeps getting ``not_modified``.
+                applied, added, updated, dropped = self._reconcile_append_into(
+                    existing, new_records
+                )
                 existing["mode"] = mode
                 if cursor:
                     existing["cursor"] = dict(cursor)
@@ -1518,13 +1539,19 @@ class ServerState:
                     # with the same table the stored daemon payload used.
                     existing["usage_catalog"] = dict(usage_catalog)
                 existing["updated_at"] = time.time()
-                if self._records_carry_usage(new_records):
+                if self._records_carry_usage(applied):
                     # The daemon's usage payload rides full snapshots only, so
                     # after a usage-bearing append the stored summary would
                     # under-count the extended bundle. Refresh it from the
                     # incremental source cache so every later REST/WS read sees
                     # a summary derived from ALL cached records.
-                    self._refresh_bundle_usage(existing, new_records)
+                    #
+                    # WHY the ACCEPTED set rather than the raw frame: the usage
+                    # cache extends per append, so feeding it a re-delivered
+                    # record would add that call's tokens/cost a second time —
+                    # the same unbounded growth the record reconcile above
+                    # closes, only in the usage summary instead of the chat.
+                    self._refresh_bundle_usage(existing, applied)
                 if flow_id in self._history_recovery_inflight:
                     # INFO-visible backfill CONVERGENCE signal: an append landed
                     # while a self-heal recovery is in flight for this flow, so
@@ -1537,16 +1564,18 @@ class ServerState:
                     # fires for the recovery window, not for every live append.
                     logger.info(
                         "hist-diag append_history BACKFILL-APPLIED flow=%s "
-                        "records=%d total=%d (recovery backfill append accepted "
-                        "— bundle extended from the server water mark; self-heal "
-                        "converging)",
-                        flow_id, len(new_records), len(existing["records"]),
+                        "records=%d added=%d updated=%d dropped=%d total=%d "
+                        "(recovery backfill append accepted — bundle extended "
+                        "from the server water mark; self-heal converging)",
+                        flow_id, len(new_records), added, updated, dropped,
+                        len(existing["records"]),
                     )
                 else:
                     logger.debug(
                         "hist-diag append_history APPLIED-append flow=%s records=%d "
-                        "total=%d",
-                        flow_id, len(new_records), len(existing["records"]),
+                        "added=%d updated=%d dropped=%d total=%d",
+                        flow_id, len(new_records), added, updated, dropped,
+                        len(existing["records"]),
                     )
                 return HistoryWriteOutcome(resolves_pull=True)
             else:
@@ -1948,13 +1977,20 @@ class ServerState:
         pull rather than a baked-in hole.
 
         Overlap (a window starting at or before *n*, and the ``m <= n`` rollback)
-        is deliberately NOT a gap. It is the normal shape of two legitimate flows:
-        a daemon that re-reads and re-sends a frame whose previous send failed
-        (its cursor only advances on a successful send), and a retried FAILED step
-        that rewrites its jsonl in place. Both re-deliver records the bundle
-        already holds, and the frontend's ``dedupeAppendRecords`` collapses the
-        duplicates — whereas forcing a full pull on every overlap would turn a
-        routine retry into a pull storm. Only a FORWARD jump loses information.
+        is deliberately NOT a gap. It is the normal shape of three legitimate
+        flows: a daemon that re-reads and re-sends a frame whose previous send
+        failed (its cursor only advances on a successful send), a retried FAILED
+        step that rewrites its jsonl in place, and the running-worktree self-heal
+        drain, whose byte-capped ``full`` HEAD is refused as shrinking so every
+        following tail re-covers the water mark. Forcing a full pull on any of
+        them would turn a routine retry into a pull storm. What makes the overlap
+        harmless is the SERVER CACHE: the append branch of
+        :meth:`apply_history_frame` folds each record onto the bundle by
+        ``(step_id, ordinal)``, so a re-delivered line is dropped and a rewritten
+        one replaces its predecessor in place. (The frontend's
+        ``reconcileAppendRecords`` applies the same rule to what a client holds,
+        but it is the client-side half of the contract, not the place the
+        duplicates are stopped.) Only a FORWARD jump loses information.
 
         A file the cache carries no water mark for is at line 0 — a step file the
         flow only just created starts there, and an append that instead starts
@@ -2204,14 +2240,126 @@ class ServerState:
         """
         index: Dict[Tuple[str, int], int] = {}
         for position, record in enumerate(records):
-            if not isinstance(record, dict):
+            key = cls._record_identity(record)
+            if key is None:
                 continue
-            step_id = record.get("step_id")
-            ordinal = cls._record_ordinal(record)
-            if not step_id or ordinal is None:
-                continue
-            index.setdefault((str(step_id), ordinal), position)
+            # INVARIANT: FIRST occurrence wins. A bundle that somehow holds two
+            # records under one number (a pre-fix bundle still in memory, a
+            # daemon full frame that carried a clone) must resolve that number to
+            # the SAME position for every consumer — the backfill slice, and the
+            # append reconcile that rewrites a retried line in place. Letting the
+            # later copy win would make an in-place update land on a different
+            # record than the one a numbered backfill just served.
+            index.setdefault(key, position)
         return index
+
+    @classmethod
+    def _record_identity(cls, record: Any) -> Optional[Tuple[str, int]]:
+        """The record's ``(step_id, ordinal)`` physical-line identity, or ``None``.
+
+        ``None`` marks a record that is NOT addressable by number — a legacy
+        pre-ordinal daemon's record, an optimistic echo, a non-dict line. Such a
+        record's identity cannot be proven, so no path may fold it against
+        another one: the append reconcile appends it verbatim, and
+        :meth:`_index_records_by_ordinal` leaves it out of the index. Mirrors the
+        frontend's ``recordOrdinal``-gated ``recordKey``, so both sides agree on
+        which records are foldable.
+        """
+        if not isinstance(record, dict):
+            return None
+        step_id = record.get("step_id")
+        ordinal = cls._record_ordinal(record)
+        if not step_id or ordinal is None:
+            return None
+        return (str(step_id), ordinal)
+
+    @classmethod
+    def _bundle_key_index(
+        cls, bundle: Dict[str, Any]
+    ) -> Dict[Tuple[str, int], int]:
+        """The bundle's ``(step_id, ordinal) -> position`` index, built on demand.
+
+        Cached on the bundle under the private ``_key_index`` key alongside the
+        record count it was built for (``_key_index_len``) — in-memory only,
+        never serialized onto the wire, exactly like ``_usage_sources`` (every
+        history getter picks its fields explicitly, so a private key cannot leak
+        into a payload).
+
+        WHY cached rather than rebuilt per frame: the whole point of the append
+        reconcile is that a repeated whole-flow drain costs the SIZE OF THE
+        FRAME, not the size of the bundle. Rebuilding the index on each of the
+        dozens of tail frames a drain arrives in would put the O(bundle) term
+        straight back.
+
+        WHY the length guard: ``records`` has only two writers (this reconcile
+        and the full-frame replacement, which drops the whole bundle dict), but
+        the index must never silently mis-address a bundle some future path
+        mutated behind its back. Comparing the recorded count against the live
+        one is O(1) and degrades the worst case to a single rebuild instead of a
+        wrong position.
+        """
+        records = bundle.get("records") or []
+        index = bundle.get("_key_index")
+        if isinstance(index, dict) and bundle.get("_key_index_len") == len(
+            records
+        ):
+            return index
+        index = cls._index_records_by_ordinal(records)
+        bundle["_key_index"] = index
+        bundle["_key_index_len"] = len(records)
+        return index
+
+    @classmethod
+    def _reconcile_append_into(
+        cls, bundle: Dict[str, Any], new_records: List[Any]
+    ) -> Tuple[List[Any], int, int, int]:
+        """Fold *new_records* into *bundle*'s records idempotently by identity.
+
+        Returns ``(applied, added, updated, dropped)`` — the records that
+        actually changed the bundle (new tail records plus the new content of
+        in-place updates, in frame order), and the three counts for the caller's
+        diagnostic log.
+
+        Per record, keyed by :meth:`_record_identity`:
+
+        * key unseen → appended to the tail (and indexed);
+        * key held, record equal → DROPPED, the bundle is already correct;
+        * key held, record differs → REPLACED at its existing position, so the
+          record count and order are untouched (a retried FAILED step rewrote
+          that physical jsonl line; the newest content is the truth);
+        * no key (legacy / un-numbered) → appended verbatim, never folded.
+
+        The bundle's ``generation`` is deliberately NOT touched here: the count
+        and order only ever grow at the tail, so an outstanding progress token's
+        offset keeps meaning what it meant and an in-sync client stays on the
+        cheap ``not_modified`` reply.
+        """
+        records = bundle["records"]
+        index = cls._bundle_key_index(bundle)
+        applied: List[Any] = []
+        added = updated = dropped = 0
+        for record in new_records:
+            key = cls._record_identity(record)
+            if key is None:
+                records.append(record)
+                applied.append(record)
+                added += 1
+                continue
+            position = index.get(key)
+            if position is None:
+                index[key] = len(records)
+                records.append(record)
+                applied.append(record)
+                added += 1
+                continue
+            if records[position] == record:
+                dropped += 1
+                continue
+            records[position] = record
+            applied.append(record)
+            updated += 1
+        bundle["_key_index_len"] = len(records)
+        return applied, added, updated, dropped
 
     @classmethod
     def _unnumbered_steps(cls, records: List[Any]) -> Set[str]:

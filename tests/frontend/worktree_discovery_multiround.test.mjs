@@ -18,7 +18,7 @@
  * sidecar keeps its ``.from-<branch>`` marker), so ``stepId#ordinal`` is again
  * globally unique. These tests pin that the frontend, which consumes that
  * disambiguated step_id verbatim through `recordKey`, renders EVERY round and
- * that `dedupeSnapshotDiscovery` de-dups only a byte-identical clone — never a
+ * that `dedupeSnapshotClones` de-dups only a byte-identical clone — never a
  * legitimately-different record that happens to reuse a physical ordinal.
  *
  * Record shapes mirror the REAL daemon envelope: the authoritative `step_type`
@@ -33,7 +33,7 @@ export function registerWorktreeDiscoveryMultiroundTests(ctx) {
     recordKey,
     recordOrdinal,
     reconcileAppendRecords,
-    dedupeSnapshotDiscovery,
+    dedupeSnapshotClones,
   } = app;
 
   // Daemon-shape discovery record: envelope step_id + ordinal, inner message.
@@ -105,10 +105,10 @@ export function registerWorktreeDiscoveryMultiroundTests(ctx) {
   });
 
   // --------------------------------------------------------------------- //
-  // Task 2: dedupeSnapshotDiscovery compares CONTENT before dropping — a
+  // Task 2: dedupeSnapshotClones compares CONTENT before dropping — a
   // shared stepId#ordinal alone is not proof of a clone.
   // --------------------------------------------------------------------- //
-  check("dedupeSnapshotDiscovery: same stepId#ordinal but DIFFERENT content — both kept", () => {
+  check("dedupeSnapshotClones: same stepId#ordinal but DIFFERENT content — both kept", () => {
     // A pathological ordinal reuse (which G1 aims to prevent, but the frontend
     // must not depend on): two discovery records collide on stepId#ordinal yet
     // carry different content. They are NOT clones — dropping either would
@@ -117,7 +117,7 @@ export function registerWorktreeDiscoveryMultiroundTests(ctx) {
     const b = disc("01_discovery_ab12", 0, "assistant", "round2 body — different", 20);
     assert.equal(recordKey(a), recordKey(b), "keys collide (shared stepId#ordinal)");
 
-    const out = dedupeSnapshotDiscovery([a, b]);
+    const out = dedupeSnapshotClones([a, b]);
     assert.equal(out.length, 2, "different content ⇒ neither dropped");
     assert.deepEqual(
       out.map((r) => r.message.content),
@@ -125,18 +125,18 @@ export function registerWorktreeDiscoveryMultiroundTests(ctx) {
     );
   });
 
-  check("dedupeSnapshotDiscovery: a byte-identical clone IS still de-duped", () => {
+  check("dedupeSnapshotClones: a byte-identical clone IS still de-duped", () => {
     // The genuine split-root clone case: same key AND same content ⇒ one bubble.
     const c1 = disc("01_discovery_ab12", 0, "assistant", "identical body", 10);
     const c2 = disc("01_discovery_ab12", 0, "assistant", "identical body", 10);
     assert.equal(recordKey(c1), recordKey(c2));
 
-    const out = dedupeSnapshotDiscovery([c1, c2]);
+    const out = dedupeSnapshotClones([c1, c2]);
     assert.equal(out.length, 1, "true clone collapses to one");
     assert.equal(out[0].message.content, "identical body");
   });
 
-  check("dedupeSnapshotDiscovery: cross-source rounds (distinct step_ids) all survive", () => {
+  check("dedupeSnapshotClones: cross-source rounds (distinct step_ids) all survive", () => {
     // The realistic post-G1 merged snapshot: primary file rounds plus a sidecar
     // round, each with its own disambiguated step_id — none share a key, so the
     // guard is a pure pass-through and every round renders.
@@ -146,7 +146,7 @@ export function registerWorktreeDiscoveryMultiroundTests(ctx) {
       disc("01_discovery_ab12", 2, "assistant", "a2 round2", 3),
       disc("01_discovery_ab12.from-worktree__b", 0, "assistant", "sidecar round", 4),
     ];
-    const out = dedupeSnapshotDiscovery(records);
+    const out = dedupeSnapshotClones(records);
     assert.equal(out.length, 4, "no legitimate round is dropped");
     assert.equal(out, records, "no drop ⇒ same array reference (no-op)");
   });
