@@ -71,8 +71,8 @@ description: "这个agent调用，在完成前是有Agent调用具体命令的�
   \ new key. Nothing anywhere applies a per-key allowlist, so `group_summaries` (or\
   \ any new key) arrives at `renderImplementReport` intact.\n\n修复这个bug。另外，让tool调用在未完成的时候也可以点开详情看完整命令。\n\
   \n然后，这个report findings是什么tool调用？也是agent吗？还是什么？"
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-08-19T10:23:37.762735'
-updated_at: '2026-08-19T10:39:28.317902'
+updated_at: '2026-08-19T10:46:17.415707'

@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.9.0 - 2026-08-19
+
+- Fix WebUI tool chips losing their header after unregistered tools (Agent, ToolSearch, Skill, Workflow, SendMessage, MCP tools) finish — completed calls now show '<tool> ✓ <input> · <result>' instead of a bare 'Tool ✓'
+- Parse tool chip names generically on the structured (tool_use_id) path instead of a fixed name whitelist, so codex-synthesized names like mcp__server__tool and unknown render correctly across claude, claude-interactive, and codex runners
+- Preserve an existing chip header when a terminal fragment carries no header, and rename the chip when the terminal event reveals the real tool name, so historical jsonl transcripts also upgrade cleanly
+- Make in-flight tool chips expandable: running calls now carry a tool_input detail panel with the full command or input arguments, collapsed by default
+- Show the full tool input alongside the result text in the detail panel of completed unregistered tools
+- Disable the claude CLI built-in ReportFindings tool for all steps, removing 'No findings reported.' noise from headless runs; read-only steps now pass a single --disallowedTools list
+- Add English and Chinese labels for the new tool-input detail sections
 ## 12.8.1 - 2026-08-19
 
 - Fix the IMPLEMENT completion report showing far more groups than the plan contains — group summaries that themselves contained a semicolon were split into extra fake entries.

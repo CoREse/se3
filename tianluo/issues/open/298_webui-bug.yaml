@@ -1,0 +1,873 @@
+id: '298'
+description: '怎么连续显示好几次？是webui端的渲染bug吗？
+
+  assistant
+
+  2026/8/19 11:09:00
+
+  opus · claude-opus-5
+
+  Bash
+
+  grep -n "estimated_test_duration\|^IMPLEMENT_PR... · 85 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "incomplete" src/tianluo/engine/step_re... · 15 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n 770,890p src/tianluo/engine/step_rendere... · 119 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n 200,235p src/tianluo/engine/steps/implem... · 233 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  ls tests/engine/steps/ 2>/dev/null | head; echo... · 16 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  sed -n 1,40p tests/test_step_renderers.py; echo... · 60 lines output
+
+  ✓
+
+  详情
+
+  Bash
+
+  grep -n "steprender.implement" src/tianluo/i18n... · 11 lines output
+
+  ✓
+
+  详情
+
+  提案
+
+  摘要
+
+  修补 implement 步骤『汇报 complete 却同时列出未完成任务』暴露的两个缺口：一是在 implement.py 中新增一段共用的英文 prompt
+  文案（测试范围默认针对性 + 无头运行契约），在模块内定义一次并注入 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT / FIX_PROMPT
+  三份基础 prompt（HOLISTIC 与 CAPABILITY_GROUP 派生变体自然继承），并把 FIX_PROMPT 的 incomplete_tasks
+  字段说明对齐另外两份；二是在 step_renderers.py 的 _render_implement 中，对『complete + 非空 incomplete_tasks』这一组合改用中性标题与中性项目符号渲染（新增
+  cli.steprender.implement.* i18n key），partial / failed / unknown 的红色渲染保持不变。引擎状态判定、commit
+  行为、WebUI、charter、.version 一律不动。
+
+
+  待修改文件 (6)
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  tests/test_step_renderers.py
+
+  tests/engine/steps/test_implement.py
+
+  其他字段
+
+  motivation
+
+  flow 20260815-013629_e5f57f8a 中，无头 implement agent 做完全部任务组后自行后台启动全量 pytest 并『等待被唤醒』——无头模式下本轮输出结束即进程退出，该结果永远不会被观察到；agent
+  于是汇报 completion_status=complete 且把『Full test suite run was still in progress…』填进…
+  (476 字符)
+
+  files_to_create
+
+  []
+
+  risks
+
+  [ "三份基础 prompt 都是 `.format(...)` 风格模板，新增文案中若出现单个 `{` 或 `}` 会在渲染时抛 KeyError/IndexError——共用文案必须完全不含花括号（或按现有惯例双写）。",
+  "IMPLEMENT_CAPABILITY_GROUP_PROMPT 经 _substitute_anchor 从 IMPLEMENT_GROUP_PROMPT
+  锚点替换派生（锚点缺失即 import 时抛错），HOLISTIC_IMPLEMENT_PROMPT 经 .replace 从 IMPLEMENT_PROMPT
+  派生：新文案的插入点若落在这些锚点串内部或改动了锚点文本，会导致 import 期直接失败或派生变体静默丢失文案。插入必须发生在派生之前、且不触碰任何锚点句。",
+  "现有拼接顺序（VERSION_FILE_GUARDRAIL → WHY_COMMENT_CONVENTION → inject_boundary 标记注入 →
+  HOLISTIC/CAPABILITY 派生）是有依赖的流水线，插入时序放错会让 prompt 内容或 USER_CONTENT 边界标记错位。", "prompt
+  是 LLM 软约束，不是硬守卫：文案只能降低而不能消除 agent 自行跑全量测试或留后台任务的概率；本任务明确不做硬性禁止。", "i18n 两份语言包 key
+  集合必须一致（en-US 为基准持有全集），漏加 zh-CN key 会在中文环境回落 en-US 而非报错，易被测试放过——测试需覆盖 key 存在性。",
+  "渲染分支新增后，判定条件依赖 outputs 中 completion_status 的字面值；对历史 flow 记录（缺字段 → unknown）必须落回原红色渲染，否则会改变旧记录的展示语义。"
+  ]
+
+  设计
+
+  概览
+
+  两条互不相干的改动线。A 线在 src/tianluo/engine/steps/implement.py 顶部区域新增一个模块级常量（例如 TEST_SCOPE_AND_HEADLESS_CLAUSE），承载两条要点的英文条目式文案（≤80
+  词、无花括号）：(1) 全量测试由 flow 后续 TEST step 统一执行，agent 默认只跑与本次改动直接相关的测试，仅在有具体理由预期波及所触模块之外时才自行跑全量、且必须前台跑到出结果，不得以『全量测试未跑完/结果未观察』作为未完成项汇报，estimated_test_duration
+  仍按现有说明填整套估时；(2) agent 以无头方式运行，本轮输出结束即进程退出，不存在之后被唤醒，不得遗留后台任务/监视器/等通知式收尾，所有汇报依赖的工作必须在输出最终
+  JSON 前完成。该常量经一个锚点式插入（缺锚点即抛错的辅助函数，语义同现有 _substitute_anchor）分别插进三份基础 prompt 的 estimated_test_duration
+  说明紧邻位置，插入时机在 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接与 HOLISTIC / CAPABILITY
+  派生之前，从而由派生变体自然继承。同时把 FIX_PROMPT 的 incomplete_tasks 字段说明改写为与 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  现有措辞一致的版本（含『Only populate when completion_status is "partial" or "failed"』语义，complete
+  时必须为空数组）。B 线在 src/tianluo/engine/step_renderers.py::_render_implement 的 Incomplete
+  Tasks 区块内按 completion_status 分叉：complete 走新的中性标题 key 与中性项目符号，其余（partial / failed
+  / unknown / 缺失）保持现有红色标题与红 ✗ 不变；新标题 key 加入 en-US.json 与 zh-CN.json 的 cli.steprender.implement.*
+  命名空间。
+
+
+  组件 (5)
+
+  共用 prompt 文案常量（implement.py 模块级） — 以英文条目式承载两条要点（测试范围默认针对性、无头运行契约），≤80 词、不含花括号，是三份基础
+  prompt 的唯一文案来源。
+
+  锚点插入逻辑（implement.py 模块加载期） — 把共用文案插到三份基础 prompt 各自 estimated_test_duration 说明的紧邻位置；锚点缺失时抛错。执行时机必须早于
+  VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接、inject_boundary 标记注入与 HOLISTIC
+  / CAPABILITY_GROUP 派生。
+
+  FIX_PROMPT 的 incomplete_tasks 字段说明 — 把措辞对齐 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  的现有版本：仅当 completion_status 为 partial 或 failed 时填写，complete 时必须为空数组。
+
+  _render_implement 的 Incomplete Tasks 区块（step_renderers.py） — 按 completion_status
+  选择标题 key 与项目符号样式：complete → 中性标题 + 中性 bullet；partial / failed / unknown → 现有红色标题
+  + 红 ✗。dict 与字符串两种条目形态的解析逻辑（task_id/id、reason/error）在两条分支下完全一致地保留。
+
+  i18n 语言包（en-US.json / zh-CN.json） — 新增中性标题 key（cli.steprender.implement.* 命名空间，携带
+  {count} 占位与中性 Rich 标记），两份语言包 key 集合保持一致，en-US 为基准。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "共用文案定义为单一模块级常量，经锚点式插入注入三份基础 prompt，而非在每份 prompt 字符串里各写一遍。", "rationale":
+  "任务明确要求单点维护；且 HOLISTIC 与 CAPABILITY_GROUP 是从基础 prompt 派生的，注入基础即自动继承，避免派生链上出现文案漂移。锚点缺失时抛错（而非静默不插）沿用文件内
+  _substitute_anchor 已确立的失败模式：基础模板改动导致锚点失效时在 import 期立刻暴露，而不是让派生变体悄悄丢文案。", "alternatives_considered":
+  "(a) 像 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 那样直接尾部拼接——最省事，但文案会离 estimated_test_duration
+  说明很远，违背『同一测试话题就近放置』的要求；(b) 三份 prompt 各自内联同一段文字——违反单点维护，日后必然漂移。" }, { "decision":
+  "文案定位为软约束，措辞为『默认针对性 + 有理由时可全量但须前台跑完』，不写死禁令。", "rationale": "任务的『不做』明确排除硬性禁止运行全量测试；真实场景中跨模块改动确实需要更宽的验证，一刀切禁令会把正当行为也压掉，反而降低质量。要点二（无头契约）是事实陈述而非禁令，纠正的是
+  agent 对自身运行模型的错误假设——这是根因，比任何测试范围的措辞更关键。", "alternatives_considered": "在 prompt 中硬性禁止自行运行全量测试；或在引擎侧检测并拒收含『测试仍在进行』字样的
+  incomplete_tasks 条目——前者被任务显式排除，后者属于改动状态判定逻辑，同样在排除范围内。" }, { "decision": "渲染降级只按
+  completion_status == \"complete\" 分叉，不试图解析 incomplete_tasks 条目内容。", "rationale":
+  "条目是自由文本（也可能是 dict），任何基于关键词的『这是不是测试相关备注』判断都是脆弱启发式。状态字段是引擎已经确定性持有的信号：complete 意味着引擎按现有
+  WHY 逻辑已判定任务完成，此时残留条目在语义上就是备注/未验证项，与是否提到测试无关。", "alternatives_considered": "按条目文本匹配『test
+  suite / in progress』等关键词只降级匹配到的条目；或在引擎侧过滤掉这类条目——前者脆弱且会产生红黑混排，后者会丢失信息且触碰被排除的引擎逻辑。"
+  }, { "decision": "新增独立 i18n key（沿用 cli.steprender.implement.* 命名空间），而非改写现有 incomplete_tasks
+  key 或在代码里拼颜色标签。", "rationale": "charter 要求用户可见文案一律经语言资源按 key 渲染、en-US 持有 key 全集；现有
+  incomplete_tasks key 仍被 partial/failed 路径使用，不能改写。两个 key 各自把 Rich 标记（红 vs 中性）封在语言包里，与该文件现有做法一致。",
+  "alternatives_considered": "复用同一 key、在渲染代码里按状态换 Rich 颜色标签——会把样式从语言包漏回代码，与文件内其他条目风格不一致。"
+  }, { "decision": "prompt 内容断言测试放在 tests/engine/steps/test_implement.py，渲染分支测试放在
+  tests/test_step_renderers.py。", "rationale": "与 scope 指定的位置一致，且各自贴近被测模块的既有测试聚集地。conftest.py
+  已有 autouse 的 _force_en_us_ui_language fixture 把 UI 语言钉在 en-US，渲染断言可直接按英文文案写，无需各测试自行
+  monkeypatch。", "alternatives_considered": "把 prompt 断言塞进 tests/test_implement.py——该文件更偏行为/流程测试，且
+  scope 已指明目标文件。" } ]
+
+  data_flow
+
+  A 线：implement.py import 时 → 三份基础 prompt 字面量定义完成 → 锚点插入共用文案（各自 estimated_test_duration
+  说明旁）+ FIX_PROMPT 字段说明对齐 → 依次拼接 VERSION_FILE_GUARDRAIL / FIX_VERSION_FILE_GUARDRAIL
+  与 WHY_COMMENT_CONVENTION → inje… (659 字符)
+
+  testing_strategy
+
+  渲染侧（tests/test_step_renderers.py）：新增用例覆盖 (1) complete + 非空 incomplete_tasks → 输出含中性标题、且不含『Incomplete
+  Tasks』/『未完成任务』文案与红 ✗ 行；(2) partial + 非空 → 仍为原红色渲染（标题与 ✗ 均在）；(3) failed 与 status
+  缺失（unknown）→ 同 part… (990 字符)
+
+  notes
+
+  两条改动线文件完全不重叠（implement.py vs step_renderers.py + 两份 locales），可在隔离 worktree 中并行执行，无
+  depends_on。
+
+  任务组 (2)
+
+  G1 implement prompt 增补测试范围与无头运行契约文案，并对齐 FIX_PROMPT 的 incomplete_tasks 说明 · 0 个任务
+  · ~0 LOC · 依赖：无
+
+  G2 CLI 渲染：complete 状态下的残留 incomplete_tasks 降级为中性备注 · 0 个任务 · ~0 LOC · 依赖：无
+
+  本轮 303,055 in / 10,735 out · 累计 303,055 in / 10,735 out
+
+  查看原始
+
+  ▸ ✓ 步骤已完成 · 计划
+
+  提案
+
+  摘要
+
+  修补 implement 步骤『汇报 complete 却同时列出未完成任务』暴露的两个缺口：一是在 implement.py 中新增一段共用的英文 prompt
+  文案（测试范围默认针对性 + 无头运行契约），在模块内定义一次并注入 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT / FIX_PROMPT
+  三份基础 prompt（HOLISTIC 与 CAPABILITY_GROUP 派生变体自然继承），并把 FIX_PROMPT 的 incomplete_tasks
+  字段说明对齐另外两份；二是在 step_renderers.py 的 _render_implement 中，对『complete + 非空 incomplete_tasks』这一组合改用中性标题与中性项目符号渲染（新增
+  cli.steprender.implement.* i18n key），partial / failed / unknown 的红色渲染保持不变。引擎状态判定、commit
+  行为、WebUI、charter、.version 一律不动。
+
+
+  待修改文件 (6)
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  tests/test_step_renderers.py
+
+  tests/engine/steps/test_implement.py
+
+  其他字段
+
+  motivation
+
+  flow 20260815-013629_e5f57f8a 中，无头 implement agent 做完全部任务组后自行后台启动全量 pytest 并『等待被唤醒』——无头模式下本轮输出结束即进程退出，该结果永远不会被观察到；agent
+  于是汇报 completion_status=complete 且把『Full test suite run was still in progress…』填进…
+  (476 字符)
+
+  files_to_create
+
+  []
+
+  risks
+
+  [ "三份基础 prompt 都是 `.format(...)` 风格模板，新增文案中若出现单个 `{` 或 `}` 会在渲染时抛 KeyError/IndexError——共用文案必须完全不含花括号（或按现有惯例双写）。",
+  "IMPLEMENT_CAPABILITY_GROUP_PROMPT 经 _substitute_anchor 从 IMPLEMENT_GROUP_PROMPT
+  锚点替换派生（锚点缺失即 import 时抛错），HOLISTIC_IMPLEMENT_PROMPT 经 .replace 从 IMPLEMENT_PROMPT
+  派生：新文案的插入点若落在这些锚点串内部或改动了锚点文本，会导致 import 期直接失败或派生变体静默丢失文案。插入必须发生在派生之前、且不触碰任何锚点句。",
+  "现有拼接顺序（VERSION_FILE_GUARDRAIL → WHY_COMMENT_CONVENTION → inject_boundary 标记注入 →
+  HOLISTIC/CAPABILITY 派生）是有依赖的流水线，插入时序放错会让 prompt 内容或 USER_CONTENT 边界标记错位。", "prompt
+  是 LLM 软约束，不是硬守卫：文案只能降低而不能消除 agent 自行跑全量测试或留后台任务的概率；本任务明确不做硬性禁止。", "i18n 两份语言包 key
+  集合必须一致（en-US 为基准持有全集），漏加 zh-CN key 会在中文环境回落 en-US 而非报错，易被测试放过——测试需覆盖 key 存在性。",
+  "渲染分支新增后，判定条件依赖 outputs 中 completion_status 的字面值；对历史 flow 记录（缺字段 → unknown）必须落回原红色渲染，否则会改变旧记录的展示语义。"
+  ]
+
+  设计
+
+  概览
+
+  两条互不相干的改动线。A 线在 src/tianluo/engine/steps/implement.py 顶部区域新增一个模块级常量（例如 TEST_SCOPE_AND_HEADLESS_CLAUSE），承载两条要点的英文条目式文案（≤80
+  词、无花括号）：(1) 全量测试由 flow 后续 TEST step 统一执行，agent 默认只跑与本次改动直接相关的测试，仅在有具体理由预期波及所触模块之外时才自行跑全量、且必须前台跑到出结果，不得以『全量测试未跑完/结果未观察』作为未完成项汇报，estimated_test_duration
+  仍按现有说明填整套估时；(2) agent 以无头方式运行，本轮输出结束即进程退出，不存在之后被唤醒，不得遗留后台任务/监视器/等通知式收尾，所有汇报依赖的工作必须在输出最终
+  JSON 前完成。该常量经一个锚点式插入（缺锚点即抛错的辅助函数，语义同现有 _substitute_anchor）分别插进三份基础 prompt 的 estimated_test_duration
+  说明紧邻位置，插入时机在 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接与 HOLISTIC / CAPABILITY
+  派生之前，从而由派生变体自然继承。同时把 FIX_PROMPT 的 incomplete_tasks 字段说明改写为与 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  现有措辞一致的版本（含『Only populate when completion_status is "partial" or "failed"』语义，complete
+  时必须为空数组）。B 线在 src/tianluo/engine/step_renderers.py::_render_implement 的 Incomplete
+  Tasks 区块内按 completion_status 分叉：complete 走新的中性标题 key 与中性项目符号，其余（partial / failed
+  / unknown / 缺失）保持现有红色标题与红 ✗ 不变；新标题 key 加入 en-US.json 与 zh-CN.json 的 cli.steprender.implement.*
+  命名空间。
+
+
+  组件 (5)
+
+  共用 prompt 文案常量（implement.py 模块级） — 以英文条目式承载两条要点（测试范围默认针对性、无头运行契约），≤80 词、不含花括号，是三份基础
+  prompt 的唯一文案来源。
+
+  锚点插入逻辑（implement.py 模块加载期） — 把共用文案插到三份基础 prompt 各自 estimated_test_duration 说明的紧邻位置；锚点缺失时抛错。执行时机必须早于
+  VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接、inject_boundary 标记注入与 HOLISTIC
+  / CAPABILITY_GROUP 派生。
+
+  FIX_PROMPT 的 incomplete_tasks 字段说明 — 把措辞对齐 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  的现有版本：仅当 completion_status 为 partial 或 failed 时填写，complete 时必须为空数组。
+
+  _render_implement 的 Incomplete Tasks 区块（step_renderers.py） — 按 completion_status
+  选择标题 key 与项目符号样式：complete → 中性标题 + 中性 bullet；partial / failed / unknown → 现有红色标题
+  + 红 ✗。dict 与字符串两种条目形态的解析逻辑（task_id/id、reason/error）在两条分支下完全一致地保留。
+
+  i18n 语言包（en-US.json / zh-CN.json） — 新增中性标题 key（cli.steprender.implement.* 命名空间，携带
+  {count} 占位与中性 Rich 标记），两份语言包 key 集合保持一致，en-US 为基准。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "共用文案定义为单一模块级常量，经锚点式插入注入三份基础 prompt，而非在每份 prompt 字符串里各写一遍。", "rationale":
+  "任务明确要求单点维护；且 HOLISTIC 与 CAPABILITY_GROUP 是从基础 prompt 派生的，注入基础即自动继承，避免派生链上出现文案漂移。锚点缺失时抛错（而非静默不插）沿用文件内
+  _substitute_anchor 已确立的失败模式：基础模板改动导致锚点失效时在 import 期立刻暴露，而不是让派生变体悄悄丢文案。", "alternatives_considered":
+  "(a) 像 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 那样直接尾部拼接——最省事，但文案会离 estimated_test_duration
+  说明很远，违背『同一测试话题就近放置』的要求；(b) 三份 prompt 各自内联同一段文字——违反单点维护，日后必然漂移。" }, { "decision":
+  "文案定位为软约束，措辞为『默认针对性 + 有理由时可全量但须前台跑完』，不写死禁令。", "rationale": "任务的『不做』明确排除硬性禁止运行全量测试；真实场景中跨模块改动确实需要更宽的验证，一刀切禁令会把正当行为也压掉，反而降低质量。要点二（无头契约）是事实陈述而非禁令，纠正的是
+  agent 对自身运行模型的错误假设——这是根因，比任何测试范围的措辞更关键。", "alternatives_considered": "在 prompt 中硬性禁止自行运行全量测试；或在引擎侧检测并拒收含『测试仍在进行』字样的
+  incomplete_tasks 条目——前者被任务显式排除，后者属于改动状态判定逻辑，同样在排除范围内。" }, { "decision": "渲染降级只按
+  completion_status == \"complete\" 分叉，不试图解析 incomplete_tasks 条目内容。", "rationale":
+  "条目是自由文本（也可能是 dict），任何基于关键词的『这是不是测试相关备注』判断都是脆弱启发式。状态字段是引擎已经确定性持有的信号：complete 意味着引擎按现有
+  WHY 逻辑已判定任务完成，此时残留条目在语义上就是备注/未验证项，与是否提到测试无关。", "alternatives_considered": "按条目文本匹配『test
+  suite / in progress』等关键词只降级匹配到的条目；或在引擎侧过滤掉这类条目——前者脆弱且会产生红黑混排，后者会丢失信息且触碰被排除的引擎逻辑。"
+  }, { "decision": "新增独立 i18n key（沿用 cli.steprender.implement.* 命名空间），而非改写现有 incomplete_tasks
+  key 或在代码里拼颜色标签。", "rationale": "charter 要求用户可见文案一律经语言资源按 key 渲染、en-US 持有 key 全集；现有
+  incomplete_tasks key 仍被 partial/failed 路径使用，不能改写。两个 key 各自把 Rich 标记（红 vs 中性）封在语言包里，与该文件现有做法一致。",
+  "alternatives_considered": "复用同一 key、在渲染代码里按状态换 Rich 颜色标签——会把样式从语言包漏回代码，与文件内其他条目风格不一致。"
+  }, { "decision": "prompt 内容断言测试放在 tests/engine/steps/test_implement.py，渲染分支测试放在
+  tests/test_step_renderers.py。", "rationale": "与 scope 指定的位置一致，且各自贴近被测模块的既有测试聚集地。conftest.py
+  已有 autouse 的 _force_en_us_ui_language fixture 把 UI 语言钉在 en-US，渲染断言可直接按英文文案写，无需各测试自行
+  monkeypatch。", "alternatives_considered": "把 prompt 断言塞进 tests/test_implement.py——该文件更偏行为/流程测试，且
+  scope 已指明目标文件。" } ]
+
+  data_flow
+
+  A 线：implement.py import 时 → 三份基础 prompt 字面量定义完成 → 锚点插入共用文案（各自 estimated_test_duration
+  说明旁）+ FIX_PROMPT 字段说明对齐 → 依次拼接 VERSION_FILE_GUARDRAIL / FIX_VERSION_FILE_GUARDRAIL
+  与 WHY_COMMENT_CONVENTION → inje… (659 字符)
+
+  testing_strategy
+
+  渲染侧（tests/test_step_renderers.py）：新增用例覆盖 (1) complete + 非空 incomplete_tasks → 输出含中性标题、且不含『Incomplete
+  Tasks』/『未完成任务』文案与红 ✗ 行；(2) partial + 非空 → 仍为原红色渲染（标题与 ✗ 均在）；(3) failed 与 status
+  缺失（unknown）→ 同 part… (990 字符)
+
+  notes
+
+  两条改动线文件完全不重叠（implement.py vs step_renderers.py + 两份 locales），可在隔离 worktree 中并行执行，无
+  depends_on。
+
+  任务组 (2)
+
+  G1 implement prompt 增补测试范围与无头运行契约文案，并对齐 FIX_PROMPT 的 incomplete_tasks 说明 · 0 个任务
+  · ~0 LOC · 依赖：无
+
+  G2 CLI 渲染：complete 状态下的残留 incomplete_tasks 降级为中性备注 · 0 个任务 · ~0 LOC · 依赖：无
+
+  tokens
+
+  输入 303,055 · 输出 10,735 · 缓存 读/写 265,752/37,291 · $0.7888
+
+  ▸ ✓ 步骤已完成 · 计划
+
+  提案
+
+  摘要
+
+  修补 implement 步骤『汇报 complete 却同时列出未完成任务』暴露的两个缺口：一是在 implement.py 中新增一段共用的英文 prompt
+  文案（测试范围默认针对性 + 无头运行契约），在模块内定义一次并注入 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT / FIX_PROMPT
+  三份基础 prompt（HOLISTIC 与 CAPABILITY_GROUP 派生变体自然继承），并把 FIX_PROMPT 的 incomplete_tasks
+  字段说明对齐另外两份；二是在 step_renderers.py 的 _render_implement 中，对『complete + 非空 incomplete_tasks』这一组合改用中性标题与中性项目符号渲染（新增
+  cli.steprender.implement.* i18n key），partial / failed / unknown 的红色渲染保持不变。引擎状态判定、commit
+  行为、WebUI、charter、.version 一律不动。
+
+
+  待修改文件 (6)
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  tests/test_step_renderers.py
+
+  tests/engine/steps/test_implement.py
+
+  其他字段
+
+  motivation
+
+  flow 20260815-013629_e5f57f8a 中，无头 implement agent 做完全部任务组后自行后台启动全量 pytest 并『等待被唤醒』——无头模式下本轮输出结束即进程退出，该结果永远不会被观察到；agent
+  于是汇报 completion_status=complete 且把『Full test suite run was still in progress…』填进…
+  (476 字符)
+
+  files_to_create
+
+  []
+
+  risks
+
+  [ "三份基础 prompt 都是 `.format(...)` 风格模板，新增文案中若出现单个 `{` 或 `}` 会在渲染时抛 KeyError/IndexError——共用文案必须完全不含花括号（或按现有惯例双写）。",
+  "IMPLEMENT_CAPABILITY_GROUP_PROMPT 经 _substitute_anchor 从 IMPLEMENT_GROUP_PROMPT
+  锚点替换派生（锚点缺失即 import 时抛错），HOLISTIC_IMPLEMENT_PROMPT 经 .replace 从 IMPLEMENT_PROMPT
+  派生：新文案的插入点若落在这些锚点串内部或改动了锚点文本，会导致 import 期直接失败或派生变体静默丢失文案。插入必须发生在派生之前、且不触碰任何锚点句。",
+  "现有拼接顺序（VERSION_FILE_GUARDRAIL → WHY_COMMENT_CONVENTION → inject_boundary 标记注入 →
+  HOLISTIC/CAPABILITY 派生）是有依赖的流水线，插入时序放错会让 prompt 内容或 USER_CONTENT 边界标记错位。", "prompt
+  是 LLM 软约束，不是硬守卫：文案只能降低而不能消除 agent 自行跑全量测试或留后台任务的概率；本任务明确不做硬性禁止。", "i18n 两份语言包 key
+  集合必须一致（en-US 为基准持有全集），漏加 zh-CN key 会在中文环境回落 en-US 而非报错，易被测试放过——测试需覆盖 key 存在性。",
+  "渲染分支新增后，判定条件依赖 outputs 中 completion_status 的字面值；对历史 flow 记录（缺字段 → unknown）必须落回原红色渲染，否则会改变旧记录的展示语义。"
+  ]
+
+  设计
+
+  概览
+
+  两条互不相干的改动线。A 线在 src/tianluo/engine/steps/implement.py 顶部区域新增一个模块级常量（例如 TEST_SCOPE_AND_HEADLESS_CLAUSE），承载两条要点的英文条目式文案（≤80
+  词、无花括号）：(1) 全量测试由 flow 后续 TEST step 统一执行，agent 默认只跑与本次改动直接相关的测试，仅在有具体理由预期波及所触模块之外时才自行跑全量、且必须前台跑到出结果，不得以『全量测试未跑完/结果未观察』作为未完成项汇报，estimated_test_duration
+  仍按现有说明填整套估时；(2) agent 以无头方式运行，本轮输出结束即进程退出，不存在之后被唤醒，不得遗留后台任务/监视器/等通知式收尾，所有汇报依赖的工作必须在输出最终
+  JSON 前完成。该常量经一个锚点式插入（缺锚点即抛错的辅助函数，语义同现有 _substitute_anchor）分别插进三份基础 prompt 的 estimated_test_duration
+  说明紧邻位置，插入时机在 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接与 HOLISTIC / CAPABILITY
+  派生之前，从而由派生变体自然继承。同时把 FIX_PROMPT 的 incomplete_tasks 字段说明改写为与 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  现有措辞一致的版本（含『Only populate when completion_status is "partial" or "failed"』语义，complete
+  时必须为空数组）。B 线在 src/tianluo/engine/step_renderers.py::_render_implement 的 Incomplete
+  Tasks 区块内按 completion_status 分叉：complete 走新的中性标题 key 与中性项目符号，其余（partial / failed
+  / unknown / 缺失）保持现有红色标题与红 ✗ 不变；新标题 key 加入 en-US.json 与 zh-CN.json 的 cli.steprender.implement.*
+  命名空间。
+
+
+  组件 (5)
+
+  共用 prompt 文案常量（implement.py 模块级） — 以英文条目式承载两条要点（测试范围默认针对性、无头运行契约），≤80 词、不含花括号，是三份基础
+  prompt 的唯一文案来源。
+
+  锚点插入逻辑（implement.py 模块加载期） — 把共用文案插到三份基础 prompt 各自 estimated_test_duration 说明的紧邻位置；锚点缺失时抛错。执行时机必须早于
+  VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接、inject_boundary 标记注入与 HOLISTIC
+  / CAPABILITY_GROUP 派生。
+
+  FIX_PROMPT 的 incomplete_tasks 字段说明 — 把措辞对齐 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  的现有版本：仅当 completion_status 为 partial 或 failed 时填写，complete 时必须为空数组。
+
+  _render_implement 的 Incomplete Tasks 区块（step_renderers.py） — 按 completion_status
+  选择标题 key 与项目符号样式：complete → 中性标题 + 中性 bullet；partial / failed / unknown → 现有红色标题
+  + 红 ✗。dict 与字符串两种条目形态的解析逻辑（task_id/id、reason/error）在两条分支下完全一致地保留。
+
+  i18n 语言包（en-US.json / zh-CN.json） — 新增中性标题 key（cli.steprender.implement.* 命名空间，携带
+  {count} 占位与中性 Rich 标记），两份语言包 key 集合保持一致，en-US 为基准。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "共用文案定义为单一模块级常量，经锚点式插入注入三份基础 prompt，而非在每份 prompt 字符串里各写一遍。", "rationale":
+  "任务明确要求单点维护；且 HOLISTIC 与 CAPABILITY_GROUP 是从基础 prompt 派生的，注入基础即自动继承，避免派生链上出现文案漂移。锚点缺失时抛错（而非静默不插）沿用文件内
+  _substitute_anchor 已确立的失败模式：基础模板改动导致锚点失效时在 import 期立刻暴露，而不是让派生变体悄悄丢文案。", "alternatives_considered":
+  "(a) 像 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 那样直接尾部拼接——最省事，但文案会离 estimated_test_duration
+  说明很远，违背『同一测试话题就近放置』的要求；(b) 三份 prompt 各自内联同一段文字——违反单点维护，日后必然漂移。" }, { "decision":
+  "文案定位为软约束，措辞为『默认针对性 + 有理由时可全量但须前台跑完』，不写死禁令。", "rationale": "任务的『不做』明确排除硬性禁止运行全量测试；真实场景中跨模块改动确实需要更宽的验证，一刀切禁令会把正当行为也压掉，反而降低质量。要点二（无头契约）是事实陈述而非禁令，纠正的是
+  agent 对自身运行模型的错误假设——这是根因，比任何测试范围的措辞更关键。", "alternatives_considered": "在 prompt 中硬性禁止自行运行全量测试；或在引擎侧检测并拒收含『测试仍在进行』字样的
+  incomplete_tasks 条目——前者被任务显式排除，后者属于改动状态判定逻辑，同样在排除范围内。" }, { "decision": "渲染降级只按
+  completion_status == \"complete\" 分叉，不试图解析 incomplete_tasks 条目内容。", "rationale":
+  "条目是自由文本（也可能是 dict），任何基于关键词的『这是不是测试相关备注』判断都是脆弱启发式。状态字段是引擎已经确定性持有的信号：complete 意味着引擎按现有
+  WHY 逻辑已判定任务完成，此时残留条目在语义上就是备注/未验证项，与是否提到测试无关。", "alternatives_considered": "按条目文本匹配『test
+  suite / in progress』等关键词只降级匹配到的条目；或在引擎侧过滤掉这类条目——前者脆弱且会产生红黑混排，后者会丢失信息且触碰被排除的引擎逻辑。"
+  }, { "decision": "新增独立 i18n key（沿用 cli.steprender.implement.* 命名空间），而非改写现有 incomplete_tasks
+  key 或在代码里拼颜色标签。", "rationale": "charter 要求用户可见文案一律经语言资源按 key 渲染、en-US 持有 key 全集；现有
+  incomplete_tasks key 仍被 partial/failed 路径使用，不能改写。两个 key 各自把 Rich 标记（红 vs 中性）封在语言包里，与该文件现有做法一致。",
+  "alternatives_considered": "复用同一 key、在渲染代码里按状态换 Rich 颜色标签——会把样式从语言包漏回代码，与文件内其他条目风格不一致。"
+  }, { "decision": "prompt 内容断言测试放在 tests/engine/steps/test_implement.py，渲染分支测试放在
+  tests/test_step_renderers.py。", "rationale": "与 scope 指定的位置一致，且各自贴近被测模块的既有测试聚集地。conftest.py
+  已有 autouse 的 _force_en_us_ui_language fixture 把 UI 语言钉在 en-US，渲染断言可直接按英文文案写，无需各测试自行
+  monkeypatch。", "alternatives_considered": "把 prompt 断言塞进 tests/test_implement.py——该文件更偏行为/流程测试，且
+  scope 已指明目标文件。" } ]
+
+  data_flow
+
+  A 线：implement.py import 时 → 三份基础 prompt 字面量定义完成 → 锚点插入共用文案（各自 estimated_test_duration
+  说明旁）+ FIX_PROMPT 字段说明对齐 → 依次拼接 VERSION_FILE_GUARDRAIL / FIX_VERSION_FILE_GUARDRAIL
+  与 WHY_COMMENT_CONVENTION → inje… (659 字符)
+
+  testing_strategy
+
+  渲染侧（tests/test_step_renderers.py）：新增用例覆盖 (1) complete + 非空 incomplete_tasks → 输出含中性标题、且不含『Incomplete
+  Tasks』/『未完成任务』文案与红 ✗ 行；(2) partial + 非空 → 仍为原红色渲染（标题与 ✗ 均在）；(3) failed 与 status
+  缺失（unknown）→ 同 part… (990 字符)
+
+  notes
+
+  两条改动线文件完全不重叠（implement.py vs step_renderers.py + 两份 locales），可在隔离 worktree 中并行执行，无
+  depends_on。
+
+  任务组 (2)
+
+  G1 implement prompt 增补测试范围与无头运行契约文案，并对齐 FIX_PROMPT 的 incomplete_tasks 说明 · 0 个任务
+  · ~0 LOC · 依赖：无
+
+  G2 CLI 渲染：complete 状态下的残留 incomplete_tasks 降级为中性备注 · 0 个任务 · ~0 LOC · 依赖：无
+
+  tokens
+
+  输入 303,055 · 输出 10,735 · 缓存 读/写 265,752/37,291 · $0.7888
+
+  ▸ ✓ 步骤已完成 · 计划
+
+  提案
+
+  摘要
+
+  修补 implement 步骤『汇报 complete 却同时列出未完成任务』暴露的两个缺口：一是在 implement.py 中新增一段共用的英文 prompt
+  文案（测试范围默认针对性 + 无头运行契约），在模块内定义一次并注入 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT / FIX_PROMPT
+  三份基础 prompt（HOLISTIC 与 CAPABILITY_GROUP 派生变体自然继承），并把 FIX_PROMPT 的 incomplete_tasks
+  字段说明对齐另外两份；二是在 step_renderers.py 的 _render_implement 中，对『complete + 非空 incomplete_tasks』这一组合改用中性标题与中性项目符号渲染（新增
+  cli.steprender.implement.* i18n key），partial / failed / unknown 的红色渲染保持不变。引擎状态判定、commit
+  行为、WebUI、charter、.version 一律不动。
+
+
+  待修改文件 (6)
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  tests/test_step_renderers.py
+
+  tests/engine/steps/test_implement.py
+
+  其他字段
+
+  motivation
+
+  flow 20260815-013629_e5f57f8a 中，无头 implement agent 做完全部任务组后自行后台启动全量 pytest 并『等待被唤醒』——无头模式下本轮输出结束即进程退出，该结果永远不会被观察到；agent
+  于是汇报 completion_status=complete 且把『Full test suite run was still in progress…』填进…
+  (476 字符)
+
+  files_to_create
+
+  []
+
+  risks
+
+  [ "三份基础 prompt 都是 `.format(...)` 风格模板，新增文案中若出现单个 `{` 或 `}` 会在渲染时抛 KeyError/IndexError——共用文案必须完全不含花括号（或按现有惯例双写）。",
+  "IMPLEMENT_CAPABILITY_GROUP_PROMPT 经 _substitute_anchor 从 IMPLEMENT_GROUP_PROMPT
+  锚点替换派生（锚点缺失即 import 时抛错），HOLISTIC_IMPLEMENT_PROMPT 经 .replace 从 IMPLEMENT_PROMPT
+  派生：新文案的插入点若落在这些锚点串内部或改动了锚点文本，会导致 import 期直接失败或派生变体静默丢失文案。插入必须发生在派生之前、且不触碰任何锚点句。",
+  "现有拼接顺序（VERSION_FILE_GUARDRAIL → WHY_COMMENT_CONVENTION → inject_boundary 标记注入 →
+  HOLISTIC/CAPABILITY 派生）是有依赖的流水线，插入时序放错会让 prompt 内容或 USER_CONTENT 边界标记错位。", "prompt
+  是 LLM 软约束，不是硬守卫：文案只能降低而不能消除 agent 自行跑全量测试或留后台任务的概率；本任务明确不做硬性禁止。", "i18n 两份语言包 key
+  集合必须一致（en-US 为基准持有全集），漏加 zh-CN key 会在中文环境回落 en-US 而非报错，易被测试放过——测试需覆盖 key 存在性。",
+  "渲染分支新增后，判定条件依赖 outputs 中 completion_status 的字面值；对历史 flow 记录（缺字段 → unknown）必须落回原红色渲染，否则会改变旧记录的展示语义。"
+  ]
+
+  设计
+
+  概览
+
+  两条互不相干的改动线。A 线在 src/tianluo/engine/steps/implement.py 顶部区域新增一个模块级常量（例如 TEST_SCOPE_AND_HEADLESS_CLAUSE），承载两条要点的英文条目式文案（≤80
+  词、无花括号）：(1) 全量测试由 flow 后续 TEST step 统一执行，agent 默认只跑与本次改动直接相关的测试，仅在有具体理由预期波及所触模块之外时才自行跑全量、且必须前台跑到出结果，不得以『全量测试未跑完/结果未观察』作为未完成项汇报，estimated_test_duration
+  仍按现有说明填整套估时；(2) agent 以无头方式运行，本轮输出结束即进程退出，不存在之后被唤醒，不得遗留后台任务/监视器/等通知式收尾，所有汇报依赖的工作必须在输出最终
+  JSON 前完成。该常量经一个锚点式插入（缺锚点即抛错的辅助函数，语义同现有 _substitute_anchor）分别插进三份基础 prompt 的 estimated_test_duration
+  说明紧邻位置，插入时机在 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接与 HOLISTIC / CAPABILITY
+  派生之前，从而由派生变体自然继承。同时把 FIX_PROMPT 的 incomplete_tasks 字段说明改写为与 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  现有措辞一致的版本（含『Only populate when completion_status is "partial" or "failed"』语义，complete
+  时必须为空数组）。B 线在 src/tianluo/engine/step_renderers.py::_render_implement 的 Incomplete
+  Tasks 区块内按 completion_status 分叉：complete 走新的中性标题 key 与中性项目符号，其余（partial / failed
+  / unknown / 缺失）保持现有红色标题与红 ✗ 不变；新标题 key 加入 en-US.json 与 zh-CN.json 的 cli.steprender.implement.*
+  命名空间。
+
+
+  组件 (5)
+
+  共用 prompt 文案常量（implement.py 模块级） — 以英文条目式承载两条要点（测试范围默认针对性、无头运行契约），≤80 词、不含花括号，是三份基础
+  prompt 的唯一文案来源。
+
+  锚点插入逻辑（implement.py 模块加载期） — 把共用文案插到三份基础 prompt 各自 estimated_test_duration 说明的紧邻位置；锚点缺失时抛错。执行时机必须早于
+  VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接、inject_boundary 标记注入与 HOLISTIC
+  / CAPABILITY_GROUP 派生。
+
+  FIX_PROMPT 的 incomplete_tasks 字段说明 — 把措辞对齐 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  的现有版本：仅当 completion_status 为 partial 或 failed 时填写，complete 时必须为空数组。
+
+  _render_implement 的 Incomplete Tasks 区块（step_renderers.py） — 按 completion_status
+  选择标题 key 与项目符号样式：complete → 中性标题 + 中性 bullet；partial / failed / unknown → 现有红色标题
+  + 红 ✗。dict 与字符串两种条目形态的解析逻辑（task_id/id、reason/error）在两条分支下完全一致地保留。
+
+  i18n 语言包（en-US.json / zh-CN.json） — 新增中性标题 key（cli.steprender.implement.* 命名空间，携带
+  {count} 占位与中性 Rich 标记），两份语言包 key 集合保持一致，en-US 为基准。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "共用文案定义为单一模块级常量，经锚点式插入注入三份基础 prompt，而非在每份 prompt 字符串里各写一遍。", "rationale":
+  "任务明确要求单点维护；且 HOLISTIC 与 CAPABILITY_GROUP 是从基础 prompt 派生的，注入基础即自动继承，避免派生链上出现文案漂移。锚点缺失时抛错（而非静默不插）沿用文件内
+  _substitute_anchor 已确立的失败模式：基础模板改动导致锚点失效时在 import 期立刻暴露，而不是让派生变体悄悄丢文案。", "alternatives_considered":
+  "(a) 像 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 那样直接尾部拼接——最省事，但文案会离 estimated_test_duration
+  说明很远，违背『同一测试话题就近放置』的要求；(b) 三份 prompt 各自内联同一段文字——违反单点维护，日后必然漂移。" }, { "decision":
+  "文案定位为软约束，措辞为『默认针对性 + 有理由时可全量但须前台跑完』，不写死禁令。", "rationale": "任务的『不做』明确排除硬性禁止运行全量测试；真实场景中跨模块改动确实需要更宽的验证，一刀切禁令会把正当行为也压掉，反而降低质量。要点二（无头契约）是事实陈述而非禁令，纠正的是
+  agent 对自身运行模型的错误假设——这是根因，比任何测试范围的措辞更关键。", "alternatives_considered": "在 prompt 中硬性禁止自行运行全量测试；或在引擎侧检测并拒收含『测试仍在进行』字样的
+  incomplete_tasks 条目——前者被任务显式排除，后者属于改动状态判定逻辑，同样在排除范围内。" }, { "decision": "渲染降级只按
+  completion_status == \"complete\" 分叉，不试图解析 incomplete_tasks 条目内容。", "rationale":
+  "条目是自由文本（也可能是 dict），任何基于关键词的『这是不是测试相关备注』判断都是脆弱启发式。状态字段是引擎已经确定性持有的信号：complete 意味着引擎按现有
+  WHY 逻辑已判定任务完成，此时残留条目在语义上就是备注/未验证项，与是否提到测试无关。", "alternatives_considered": "按条目文本匹配『test
+  suite / in progress』等关键词只降级匹配到的条目；或在引擎侧过滤掉这类条目——前者脆弱且会产生红黑混排，后者会丢失信息且触碰被排除的引擎逻辑。"
+  }, { "decision": "新增独立 i18n key（沿用 cli.steprender.implement.* 命名空间），而非改写现有 incomplete_tasks
+  key 或在代码里拼颜色标签。", "rationale": "charter 要求用户可见文案一律经语言资源按 key 渲染、en-US 持有 key 全集；现有
+  incomplete_tasks key 仍被 partial/failed 路径使用，不能改写。两个 key 各自把 Rich 标记（红 vs 中性）封在语言包里，与该文件现有做法一致。",
+  "alternatives_considered": "复用同一 key、在渲染代码里按状态换 Rich 颜色标签——会把样式从语言包漏回代码，与文件内其他条目风格不一致。"
+  }, { "decision": "prompt 内容断言测试放在 tests/engine/steps/test_implement.py，渲染分支测试放在
+  tests/test_step_renderers.py。", "rationale": "与 scope 指定的位置一致，且各自贴近被测模块的既有测试聚集地。conftest.py
+  已有 autouse 的 _force_en_us_ui_language fixture 把 UI 语言钉在 en-US，渲染断言可直接按英文文案写，无需各测试自行
+  monkeypatch。", "alternatives_considered": "把 prompt 断言塞进 tests/test_implement.py——该文件更偏行为/流程测试，且
+  scope 已指明目标文件。" } ]
+
+  data_flow
+
+  A 线：implement.py import 时 → 三份基础 prompt 字面量定义完成 → 锚点插入共用文案（各自 estimated_test_duration
+  说明旁）+ FIX_PROMPT 字段说明对齐 → 依次拼接 VERSION_FILE_GUARDRAIL / FIX_VERSION_FILE_GUARDRAIL
+  与 WHY_COMMENT_CONVENTION → inje… (659 字符)
+
+  testing_strategy
+
+  渲染侧（tests/test_step_renderers.py）：新增用例覆盖 (1) complete + 非空 incomplete_tasks → 输出含中性标题、且不含『Incomplete
+  Tasks』/『未完成任务』文案与红 ✗ 行；(2) partial + 非空 → 仍为原红色渲染（标题与 ✗ 均在）；(3) failed 与 status
+  缺失（unknown）→ 同 part… (990 字符)
+
+  notes
+
+  两条改动线文件完全不重叠（implement.py vs step_renderers.py + 两份 locales），可在隔离 worktree 中并行执行，无
+  depends_on。
+
+  任务组 (2)
+
+  G1 implement prompt 增补测试范围与无头运行契约文案，并对齐 FIX_PROMPT 的 incomplete_tasks 说明 · 0 个任务
+  · ~0 LOC · 依赖：无
+
+  G2 CLI 渲染：complete 状态下的残留 incomplete_tasks 降级为中性备注 · 0 个任务 · ~0 LOC · 依赖：无
+
+  tokens
+
+  输入 303,055 · 输出 10,735 · 缓存 读/写 265,752/37,291 · $0.7888
+
+  ▸ ✓ 步骤已完成 · 计划
+
+  提案
+
+  摘要
+
+  修补 implement 步骤『汇报 complete 却同时列出未完成任务』暴露的两个缺口：一是在 implement.py 中新增一段共用的英文 prompt
+  文案（测试范围默认针对性 + 无头运行契约），在模块内定义一次并注入 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT / FIX_PROMPT
+  三份基础 prompt（HOLISTIC 与 CAPABILITY_GROUP 派生变体自然继承），并把 FIX_PROMPT 的 incomplete_tasks
+  字段说明对齐另外两份；二是在 step_renderers.py 的 _render_implement 中，对『complete + 非空 incomplete_tasks』这一组合改用中性标题与中性项目符号渲染（新增
+  cli.steprender.implement.* i18n key），partial / failed / unknown 的红色渲染保持不变。引擎状态判定、commit
+  行为、WebUI、charter、.version 一律不动。
+
+
+  待修改文件 (6)
+
+  src/tianluo/engine/steps/implement.py
+
+  src/tianluo/engine/step_renderers.py
+
+  src/tianluo/i18n/locales/en-US.json
+
+  src/tianluo/i18n/locales/zh-CN.json
+
+  tests/test_step_renderers.py
+
+  tests/engine/steps/test_implement.py
+
+  其他字段
+
+  motivation
+
+  flow 20260815-013629_e5f57f8a 中，无头 implement agent 做完全部任务组后自行后台启动全量 pytest 并『等待被唤醒』——无头模式下本轮输出结束即进程退出，该结果永远不会被观察到；agent
+  于是汇报 completion_status=complete 且把『Full test suite run was still in progress…』填进…
+  (476 字符)
+
+  files_to_create
+
+  []
+
+  risks
+
+  [ "三份基础 prompt 都是 `.format(...)` 风格模板，新增文案中若出现单个 `{` 或 `}` 会在渲染时抛 KeyError/IndexError——共用文案必须完全不含花括号（或按现有惯例双写）。",
+  "IMPLEMENT_CAPABILITY_GROUP_PROMPT 经 _substitute_anchor 从 IMPLEMENT_GROUP_PROMPT
+  锚点替换派生（锚点缺失即 import 时抛错），HOLISTIC_IMPLEMENT_PROMPT 经 .replace 从 IMPLEMENT_PROMPT
+  派生：新文案的插入点若落在这些锚点串内部或改动了锚点文本，会导致 import 期直接失败或派生变体静默丢失文案。插入必须发生在派生之前、且不触碰任何锚点句。",
+  "现有拼接顺序（VERSION_FILE_GUARDRAIL → WHY_COMMENT_CONVENTION → inject_boundary 标记注入 →
+  HOLISTIC/CAPABILITY 派生）是有依赖的流水线，插入时序放错会让 prompt 内容或 USER_CONTENT 边界标记错位。", "prompt
+  是 LLM 软约束，不是硬守卫：文案只能降低而不能消除 agent 自行跑全量测试或留后台任务的概率；本任务明确不做硬性禁止。", "i18n 两份语言包 key
+  集合必须一致（en-US 为基准持有全集），漏加 zh-CN key 会在中文环境回落 en-US 而非报错，易被测试放过——测试需覆盖 key 存在性。",
+  "渲染分支新增后，判定条件依赖 outputs 中 completion_status 的字面值；对历史 flow 记录（缺字段 → unknown）必须落回原红色渲染，否则会改变旧记录的展示语义。"
+  ]
+
+  设计
+
+  概览
+
+  两条互不相干的改动线。A 线在 src/tianluo/engine/steps/implement.py 顶部区域新增一个模块级常量（例如 TEST_SCOPE_AND_HEADLESS_CLAUSE），承载两条要点的英文条目式文案（≤80
+  词、无花括号）：(1) 全量测试由 flow 后续 TEST step 统一执行，agent 默认只跑与本次改动直接相关的测试，仅在有具体理由预期波及所触模块之外时才自行跑全量、且必须前台跑到出结果，不得以『全量测试未跑完/结果未观察』作为未完成项汇报，estimated_test_duration
+  仍按现有说明填整套估时；(2) agent 以无头方式运行，本轮输出结束即进程退出，不存在之后被唤醒，不得遗留后台任务/监视器/等通知式收尾，所有汇报依赖的工作必须在输出最终
+  JSON 前完成。该常量经一个锚点式插入（缺锚点即抛错的辅助函数，语义同现有 _substitute_anchor）分别插进三份基础 prompt 的 estimated_test_duration
+  说明紧邻位置，插入时机在 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接与 HOLISTIC / CAPABILITY
+  派生之前，从而由派生变体自然继承。同时把 FIX_PROMPT 的 incomplete_tasks 字段说明改写为与 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  现有措辞一致的版本（含『Only populate when completion_status is "partial" or "failed"』语义，complete
+  时必须为空数组）。B 线在 src/tianluo/engine/step_renderers.py::_render_implement 的 Incomplete
+  Tasks 区块内按 completion_status 分叉：complete 走新的中性标题 key 与中性项目符号，其余（partial / failed
+  / unknown / 缺失）保持现有红色标题与红 ✗ 不变；新标题 key 加入 en-US.json 与 zh-CN.json 的 cli.steprender.implement.*
+  命名空间。
+
+
+  组件 (5)
+
+  共用 prompt 文案常量（implement.py 模块级） — 以英文条目式承载两条要点（测试范围默认针对性、无头运行契约），≤80 词、不含花括号，是三份基础
+  prompt 的唯一文案来源。
+
+  锚点插入逻辑（implement.py 模块加载期） — 把共用文案插到三份基础 prompt 各自 estimated_test_duration 说明的紧邻位置；锚点缺失时抛错。执行时机必须早于
+  VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 拼接、inject_boundary 标记注入与 HOLISTIC
+  / CAPABILITY_GROUP 派生。
+
+  FIX_PROMPT 的 incomplete_tasks 字段说明 — 把措辞对齐 IMPLEMENT_PROMPT / IMPLEMENT_GROUP_PROMPT
+  的现有版本：仅当 completion_status 为 partial 或 failed 时填写，complete 时必须为空数组。
+
+  _render_implement 的 Incomplete Tasks 区块（step_renderers.py） — 按 completion_status
+  选择标题 key 与项目符号样式：complete → 中性标题 + 中性 bullet；partial / failed / unknown → 现有红色标题
+  + 红 ✗。dict 与字符串两种条目形态的解析逻辑（task_id/id、reason/error）在两条分支下完全一致地保留。
+
+  i18n 语言包（en-US.json / zh-CN.json） — 新增中性标题 key（cli.steprender.implement.* 命名空间，携带
+  {count} 占位与中性 Rich 标记），两份语言包 key 集合保持一致，en-US 为基准。
+
+  其他字段
+
+  architecture_decisions
+
+  [ { "decision": "共用文案定义为单一模块级常量，经锚点式插入注入三份基础 prompt，而非在每份 prompt 字符串里各写一遍。", "rationale":
+  "任务明确要求单点维护；且 HOLISTIC 与 CAPABILITY_GROUP 是从基础 prompt 派生的，注入基础即自动继承，避免派生链上出现文案漂移。锚点缺失时抛错（而非静默不插）沿用文件内
+  _substitute_anchor 已确立的失败模式：基础模板改动导致锚点失效时在 import 期立刻暴露，而不是让派生变体悄悄丢文案。", "alternatives_considered":
+  "(a) 像 VERSION_FILE_GUARDRAIL / WHY_COMMENT_CONVENTION 那样直接尾部拼接——最省事，但文案会离 estimated_test_duration
+  说明很远，违背『同一测试话题就近放置』的要求；(b) 三份 prompt 各自内联同一段文字——违反单点维护，日后必然漂移。" }, { "decision":
+  "文案定位为软约束，措辞为『默认针对性 + 有理由时可全量但须前台跑完』，不写死禁令。", "rationale": "任务的『不做』明确排除硬性禁止运行全量测试；真实场景中跨模块改动确实需要更宽的验证，一刀切禁令会把正当行为也压掉，反而降低质量。要点二（无头契约）是事实陈述而非禁令，纠正的是
+  agent 对自身运行模型的错误假设——这是根因，比任何测试范围的措辞更关键。", "alternatives_considered": "在 prompt 中硬性禁止自行运行全量测试；或在引擎侧检测并拒收含『测试仍在进行』字样的
+  incomplete_tasks 条目——前者被任务显式排除，后者属于改动状态判定逻辑，同样在排除范围内。" }, { "decision": "渲染降级只按
+  completion_status == \"complete\" 分叉，不试图解析 incomplete_tasks 条目内容。", "rationale":
+  "条目是自由文本（也可能是 dict），任何基于关键词的『这是不是测试相关备注』判断都是脆弱启发式。状态字段是引擎已经确定性持有的信号：complete 意味着引擎按现有
+  WHY 逻辑已判定任务完成，此时残留条目在语义上就是备注/未验证项，与是否提到测试无关。", "alternatives_considered": "按条目文本匹配『test
+  suite / in progress』等关键词只降级匹配到的条目；或在引擎侧过滤掉这类条目——前者脆弱且会产生红黑混排，后者会丢失信息且触碰被排除的引擎逻辑。"
+  }, { "decision": "新增独立 i18n key（沿用 cli.steprender.implement.* 命名空间），而非改写现有 incomplete_tasks
+  key 或在代码里拼颜色标签。", "rationale": "charter 要求用户可见文案一律经语言资源按 key 渲染、en-US 持有 key 全集；现有
+  incomplete_tasks key 仍被 partial/failed 路径使用，不能改写。两个 key 各自把 Rich 标记（红 vs 中性）封在语言包里，与该文件现有做法一致。",
+  "alternatives_considered": "复用同一 key、在渲染代码里按状态换 Rich 颜色标签——会把样式从语言包漏回代码，与文件内其他条目风格不一致。"
+  }, { "decision": "prompt 内容断言测试放在 tests/engine/steps/test_implement.py，渲染分支测试放在
+  tests/test_step_renderers.py。", "rationale": "与 scope 指定的位置一致，且各自贴近被测模块的既有测试聚集地。conftest.py
+  已有 autouse 的 _force_en_us_ui_language fixture 把 UI 语言钉在 en-US，渲染断言可直接按英文文案写，无需各测试自行
+  monkeypatch。", "alternatives_considered": "把 prompt 断言塞进 tests/test_implement.py——该文件更偏行为/流程测试，且
+  scope 已指明目标文件。" } ]
+
+  data_flow
+
+  A 线：implement.py import 时 → 三份基础 prompt 字面量定义完成 → 锚点插入共用文案（各自 estimated_test_duration
+  说明旁）+ FIX_PROMPT 字段说明对齐 → 依次拼接 VERSION_FILE_GUARDRAIL / FIX_VERSION_FILE_GUARDRAIL
+  与 WHY_COMMENT_CONVENTION → inje… (659 字符)
+
+  testing_strategy
+
+  渲染侧（tests/test_step_renderers.py）：新增用例覆盖 (1) complete + 非空 incomplete_tasks → 输出含中性标题、且不含『Incomplete
+  Tasks』/『未完成任务』文案与红 ✗ 行；(2) partial + 非空 → 仍为原红色渲染（标题与 ✗ 均在）；(3) failed 与 status
+  缺失（unknown）→ 同 part… (990 字符)
+
+  notes
+
+  两条改动线文件完全不重叠（implement.py vs step_renderers.py + 两份 locales），可在隔离 worktree 中并行执行，无
+  depends_on。
+
+  任务组 (2)
+
+  G1 implement prompt 增补测试范围与无头运行契约文案，并对齐 FIX_PROMPT 的 incomplete_tasks 说明 · 0 个任务
+  · ~0 LOC · 依赖：无
+
+  G2 CLI 渲染：complete 状态下的残留 incomplete_tasks 降级为中性备注 · 0 个任务 · ~0 LOC · 依赖：无
+
+  tokens
+
+  输入 303,055 · 输出 10,735 · 缓存 读/写 265,752/37,291 · $0.7888
+
+  确认
+
+  ▸ user 提示词 · confirm
+
+  ▸ user 提示词 · confirm
+
+  ▸ user 提示词 · confirm
+
+  ▸ user 提示词 · confirm
+
+  assistant
+
+  2026/8/19 11:09:27
+
+  opus · claude-opus-5
+
+  approved
+
+  true
+
+  feedback
+
+  三个维度均通过。 1) 分组数 vs 独立任务：任务本身包含两条互不相干的改动线——范围 A（`src/tianluo/engine/steps/implement.py`
+  的共用 prompt 文案 + `FIX_PROMPT` 的 `incomplete_tasks` 字段对齐）与范围 B（`step_renderers.py::_render_implement`
+  的渲染降级 + 两份 l… (812 字符)
+
+  本轮 52,177 in / 984 out · 累计 52,177 in / 984 out
+
+  查看原始
+
+  assistant
+
+  2026/8/19 11:09:27
+
+  opus · claude-opus-5
+
+  approved
+
+  true
+
+  feedback
+
+  三个维度均通过。 1) 分组数 vs 独立任务：任务本身包含两条互不相干的改动线——范围 A（`src/tianluo/engine/steps/implement.py`
+  的共用 prompt 文案 + `FIX_PROMPT` 的 `incomplete_tasks` 字段对齐）与范围 B（`step_renderers.py::_render_implement`
+  的渲染降级 + 两份 l… (812 字符)
+
+  本轮 52,177 in / 984 out · 累计 52,177 in / 984 out
+
+  查看原始
+
+  assistant
+
+  2026/8/19 11:09:27
+
+  opus · claude-opus-5
+
+  approved
+
+  true
+
+  feedback
+
+  三个维度均通过。 1) 分组数 vs 独立任务：任务本身包含两条互不相干的改动线——范围 A（`src/tianluo/engine/steps/implement.py`
+  的共用 prompt 文案 + `FIX_PROMPT` 的 `incomplete_tasks` 字段对齐）与范围 B（`step_renderers.py::_render_implement`
+  的渲染降级 + 两份 l… (812 字符)
+
+  本轮 52,177 in / 984 out · 累计 52,177 in / 984 out
+
+  查看原始
+
+  assistant
+
+  2026/8/19 11:09:27
+
+  opus · claude-opus-5
+
+  approved
+
+  true
+
+  feedback
+
+  三个维度均通过。 1) 分组数 vs 独立任务：任务本身包含两条互不相干的改动线——范围 A（`src/tianluo/engine/steps/implement.py`
+  的共用 prompt 文案 + `FIX_PROMPT` 的 `incomplete_tasks` 字段对齐）与范围 B（`step_renderers.py::_render_implement`
+  的渲染降级 + 两份 l… (812 字符)
+
+  本轮 52,177 in / 984 out · 累计 52,177 in / 984 out
+
+  查看原始'
+status: in-progress
+tags: []
+source: human
+created_at: '2026-08-19T11:12:18.557457'
+updated_at: '2026-08-19T11:12:55.113863'
+type: bug
