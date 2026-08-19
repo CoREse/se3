@@ -817,6 +817,59 @@ class TestChipHeader:
         assert "MysteryTool" in header
         assert "foo=bar" in header
 
+    def test_in_flight_unknown_tool_leads_with_its_own_name(self):
+        # WHY this matters: the frontend reads a structured chip fragment's
+        # tool name as the first token inside the bracket. The old generic
+        # framing `Tool: MysteryTool | Input: ...` made that token "Tool", so
+        # the terminal fragment `[MysteryTool ✓ ...]` looked like a different
+        # tool and blanked the chip header when it upgraded it.
+        header = format_tool_chip_in_flight_header(
+            "MysteryTool", {"foo": "bar"}
+        )
+        assert header == "MysteryTool: foo=bar"
+
+    def test_in_flight_agent_matches_terminal_leading_token(self):
+        in_flight = format_tool_chip_in_flight_header(
+            "Agent", {"description": "self check", "prompt": "look"}
+        )
+        terminal = format_tool_chip_header(
+            "Agent",
+            {"description": "self check", "prompt": "look"},
+            "found nothing",
+            is_error=False,
+        )
+        assert in_flight.split(":")[0] == terminal.split(" ")[0] == "Agent"
+
+    def test_in_flight_codex_mcp_name_kept_whole(self):
+        # codex_runner synthesizes `mcp__<server>__<tool>`; the double
+        # underscores must survive into the chip name.
+        header = format_tool_chip_in_flight_header(
+            "mcp__ctx7__get-library-docs", {"library": "fastapi"}
+        )
+        assert header == "mcp__ctx7__get-library-docs: library=fastapi"
+
+    def test_in_flight_codex_unknown_name(self):
+        header = format_tool_chip_in_flight_header("unknown", {"raw": "x"})
+        assert header == "unknown: raw=x"
+
+    def test_in_flight_empty_input_is_none_body(self):
+        assert format_tool_chip_in_flight_header("Agent", {}) == "Agent: (none)"
+
+    def test_in_flight_registered_tools_byte_identical(self):
+        """Registered tools keep the exact header they produced before."""
+        assert format_tool_chip_in_flight_header(
+            "Read", {"file_path": "src/app.py", "offset": 0, "limit": 200}
+        ) == "Read: src/app.py:0-200"
+        assert format_tool_chip_in_flight_header(
+            "Bash", {"command": "pytest -q"}
+        ) == "Bash: pytest -q"
+        assert format_tool_chip_in_flight_header(
+            "Grep", {"pattern": "def ", "path": "src"}
+        ) == "Grep: /def / in src"
+        assert format_tool_chip_in_flight_header(
+            "Glob", {"pattern": "*.py", "path": "src"}
+        ) == "Glob: *.py in src"
+
     def test_success_read_merges_use_and_result(self):
         header = format_tool_chip_header(
             "Read",

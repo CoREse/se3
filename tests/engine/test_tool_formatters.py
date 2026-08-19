@@ -13,6 +13,8 @@ import pytest
 from tianluo.engine.tool_formatters import (
     TOOL_FORMATTERS,
     _extract_text,
+    format_tool_chip_header,
+    format_tool_chip_in_flight_header,
     format_tool_result_preview,
     format_tool_use_preview,
     get_project_root,
@@ -603,3 +605,87 @@ class TestRouting:
             assert result.startswith(f"{tool_name}:"), (
                 f"{tool_name} use preview should start with '{tool_name}:', got: {result}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Chip bracket grammar — both chip grammars lead with the real tool name
+# ---------------------------------------------------------------------------
+
+
+class TestChipGrammarLeadsWithToolName:
+    """The in-flight and terminal chip headers must agree on the leading token.
+
+    The frontend parses a structured chip fragment's tool name generically (the
+    first token inside the bracket), so a header that leads with the literal
+    word ``Tool`` instead of the tool's own name makes the terminal fragment
+    look like a different tool than the in-flight one — which used to blank the
+    chip header on completion.
+    """
+
+    # Names an unregistered call can carry: claude's own host/subagent tools and
+    # the two shapes codex_runner synthesizes for MCP calls.
+    UNREGISTERED = [
+        ("Agent", {"description": "self check", "prompt": "look at the diff"}),
+        ("mcp__context7__get-library-docs", {"library": "fastapi"}),
+        ("unknown", {"raw": "no tool name in the event"}),
+        ("ReportFindings", {"findings": []}),
+    ]
+
+    @pytest.mark.parametrize("tool_name,use_input", UNREGISTERED)
+    def test_unregistered_in_flight_leads_with_tool_name(self, tool_name, use_input):
+        header = format_tool_chip_in_flight_header(tool_name, use_input)
+        assert header.startswith(f"{tool_name}: "), header
+        # The generic `Tool: <name> | Input: ` framing is gone — only the
+        # `k=v, ...` body survives after the name.
+        assert "| Input:" not in header
+        assert not header.startswith("Tool: ") or tool_name == "Tool"
+
+    @pytest.mark.parametrize("tool_name,use_input", UNREGISTERED)
+    def test_unregistered_terminal_leads_with_same_tool_name(self, tool_name, use_input):
+        header = format_tool_chip_header(tool_name, use_input, "done", is_error=False)
+        assert header.startswith(f"{tool_name} ✓"), header
+
+    def test_agent_in_flight_body_is_key_value_summary(self):
+        header = format_tool_chip_in_flight_header(
+            "Agent", {"description": "self check", "prompt": "look"}
+        )
+        assert header == "Agent: description=self check, prompt=look"
+
+    def test_mcp_name_kept_whole(self):
+        header = format_tool_chip_in_flight_header(
+            "mcp__context7__get-library-docs", {"library": "fastapi"}
+        )
+        assert header == "mcp__context7__get-library-docs: library=fastapi"
+
+    def test_empty_input_renders_none_body(self):
+        assert format_tool_chip_in_flight_header("Agent", {}) == "Agent: (none)"
+        assert format_tool_chip_in_flight_header("unknown", None) == "unknown: (none)"
+
+    @pytest.mark.parametrize(
+        "tool_name,use_input,expected",
+        [
+            ("Read", {"file_path": "src/a.py", "offset": 0, "limit": 200},
+             "Read: src/a.py:0-200"),
+            ("Bash", {"command": "ls -la"}, "Bash: ls -la"),
+            ("Edit", {"file_path": "src/a.py", "old_string": "a", "new_string": "b"},
+             "Edit: src/a.py (1 lines → 1 lines)"),
+            ("Write", {"file_path": "src/a.py", "content": "x\ny"},
+             "Write: src/a.py (2 lines)"),
+            ("Grep", {"pattern": "def ", "path": "src"}, "Grep: /def / in src"),
+            ("Glob", {"pattern": "*.py", "path": "src"}, "Glob: *.py in src"),
+        ],
+    )
+    def test_registered_tools_unchanged(self, tool_name, use_input, expected):
+        """Registered tools keep their exact pre-existing in-flight header."""
+        assert format_tool_chip_in_flight_header(tool_name, use_input) == expected
+
+    def test_preview_helpers_keep_their_cli_framing(self):
+        """`format_tool_use_preview` still feeds the CLI's stdout preview.
+
+        It is deliberately NOT rewritten alongside the chip header — the
+        `Tool: <name> | Input: ...` shape is what the terminal `🔧` line and
+        the chat_history transcript show.
+        """
+        assert format_tool_use_preview("Agent", {"prompt": "x"}) == (
+            "Tool: Agent | Input: prompt=x"
+        )

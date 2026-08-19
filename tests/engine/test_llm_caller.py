@@ -2003,3 +2003,148 @@ class TestCallDispatchExtractRequiredKeys:
             )
             mock_extract.assert_called_once()
             assert mock_extract.call_args.kwargs.get("required_keys") is None
+
+
+# ---------------------------------------------------------------------------
+# Chip bracket fragments — cross-runner (claude / claude-interactive / codex)
+# ---------------------------------------------------------------------------
+
+
+class TestChipFragmentGrammar:
+    """Both chip fragments a tool call emits must lead with the real tool name.
+
+    All three AgentRunners translate their own output into the SAME stream-json
+    NDJSON contract (``assistant``/``tool_use`` + ``user``/``tool_result``) and
+    hand it to ``StreamJSONTracker``, so these assertions hold for claude,
+    claude-interactive and codex alike — the fragments are built here, in the
+    shared LLMCaller layer, never in a runner.
+    """
+
+    @staticmethod
+    def _tracker(monkeypatch, tmp_path):
+        from tianluo.engine import chat_history
+
+        captured = []
+
+        def fake_record_stream_progress(
+            project_root, flow_id, step_id, step_type, content, raw_obj,
+            attempt, timestamp=None, *, tool_use_id=None, is_error=None,
+            tool_detail=None,
+        ):
+            captured.append({
+                "content": content,
+                "tool_use_id": tool_use_id,
+                "is_error": is_error,
+                "tool_detail": tool_detail,
+            })
+
+        monkeypatch.setattr(
+            chat_history, "record_stream_progress", fake_record_stream_progress
+        )
+        tracker = StreamJSONTracker(
+            project_root=tmp_path,
+            flow_id="flow-chip-grammar",
+            step_id="step-1",
+            step_type="implement",
+            attempt=0,
+        )
+        return tracker, captured
+
+    @staticmethod
+    def _tool_use_line(tool_use_id, name, tool_input):
+        # Byte-shape emitted by codex_runner._tool_use_line and by claude's own
+        # stream-json output alike.
+        return json.dumps({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use",
+                "id": tool_use_id,
+                "name": name,
+                "input": tool_input,
+            }]},
+        })
+
+    @staticmethod
+    def _tool_result_line(tool_use_id, content, is_error=False):
+        # Byte-shape emitted by codex_runner._tool_result_line.
+        return json.dumps({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result",
+                "tool_use_id": tool_use_id,
+                "content": content,
+                "is_error": is_error,
+            }]},
+        })
+
+    def _run_pair(self, monkeypatch, tmp_path, name, tool_input, result="ok"):
+        tracker, captured = self._tracker(monkeypatch, tmp_path)
+        tracker.process_line(self._tool_use_line("tu-1", name, tool_input))
+        tracker.process_line(self._tool_result_line("tu-1", result))
+        recs = [c for c in captured if c["tool_use_id"]]
+        assert len(recs) == 2, recs
+        return recs
+
+    @pytest.mark.parametrize(
+        "name,tool_input",
+        [
+            ("Agent", {"description": "self check", "prompt": "look"}),
+            ("ToolSearch", {"query": "select:Read"}),
+            ("mcp__context7__get-library-docs", {"library": "fastapi"}),
+            ("unknown", {"raw": "x"}),
+            ("Read", {"file_path": "src/a.py", "offset": 0, "limit": 200}),
+        ],
+    )
+    def test_both_fragments_lead_with_real_tool_name(
+        self, monkeypatch, tmp_path, name, tool_input
+    ):
+        in_flight, terminal = self._run_pair(monkeypatch, tmp_path, name, tool_input)
+        assert in_flight["content"].startswith(f"[{name}"), in_flight["content"]
+        assert terminal["content"].startswith(f"[{name} ✓"), terminal["content"]
+        # in-flight is marked by the ABSENCE of is_error, not by tool_detail.
+        assert in_flight["is_error"] is None
+        assert terminal["is_error"] is False
+
+    def test_unregistered_in_flight_fragment_has_no_generic_framing(
+        self, monkeypatch, tmp_path
+    ):
+        in_flight, _ = self._run_pair(
+            monkeypatch, tmp_path, "Agent",
+            {"description": "self check", "prompt": "look"},
+        )
+        assert in_flight["content"] == "[Agent: description=self check, prompt=look]"
+        assert "| Input:" not in in_flight["content"]
+
+    def test_failure_fragment_leads_with_real_tool_name(self, monkeypatch, tmp_path):
+        tracker, captured = self._tracker(monkeypatch, tmp_path)
+        tracker.process_line(
+            self._tool_use_line("tu-err", "Agent", {"prompt": "boom"})
+        )
+        tracker.process_line(
+            self._tool_result_line("tu-err", "InputValidationError", is_error=True)
+        )
+        recs = [c for c in captured if c["tool_use_id"]]
+        assert recs[-1]["content"].startswith("[Agent ✗"), recs[-1]["content"]
+        assert recs[-1]["is_error"] is True
+
+    def test_codex_synthesized_mcp_pair_matches_claude_shape(
+        self, monkeypatch, tmp_path
+    ):
+        """A codex-synthesized MCP call renders the same chip a claude call would.
+
+        codex_runner emits `mcp__<server>__<tool>` through the very same
+        stream-json records, so driving the tracker with its byte-shape must
+        produce a chip fragment whose name token is the full MCP name — double
+        underscores and hyphens intact.
+        """
+        in_flight, terminal = self._run_pair(
+            monkeypatch, tmp_path,
+            "mcp__context7__get-library-docs", {"library": "fastapi"},
+            result="docs...",
+        )
+        assert in_flight["content"] == (
+            "[mcp__context7__get-library-docs: library=fastapi]"
+        )
+        assert terminal["content"].startswith(
+            "[mcp__context7__get-library-docs ✓ library=fastapi · docs..."
+        ), terminal["content"]

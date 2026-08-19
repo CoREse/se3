@@ -3849,6 +3849,13 @@ check("live partial with bracket-format generic 'Tool error' renders as .tool-ma
 const chipMod = await import("./tool_chip_state.test.mjs");
 chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 
+// Register the whitelist-free structured chip-name tests: every tool the
+// backend can name (claude's Agent / Skill / ToolSearch, codex's synthesized
+// mcp__server__tool / unknown) must render as its own chip and keep a
+// non-empty header once it completes.
+const chipGenericNameMod = await import("./tool_chip_generic_name.test.mjs");
+chipGenericNameMod.registerToolChipGenericNameTests({ app, check, findOne, findAll });
+
 // Register the G4 per-group DAG status marker tests (separate module — same
 // `check` reporter, same `app` module, same shared DOM stub already installed
 // above).

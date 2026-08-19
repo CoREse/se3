@@ -493,15 +493,55 @@ def generate_edit_diff(old_string: str, new_string: str, file_path: str) -> list
 # Chip header — single-chip in-flight / success / failure
 # ---------------------------------------------------------------------------
 
+def _generic_use_body(tool_name: str, use_input: dict) -> str:
+    """Return the generic ``k=v, ...`` summary with the framing stripped.
+
+    ``_generic_tool_use_preview`` frames its summary as
+    ``Tool: <name> | Input: <body>`` because that string also feeds the CLI's
+    ``🔧`` stdout preview and the chat_history text transcript. Chips draw the
+    tool name in their own span, so only ``<body>`` belongs in the header.
+    Unlike :func:`_failure_use_body` this peels the generic framing FIRST, so a
+    tool literally named ``Tool`` does not lose half its framing to the
+    ``"<name>: "`` prefix test.
+    """
+    full = format_tool_use_preview(tool_name, use_input or {})
+    generic_prefix = f"Tool: {tool_name} | Input: "
+    if full.startswith(generic_prefix):
+        return full[len(generic_prefix):]
+    prefix = f"{tool_name}: "
+    if full.startswith(prefix):
+        return full[len(prefix):]
+    return full
+
+
 def format_tool_chip_in_flight_header(tool_name: str, use_input: dict) -> str:
     """Return the chip header string for an in-flight tool call.
 
-    Delegates to the existing ``_format_*_use`` registry; output looks like
-    ``Read: path:0-200``. The returned string is the chip header *only* — it
-    does NOT carry surrounding ``[`` / ``]`` brackets, since the chip frame is
-    drawn by the frontend.
+    Registered tools delegate to the ``_format_*_use`` registry, whose output
+    already leads with the real tool name (``Read: path:0-200``). Unregistered
+    tools — claude's ``Agent`` / ``Skill`` / ``ToolSearch``, codex's synthesized
+    ``mcp__<server>__<tool>`` / ``unknown`` — would otherwise fall through to
+    the generic ``Tool: <name> | Input: …`` framing, whose leading token is the
+    literal word ``Tool`` rather than the tool's name; they get
+    ``<tool_name>: <k=v summary>`` instead.
+
+    WHY: both chip grammars — this in-flight one and the terminal
+    ``<tool_name> ✓/✗ …`` from :func:`format_tool_chip_header` — MUST start
+    with the real tool name, because the frontend parses the chip name
+    generically as the first token inside the bracket rather than against a
+    name whitelist. When the two grammars disagreed, the terminal fragment for
+    an unregistered tool parsed as a different tool than its in-flight
+    fragment, and upgrading the chip blanked its header.
+
+    The returned string is the chip header *only* — it does NOT carry
+    surrounding ``[`` / ``]`` brackets, since the chip frame is drawn by the
+    frontend.
     """
-    return format_tool_use_preview(tool_name, use_input or {})
+    entry = TOOL_FORMATTERS.get(tool_name)
+    if entry and "use" in entry:
+        return format_tool_use_preview(tool_name, use_input or {})
+    body = _generic_use_body(tool_name, use_input or {})
+    return f"{tool_name}: {body}" if body else f"{tool_name}: (none)"
 
 
 def _error_preview(result_data: Any, max_length: int = 80) -> str:

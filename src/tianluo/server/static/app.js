@@ -10581,15 +10581,29 @@ function applyFragmentToBubble(row, norm) {
   if (norm && typeof norm.toolUseId === "string" && norm.toolUseId) {
     const reg = row.__chipRegistry || (row.__chipRegistry = new Map());
     const content = typeof norm.content === "string" ? norm.content : "";
-    // Parse the bracket marker for name + header. Fragment text is exactly
-    // `[<Name>...]` so the first known-name match drives the chip identity;
-    // fall back to "Tool" if no name matches.
-    const nameMatch = TOOL_MARKER_RE.exec(content);
-    TOOL_MARKER_RE.lastIndex = 0;
-    const name = nameMatch ? nameMatch[1] : "Tool";
-    const parsed = nameMatch ? parseToolBracket(name, nameMatch[0])
+    // Parse the bracket marker for name + header. Fragment text is generated
+    // whole by the backend as exactly `[<Name>...]`, so the name is read
+    // generically as the leading token — NOT matched against
+    // `TOOL_MARKER_NAMES`. WHY: the whitelist covered only a handful of
+    // built-ins, so every other tool (claude's Agent / Skill / ToolSearch,
+    // codex's synthesized `mcp__<server>__<tool>` / `unknown`) fell through to
+    // the "Tool" fallback with an EMPTY header, and its terminal fragment
+    // blanked the chip it should have upgraded. Fall back to "Tool" only when
+    // the fragment carries no parseable name at all.
+    const raw = content.trim();
+    const parsedName = parseToolFragmentName(raw);
+    const name = parsedName || "Tool";
+    const parsed = parsedName ? parseToolBracket(name, raw)
       : { name: name, header: "", status: "in-flight" };
     const existing = reg.get(norm.toolUseId);
+    // A terminal fragment naming a real tool renames a chip built under the
+    // fallback name — this is what lets legacy jsonl (in-flight
+    // `[Tool: Agent | Input: …]`, terminal `[Agent ✓ …]`) still settle as
+    // "Agent ✓ …" rather than a bare "Tool ✓".
+    if (existing && parsedName && parsedName !== "Tool" &&
+        existing.__toolName !== parsedName) {
+      existing.__toolName = parsedName;
+    }
     if (norm.isError === true) {
       const chip = existing || (() => {
         const c = createInFlightChip(parsed.name, parsed.header);
@@ -11164,6 +11178,15 @@ function renderMarkdown(text) {
 // --- inline tool-call markers ---------------------------------------------
 
 // Tool names that the streaming/history layers embed inline as `[Name: …]`.
+//
+// WHY this list still exists: it drives ONLY the legacy `renderToolMarkers`
+// path, which slices inline markers out of free-form prose. There a generic
+// "anything in brackets is a chip" rule would swallow Markdown links
+// (`[link](url)`) and ordinary bracketed prose, so recognition stays pinned to
+// known names. The structured path (`applyFragmentToBubble` with a
+// `tool_use_id`) does NOT use this list — its fragment text is generated whole
+// by the backend, so it parses the name generically via
+// `parseToolFragmentName` and therefore renders ANY tool, registered or not.
 const TOOL_MARKER_NAMES = [
   "Tool", "Read", "Bash", "Edit", "Write", "Grep", "Glob", "Task",
   "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "LS", "TodoWrite",
@@ -11171,6 +11194,21 @@ const TOOL_MARKER_NAMES = [
 ];
 const TOOL_MARKER_RE = new RegExp(
   "\\[(" + TOOL_MARKER_NAMES.join("|") + ")\\b[^\\]\\n]*\\]", "g");
+
+// Leading tool name of a structured chip fragment: `[` followed by the first
+// token of [A-Za-z0-9_.-], terminated by whitespace, `:`, `✓`, `✗` or `]`.
+// The `_` in the class keeps codex's `mcp__<server>__<tool>` names whole.
+const TOOL_BRACKET_NAME_RE = /^\[([A-Za-z0-9_.-]+)/;
+
+// Extract the tool name from a structured chip fragment (`[<Name>…]`), or null
+// when the fragment is not a bracket marker at all. Both backend chip grammars
+// — in-flight `<Name>: <input summary>` and terminal `<Name> ✓/✗ <summary>` —
+// lead with the real tool name, so one generic rule covers every tool without
+// a name whitelist to keep in sync.
+function parseToolFragmentName(content) {
+  const m = TOOL_BRACKET_NAME_RE.exec(String(content == null ? "" : content).trim());
+  return m ? m[1] : null;
+}
 
 // Parse `[<Name> [: ] [✓|✗ ] <header>]` into `{name, header, status}`.
 //
@@ -11254,12 +11292,34 @@ function createInFlightChip(name, header) {
   return chip;
 }
 
+// Current header text of a chip, read back off its `.tool-marker-detail` span
+// (absent when the chip was built with an empty header).
+function chipHeaderText(chip) {
+  if (!chip || !chip.children) return "";
+  for (const c of chip.children) {
+    if (c.classList && c.classList.contains("tool-marker-detail")) {
+      return c.textContent || "";
+    }
+  }
+  return "";
+}
+
+// WHY: an empty terminal header must never blank a header the in-flight chip
+// already showed. Legacy jsonl (in-flight `[Tool: Agent | Input: …]`, terminal
+// `[Agent ✓ …]`) and any future parse miss both land here with `header === ""`;
+// keeping what is on screen degrades to "slightly stale" instead of "empty
+// chip that says only `Tool ✓`" — the bug this guard exists for.
+function _preserveChipHeader(chip, header) {
+  return header || chipHeaderText(chip);
+}
+
 function upgradeChipToSuccess(chip, header, detail) {
   if (!chip) return;
   chip.classList.remove("in-flight", "failure");
   chip.classList.add("success");
   chip.__toolStatus = "success";
-  setChipHeader(chip, chip.__toolName || "Tool", header || "", "success");
+  setChipHeader(chip, chip.__toolName || "Tool",
+    _preserveChipHeader(chip, header), "success");
   attachChipDetail(chip, detail, /*expanded=*/false);
 }
 
@@ -11268,7 +11328,8 @@ function upgradeChipToFailure(chip, header, detail) {
   chip.classList.remove("in-flight", "success");
   chip.classList.add("failure");
   chip.__toolStatus = "failure";
-  setChipHeader(chip, chip.__toolName || "Tool", header || "", "failure");
+  setChipHeader(chip, chip.__toolName || "Tool",
+    _preserveChipHeader(chip, header), "failure");
   attachChipDetail(chip, detail, /*expanded=*/true);
 }
 
@@ -17307,6 +17368,9 @@ if (typeof module !== "undefined" && module.exports) {
     // Tool chip state machine (exposed for the DOM-stub tests in
     // tests/frontend/tool_chip_state.test.mjs).
     parseToolBracket,
+    parseToolFragmentName,
+    renderToolMarkers,
+    chipHeaderText,
     createInFlightChip,
     upgradeChipToSuccess,
     upgradeChipToFailure,
