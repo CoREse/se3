@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..engine.display import render_text
-from ..engine.merge.human_call import DEGRADED_CALL_TYPE
+from ..engine.merge.human_call import NO_ACTIVE_MERGE_CALL_TYPES
 from ..i18n import t
 
 logger = logging.getLogger(__name__)
@@ -246,21 +246,6 @@ def process_merge_response(
             title=t("merge_respond.title.error"),
         )
         return 1
-
-
-# Call ``type`` values written by merge phases that already left the working
-# tree in a settled state (the merge was aborted or rolled back before the
-# call file was produced). ``git merge --abort`` would fail on these because
-# no merge is in progress, so the responder reports clean success instead.
-# The ``guardrail_*`` entries name call files written by the retired spec
-# guardrails chain; they are kept so an operator answering a call file left
-# over from before that removal is not met with an error.
-_NO_ACTIVE_MERGE_CALL_TYPES = (
-    DEGRADED_CALL_TYPE,
-    "guardrail_violation",
-    "guardrail_repair_stalled",
-    "guardrail_repair_exhausted",
-)
 
 
 def _process_merge_response_locked(
@@ -500,7 +485,7 @@ def _process_merge_response_locked(
         return 0
 
     if choice == "abort":
-        if call_type in _NO_ACTIVE_MERGE_CALL_TYPES:
+        if call_type in NO_ACTIVE_MERGE_CALL_TYPES:
             # These call files are only produced after the merge was already
             # aborted or rolled back, so `git merge --abort` would fail with
             # "no merge to abort". Report clean success instead.

@@ -386,7 +386,7 @@ class TestHumanCallWriter:
     def test_print_instructions_renders_merge_conflict_guidance(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
-        """``print_instructions`` renders the (only remaining) merge-conflict variant."""
+        """``print_instructions`` renders the merge-conflict variant."""
         writer = HumanCallWriter(tmp_path)
         ctx = ConflictContext(
             project_root=tmp_path,
@@ -412,6 +412,80 @@ class TestHumanCallWriter:
         assert "Human review required for merge conflict" in out
         assert f"{call_file}.response" in out
         assert '{"choice": "accept|abort|manual", "feedback": "notes"}' in out
+        assert "git merge --abort" in out
+
+    def test_print_instructions_degraded_call_omits_conflict_commands(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A degraded call is written after the merge was already aborted.
+
+        Telling the operator to edit conflict markers and run
+        ``git merge --abort`` there would fail with "no merge to abort".
+        """
+        writer = HumanCallWriter(tmp_path)
+        call_file = writer.write_degraded_call(
+            branch="feature",
+            message="Conflict context could not be built: boom",
+            pre_merge_sha="abc1234",
+        )
+
+        writer.print_instructions(call_file)
+
+        out = capsys.readouterr().out
+        assert "already rolled back" in out
+        assert f"{call_file}.response" in out
+        assert '{"choice": "accept|abort|manual", "feedback": "notes"}' in out
+        assert "Conflict context could not be built: boom" in out
+        assert "git merge --abort" not in out
+        assert "Edit files to resolve conflicts" not in out
+
+    def test_print_instructions_is_localized(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Every fixed line of the printed guidance comes from the catalogs.
+
+        The degraded variant is the one that used to carry hardcoded English,
+        so a zh-CN render is the sharpest check that no literal survives.
+        """
+        from tianluo import i18n
+
+        writer = HumanCallWriter(tmp_path)
+        call_file = writer.write_degraded_call(
+            branch="feature",
+            message="Conflict context could not be built: boom",
+            pre_merge_sha="abc1234",
+        )
+
+        i18n.set_language("zh-CN")
+        try:
+            writer.print_instructions(call_file)
+        finally:
+            i18n.reset_language()
+
+        out = capsys.readouterr().out
+        for fragment in (
+            "Human review required",
+            "Next steps:",
+            "Nothing to abort or commit",
+            "Call file:",
+            "To respond, create:",
+        ):
+            assert fragment not in out, fragment
+        assert "\u5408\u5e76\u5df2\u56de\u6eda" in out
+        assert str(call_file) in out
+
+    def test_print_instructions_unreadable_call_file_degrades(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """A missing/corrupt call file still prints the conflict guidance."""
+        writer = HumanCallWriter(tmp_path)
+        missing = tmp_path / "calls" / "merge_nonexistent.json"
+
+        writer.print_instructions(missing)
+
+        out = capsys.readouterr().out
+        assert "Human review required for merge conflict" in out
+        assert f"{missing}.response" in out
 
 
 # --------- Integration: resolver + strategy ---------

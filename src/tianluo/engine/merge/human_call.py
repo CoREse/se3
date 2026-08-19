@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Optional
 
 from ...commands.merge.secret_redact import redact_text
+from ...i18n import t
 from .conflict_context import ConflictContext
 from .conflict_resolver import LLMResolution
 from .runtime_sync import _safe_branch_label
@@ -33,6 +34,21 @@ logger = logging.getLogger(__name__)
 # it carries no per-file resolution to write back — a responder must treat it
 # as "no active merge, resolve by hand".
 DEGRADED_CALL_TYPE = "merge_context_unavailable"
+
+# Call ``type`` values written by merge phases that already left the working
+# tree in a settled state (the merge was aborted or rolled back before the
+# call file was produced). INVARIANT: both the printer here and the responder
+# in ``commands/merge_respond.py`` must read this from one place — if they
+# disagree, the operator is told to run ``git merge --abort`` on a tree with
+# no merge in progress. The ``guardrail_*`` entries name call files written by
+# the retired spec guardrails chain; they are kept so an operator answering a
+# call file left over from before that removal is not met with an error.
+NO_ACTIVE_MERGE_CALL_TYPES = (
+    DEGRADED_CALL_TYPE,
+    "guardrail_violation",
+    "guardrail_repair_stalled",
+    "guardrail_repair_exhausted",
+)
 
 # Module-level atomic sequence counter for unique filenames within a process.
 # Together with pid and microsecond timestamp, guarantees no collision even
@@ -497,16 +513,51 @@ class HumanCallWriter:
         return call_file
 
     def print_instructions(self, call_file: Path) -> None:
-        """Print user-facing instructions for responding to the call."""
+        """Print user-facing instructions for responding to the call.
+
+        WHY the call file is re-read here: the printed next steps must match
+        its ``type``. A degraded call is written only after the merge was
+        already aborted, so the conflict guidance ("edit the markers, then
+        ``git merge --abort``") would send the operator at a tree with no
+        merge in progress, where that command fails outright.
+        """
+        try:
+            call_data = json.loads(call_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            # Display path only: a missing or malformed call file degrades to
+            # the conflict variant rather than aborting instruction printing.
+            # ``json.JSONDecodeError`` subclasses ``ValueError``; anything
+            # broader (KeyboardInterrupt, programmer bugs) still propagates.
+            call_data = {}
+        if not isinstance(call_data, dict):
+            call_data = {}
+        call_type = call_data.get("type", "merge_conflict")
+        settled = call_type in NO_ACTIVE_MERGE_CALL_TYPES
+
         print(f"\n{'=' * 60}")
-        print("  Human review required for merge conflict")
+        if settled:
+            print(f"  {t('merge_call.title.settled')}")
+        else:
+            print(f"  {t('merge_call.title.conflict')}")
         print(f"{'=' * 60}")
-        print(f"\nCall file: {call_file}")
-        print(f"\nTo respond, create: {call_file}.response")
-        print("\nWith JSON content:")
+        print(f"\n{t('merge_call.call_file', call_file=call_file)}")
+        response_file = f"{call_file}.response"
+        print(f"\n{t('merge_call.respond_create', response_file=response_file)}")
+        print(f"\n{t('merge_call.json_header')}")
+        # The response payload itself is data, not prose: it is typed verbatim
+        # into the .response file, so it stays out of the language catalogs.
         print('  {"choice": "accept|abort|manual", "feedback": "notes"}')
-        print("\nThen resolve manually:")
-        print("  - Edit files to resolve conflicts")
-        print("  - Run: git add . && git commit  (to complete)")
-        print("  - Or run: git merge --abort      (to abort)")
+        if settled:
+            message = call_data.get("message")
+            if message:
+                print(f"\n{t('merge_call.why', message=message)}")
+            print(f"\n{t('merge_call.next_steps')}")
+            print(f"  - {t('merge_call.settled.nothing_to_do')}")
+            print(f"  - {t('merge_call.settled.inspect_branch')}")
+            print(f"  - {t('merge_call.settled.rerun')}")
+        else:
+            print(f"\n{t('merge_call.conflict.resolve_manually')}")
+            print(f"  - {t('merge_call.conflict.edit_files')}")
+            print(f"  - {t('merge_call.conflict.commit')}")
+            print(f"  - {t('merge_call.conflict.abort')}")
         print(f"{'=' * 60}\n")
