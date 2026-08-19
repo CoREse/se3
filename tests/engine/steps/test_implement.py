@@ -1529,3 +1529,117 @@ class TestImplementSubagentDecompositionHint:
         assert "**coarse task group**, not a task list" in CAPABILITY_GROUP_DOCTRINE
         assert "coarse capability group" not in IMPLEMENT_CAPABILITY_GROUP_PROMPT
 
+
+
+class TestTestScopeAndHeadlessClause:
+    """The shared test-scope / headless clause must reach every variant.
+
+    It exists to stop implement calls from backgrounding the whole suite that
+    the flow's own TEST step re-runs anyway, and then reporting the unobserved
+    run as an incomplete task. Defined once, injected into the three bases —
+    so the risk worth testing is a base edit that drops it from the derived
+    variants without anyone noticing.
+    """
+
+    BASE_NAMES = ("IMPLEMENT_PROMPT", "IMPLEMENT_GROUP_PROMPT", "FIX_PROMPT")
+    ALL_NAMES = BASE_NAMES + (
+        "HOLISTIC_IMPLEMENT_PROMPT",
+        "IMPLEMENT_CAPABILITY_GROUP_PROMPT",
+    )
+
+    def _prompt(self, name):
+        from tianluo.engine.steps import implement
+        return getattr(implement, name)
+
+    @pytest.mark.parametrize("name", ALL_NAMES)
+    def test_every_variant_carries_the_clause_verbatim(self, name):
+        from tianluo.engine.steps.implement import TEST_SCOPE_AND_HEADLESS_CLAUSE
+        assert TEST_SCOPE_AND_HEADLESS_CLAUSE in self._prompt(name)
+
+    @pytest.mark.parametrize("name", ALL_NAMES)
+    def test_every_variant_states_the_three_key_points(self, name):
+        flat = " ".join(self._prompt(name).split())
+        # 1. the full suite belongs to the flow's TEST step
+        assert "The flow's TEST step runs the project's full suite" in flat
+        # 2. this call's own testing defaults to what it changed
+        assert "run only tests directly related to your changes" in flat
+        # 3. headless: nothing may be left running past the final output
+        assert "You run headless" in flat
+        assert "Leave no background jobs" in flat
+
+    @pytest.mark.parametrize("name", ALL_NAMES)
+    def test_no_incomplete_task_for_an_unobserved_run(self, name):
+        flat = " ".join(self._prompt(name).split())
+        assert (
+            "Never report an unobserved test run as an incomplete task" in flat
+        )
+
+    @pytest.mark.parametrize("name", BASE_NAMES)
+    def test_clause_sits_next_to_the_estimate_note(self, name):
+        """Same topic, so it must stay adjacent — and the estimate stays whole-suite."""
+        prompt = self._prompt(name)
+        estimate = prompt.index("- **estimated_test_duration**:")
+        clause = prompt.index("  - **Test scope**:")
+        between = prompt[estimate:clause]
+        assert between.count("\n") == 1, (
+            "the shared clause must directly follow the estimate note"
+        )
+        assert "full test suite will take to run (ALL tests in the project" in between
+
+    @pytest.mark.parametrize("name", BASE_NAMES)
+    def test_templates_still_render(self, name):
+        """The clause must not introduce an unescaped `{...}` placeholder."""
+        import string
+
+        prompt = self._prompt(name)
+        fields = {
+            f for _, f, _, _ in string.Formatter().parse(prompt) if f
+        }
+        rendered = prompt.format(**{f: f"<{f}>" for f in fields})
+        assert "**Test scope**" in rendered
+        assert "**Headless run contract**" in rendered
+
+    @pytest.mark.parametrize("name", BASE_NAMES)
+    def test_existing_sections_and_their_order_are_preserved(self, name):
+        from tianluo.engine.steps.implement import (
+            VERSION_FILE_GUARDRAIL,
+            WHY_COMMENT_CONVENTION,
+        )
+        prompt = self._prompt(name)
+        cleanup = prompt.index("## Agent Safety: Process Cleanup")
+        clause = prompt.index("  - **Test scope**:")
+        guardrail = prompt.index(VERSION_FILE_GUARDRAIL.strip())
+        why = prompt.index(WHY_COMMENT_CONVENTION.strip())
+        assert cleanup < clause < guardrail < why
+
+    def test_fix_prompt_incomplete_tasks_note_matches_the_others(self):
+        """A `complete` fix must not carry leftover incomplete_tasks either."""
+        from tianluo.engine.steps.implement import (
+            FIX_PROMPT,
+            IMPLEMENT_GROUP_PROMPT,
+            IMPLEMENT_PROMPT,
+        )
+        shared = 'Only populate when completion_status is "partial" or "failed"'
+        assert shared in IMPLEMENT_PROMPT
+        assert shared in IMPLEMENT_GROUP_PROMPT
+        assert shared in FIX_PROMPT
+        flat = " ".join(FIX_PROMPT.split())
+        assert (
+            'it must be an empty array when the status is "complete"' in flat
+        )
+
+    def test_fix_version_guardrail_clause_survives_the_injection(self):
+        from tianluo.engine.steps.implement import (
+            FIX_PROMPT,
+            FIX_VERSION_FILE_GUARDRAIL,
+        )
+        assert FIX_VERSION_FILE_GUARDRAIL.strip() in FIX_PROMPT
+
+    def test_missing_anchor_fails_loudly(self):
+        """A base edit that moves the anchor must break at import, not silently."""
+        from tianluo.engine.steps.implement import _insert_after_line
+
+        with pytest.raises(ValueError):
+            _insert_after_line("no anchor here\n", "- **estimated_test_duration**:", "x")
+        with pytest.raises(ValueError):
+            _insert_after_line("a:\nb\na:\n", "a:", "x")

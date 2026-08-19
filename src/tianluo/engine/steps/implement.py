@@ -90,6 +90,33 @@ conventions) — it is a reminder, not a mechanically enforced rule. Comments ar
 never harvested as a source for the code-index; the structure map is derived
 from the code itself.
 """
+# Two things the implement / fix agents get wrong on their own, stated once
+# here and injected into all three base templates (and thereby into every
+# variant derived from them).
+#
+# WHY it sits next to the `estimated_test_duration` note: same topic — how
+# much testing this call itself owes — and the estimate stays whole-suite even
+# though the run deliberately is not.
+#
+# WHY the test-scope clause is soft ("by default", "only when"): a genuinely
+# cross-module change does need wider verification, and a flat ban would
+# suppress that too. Measured motive: a majority of implement calls were
+# re-running the whole serial suite that the flow's own TEST step then re-runs
+# in parallel anyway.
+#
+# WHY the headless clause is phrased as fact, not as a rule: agents have
+# backgrounded a full suite, reported it as "still in progress", and waited to
+# be woken — which cannot happen in a process that exits with its final
+# output. The wrong belief about the runtime is the root cause; forbidding the
+# symptom would not correct it.
+#
+# Placeholder-free (contains no `{...}`), so it survives the `.format(...)`
+# rendering of the templates it is injected into.
+TEST_SCOPE_AND_HEADLESS_CLAUSE = """\
+  - **Test scope**: The flow's TEST step runs the project's full suite, so by default run only tests directly related to your changes, unless you have concrete reason to expect impact beyond the modules touched — then run the full suite in the foreground, to its result. Never report an unobserved test run as an incomplete task.
+  - **Headless run contract**: You run headless: this turn's output ends the process, with no later wake-up. Leave no background jobs or monitors — everything your report depends on must finish before the final JSON.
+"""
+
 from ..worktree import (
     _run_git,
     create_worktree,
@@ -377,12 +404,43 @@ When you are done, output a JSON summary of what you did:
 ### Response field notes:
 - **completion_status**: Set to "complete" if all issues were fixed, "partial" if some fixes could not be applied (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
 - **estimated_test_duration**: Integer, estimated number of seconds the project's full test suite will take to run (ALL tests in the project, not only the new ones you added). This helps the test runner allocate appropriate time.
-- **incomplete_tasks**: An array of strings, each describing a fix that could not be applied and why.
+- **incomplete_tasks**: An array of strings, each describing a fix that could not be applied and why. Only populate when completion_status is "partial" or "failed" — it must be an empty array when the status is "complete".
 - **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 
 ### Timeout guidance:
 If the fix context indicates that tests previously timed out (timeout_reason is present), first investigate whether the timeout reflects a real hang or infinite loop in the code you changed — the test runner caps computed timeouts at its configured maximum, so simply increasing the estimate cannot rescue a runaway test. If the prior timeout looks like a genuine under-estimate (the suite really does take that long), provide a meaningfully higher `estimated_test_duration` (roughly 1.5–2× the previous value is usually enough; don't blindly multiply without bound). If the fix context indicates `Timeout at cap: true`, raising `estimated_test_duration` will NOT produce a larger timeout — the prior run was already at the cap, so focus on splitting the suite or fixing the slow/hung test instead.
 """
+
+# WHY the shared clause is injected rather than written into each template:
+# the three bases are the only place it can live once and still reach the
+# derived variants (HOLISTIC_IMPLEMENT_PROMPT and
+# IMPLEMENT_CAPABILITY_GROUP_PROMPT are built from them further down), so this
+# must run before those derivations. A missing anchor raises at import — the
+# same failure mode as `_substitute_anchor` below — because a base edit that
+# silently dropped the clause from every derived variant would be invisible.
+def _insert_after_line(template: str, line_prefix: str, insertion: str) -> str:
+    if template.count(line_prefix) != 1:
+        raise ValueError(
+            f"prompt template does not contain exactly one line starting with "
+            f"{line_prefix!r}; the shared test-scope clause cannot be placed "
+            "next to it. Update the anchor together with the base template."
+        )
+    start = template.index(line_prefix)
+    end = template.index("\n", start) + 1
+    return template[:end] + insertion + template[end:]
+
+
+_ESTIMATE_NOTE_ANCHOR = "- **estimated_test_duration**:"
+
+IMPLEMENT_PROMPT = _insert_after_line(
+    IMPLEMENT_PROMPT, _ESTIMATE_NOTE_ANCHOR, TEST_SCOPE_AND_HEADLESS_CLAUSE,
+)
+IMPLEMENT_GROUP_PROMPT = _insert_after_line(
+    IMPLEMENT_GROUP_PROMPT, _ESTIMATE_NOTE_ANCHOR, TEST_SCOPE_AND_HEADLESS_CLAUSE,
+)
+FIX_PROMPT = _insert_after_line(
+    FIX_PROMPT, _ESTIMATE_NOTE_ANCHOR, TEST_SCOPE_AND_HEADLESS_CLAUSE,
+)
 
 # Append the version-file guardrail to all three implementation prompt
 # templates. The guardrail text contains no `{...}` placeholders, so it's safe
