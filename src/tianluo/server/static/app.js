@@ -15201,19 +15201,32 @@ function renderImplementReport(step, outputs) {
   }
   frag.appendChild(bar);
 
-  if (summary) {
-    const parts = String(summary).split(";").map((s) => s.trim()).filter(Boolean);
-    if (parts.length <= 1) {
-      frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"), parts[0] || String(summary)));
+  // Parity with step_renderers.py:_render_implement. A group summary is free
+  // text and may contain semicolons, so the aggregate `summary` string cannot
+  // be split back into groups — the old split invented a group count and
+  // positional G{i} labels naming groups PLAN never emitted. Render the
+  // structured per-group list; pre-`group_summaries` flows show the whole
+  // string verbatim, unsplit and unnumbered.
+  const groupSummaries = (Array.isArray(outputs.group_summaries) ? outputs.group_summaries : [])
+    .filter((e) => e && typeof e === "object" && String(e.summary || "").trim());
+  if (groupSummaries.length || summary) {
+    const title = tf("stepReport.section.summary", "Summary");
+    if (!groupSummaries.length) {
+      frag.appendChild(reportSection(title, String(summary)));
+    } else if (groupSummaries.length === 1) {
+      frag.appendChild(reportSection(title, String(groupSummaries[0].summary).trim()));
     } else {
-      frag.appendChild(reportSection(tf("stepReport.section.summary", "Summary"),
-        reportList(parts, (p, i) => {
-          const span = el("span");
-          span.appendChild(el("span", "step-report__group-id",
-            (implGroups.length ? `G${i + 1}` : String(i + 1)) + "."));
-          span.appendChild(document.createTextNode(" " + p));
-          return span;
-        })));
+      frag.appendChild(reportSection(title, reportList(groupSummaries, (entry) => {
+        const span = el("span");
+        const gid = String((entry && entry.group_id) || "").trim();
+        if (gid) {
+          span.appendChild(el("span", "step-report__group-id", gid + "."));
+          span.appendChild(document.createTextNode(" " + String(entry.summary).trim()));
+        } else {
+          span.appendChild(document.createTextNode(String(entry.summary).trim()));
+        }
+        return span;
+      })));
     }
   }
 

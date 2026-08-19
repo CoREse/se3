@@ -5392,9 +5392,9 @@ check("G4 applyInterjectionEvent for another flow does not touch open flow", () 
 
 // -- reportList passes the running index as the second callback arg ---------
 // Regression: reportList used to call formatItem(item) without an index, so a
-// (item, index) callback such as the implement Summary's `G${i + 1}` saw
-// index === undefined and rendered "GNaN". Verify the index is now threaded
-// through and increments from 0.
+// (item, index) callback — as the implement Summary's since-removed
+// `G${i + 1}` was — saw index === undefined and rendered "GNaN". Verify the
+// index is still threaded through and increments from 0.
 check("reportList threads an incrementing index into the callback", () => {
   const seen = [];
   app.reportList(["a", "b", "c"], (item, index) => {
@@ -5411,35 +5411,77 @@ check("reportList still works for single-arg callbacks (index ignored)", () => {
   assert.ok(ul.textContent.includes("+y"));
 });
 
-// -- implement Summary numbering: G1…Gn (parity with CLI step_renderers) -----
-function implStep(summary, implementedGroups) {
-  return {
-    step_type: "implement",
-    outputs: {
-      completion_status: "complete",
-      summary,
-      implemented_groups: implementedGroups,
-      files_changed: [],
-      tests_added: [],
-    },
+// -- implement Summary: real group_id labels (parity with CLI step_renderers) -
+// The renderer used to split the aggregate `summary` string on ";" and label
+// each fragment by position (G1…Gn), so 6 real groups rendered as 19 "groups"
+// and every label past the real group count named a group PLAN never emitted.
+// It now reads the structured `group_summaries` list instead.
+function implStep(summary, implementedGroups, groupSummaries) {
+  const outputs = {
+    completion_status: "complete",
+    summary,
+    implemented_groups: implementedGroups,
+    files_changed: [],
+    tests_added: [],
   };
+  if (groupSummaries !== undefined) outputs.group_summaries = groupSummaries;
+  return { step_type: "implement", outputs };
 }
 
-check("implement Summary numbers multi-part summary as G1…Gn (groups non-empty)", () => {
-  const step = implStep("first part; second part; third part", ["G1", "G2", "G3"]);
+check("implement Summary labels each group with its real group_id", () => {
+  const step = implStep("first part; second part; third part", ["G2", "G5", "G7"], [
+    { group_id: "G2", summary: "first part" },
+    { group_id: "G5", summary: "second part" },
+    { group_id: "G7", summary: "third part" },
+  ]);
   const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
   const ids = findAll(frag, "step-report__group-id").map((n) => n.textContent);
-  assert.deepEqual(ids, ["G1.", "G2.", "G3."]);
+  assert.deepEqual(ids, ["G2.", "G5.", "G7."]);
   // No GNaN / NaN regression anywhere in the rendered output.
   assert.equal(frag.textContent.includes("GNaN"), false);
   assert.equal(frag.textContent.includes("NaN"), false);
 });
 
-check("implement Summary degrades to plain numbers 1…n when groups empty", () => {
-  const step = implStep("alpha; beta; gamma", []);
+check("implement Summary does not number a group_summaries list of one", () => {
+  const step = implStep("only part", ["G1"], [{ group_id: "G1", summary: "only part" }]);
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  assert.deepEqual(findAll(frag, "step-report__group-id"), []);
+  assert.ok(frag.textContent.includes("only part"));
+});
+
+check("implement Summary renders group summaries containing semicolons as one group each", () => {
+  // The exact bug: two groups whose own summaries carry semicolons used to
+  // render as five positional entries.
+  const step = implStep(
+    "added a; wired b; fixed c; covered d",
+    ["G1", "G2"],
+    [
+      { group_id: "G1", summary: "added a; wired b" },
+      { group_id: "G2", summary: "fixed c; covered d" },
+    ],
+  );
   const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
   const ids = findAll(frag, "step-report__group-id").map((n) => n.textContent);
-  assert.deepEqual(ids, ["1.", "2.", "3."]);
+  assert.deepEqual(ids, ["G1.", "G2."]);
+  assert.ok(frag.textContent.includes("added a; wired b"));
+  assert.ok(frag.textContent.includes("fixed c; covered d"));
+});
+
+check("implement Summary renders a legacy summary-only flow as one unsplit block", () => {
+  // Old flow: no `group_summaries` in outputs, only the joined string.
+  const step = implStep("alpha; beta; gamma", ["G1", "G2", "G3"]);
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  assert.deepEqual(findAll(frag, "step-report__group-id"), []);
+  assert.ok(frag.textContent.includes("alpha; beta; gamma"));
+  assert.equal(frag.textContent.includes("GNaN"), false);
+  assert.equal(frag.textContent.includes("NaN"), false);
+});
+
+check("implement Summary legacy flow with no groups is also unsplit", () => {
+  const step = implStep("alpha; beta; gamma", []);
+  const frag = app.STEP_REPORT_RENDERERS.implement(step, step.outputs);
+  assert.deepEqual(findAll(frag, "step-report__group-id"), []);
+  assert.ok(frag.textContent.includes("alpha; beta; gamma"));
   assert.equal(frag.textContent.includes("GNaN"), false);
   assert.equal(frag.textContent.includes("NaN"), false);
 });

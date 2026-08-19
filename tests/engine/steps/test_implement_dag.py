@@ -1015,6 +1015,156 @@ class TestOutputAggregation:
         assert "G1" in step.outputs["implemented_groups"]
         assert "G2" in step.outputs["implemented_groups"]
         assert step.outputs["completion_status"] == "complete"
+        assert step.outputs["group_summaries"] == [
+            {"group_id": "G1", "summary": "Added A"},
+            {"group_id": "G2", "summary": "Added C"},
+        ]
+
+    @patch(f"{_IMP}.delete_branch")
+    @patch(f"{_IMP}._merge_leaf_branch", return_value=True)
+    @patch(f"{_IMP}.get_current_branch", return_value="main")
+    @patch(f"{_IMP}.force_cleanup_worktree")
+    @patch(f"{_IMP}._salvage_history_from_worktree")
+    @patch(f"{_IMP}.DAGScheduler")
+    @patch(f"{_IMP}.classify_chains")
+    @patch(f"{_IMP}.transitive_reduce")
+    def test_resume_carries_pre_resume_group_summaries(
+        self, mock_reduce, mock_classify, mock_sched_cls,
+        mock_salvage, mock_cleanup, mock_branch, mock_merge, mock_del,
+    ):
+        """A resumed DAG run must not drop the summaries earned before the
+        interruption — from the structured list nor from the joined string.
+
+        Regression: ``summaries`` started empty on resume while
+        ``implemented_groups`` was seeded from prior_outputs, so the aggregate
+        summary described only the groups that happened to re-run.
+        """
+        groups = _make_groups([("G2", 2, [], 200)])
+        mock_reduce.return_value = groups
+        mock_classify.return_value = RelayPlan(
+            relay_map={"G2": None},
+            fork_from={},
+            leaf_nodes={"G2"},
+            convergence_points={},
+            root_nodes={"G2"},
+        )
+
+        mock_sched = MagicMock()
+        mock_sched.run.return_value = [
+            GroupResult(
+                group_id="G2", status="completed",
+                branch_name="b2", worktree_path=Path("/wt2"),
+                files_changed=["c.py"], tests_added=[], test_mapping={},
+                summary="Added C; covered C",
+            ),
+        ]
+        mock_sched.get_fallback_leaves.return_value = []
+        mock_sched_cls.return_value = mock_sched
+
+        step = _make_step()
+        flow = _make_flow()
+
+        result = _run_dag_parallel(
+            groups=groups, step=step, flow=flow, project_root=Path("/repo"),
+            task_description="t", task_type="feature", design_section="",
+            spec_summary="", injection=None, retry_count=0,
+            prior_outputs={
+                "files_changed": ["a.py"],
+                "tests_added": [],
+                "test_mapping": {},
+                "implemented_groups": ["G1"],
+                "group_summaries": [{"group_id": "G1", "summary": "Added A; wired A"}],
+            },
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["group_summaries"] == [
+            {"group_id": "G1", "summary": "Added A; wired A"},
+            {"group_id": "G2", "summary": "Added C; covered C"},
+        ]
+        assert step.outputs["implemented_groups"] == ["G1", "G2"]
+        # The joined string keeps its "; " semantics but must now also carry
+        # the pre-resume group.
+        assert step.outputs["summary"] == "Added A; wired A; Added C; covered C"
+
+    @patch(f"{_IMP}.delete_branch")
+    @patch(f"{_IMP}._merge_leaf_branch", return_value=True)
+    @patch(f"{_IMP}.get_current_branch", return_value="main")
+    @patch(f"{_IMP}.force_cleanup_worktree")
+    @patch(f"{_IMP}._salvage_history_from_worktree")
+    @patch(f"{_IMP}._is_branch_reachable_from", return_value=True)
+    @patch(f"{_IMP}.has_new_commits", return_value=False)
+    @patch(f"{_IMP}.recover_stale_unmerged_paths", return_value=([], []))
+    @patch(f"{_IMP}.merge_in_progress", return_value=False)
+    def test_all_groups_recovered_keeps_prior_group_summaries(
+        self, mock_inprog, mock_recover, mock_newc, mock_reach,
+        mock_salvage, mock_cleanup, mock_branch, mock_merge, mock_del,
+    ):
+        """The all-recovered early return exposes the prior summaries both
+        structurally and in the aggregate ``summary`` string."""
+        step = _make_step()
+        flow = _make_flow()
+
+        with patch(f"{_IMP}._run_git") as mock_git:
+            mock_git.return_value = MagicMock(returncode=1)
+            result = _run_dag_parallel(
+                groups=[], step=step, flow=flow, project_root=Path("/repo"),
+                task_description="t", task_type="feature", design_section="",
+                spec_summary="", injection=None, retry_count=0,
+                prior_outputs={
+                    "files_changed": ["a.py"],
+                    "tests_added": [],
+                    "test_mapping": {},
+                    "implemented_groups": ["G1", "G2"],
+                    "group_summaries": [
+                        {"group_id": "G1", "summary": "Added A"},
+                        {"group_id": "G2", "summary": "Added C"},
+                    ],
+                },
+            )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["group_summaries"] == [
+            {"group_id": "G1", "summary": "Added A"},
+            {"group_id": "G2", "summary": "Added C"},
+        ]
+        assert step.outputs["summary"] == "Added A; Added C"
+
+    @patch(f"{_IMP}.delete_branch")
+    @patch(f"{_IMP}._merge_leaf_branch", return_value=True)
+    @patch(f"{_IMP}.get_current_branch", return_value="main")
+    @patch(f"{_IMP}.force_cleanup_worktree")
+    @patch(f"{_IMP}._salvage_history_from_worktree")
+    @patch(f"{_IMP}._is_branch_reachable_from", return_value=True)
+    @patch(f"{_IMP}.has_new_commits", return_value=False)
+    @patch(f"{_IMP}.recover_stale_unmerged_paths", return_value=([], []))
+    @patch(f"{_IMP}.merge_in_progress", return_value=False)
+    def test_all_groups_recovered_without_summaries_uses_placeholder(
+        self, mock_inprog, mock_recover, mock_newc, mock_reach,
+        mock_salvage, mock_cleanup, mock_branch, mock_merge, mock_del,
+    ):
+        """An older flow with no persisted per-group summaries still gets a
+        non-empty ``summary`` for downstream string consumers."""
+        step = _make_step()
+        flow = _make_flow()
+
+        with patch(f"{_IMP}._run_git") as mock_git:
+            mock_git.return_value = MagicMock(returncode=1)
+            result = _run_dag_parallel(
+                groups=[], step=step, flow=flow, project_root=Path("/repo"),
+                task_description="t", task_type="feature", design_section="",
+                spec_summary="", injection=None, retry_count=0,
+                prior_outputs={
+                    "files_changed": ["a.py"],
+                    "tests_added": [],
+                    "test_mapping": {},
+                    "implemented_groups": ["G1"],
+                },
+            )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["group_summaries"] == []
+        assert step.outputs["summary"] == "Recovered from previous run"
 
 
 # ---------------------------------------------------------------------------

@@ -889,8 +889,8 @@ description: 'implementation结果有十几个Group：
   G6 文档与宪章：按新模型重写配置参考、README 与 charter 段落 · 6 个任务 · ~350 LOC · 依赖：G3, G4, G5
 
   这是怎么回事？我知道这种plan模式（学说）已经是legacy的功能了，但正因如此才更应该在现在修好，不然会留下一个有bug的legacy功能）。'
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-08-17T13:05:21.776498'
-updated_at: '2026-08-17T13:05:21.776498'
+updated_at: '2026-08-19T09:16:25.627913'

@@ -811,18 +811,32 @@ def _render_implement(step: Step) -> None:
     lines.append("  │  ".join(stats))
 
     # ── Summary ─────────────────────────────────────────────────────
-    if summary:
+    # WHY: a group's summary is free text and may itself contain semicolons, so
+    # the aggregate ``summary`` string can never be split back into groups — the
+    # old split produced a bogus group count and positional G{i} labels naming
+    # groups PLAN never emitted. Render the structured per-group list instead,
+    # and fall back to the whole string verbatim for flows recorded before it.
+    group_summaries = [
+        e for e in (outputs.get("group_summaries") or [])
+        if isinstance(e, dict) and str(e.get("summary", "") or "").strip()
+    ]
+    if group_summaries or summary:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
         lines.append(f"[bold cyan]{t('cli.steprender.section.summary')}[/bold cyan]")
-        parts = [s.strip() for s in summary.split(";") if s.strip()]
-        if len(parts) == 1:
-            lines.append(f"  {parts[0]}")
+        if not group_summaries:
+            lines.append(f"  {summary}")
+        elif len(group_summaries) == 1:
+            lines.append(f"  {str(group_summaries[0]['summary']).strip()}")
         else:
-            for i, part in enumerate(parts, 1):
-                gid = f"G{i}" if implemented_groups else str(i)
-                lines.append(f"  [dim]{gid}.[/dim] {part}")
+            for entry in group_summaries:
+                gid = str(entry.get("group_id", "") or "").strip()
+                text = str(entry["summary"]).strip()
+                if gid:
+                    lines.append(f"  [dim]{gid}.[/dim] {text}")
+                else:
+                    lines.append(f"  {text}")
 
     # ── Files Changed ───────────────────────────────────────────────
     if files_changed:

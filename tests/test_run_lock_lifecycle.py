@@ -175,10 +175,23 @@ def test_busy_lock_surfaces_waiting_state_then_acquires(project: Path) -> None:
         pytest.fail("waiting_for_lock was not persisted before blocking")
 
     # The streaming waiting_for_lock event is on disk and incrementally readable.
+    # engine.json is persisted first and the jsonl anchor a moment later, so poll
+    # for the anchor instead of reading it in the same instant the flag appears —
+    # the holder is still held throughout, so this still proves the anchor lands
+    # BEFORE the blocking acquire returns.
     jsonl = _jsonl_path(project, flow.flow_id, step.step_id)
-    assert jsonl.exists()
-    records = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
-    assert any(r.get("type") == "waiting_for_lock" for r in records)
+    records: list[dict] = []
+    deadline = time.time() + 5.0
+    while time.time() < deadline:
+        if jsonl.exists():
+            records = [json.loads(ln) for ln in jsonl.read_text().splitlines() if ln.strip()]
+            if any(r.get("type") == "waiting_for_lock" for r in records):
+                break
+        time.sleep(0.02)
+    else:
+        holder.release()
+        worker.join(timeout=5.0)
+        pytest.fail("waiting_for_lock event was not streamed before blocking")
 
     # The worker is still blocked (lock not yet acquired).
     assert not done.is_set()

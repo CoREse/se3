@@ -848,9 +848,10 @@ class TestRenderImplement:
 
     _OUTPUTS = {
         "completion_status": "complete",
-        # Semicolons split the summary into numbered parts — keep one clause so
-        # the assertion below can match it contiguously.
         "summary": "Add i18n loader and wire the CLI",
+        "group_summaries": [
+            {"group_id": "G1", "summary": "Add i18n loader and wire the CLI"},
+        ],
         "files_changed": ["src/tianluo/cli.py", "src/tianluo/i18n/loader.py"],
         "tests_added": ["tests/test_i18n.py"],
         "implemented_groups": ["G1"],
@@ -910,3 +911,73 @@ class TestRenderImplement:
         mock_render_full.assert_called_once()
         mock_usage.assert_called_once()
         assert mock_usage.call_args[0][0] == usage
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_group_summaries_are_labelled_by_real_group_id(self, mock_render_full):
+        """The summary section must name each group by its real group_id.
+
+        Regression: the renderer split the aggregate ``summary`` string on ";"
+        and labelled the fragments G1…Gn by position, so a group summary that
+        itself contained a semicolon inflated the group count and produced
+        labels for groups PLAN never emitted.
+        """
+        from tianluo.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "complete",
+            "summary": "added a; wired b; fixed c; covered d",
+            "group_summaries": [
+                {"group_id": "G2", "summary": "added a; wired b"},
+                {"group_id": "G5", "summary": "fixed c; covered d"},
+            ],
+            "implemented_groups": ["G2", "G5"],
+            "files_changed": [],
+            "tests_added": [],
+        })
+        _render_implement(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "[dim]G2.[/dim] added a; wired b" in content
+        assert "[dim]G5.[/dim] fixed c; covered d" in content
+        # Exactly two labelled groups — no positional numbering survives.
+        assert content.count("[/dim] ") == 2
+        for bogus in ("G1.", "G3.", "G4.", "G6.", "G7."):
+            assert f"[dim]{bogus}[/dim]" not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_single_group_summary_renders_unlabelled(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "complete",
+            "summary": "only; part",
+            "group_summaries": [{"group_id": "G1", "summary": "only; part"}],
+            "implemented_groups": ["G1"],
+            "files_changed": [],
+            "tests_added": [],
+        })
+        _render_implement(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "only; part" in content
+        assert "[dim]G1.[/dim]" not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_legacy_summary_only_flow_renders_whole_string(self, mock_render_full):
+        """Flows recorded before ``group_summaries`` existed keep the string
+        whole — no splitting, no numbering."""
+        from tianluo.engine.step_renderers import _render_implement
+
+        step = _make_step(StepType.IMPLEMENT, {
+            "completion_status": "complete",
+            "summary": "alpha; beta; gamma",
+            "implemented_groups": ["G1", "G2", "G3"],
+            "files_changed": [],
+            "tests_added": [],
+        })
+        _render_implement(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "alpha; beta; gamma" in content
+        for bogus in ("G1.", "G2.", "G3.", "1.", "2.", "3."):
+            assert f"[dim]{bogus}[/dim]" not in content

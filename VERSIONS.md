@@ -1,5 +1,13 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.8.1 - 2026-08-19
+
+- Fix the IMPLEMENT completion report showing far more groups than the plan contains — group summaries that themselves contained a semicolon were split into extra fake entries.
+- Label each implementation group in the report with its real `group_id` from PLAN instead of a positional `G1…Gn` counter that could point at nonexistent groups.
+- Persist a structured per-group summary list in IMPLEMENT step outputs, written consistently by the sequential, DAG-parallel, and holistic execution paths.
+- Fix DAG-parallel resume dropping the summaries of groups completed before the interruption from both the structured list and the aggregate summary string.
+- Render legacy flows that only recorded the aggregate summary string as a single unnumbered block, keeping historical reports readable.
+- Keep CLI and WebUI implementation reports at parity, and leave the existing aggregate `summary` string field unchanged for downstream consumers.
 ## 12.8.0 - 2026-08-19
 
 - Reshape the PLAN grouping doctrine so the unit of a task group is a **task** — one coherent piece of work the user regards as a single thing — instead of a capability or an implementation phase; the default is now one group per task

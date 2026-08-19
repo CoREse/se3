@@ -1062,6 +1062,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                             "tests_added": list(step.outputs.get("tests_added", [])),
                             "test_mapping": dict(step.outputs.get("test_mapping", {})),
                             "implemented_groups": list(completed_groups_dag),
+                            "group_summaries": _prior_group_summaries(
+                                step.outputs, completed_groups_dag,
+                            ),
                         },
                     )
                     step.outputs["session_commits"] = _collect_session_commits(
@@ -1074,6 +1077,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     "tests_added": list(step.outputs.get("tests_added", [])),
                     "test_mapping": dict(step.outputs.get("test_mapping", {})),
                     "implemented_groups": list(completed_groups_dag),
+                    "group_summaries": _prior_group_summaries(
+                        step.outputs, completed_groups_dag,
+                    ),
                 }
                 logger.info(
                     "DAG parallel resume: skipping %d completed groups, running %d remaining",
@@ -1121,6 +1127,11 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     all_completion_statuses: list[str] = []
     all_incomplete_tasks: list[str] = []
     group_estimated_durations: list[float] = []
+    # WHY: the aggregate ``summary`` string is a lossy join — a group summary
+    # may itself contain "; ", so it cannot be split back apart, and it carries
+    # no group identity at all. Renderers need the (group_id, summary) pairing,
+    # so it is persisted structurally alongside the string.
+    group_summary_entries: list[dict] = []
 
     # Check for resume state
     completed_groups = set()
@@ -1143,6 +1154,18 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # across multiple retries (Bug fix: was starting empty, losing
         # completed groups on subsequent retries)
         implemented_group_ids = list(completed_groups)
+        # Rebuild the structured list off ``implemented_group_ids`` (not off the
+        # prior list directly) so the two stay index-aligned even when a prior
+        # run predates this field or recorded a different order.
+        prior_group_summaries = {
+            str(e.get("group_id", "")): str(e.get("summary", "") or "")
+            for e in (step.outputs.get("group_summaries") or [])
+            if isinstance(e, dict)
+        }
+        group_summary_entries = [
+            {"group_id": gid, "summary": prior_group_summaries.get(gid, "")}
+            for gid in implemented_group_ids
+        ]
 
     for group in groups:
         group_id = group.get("group_id", group.get("name", "unknown"))
@@ -1244,6 +1267,10 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "files_changed": group_files,
             "summary": group_summary,
         })
+        group_summary_entries.append({
+            "group_id": group_id,
+            "summary": group_summary,
+        })
 
         # Persist incremental progress.
         # Use max() across groups: each group reports a whole-suite estimate
@@ -1253,6 +1280,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["tests_added"] = all_tests_added
         step.outputs["test_mapping"] = merged_test_mapping
         step.outputs["implemented_groups"] = implemented_group_ids
+        step.outputs["group_summaries"] = group_summary_entries
         step.outputs["estimated_test_duration"] = (
             max(group_estimated_durations) if group_estimated_durations else None
         )
@@ -1262,6 +1290,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["tests_added"] = all_tests_added
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
+    step.outputs["group_summaries"] = group_summary_entries
     step.outputs["estimated_test_duration"] = (
         max(group_estimated_durations) if group_estimated_durations else None
     )
@@ -2434,7 +2463,19 @@ def _run_dag_parallel(
         step.outputs["tests_added"] = list(prior_outputs.get("tests_added", [])) if prior_outputs else []
         step.outputs["test_mapping"] = dict(prior_outputs.get("test_mapping", {})) if prior_outputs else {}
         step.outputs["implemented_groups"] = recovered_groups
-        step.outputs["summary"] = "Recovered from previous run"
+        recovered_summaries = (
+            _normalize_group_summaries(prior_outputs.get("group_summaries"))
+            if prior_outputs else []
+        )
+        step.outputs["group_summaries"] = recovered_summaries
+        # Every group is pre-resume here, so the aggregate string must be built
+        # from their persisted summaries — the placeholder is a last resort for
+        # flows that recorded no summary text at all, since downstream string
+        # consumers (version_analyze, commit) see only this field.
+        joined_recovered = "; ".join(
+            e["summary"] for e in recovered_summaries if e["summary"]
+        )
+        step.outputs["summary"] = joined_recovered or "Recovered from previous run"
         step.outputs["completion_status"] = "complete"
         step.outputs["incomplete_tasks"] = []
         step.outputs["estimated_test_duration"] = (
@@ -2629,7 +2670,16 @@ def _run_dag_parallel(
     all_completion_statuses: list[str] = []
     all_incomplete_tasks: list[str] = []
     implemented_group_ids: list[str] = list(prior_outputs.get("implemented_groups", [])) if prior_outputs else []
-    summaries: list[str] = []
+    # WHY: seed both the structured list AND the joined string from the resume
+    # payload — otherwise a resumed DAG run reports only the groups it happened
+    # to re-run, silently dropping every summary earned before the interruption.
+    group_summary_entries: list[dict] = (
+        _normalize_group_summaries(prior_outputs.get("group_summaries"))
+        if prior_outputs else []
+    )
+    summaries: list[str] = [
+        e["summary"] for e in group_summary_entries if e["summary"]
+    ]
     estimated_durations: list[float] = []
     if prior_outputs and prior_outputs.get("estimated_test_duration") is not None:
         estimated_durations.append(float(prior_outputs["estimated_test_duration"]))
@@ -2642,6 +2692,9 @@ def _run_dag_parallel(
             implemented_group_ids.append(r.group_id)
             all_completion_statuses.append(r.completion_status)
             all_incomplete_tasks.extend(r.incomplete_tasks)
+            group_summary_entries.append(
+                {"group_id": r.group_id, "summary": r.summary or ""}
+            )
             if r.summary:
                 summaries.append(r.summary)
             if r.estimated_test_duration is not None:
@@ -2664,6 +2717,7 @@ def _run_dag_parallel(
     step.outputs["tests_added"] = all_tests_added
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
+    step.outputs["group_summaries"] = group_summary_entries
     step.outputs["summary"] = "; ".join(summaries)
     # Each group reports a whole-suite estimate, so take the max; see
     # IMPLEMENT_GROUP_PROMPT response field notes.
@@ -2829,6 +2883,17 @@ def _run_single_llm_call(
             if preserve_existing_outputs and not summary:
                 summary = step.outputs.get("summary", "")
             step.outputs["summary"] = summary
+            # The holistic path reports zero implemented groups by design, so
+            # fall back to the planned groups for the one case that still has a
+            # real label to give: a plan of exactly one capability group.
+            lone_group_id = (
+                _lone_group_id(step.outputs["implemented_groups"])
+                or _lone_group_id(step.inputs.get("task_groups"))
+            )
+            step.outputs["group_summaries"] = (
+                [{"group_id": lone_group_id, "summary": summary}]
+                if summary else []
+            )
             estimated_duration = _sanitize_estimated_test_duration(
                 result.get("estimated_test_duration")
             )
@@ -2877,6 +2942,7 @@ def _run_single_llm_call(
                 step.outputs.setdefault("files_changed", [])
                 step.outputs.setdefault("tests_added", [])
                 step.outputs.setdefault("test_mapping", {})
+                step.outputs.setdefault("group_summaries", [])
                 step.outputs.setdefault("estimated_test_duration", None)
                 step.outputs["completion_status"] = "partial"
                 step.outputs.setdefault(
@@ -3040,6 +3106,53 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
 
     if copied:
         logger.debug("Restored %d history file(s) to worktree %s", copied, worktree_path)
+
+
+def _normalize_group_summaries(value: Any) -> list[dict]:
+    """Coerce a persisted ``group_summaries`` payload into well-formed entries.
+
+    State restored from disk (or from an older flow) can hold anything, so
+    every entry is narrowed to the ``{"group_id": str, "summary": str}`` shape
+    the renderers rely on; anything unrecognisable is dropped.
+    """
+    if not isinstance(value, list):
+        return []
+    entries: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        entries.append({
+            "group_id": str(item.get("group_id", "") or ""),
+            "summary": str(item.get("summary", "") or ""),
+        })
+    return entries
+
+
+def _prior_group_summaries(outputs: dict, group_ids) -> list[dict]:
+    """Select the persisted per-group summaries for ``group_ids`` (resume)."""
+    wanted = set(group_ids)
+    return [
+        e for e in _normalize_group_summaries(outputs.get("group_summaries"))
+        if e["group_id"] in wanted
+    ]
+
+
+def _lone_group_id(implemented_groups: Any) -> str:
+    """Return the real group_id when the holistic call covered exactly one group.
+
+    WHY: a holistic call has no per-group split, so inventing a positional
+    ``G1`` label would resurrect exactly the defect this field exists to fix —
+    a label that does not name any group PLAN actually emitted. Absent a single
+    real group, the entry stays unlabelled.
+    """
+    if not isinstance(implemented_groups, list) or len(implemented_groups) != 1:
+        return ""
+    group = implemented_groups[0]
+    if isinstance(group, str):
+        return group
+    if isinstance(group, dict):
+        return str(group.get("group_id", "") or "")
+    return ""
 
 
 def _sanitize_estimated_test_duration(value: Any) -> float | None:

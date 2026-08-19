@@ -1,0 +1,78 @@
+id: '297'
+description: "这个agent调用，在完成前是有Agent调用具体命令的（但也没法展开看完整的命令），完成后却只剩结果了(原本具体命令的地方变空了，只剩一个Tool和一个勾）：\n\
+  Tool\n✓\n隐藏详情\n**Answer: NO filtering. An arbitrary new key in `step.outputs` (including\
+  \ `group_summaries`) reaches the frontend verbatim.** In fact `group_summaries`\
+  \ already exists end-to-end today (producer + renderer both present).\n\n## The\
+  \ actual path (report cards come ONLY from the history-record channel, not from\
+  \ the status snapshot)\n\n1. **Producer** — `/data/cre/workspace/se3.0/src/tianluo/engine/steps/implement.py:1283`\
+  \ and `:1293` (and the recovery path `:2470`) already set `step.outputs[\"group_summaries\"\
+  ] = group_summary_entries` (list of `{\"group_id\",\"summary\"}`).\n\n2. **Serialization\
+  \ to the event/history line** — `/data/cre/workspace/se3.0/src/tianluo/engine/sink.py:375`\n\
+  \   `step_dict = step.to_dict()` → `/data/cre/workspace/se3.0/src/tianluo/engine/models.py:144-162`,\
+  \ where `\"outputs\": self.outputs` is passed through **whole, unfiltered, unkeyed**\
+  \ (no whitelist, no size cap).\n\n3. **jsonl write** — `/data/cre/workspace/se3.0/src/tianluo/engine/chat_history.py:352-392`:\
+  \ writes `{\"type\": \"step_completed\", \"step_id\", \"step_type\", \"timestamp\"\
+  , \"data\": {\"step\": step_dict}}` with `json.dumps(..., default=str)`. No projection,\
+  \ no truncation. (Only effect of `default=str`: non-JSON-native values become strings\
+  \ — plain dicts/lists/strings are unaffected.)\n\n4. **Daemon read** — `/data/cre/workspace/se3.0/src/tianluo/daemon/history.py:1857-1900`\
+  \ (`_build_record`). Every parsed dict line is forwarded as `{\"step_id\",\"step_type\"\
+  ,\"ordinal\",\"message\": <the whole line>}`. Two things to note, neither of which\
+  \ filters keys:\n   - Compaction gate `needs_compaction(raw_len)` (64 KB, `record_budget.py:228`)\
+  \ only routes into `compact_record`, and `compact_record` bails immediately at `/data/cre/workspace/se3.0/src/tianluo/daemon/record_budget.py:478-480`\
+  \ when the message has no `raw_json` list. A `step_completed` record has no `raw_json`,\
+  \ so it is returned **object-identical**. Even for records that do get compacted,\
+  \ the mechanism only truncates long *string leaves* inside `raw_json` events — it\
+  \ never removes dict keys and never touches top-level fields.\n   - `MAX_RECORDS_PER_REPORT=2000`\
+  \ / `MAX_BYTES_PER_REPORT=256KB` (`history.py:90,114`) are per-frame chunking caps\
+  \ checked *after* appending (`history.py:2290-2302` incremental path, `:2472-2479`\
+  \ full-read path) — the crossing record is still emitted whole and the cursor resumes;\
+  \ nothing is dropped.\n\n5. **Daemon → server** — `MSG_HISTORY_DATA` payload `records`\
+  \ handled at `/data/cre/workspace/se3.0/src/tianluo/server/ws.py:1733-1764`; cached\
+  \ verbatim via `state.apply_history_frame` (`/data/cre/workspace/se3.0/src/tianluo/server/state.py:1333+`).\
+  \ Records are appended/replaced as opaque dicts; no per-record field rewriting and\
+  \ no bundle-size trimming.\n\n6. **Server → browser** — `GET /api/history/{flow_id}`\
+  \ (`/data/cre/workspace/se3.0/src/tianluo/server/app.py:2874`) → `get_history_snapshot`\
+  \ (`/data/cre/workspace/se3.0/src/tianluo/server/state.py:~2380-2560`), which only\
+  \ *slices* the records array by the signed offset (`out_records = list(records[token[\"\
+  offset\"]:])`, state.py:2555) or returns all of them. WS push: `_push_history_data`\
+  \ (`/data/cre/workspace/se3.0/src/tianluo/server/ws.py:1160-1196`) puts `\"records\"\
+  : records` on the frame as-is.\n\n7. **Frontend** — `normalizeRecord` at `/data/cre/workspace/se3.0/src/tianluo/server/static/app.js:8109-8127`\
+  \ builds `stepReport.outputs = innerStep.outputs || data.outputs || {}` (**whole\
+  \ dict, no key filter**), then `renderConversationRecord` passes `outputs: norm.stepReport.outputs\
+  \ || {}` into `renderStepReport` (`app.js:13459-13464`), which calls `renderer(step,\
+  \ step.outputs || {})` (`app.js:14748`). `renderImplementReport` at `/data/cre/workspace/se3.0/src/tianluo/server/static/app.js:15166`\
+  \ already consumes `outputs.group_summaries` at **app.js:15210-15230**.\n\n## Whitelists\
+  \ that exist in the repo but are NOT on this path\n- `STEP_POOL[...][\"outputs\"\
+  ]` in `/data/cre/workspace/se3.0/src/tianluo/engine/models.py:986` (IMPLEMENT: `[\"\
+  implemented_groups\",\"files_changed\",\"total_groups\"]`) is **documentation only**\
+  \ — `STEP_POOL` is consumed solely for `read_only` / `uses_llm` lookups (`engine/context_builder.py:700,774`,\
+  \ `models.py:1225`). Nothing validates or prunes `step.outputs` against it.\n- `_extract_key_outputs`\
+  \ / `_summarize_outputs` (`/data/cre/workspace/se3.0/src/tianluo/engine/schema.py:623`\
+  \ and `:587`, used at `schema.py:519-522`) are a real per-step-type whitelist, but\
+  \ they build the **LLM context projection** (`se3_context` `key_outputs`), which\
+  \ never reaches the WebUI report renderers.\n- `/data/cre/workspace/se3.0/src/tianluo/daemon/aggregator.py:174-210`\
+  \ (`FlowSnapshot.to_dict`, feeding STATUS_UPDATE and `GET /api/flows/{flow_id}`\
+  \ at `server/app.py:1411`) carries **no step outputs at all** — only `current_step`,\
+  \ counts, pending calls, plan_mode/review_scope/usage_summary. So don't expect report-card\
+  \ data from that channel; it isn't a filter of outputs, it simply never carries\
+  \ them.\n- `/data/cre/workspace/se3.0/src/tianluo/engine/truncation.py` constants\
+  \ are LLM-prompt tail-truncation only (test/self_check/verify_spec prompt formatting),\
+  \ not output serialization. The one place that rewrites stored outputs is `_slim_passed_phase_archive`\
+  \ (`engine/steps/test.py:265`), which only slims *passed test phases'* stdout inside\
+  \ `test_results` — TEST step, not IMPLEMENT, and it truncates strings rather than\
+  \ dropping keys.\n- `/data/cre/workspace/se3.0/src/tianluo/daemon/disk_json_cache.py:82`\
+  \ `MAX_PARSE_BYTES = 5 MB` degrades oversized `engine.json` to hot keys — this affects\
+  \ the daemon's *status snapshot* read of engine.json (progress/current step), not\
+  \ the history-record path that carries outputs.\n\n## Practical caveat (only real\
+  \ risk, and it's not a filter)\nPersisted outputs live in the hot/cold split (`engine/models.py:178-186`\
+  \ `cold_payload`, `engine/persistence.py:659-665`), which stores/restores `outputs`\
+  \ in full; on a failed cold read the in-memory body degrades to `{}` for that access\
+  \ (`models.py:204-210`) — that would blank *all* outputs, not selectively drop a\
+  \ new key. Nothing anywhere applies a per-key allowlist, so `group_summaries` (or\
+  \ any new key) arrives at `renderImplementReport` intact.\n\n修复这个bug。另外，让tool调用在未完成的时候也可以点开详情看完整命令。\n\
+  \n然后，这个report findings是什么tool调用？也是agent吗？还是什么？"
+status: open
+tags: []
+source: human
+created_at: '2026-08-19T10:23:37.762735'
+updated_at: '2026-08-19T10:39:28.317902'
