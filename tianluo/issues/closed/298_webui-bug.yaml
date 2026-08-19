@@ -865,9 +865,9 @@ description: '怎么连续显示好几次？是webui端的渲染bug吗？
   本轮 52,177 in / 984 out · 累计 52,177 in / 984 out
 
   查看原始'
-status: in-progress
+status: resolved
 tags: []
 source: human
 created_at: '2026-08-19T11:12:18.557457'
-updated_at: '2026-08-19T11:12:55.113863'
+updated_at: '2026-08-19T14:10:38.853018'
 type: bug
