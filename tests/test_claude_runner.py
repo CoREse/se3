@@ -730,8 +730,11 @@ class TestStderrIsolation:
 class TestBuildCallArgs:
     """build_call_args translates intent into Claude Code CLI arguments.
 
-    The output must be byte-for-byte identical to the old inline assembly
-    in ``LLMCaller._call_with_retry`` (before the intent-passing refactor).
+    The output matches the old inline assembly in
+    ``LLMCaller._call_with_retry`` (before the intent-passing refactor)
+    except for tool denial: exactly one ``--disallowedTools`` flag is now
+    emitted on every call, carrying ``ReportFindings`` alone on writable
+    steps and the write-tool lock plus ``ReportFindings`` on read-only ones.
     """
 
     def test_basic_prompt(self):
@@ -745,28 +748,41 @@ class TestBuildCallArgs:
             "--output-format", "stream-json",
             "--verbose",
             "-p", "hello world",
+            "--disallowedTools", "ReportFindings",
         ]
 
     def test_read_only_appends_disallowed_tools(self):
-        """read_only=True → appends --disallowedTools for write tools."""
+        """read_only=True → write-tool lock plus ReportFindings, one flag."""
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
         args = runner.build_call_args(
             prompt="analyze this",
             read_only=True,
         )
-        assert "--disallowedTools" in args
+        assert args.count("--disallowedTools") == 1
         di = args.index("--disallowedTools")
         disallowed = args[di + 1:]
-        assert disallowed == ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+        assert disallowed == [
+            "Write",
+            "Edit",
+            "NotebookEdit",
+            "AskUserQuestion",
+            "ReportFindings",
+        ]
 
-    def test_writable_step_no_disallowed_tools(self):
-        """read_only=False → no --disallowedTools in args."""
+    def test_writable_step_disallows_only_report_findings(self):
+        """read_only=False → a single --disallowedTools carrying only
+        ReportFindings (a host-UI tool nothing receives under ``claude -p``);
+        no write tool is denied."""
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
         args = runner.build_call_args(
             prompt="implement this",
             read_only=False,
         )
-        assert "--disallowedTools" not in args
+        assert args.count("--disallowedTools") == 1
+        di = args.index("--disallowedTools")
+        assert args[di + 1:] == ["ReportFindings"]
+        for write_tool in ("Write", "Edit", "NotebookEdit", "AskUserQuestion"):
+            assert write_tool not in args
 
     def test_context_files_appended(self, tmp_path):
         """Existing context files → --file <path> pairs."""
@@ -860,7 +876,43 @@ class TestBuildCallArgs:
         assert direct == default
         assert direct[:4] == ["--output-format", "stream-json", "--verbose", "-p"]
         assert direct[4] == "implement everything"
+        assert direct[5:] == ["--disallowedTools", "ReportFindings"]
         assert not getattr(runner, "supports_native_goal", False)
+
+    def test_report_findings_denied_on_both_read_only_modes(self):
+        """ReportFindings is a claude CLI host-UI tool (``/code-review`` hands
+        findings to Claude Code's own interface), not a subagent. Under
+        headless ``claude -p`` nothing receives its output, so it is denied on
+        every step regardless of read_only."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        for read_only in (True, False):
+            args = runner.build_call_args(prompt="p", read_only=read_only)
+            assert args.count("--disallowedTools") == 1
+            di = args.index("--disallowedTools")
+            assert "ReportFindings" in args[di + 1:]
+
+    def test_single_disallowed_tools_flag_with_plugin_and_files(self, tmp_path):
+        """The merged denial list stays a single flag and does not swallow the
+        --plugin-dir / --file flags that follow it."""
+        f = tmp_path / "spec.md"
+        f.write_text("# Spec", encoding="utf-8")
+        plugin = tmp_path / "guard_plugin"
+        runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
+        args = runner.build_call_args(
+            prompt="analyze",
+            read_only=True,
+            context_files=[f],
+            spec_guard_plugin=plugin,
+        )
+        assert args == [
+            "--output-format", "stream-json",
+            "--verbose",
+            "-p", "analyze",
+            "--disallowedTools",
+            "Write", "Edit", "NotebookEdit", "AskUserQuestion", "ReportFindings",
+            "--plugin-dir", str(plugin),
+            "--file", str(f),
+        ]
 
     def test_non_direct_intent_never_injects_goal(self):
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
