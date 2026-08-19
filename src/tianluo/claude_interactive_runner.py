@@ -1070,11 +1070,21 @@ class ClaudeInteractiveRunner(AgentRunner):
 
         Flag translation:
 
-        * Read-only steps append ``--disallowedTools Write Edit NotebookEdit
-          AskUserQuestion`` (tool-layer read-only enforcement; available in
-          interactive mode).  Writable steps add nothing here — write
+        * Exactly one ``--disallowedTools`` flag, always present:
+          ``Write Edit NotebookEdit AskUserQuestion ReportFindings`` for
+          read-only steps, ``ReportFindings`` alone otherwise.  The write
+          tools are the tool-layer read-only enforcement (available in
+          interactive mode); writable steps deny no write tool here — write
           permission is granted by the ``--dangerously-skip-permissions``
           top-level flag injected into the launch argv prefix.
+          ``ReportFindings`` is denied on every step because it is a claude
+          CLI *host-UI* tool (``/code-review`` uses it to hand findings to
+          Claude Code's own interface), not a subagent — tianluo drives the
+          CLI headlessly, so nothing receives its output and it only ever
+          yields ``No findings reported.`` or an ``InputValidationError``.
+          The two lists MUST stay merged into one flag: the claude CLI
+          resolves a repeated flag last-one-wins, so a second
+          ``--disallowedTools`` would silently drop the write-tool lock.
         * ``context_files`` are translated to ``--add-dir <parent>`` for each
           existing file's parent directory (deduplicated, order-preserving),
           the interactive-mode equivalent of print mode's ``--file`` — it makes
@@ -1095,14 +1105,15 @@ class ClaudeInteractiveRunner(AgentRunner):
 
         args: List[str] = []
 
+        # WHY: one merged --disallowedTools flag, never two — the claude CLI
+        # resolves a repeated flag last-one-wins, so appending a second flag
+        # for ReportFindings would silently discard the read-only write-tool
+        # lock.
+        disallowed: List[str] = []
         if read_only:
-            args += [
-                "--disallowedTools",
-                "Write",
-                "Edit",
-                "NotebookEdit",
-                "AskUserQuestion",
-            ]
+            disallowed += ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+        disallowed.append("ReportFindings")
+        args += ["--disallowedTools"] + disallowed
 
         if context_files:
             seen: set = set()

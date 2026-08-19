@@ -181,19 +181,51 @@ class TestBuildCallArgs:
     def test_read_only_adds_disallowed_tools(self):
         runner = _make_runner()
         args = runner.build_call_args("do a thing", read_only=True)
-        assert "--disallowedTools" in args
+        # One flag only: the claude CLI resolves a repeated flag last-one-wins,
+        # so a second --disallowedTools would drop the write-tool lock.
+        assert args.count("--disallowedTools") == 1
         idx = args.index("--disallowedTools")
-        assert args[idx + 1 : idx + 5] == [
+        assert args[idx + 1 : idx + 6] == [
             "Write",
             "Edit",
             "NotebookEdit",
             "AskUserQuestion",
+            "ReportFindings",
         ]
 
-    def test_writable_omits_disallowed_tools(self):
+    def test_writable_disallows_only_report_findings(self):
+        """Writable steps deny no write tool, but still deny ReportFindings —
+        a host-UI tool whose output nothing receives when tianluo drives the
+        CLI headlessly."""
         runner = _make_runner()
         args = runner.build_call_args("do a thing", read_only=False)
-        assert "--disallowedTools" not in args
+        assert args.count("--disallowedTools") == 1
+        idx = args.index("--disallowedTools")
+        assert args[idx + 1 :] == ["ReportFindings"]
+        for write_tool in ("Write", "Edit", "NotebookEdit", "AskUserQuestion"):
+            assert write_tool not in args
+
+    def test_report_findings_denied_on_both_read_only_modes(self):
+        runner = _make_runner()
+        for read_only in (True, False):
+            args = runner.build_call_args("p", read_only=read_only)
+            assert args.count("--disallowedTools") == 1
+            assert "ReportFindings" in args
+
+    def test_disallowed_tools_precedes_add_dir(self, tmp_path):
+        """The merged denial list must not swallow the --add-dir flags that
+        follow it."""
+        f = tmp_path / "pkg" / "mod.py"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("x = 1\n")
+        runner = _make_runner()
+        args = runner.build_call_args("p", read_only=False, context_files=[f])
+        assert args == [
+            "--disallowedTools",
+            "ReportFindings",
+            "--add-dir",
+            str(tmp_path / "pkg"),
+        ]
 
     def test_no_print_only_flags(self):
         runner = _make_runner()

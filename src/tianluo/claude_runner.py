@@ -428,13 +428,25 @@ class ClaudeCodeRunner(AgentRunner):
     ) -> List[str]:
         """Build Claude Code CLI arguments from intent-level parameters.
 
-        Produces the same argv that :class:`LLMCaller` previously assembled
-        inline, preserving byte-for-byte compatibility with the existing
-        behaviour when ``spec_guard_plugin`` is ``None``:
+        Produces the argv that :class:`LLMCaller` previously assembled inline,
+        with one deliberate divergence from that historical form: a single
+        ``--disallowedTools`` flag is now emitted on *every* call (see below).
+        Flag identity and ordering are otherwise unchanged, and
+        ``spec_guard_plugin`` still adds nothing when it is ``None``:
 
         * Base flags: ``--output-format stream-json --verbose -p <prompt>``
-        * Read-only enforcement: ``--disallowedTools Write Edit
-          NotebookEdit AskUserQuestion``
+        * Tool denial — exactly one ``--disallowedTools`` flag, always
+          present: ``Write Edit NotebookEdit AskUserQuestion ReportFindings``
+          for read-only steps, ``ReportFindings`` otherwise. The write tools
+          are the read-only enforcement; ``ReportFindings`` is denied
+          unconditionally because it is a claude CLI *host-UI* tool (the one
+          ``/code-review`` uses to hand findings to Claude Code's own
+          interface), not a subagent — under headless ``claude -p`` nothing
+          receives its output, so it only ever yields ``No findings
+          reported.`` or an ``InputValidationError`` in history. The two lists
+          MUST stay merged into one flag: the claude CLI resolves a repeated
+          flag last-one-wins, so a second ``--disallowedTools`` would silently
+          drop the read-only write-tool lock.
         * Spec-write guard: ``--plugin-dir <dir>`` when ``spec_guard_plugin``
           is provided (the guard plugin installs the PreToolUse spec-write
           hook). ``--plugin-dir`` is a session-scoped, repeatable CLI argument
@@ -452,8 +464,7 @@ class ClaudeCodeRunner(AgentRunner):
             spec_guard_plugin: Optional path to the guard plugin directory that
                 installs the spec-write PreToolUse hook. When ``None`` (the
                 default — e.g. for ``update_spec`` / sync steps, which are
-                allowed to write specs), no ``--plugin-dir`` flag is added and
-                the argv is byte-for-byte identical to the prior form.
+                allowed to write specs), no ``--plugin-dir`` flag is added.
 
         Returns:
             CLI argument list (excluding the command name and the runner's
@@ -473,14 +484,15 @@ class ClaudeCodeRunner(AgentRunner):
             "-p", prompt,
         ]
 
+        # WHY: one merged --disallowedTools flag, never two — the claude CLI
+        # resolves a repeated flag last-one-wins, so appending a second flag
+        # for ReportFindings would silently discard the read-only write-tool
+        # lock built above it.
+        disallowed: List[str] = []
         if read_only:
-            args += [
-                "--disallowedTools",
-                "Write",
-                "Edit",
-                "NotebookEdit",
-                "AskUserQuestion",
-            ]
+            disallowed += ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+        disallowed.append("ReportFindings")
+        args += ["--disallowedTools"] + disallowed
 
         if spec_guard_plugin is not None:
             args += ["--plugin-dir", str(spec_guard_plugin)]

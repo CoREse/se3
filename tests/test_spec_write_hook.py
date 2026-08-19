@@ -376,7 +376,7 @@ class TestBuildCallArgs:
         # duplicated --settings clobbers the agent's own --settings (and model).
         assert "--settings" not in args
 
-    def test_argv_byte_identical_when_none(self, tmp_path):
+    def test_argv_identical_when_none(self, tmp_path):
         runner = _claude_runner(tmp_path)
         base = runner.build_call_args("the prompt", read_only=False)
         explicit_none = runner.build_call_args(
@@ -392,8 +392,13 @@ class TestBuildCallArgs:
         args = runner.build_call_args(
             "p", read_only=True, spec_guard_plugin=plugin_dir
         )
-        assert "--disallowedTools" in args
-        assert "--plugin-dir" in args
+        # One denial flag only, and it must not swallow --plugin-dir.
+        assert args.count("--disallowedTools") == 1
+        di = args.index("--disallowedTools")
+        pi = args.index("--plugin-dir")
+        assert args[di + 1:pi] == [
+            "Write", "Edit", "NotebookEdit", "AskUserQuestion", "ReportFindings",
+        ]
         assert "--settings" not in args
 
 

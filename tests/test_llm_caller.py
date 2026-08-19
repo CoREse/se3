@@ -286,14 +286,11 @@ class _ArgsCapturingRunner:
         self, prompt, read_only, context_files=None, spec_guard_plugin=None
     ):
         args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
+        disallowed = []
         if read_only:
-            args += [
-                "--disallowedTools",
-                "Write",
-                "Edit",
-                "NotebookEdit",
-                "AskUserQuestion",
-            ]
+            disallowed += ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+        disallowed.append("ReportFindings")
+        args += ["--disallowedTools"] + disallowed
         if spec_guard_plugin is not None:
             args += ["--plugin-dir", str(spec_guard_plugin)]
         if context_files:
@@ -325,9 +322,29 @@ def test_direct_intent_keeps_legacy_runner_on_plain_autonomous_prompt():
     assert not prompt.startswith("/goal")
 
 
+# Write tools locked out of read-only steps. ReportFindings is denied on every
+# step regardless of read_only, so the flag's mere presence no longer
+# distinguishes the two modes — its *contents* do.
+_WRITE_TOOLS = ("Write", "Edit", "NotebookEdit", "AskUserQuestion")
+
+
+def _disallowed_values(args):
+    """The values carried by the single --disallowedTools flag (stopping at
+    whatever flag follows it, e.g. --plugin-dir)."""
+    assert args.count("--disallowedTools") == 1
+    di = args.index("--disallowedTools")
+    values = []
+    for token in args[di + 1:]:
+        if token.startswith("--"):
+            break
+        values.append(token)
+    return values
+
+
 class TestReadOnlyToolDisallowList:
-    """Tool-layer enforcement: read-only steps append --disallowedTools for the
-    write tools; writable steps (sync_resolve / implement) do not."""
+    """Tool-layer enforcement: read-only steps add the write tools to
+    --disallowedTools; writable steps (sync_resolve / implement) do not (they
+    still carry the unconditional ReportFindings denial)."""
 
     def _run_and_capture_args(self, step_type: str):
         caller = _make_caller(step_type=step_type)
@@ -353,23 +370,26 @@ class TestReadOnlyToolDisallowList:
     def test_read_tools_not_disallowed(self):
         """Read/Grep/Glob/Bash must remain available (not in the disallow list)."""
         args = self._run_and_capture_args("sync_scan")
-        di = args.index("--disallowedTools")
-        disallowed = args[di + 1:]
+        disallowed = _disallowed_values(args)
         for tool in ("Read", "Grep", "Glob", "Bash"):
             assert tool not in disallowed, f"{tool} must not be disallowed"
 
-    def test_sync_resolve_args_have_no_disallowed_tools(self):
+    def _assert_writable(self, args):
+        # Exactly one --disallowedTools flag (a repeated flag is last-one-wins
+        # in the claude CLI), carrying only the unconditional host-UI denial.
+        assert _disallowed_values(args) == ["ReportFindings"]
+        for tool in _WRITE_TOOLS:
+            assert tool not in args, f"{tool} must not be disallowed"
+
+    def test_sync_resolve_args_have_no_write_tool_lock(self):
         """sync_resolve is the writable update path (Way A edits the spec)."""
-        args = self._run_and_capture_args("sync_resolve")
-        assert "--disallowedTools" not in args
+        self._assert_writable(self._run_and_capture_args("sync_resolve"))
 
-    def test_implement_args_have_no_disallowed_tools(self):
-        args = self._run_and_capture_args("implement")
-        assert "--disallowedTools" not in args
+    def test_implement_args_have_no_write_tool_lock(self):
+        self._assert_writable(self._run_and_capture_args("implement"))
 
-    def test_update_spec_args_have_no_disallowed_tools(self):
-        args = self._run_and_capture_args("update_spec")
-        assert "--disallowedTools" not in args
+    def test_update_spec_args_have_no_write_tool_lock(self):
+        self._assert_writable(self._run_and_capture_args("update_spec"))
 
     def test_analyze_read_only_step_has_disallowed_tools(self):
         """STEP_POOL read-only steps also get tool-layer enforcement."""
@@ -402,7 +422,9 @@ class TestForceReadOnlyOverride:
 
         assert is_step_read_only("charter_freshness") is False
         args = self._run_and_capture_args("charter_freshness", force_read_only=False)
-        assert "--disallowedTools" not in args
+        assert _disallowed_values(args) == ["ReportFindings"]
+        for tool in _WRITE_TOOLS:
+            assert tool not in args
 
     def test_force_read_only_adds_runner_disallowed_tools(self):
         """Enforcement point 1: runner receives read_only=True even though the
