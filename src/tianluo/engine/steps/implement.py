@@ -113,8 +113,8 @@ from the code itself.
 # Placeholder-free (contains no `{...}`), so it survives the `.format(...)`
 # rendering of the templates it is injected into.
 TEST_SCOPE_AND_HEADLESS_CLAUSE = """\
-  - **Test scope**: The flow's later TEST step runs the project's full suite, so by default run only tests directly related to your changes (test modules you added or modified; when fixing, the previously failing tests and their direct subset). Run the full suite yourself only with a concrete reason to expect impact beyond the modules you touched — and then in the foreground, through to its result. Never report an unfinished or unobserved test run as an incomplete task.
-  - **Headless run contract**: You run headless: this turn's output ends the process; there is no later wake-up. Leave no background jobs, monitors, or "await notification" wrap-ups — all work your report depends on must finish before you emit the final JSON.
+  - **Test scope**: The flow's TEST step runs the project's full suite, so by default run only tests directly related to your changes, unless you have concrete reason to expect impact beyond the modules touched — then run the full suite in the foreground, to its result. Never report an unobserved test run as an incomplete task.
+  - **Headless run contract**: You run headless: this turn's output ends the process, with no later wake-up. Leave no background jobs or monitors — everything your report depends on must finish before the final JSON.
 """
 
 from ..worktree import (

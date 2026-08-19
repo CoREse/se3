@@ -1560,7 +1560,7 @@ class TestTestScopeAndHeadlessClause:
     def test_every_variant_states_the_three_key_points(self, name):
         flat = " ".join(self._prompt(name).split())
         # 1. the full suite belongs to the flow's TEST step
-        assert "The flow's later TEST step runs the project's full suite" in flat
+        assert "The flow's TEST step runs the project's full suite" in flat
         # 2. this call's own testing defaults to what it changed
         assert "run only tests directly related to your changes" in flat
         # 3. headless: nothing may be left running past the final output
@@ -1571,8 +1571,7 @@ class TestTestScopeAndHeadlessClause:
     def test_no_incomplete_task_for_an_unobserved_run(self, name):
         flat = " ".join(self._prompt(name).split())
         assert (
-            "Never report an unfinished or unobserved test run as an "
-            "incomplete task" in flat
+            "Never report an unobserved test run as an incomplete task" in flat
         )
 
     @pytest.mark.parametrize("name", BASE_NAMES)
