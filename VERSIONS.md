@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.9.2 - 2026-08-19
+
+- Fix WebUI chat history for active --worktree flows showing plan and confirm records duplicated several times over
+- Make the server history cache idempotent per (step_id, ordinal) so repeated self-heal re-delivery no longer grows the cached bundle without bound
+- Update in place when a re-delivered record's content changed (FAILED step retry rewriting its jsonl entry), keeping record count and ordering stable
+- Keep legacy records without an ordinal on the existing append behavior, so older histories render unchanged
+- Preserve bundle generation, signature, and progress-offset semantics so already-synced browsers keep receiving not_modified instead of full re-downloads
+- Collapse verbatim record clones for every step (not just discovery) when the WebUI adopts a full history snapshot, as a client-side backstop
+- Correct the daemon and server comments that each assumed the other side performed the deduplication
 ## 12.9.1 - 2026-08-19
 
 - Tell implement agents that the flow's TEST step owns the full suite, so they run only tests directly related to their changes unless they have a specific reason to expect wider impact
