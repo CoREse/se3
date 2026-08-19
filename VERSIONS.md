@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.9.1 - 2026-08-19
+
+- Tell implement agents that the flow's TEST step owns the full suite, so they run only tests directly related to their changes unless they have a specific reason to expect wider impact
+- State the headless execution contract in the implement prompts: no background jobs, monitors, or 'wait to be woken' endings — all reported work must finish before the final JSON
+- Forbid reporting an unfinished or unobserved full test run as an incomplete task, cutting the redundant serial pytest runs that dominated implement wall-clock time
+- Align FIX_PROMPT's incomplete_tasks description with the other implement prompts: fill it only for partial or failed, and keep it empty for complete
+- Render leftover incomplete_tasks as neutral notes instead of a red 'Incomplete Tasks' block when the step reports complete, so a successful implement step no longer looks half-finished
+- Keep the existing red incomplete-task rendering for partial, failed, and unknown completion statuses
+- Add matching en-US and zh-CN locale strings for the new neutral notes heading
 ## 12.9.0 - 2026-08-19
 
 - Fix WebUI tool chips losing their header after unregistered tools (Agent, ToolSearch, Skill, Workflow, SendMessage, MCP tools) finish — completed calls now show '<tool> ✓ <input> · <result>' instead of a bare 'Tool ✓'
