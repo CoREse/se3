@@ -95,7 +95,7 @@ class TestStashPrevention:
 
         result = _merge_leaf_branch(
             repo, "impl/f/G1", "main",
-            task_description="t", group_summaries=[], spec_content="s",
+            task_description="t", group_summaries=[],
         )
 
         assert result is True
@@ -123,7 +123,7 @@ class TestStashPrevention:
 
         result = _merge_leaf_branch(
             repo, "impl/f/G1", "main",
-            task_description="t", group_summaries=[], spec_content="s",
+            task_description="t", group_summaries=[],
         )
 
         assert result is True
@@ -152,7 +152,7 @@ class TestStashPopConflict:
         ) as mock_audit:
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
-                task_description="t", group_summaries=[], spec_content="s",
+                task_description="t", group_summaries=[],
                 flow_id="20260101-test",
             )
 
@@ -214,7 +214,7 @@ class TestTakeTheirsFallback:
         ) as mock_audit:
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
-                task_description="t", group_summaries=[], spec_content="s",
+                task_description="t", group_summaries=[],
                 flow_id="20260101-test",
             )
 
@@ -270,7 +270,7 @@ class TestTakeTheirsCommitFailure:
         ):
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
-                task_description="t", group_summaries=[], spec_content="s",
+                task_description="t", group_summaries=[],
             )
 
         assert result is False
@@ -310,7 +310,7 @@ class TestAuditIssueIntegration:
         ):
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
-                task_description="t", group_summaries=[], spec_content="s",
+                task_description="t", group_summaries=[],
                 flow_id="20260101-aud",
             )
 
@@ -350,7 +350,7 @@ class TestAuditIssueIntegration:
         ):
             result = _merge_leaf_branch(
                 repo, "impl/f/G1", "main",
-                task_description="t", group_summaries=[], spec_content="s",
+                task_description="t", group_summaries=[],
             )
 
         # Audit failed but merge still succeeded
@@ -383,7 +383,7 @@ class TestExceptionDuringMerge:
             with pytest.raises(RuntimeError, match="simulated merge crash"):
                 _merge_leaf_branch(
                     repo, "impl/f/G1", "main",
-                    task_description="t", group_summaries=[], spec_content="s",
+                    task_description="t", group_summaries=[],
                 )
 
         # Stash was popped (untracked file restored)

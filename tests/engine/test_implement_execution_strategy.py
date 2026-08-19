@@ -311,10 +311,8 @@ class TestCapabilityGroupPrompt:
         fields = dict(
             task_description="TD",
             task_type="feature",
-            design_section="",
             current_group=json.dumps(CAPABILITY_GROUPS[0]),
             previous_results="No previous groups.",
-            spec_summary="SS",
             root_cause_section="",
         )
         capability = IMPLEMENT_CAPABILITY_GROUP_PROMPT.format(**fields)
@@ -914,7 +912,7 @@ class TestHolisticExecutionStrategy:
         "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
-    def test_single_group_prompt_carries_the_design_and_the_group_scope(
+    def test_single_group_prompt_carries_the_group_scope_and_no_design(
         self,
         mock_issue,
         mock_charter,
@@ -924,7 +922,7 @@ class TestHolisticExecutionStrategy:
         mock_resolve,
         tmp_path,
     ):
-        """A one-group plan is still a plan: its design must reach the call."""
+        """The group's own scope reaches the call; no design document does."""
         from tianluo.engine.steps.implement import implement_handler
 
         flow, step = self._flow_step(
@@ -939,6 +937,8 @@ class TestHolisticExecutionStrategy:
                 }
             ],
         )
+        # A resumed legacy flow may still carry a design_doc input; PLAN no
+        # longer emits one and implement no longer renders one either.
         step.inputs["design_doc"] = {
             "overview": "DESIGN-OVERVIEW-MARKER",
             "architecture_decisions": ["DESIGN-DECISION-MARKER"],
@@ -946,9 +946,9 @@ class TestHolisticExecutionStrategy:
         assert implement_handler(step, flow) == StepStatus.COMPLETED
 
         prompt = mock_run.call_args.args[0]
-        assert "## Design Document" in prompt
-        assert "DESIGN-OVERVIEW-MARKER" in prompt
-        assert "DESIGN-DECISION-MARKER" in prompt
+        assert "## Design Document" not in prompt
+        assert "DESIGN-OVERVIEW-MARKER" not in prompt
+        assert "DESIGN-DECISION-MARKER" not in prompt
         # PLAN's scope statement for this one call, without reintroducing the
         # per-group enumeration this mode denies.
         assert "GROUP-SCOPE-MARKER" in prompt
@@ -973,7 +973,7 @@ class TestHolisticExecutionStrategy:
         "tianluo.engine.context_builder.get_issue_discovery_injection",
         return_value=None,
     )
-    def test_forced_single_collapse_also_carries_the_design(
+    def test_forced_single_collapse_renders_no_design(
         self,
         mock_issue,
         mock_charter,
@@ -983,7 +983,7 @@ class TestHolisticExecutionStrategy:
         mock_resolve,
         tmp_path,
     ):
-        """Pinning the shape must not drop what PLAN designed for it."""
+        """The collapse path renders no design document either."""
         from tianluo.engine.steps.implement import implement_handler
 
         flow, step = self._flow_step(
@@ -998,8 +998,8 @@ class TestHolisticExecutionStrategy:
         assert implement_handler(step, flow) == StepStatus.COMPLETED
 
         prompt = mock_run.call_args.args[0]
-        assert "## Design Document" in prompt
-        assert "DESIGN-OVERVIEW-MARKER" in prompt
+        assert "## Design Document" not in prompt
+        assert "DESIGN-OVERVIEW-MARKER" not in prompt
 
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)

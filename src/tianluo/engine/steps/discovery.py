@@ -210,7 +210,7 @@ If you are uncertain whether the input is evaluative/inquisitive, fall back to t
 Guidelines:
 - Start by understanding the current project context (see Project Context above)
 - Ask questions that help narrow down what the user actually needs
-- Consult the available specifications as a read-only reference to how the code currently behaves, not as a contract the task must be aligned to
+- Consult the project charter and the code-index (and the source itself) as a read-only reference to how the code currently behaves, not as a contract the task must be aligned to
 - After gathering enough info, provide a synthesis (mode: "synthesis")
 - Once user confirms, finalize the description (mode: "confirmation")
 - Be conversational but focused on understanding requirements
@@ -313,7 +313,7 @@ If uncertain, fall back to normal clarification behavior.
 
 Guidelines:
 - Consider how the code currently behaves when asking questions
-- Reference the available specifications as a read-only description of current code behavior when relevant
+- Reference the project charter, the code-index and the source as a read-only description of current code behavior when relevant
 - If the user provides clear direction, acknowledge it and move toward synthesis
 - If things are still unclear, ask more specific questions
 - When you have enough information, provide a refined description and ask for confirmation

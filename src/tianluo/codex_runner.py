@@ -1102,15 +1102,9 @@ class CodexRunner(AgentRunner):
         prompt: str,
         read_only: bool,
         context_files: Optional[List[Path]] = None,
-        spec_guard_plugin: Optional[Path] = None,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Build codex CLI arguments from intent-level parameters.
-
-        ``spec_guard_plugin`` is accepted for interface parity but ignored:
-        the spec-write PreToolUse hook is injected via Claude's ``--plugin-dir``
-        (handled only by ``ClaudeCodeRunner``), and codex sandboxing is handled
-        separately via ``--sandbox``.
 
         Produces the argv for ``codex exec --json``:
 

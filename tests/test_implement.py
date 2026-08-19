@@ -8,7 +8,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from tianluo.engine.models import FlowInstance, Step, StepStatus, StepType
-from tianluo.engine.steps.implement import _format_spec_brief
 
 
 def _make_step_and_flow(tmp_path: Path, task_groups: list[dict]) -> tuple[Step, FlowInstance]:
@@ -21,7 +20,6 @@ def _make_step_and_flow(tmp_path: Path, task_groups: list[dict]) -> tuple[Step, 
             "task_type": "feature",
             "task_groups": task_groups,
             "design_doc": {},
-            "spec_content": {},
         },
     )
     flow = FlowInstance(
@@ -70,24 +68,6 @@ FORK_GROUPS = [
         "tasks": [{"id": 3, "description": "Task 3", "estimated_loc": 200}],
     },
 ]
-
-
-class TestFormatSpecBrief:
-    """Tests for _format_spec_brief trailing newline behavior."""
-
-    def test_ensures_trailing_newline_after_last_spec(self):
-        """If a spec lacks a trailing newline, the next heading must not be
-        concatenated to its last line."""
-        result = _format_spec_brief({"base": "No newline here"})
-        # Must end with a trailing newline so the next prompt heading isn't
-        # concatenated to the last line of spec content.
-        assert result.endswith("\n")
-        lines = result.split("\n")
-        assert lines == ["### base", "No newline here", ""]
-
-    def test_empty_spec_content(self):
-        """Empty dict should return the placeholder message."""
-        assert _format_spec_brief({}) == "No project conventions specified."
 
 
 class TestImplementHandlerEmptyRepoFallback:

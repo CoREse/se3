@@ -36,6 +36,7 @@ from tianluo.engine.steps.plan import (
     CAPABILITY_GRANULARITY_SINGLE,
     CAPABILITY_JSON_SCHEMA,
     CAPABILITY_TASKS_SECTION,
+    GRANULAR_JSON_SCHEMA,
     TASKS_SECTION,
     VERSION_FILE_GUARDRAIL,
     _build_prompt,
@@ -52,18 +53,16 @@ _PROMPT_KWARGS = dict(
 )
 
 
-def _capability_prompt(depth="full", granularity=PlanGranularity.AUTO):
+def _capability_prompt(granularity=PlanGranularity.AUTO):
     return _build_prompt(
-        depth=depth,
         decomposition=PlanDecomposition.CAPABILITY,
         granularity=granularity,
         **_PROMPT_KWARGS,
     )
 
 
-def _granular_prompt(depth="full"):
+def _granular_prompt():
     return _build_prompt(
-        depth=depth,
         decomposition=PlanDecomposition.GRANULAR,
         **_PROMPT_KWARGS,
     )
@@ -155,21 +154,37 @@ class TestCapabilityGroupingDoctrine:
         assert "Do NOT enumerate individual tasks inside a group" in prompt
         assert "planning / sub-agent system" in prompt
 
-    def test_prompt_keeps_proposal_and_design(self):
-        """The human gate and the fix loop's design context still need them."""
+    def test_prompt_asks_for_no_proposal_or_design(self):
+        """PLAN emits scheduling data only; there is no artifact to review."""
         prompt = _capability_prompt()
-        assert "## Part 1: Proposal" in prompt
-        assert "## Part 2: Design" in prompt
+        assert "Proposal" not in prompt
+        assert "Design" not in prompt
+        assert "proposal" not in prompt
+        assert "design" not in prompt
 
-    def test_bugfix_depth_keeps_its_lightweight_design(self):
-        prompt = _capability_prompt(depth="medium")
-        assert "## Part 2: Design (lightweight)" in prompt
-        assert "## Part 3: Task Groups (task units)" in prompt
-
-    def test_shallow_depth_labels_the_section_instructions(self):
-        prompt = _capability_prompt(depth="shallow")
+    def test_prompt_labels_the_task_groups_section_once(self):
+        """No Part 1/Part 2 remain, so the section is not numbered."""
+        prompt = _capability_prompt()
         assert "## Instructions: Task Groups (task units)" in prompt
-        assert "## Part 1: Proposal" not in prompt
+        assert "Part 1" not in prompt
+        assert "Part 2" not in prompt
+        assert "Part 3" not in prompt
+
+    @pytest.mark.parametrize(
+        "task_type", ["feature", "discovery", "bugfix", "fix", "small", "review"],
+    )
+    def test_every_task_type_gets_the_same_prompt(self, task_type):
+        """Depth tiering is gone: it only ever selected proposal/design."""
+        kwargs = dict(_PROMPT_KWARGS, task_type=task_type)
+        prompt = _build_prompt(
+            decomposition=PlanDecomposition.CAPABILITY,
+            granularity=PlanGranularity.AUTO,
+            **kwargs,
+        )
+        baseline = _capability_prompt()
+        assert prompt == baseline.replace(
+            "## Task Type\nfeature", f"## Task Type\n{task_type}",
+        )
 
     def test_capability_prompt_never_carries_the_granular_tasks_section(self):
         prompt = _capability_prompt()
@@ -246,7 +261,6 @@ class TestGranularityTiers:
     def test_unknown_granularity_falls_back_to_auto(self):
         """A malformed persisted value must not drop the directive entirely."""
         prompt = _build_prompt(
-            depth="full",
             decomposition=PlanDecomposition.CAPABILITY,
             granularity="nonsense",
             **_PROMPT_KWARGS,
@@ -256,7 +270,6 @@ class TestGranularityTiers:
     def test_granularity_is_ignored_under_granular(self):
         for granularity in PlanGranularity:
             prompt = _build_prompt(
-                depth="full",
                 decomposition=PlanDecomposition.GRANULAR,
                 granularity=granularity,
                 **_PROMPT_KWARGS,
@@ -321,8 +334,7 @@ class TestArtifactSplitGuardrail:
 
     def test_guardrail_is_only_attached_under_capability(self):
         assert ARTIFACT_SPLIT_GUARDRAIL in _capability_prompt()
-        for depth in ("full", "medium", "shallow"):
-            assert ARTIFACT_SPLIT_GUARDRAIL not in _granular_prompt(depth=depth)
+        assert ARTIFACT_SPLIT_GUARDRAIL not in _granular_prompt()
 
     def test_version_guardrail_survives_in_both_doctrines(self):
         assert VERSION_FILE_GUARDRAIL in _capability_prompt()
@@ -353,9 +365,12 @@ class TestCapabilitySchema:
         assert '"name": "Task this group delivers"' in CAPABILITY_JSON_SCHEMA
         assert "Capability this group delivers" not in CAPABILITY_JSON_SCHEMA
 
-    def test_schema_keeps_proposal_and_design(self):
-        assert '"proposal"' in CAPABILITY_JSON_SCHEMA
-        assert '"design"' in CAPABILITY_JSON_SCHEMA
+    def test_schema_carries_no_proposal_or_design(self):
+        for schema in (CAPABILITY_JSON_SCHEMA, GRANULAR_JSON_SCHEMA):
+            assert "proposal" not in schema
+            assert "design" not in schema
+        assert '"plan"' not in CAPABILITY_JSON_SCHEMA
+        assert '"plan"' not in GRANULAR_JSON_SCHEMA
 
     def test_schema_explains_that_independent_groups_run_in_parallel(self):
         assert "run in parallel" in CAPABILITY_JSON_SCHEMA
@@ -368,6 +383,15 @@ class TestCapabilitySchema:
     def test_schema_hint_carries_no_tasks_key(self):
         assert '"tasks"' not in plan_mod.CAPABILITY_JSON_SCHEMA_HINT
         assert '"tasks"' in plan_mod.GRANULAR_JSON_SCHEMA_HINT
+
+    def test_schema_hints_carry_no_proposal_or_design(self):
+        for hint in (
+            plan_mod.CAPABILITY_JSON_SCHEMA_HINT,
+            plan_mod.GRANULAR_JSON_SCHEMA_HINT,
+        ):
+            assert "proposal" not in hint
+            assert "design" not in hint
+            assert '"plan"' not in hint
 
     def test_schema_reaches_the_prompt_as_valid_json(self):
         """The schema block is appended verbatim, so its braces stay single."""
@@ -389,7 +413,7 @@ class TestGranularDoctrineIsFrozen:
 
     def test_granular_sections_are_unchanged(self):
         prompt = _granular_prompt()
-        assert TASKS_SECTION.format(part_label="Part 3") in prompt
+        assert TASKS_SECTION in prompt
         assert "### Grouping Principles" in prompt
         assert "- **High cohesion within groups**" in prompt
         assert "Include `estimated_loc` (integer)" in prompt
@@ -401,10 +425,9 @@ class TestGranularDoctrineIsFrozen:
         assert "autonomous implement call" not in prompt
         assert CAPABILITY_TASKS_SECTION.splitlines()[0] not in prompt
 
-    @pytest.mark.parametrize("depth", ["full", "medium", "shallow"])
-    def test_granular_prompt_matches_the_recorded_section_order(self, depth):
+    def test_granular_prompt_matches_the_recorded_section_order(self):
         """Ordering is part of the frozen shape, not just the section set."""
-        prompt = _granular_prompt(depth=depth)
+        prompt = _granular_prompt()
         tasks_at = prompt.index("Task Groups")
         guardrail_at = prompt.index(VERSION_FILE_GUARDRAIL)
         schema_at = prompt.index("Respond in JSON format:")
@@ -441,10 +464,6 @@ def _flow_and_step(tmp_path, *, decomposition=None, granularity=None):
 
 
 _CAPABILITY_RESPONSE = {
-    "plan": {
-        "proposal": {"summary": "add export"},
-        "design": {"overview": "one component"},
-    },
     "task_groups": [
         {
             "group_id": "G1",

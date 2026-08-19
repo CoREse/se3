@@ -478,8 +478,8 @@ def is_legacy_direct_flow(
     WHY the group count gates it: such a flow *can* acquire a plan after the
     upgrade — ANALYZE rebuilds the sequence from the default table, which now
     always contains PLAN, so a flow interrupted before ANALYZE completed will
-    run PLAN under the projected (capability, single) mode and emit proposal,
-    design and groups. From that point the flow's own history contradicts this
+    run PLAN under the projected (capability, single) mode and emit groups.
+    From that point the flow's own history contradicts this
     branch's prompt ("carries no plan and no task groups"), and the shape must
     be read off the plan instead: :func:`holistic_execution_mode` then lands on
     the single-group branch, which keeps the same one-call contract *and* shows

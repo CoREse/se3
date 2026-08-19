@@ -175,7 +175,7 @@ def test_leaf_merge_path_archives_concurrent_untracked(tmp_path: Path) -> None:
 
     result = _merge_leaf_branch(
         tmp_path, "impl/f/G1", default,
-        task_description="t", group_summaries=[], spec_content="s",
+        task_description="t", group_summaries=[],
         flow_id="20260630-test",
     )
     assert result is True
@@ -321,7 +321,7 @@ def test_leaf_merge_reports_failure_on_incomplete_stashpop(
     ):
         result = _merge_leaf_branch(
             tmp_path, "impl/f/G1", default,
-            task_description="t", group_summaries=[], spec_content="s",
+            task_description="t", group_summaries=[],
             flow_id="20260630-incomplete",
         )
 

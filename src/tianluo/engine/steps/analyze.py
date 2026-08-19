@@ -279,9 +279,9 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # --discover preservation and --type override) so step.outputs agrees
         # with flow.task_type rather than diverging from a separately defaulted
         # raw value. The retired spec-selection mechanism no longer produces
-        # ``spec_content`` / ``relevant_specs`` / ``selected_items`` — downstream
-        # steps instead receive the charter + code-index injection. These keys are
-        # kept (empty) so any defensive ``.get()`` consumers degrade cleanly.
+        # ``relevant_specs`` / ``selected_items`` — downstream steps instead
+        # receive the charter + code-index injection. These two keys are kept
+        # (empty) so any defensive ``.get()`` consumers degrade cleanly.
         step.outputs["task_type"] = resolved_task_type
         step.outputs["analyzed_type"] = analyzed_type
         step.outputs["scope"] = result.get("scope", "")
@@ -290,7 +290,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["root_cause_clear"] = root_cause_clear
         step.outputs["project_summary"] = project_summary
         step.outputs["relevant_specs"] = []
-        step.outputs["spec_content"] = ""
         step.outputs["selected_items"] = []
 
         logger.info(

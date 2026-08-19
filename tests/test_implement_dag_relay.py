@@ -234,7 +234,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is True
@@ -256,7 +256,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [{"group_id": "G1", "summary": "s", "files_changed": []}], "spec",
+            "task desc", [{"group_id": "G1", "summary": "s", "files_changed": []}],
         )
 
         assert result is True
@@ -286,7 +286,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is True
@@ -322,7 +322,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is False
@@ -345,7 +345,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is False
@@ -368,7 +368,7 @@ class TestMergeLeafBranch:
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is True
@@ -402,7 +402,6 @@ class TestResolveLeafMergeConflicts:
             tmp_path, ["conflict.py"],
             "task desc",
             [{"group_id": "G1", "summary": "did stuff", "files_changed": ["a.py"]}],
-            "spec",
         )
 
         assert result is True
@@ -428,7 +427,7 @@ class TestResolveLeafMergeConflicts:
 
         result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
-            "task desc", [], "spec",
+            "task desc", [],
             max_retries=2,
         )
 
@@ -450,7 +449,7 @@ class TestResolveLeafMergeConflicts:
 
         result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
-            "task desc", [], "spec",
+            "task desc", [],
             max_retries=3,
         )
 
@@ -476,7 +475,7 @@ class TestResolveLeafMergeConflicts:
 
         result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
-            "task desc", [], "spec",
+            "task desc", [],
             max_retries=2,
         )
 
@@ -487,7 +486,7 @@ class TestResolveLeafMergeConflicts:
         """Missing conflict file returns False."""
         result = resolve_merge_conflicts_with_context(
             tmp_path, ["nonexistent.py"],
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is False
@@ -503,7 +502,7 @@ class TestResolveLeafMergeConflicts:
 
         result = resolve_merge_conflicts_with_context(
             tmp_path, ["clean.py"],
-            "task desc", [], "spec",
+            "task desc", [],
         )
 
         assert result is True
@@ -530,7 +529,6 @@ class TestResolveLeafMergeConflicts:
                 {"group_id": "G1", "summary": "Added login", "files_changed": ["auth.py"]},
                 {"group_id": "G2", "summary": "Added logout", "files_changed": ["auth.py"]},
             ],
-            "Use bcrypt for passwords",
         )
 
         prompt = mock_caller.call.call_args[1].get("prompt", mock_caller.call.call_args[0][0] if mock_caller.call.call_args[0] else "")
@@ -601,8 +599,8 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         mock_reduce.assert_called_once_with(groups)
@@ -648,8 +646,8 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # DAGScheduler should be created with relay_plan
@@ -710,8 +708,8 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # Only one merge call (for the leaf G3's branch, which is shared)
@@ -764,8 +762,8 @@ class TestDagParallelRelayIntegration:
 
         result = _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # G1 should be merged as a fallback leaf
@@ -824,8 +822,8 @@ class TestDagParallelRelayIntegration:
 
         _run_dag_parallel(
             groups=groups, step=step, flow=flow, project_root=Path("/repo"),
-            task_description="t", task_type="feature", design_section="",
-            spec_summary="", injection=None, retry_count=0,
+            task_description="t", task_type="feature",
+            injection=None, retry_count=0,
         )
 
         # force_cleanup_worktree should only be called once for the shared branch

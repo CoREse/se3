@@ -1557,9 +1557,8 @@ def _generate_commit_message(
 
     Priority chain for the subject line:
     1. commit_message from version_analyze step (via step.inputs)
-    2. proposal summary from plan step
-    3. implement_summary from implement step
-    4. Template fallback from task description
+    2. implement_summary from implement step
+    3. Template fallback from task description
 
     Args:
         flow: The flow instance
@@ -1581,7 +1580,6 @@ def _generate_commit_message(
 
     # Get inputs from previous steps
     changes_made = step.inputs.get("changes_made") or {}
-    proposal = step.inputs.get("proposal") or {}
 
     # Get completion status from implement step (defaults for backward compatibility)
     completion_status = step.inputs.get("completion_status", "complete")
@@ -1597,15 +1595,14 @@ def _generate_commit_message(
             first_line = first_line[:69] + "..."
         message = f"{task_type}: {first_line}"
     else:
-        # Priority 2: proposal summary, Priority 3: implement_summary
-        summary = proposal.get("summary", "") or implement_summary
-        if summary:
-            first_line = summary.split(".")[0]
+        # Priority 2: implement_summary
+        if implement_summary:
+            first_line = implement_summary.split(".")[0]
             if len(first_line) > 72:
                 first_line = first_line[:69] + "..."
             message = f"{task_type}: {first_line}"
         else:
-            # Priority 4: template fallback from task description
+            # Priority 3: template fallback from task description
             desc = task_description[:60] if len(task_description) > 60 else task_description
             message = f"{task_type}: {desc}"
 

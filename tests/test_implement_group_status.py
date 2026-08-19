@@ -102,8 +102,6 @@ class TestDagGroupStatusWiring:
             project_root=tmp_path,
             task_description="t",
             task_type="feature",
-            design_section="",
-            spec_summary="",
             injection=None,
             retry_count=0,
         )
@@ -141,7 +139,7 @@ class _AgentStreamRunner:
         self._succeed = succeed
         self._model = model
 
-    def build_call_args(self, prompt, read_only, context_files=None, spec_guard_plugin=None):
+    def build_call_args(self, prompt, read_only, context_files=None):
         return ["-p", prompt]
 
     def detect_infra_error(self, returncode, output, stderr_tail):
@@ -355,8 +353,6 @@ class TestDagAgentModelRelay:
                 project_root=tmp_path,
                 task_description="t",
                 task_type="feature",
-                design_section="",
-                spec_summary="",
                 injection=None,
                 retry_count=0,
             )

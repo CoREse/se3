@@ -27,10 +27,11 @@ class TestAnalyzeStep:
     def test_analyze_success(self, MockLLMCaller, MockCollector):
         """Test successful analysis produces classification fields.
 
-        The retired spec-selection mechanism no longer produces real
-        ``spec_content`` / ``relevant_specs`` / ``selected_items`` — they are
-        emitted empty so defensive downstream consumers degrade cleanly, and
-        the legacy ``selected_specs`` key never appears.
+        The retired spec-selection mechanism no longer produces
+        ``relevant_specs`` / ``selected_items`` — they are emitted empty so
+        defensive downstream consumers degrade cleanly — and no longer emits
+        ``spec_content`` at all. The legacy ``selected_specs`` key never
+        appears either.
         """
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
@@ -68,8 +69,9 @@ class TestAnalyzeStep:
         assert len(step.outputs["project_summary"]) > 0
         # Retired spec-selection outputs are present but empty
         assert step.outputs["relevant_specs"] == []
-        assert step.outputs["spec_content"] == ""
         assert step.outputs["selected_items"] == []
+        # The spec content channel is gone entirely.
+        assert "spec_content" not in step.outputs
         # The legacy selected_specs key must never appear
         assert "selected_specs" not in step.outputs
 

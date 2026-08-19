@@ -71,7 +71,7 @@ class _FakeRunner:
 
         return InfraErrorType.NONE
 
-    def build_call_args(self, prompt, read_only, context_files=None, spec_guard_plugin=None):
+    def build_call_args(self, prompt, read_only, context_files=None):
         return ["--output-format", "stream-json", "--verbose", "-p", prompt]
 
 

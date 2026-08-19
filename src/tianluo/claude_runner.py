@@ -423,37 +423,28 @@ class ClaudeCodeRunner(AgentRunner):
         prompt: str,
         read_only: bool,
         context_files: Optional[List[Path]] = None,
-        spec_guard_plugin: Optional[Path] = None,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
     ) -> List[str]:
         """Build Claude Code CLI arguments from intent-level parameters.
 
         Produces the same argv that :class:`LLMCaller` previously assembled
-        inline, preserving byte-for-byte compatibility with the existing
-        behaviour when ``spec_guard_plugin`` is ``None``:
+        inline:
 
         * Base flags: ``--output-format stream-json --verbose -p <prompt>``
         * Read-only enforcement: ``--disallowedTools Write Edit
           NotebookEdit AskUserQuestion``
-        * Spec-write guard: ``--plugin-dir <dir>`` when ``spec_guard_plugin``
-          is provided (the guard plugin installs the PreToolUse spec-write
-          hook). ``--plugin-dir`` is a session-scoped, repeatable CLI argument
-          loaded *additively* — it does NOT participate in ``--settings``
-          override semantics, so it cannot clobber the agent's own
-          ``--settings`` (and its ``model``) the way a duplicated ``--settings``
-          did. The default ``--setting-sources user`` isolation is preserved and
-          no ``permissions.deny`` is re-introduced.
         * Context files: ``--file <path>`` for each existing file
+
+        WHY (no ``--settings`` here): this runner never appends a ``--settings``
+        flag of its own. The Claude CLI treats a duplicated ``--settings`` as
+        last-wins, so a second occurrence would wholly override an agent
+        wrapper's settings file — silently discarding the model it selects. The
+        default ``--setting-sources user`` isolation is preserved instead.
 
         Args:
             prompt: The effective prompt text.
             read_only: Whether the current step is read-only.
             context_files: Optional list of files to include as context.
-            spec_guard_plugin: Optional path to the guard plugin directory that
-                installs the spec-write PreToolUse hook. When ``None`` (the
-                default — e.g. for ``update_spec`` / sync steps, which are
-                allowed to write specs), no ``--plugin-dir`` flag is added and
-                the argv is byte-for-byte identical to the prior form.
 
         Returns:
             CLI argument list (excluding the command name and the runner's
@@ -481,9 +472,6 @@ class ClaudeCodeRunner(AgentRunner):
                 "NotebookEdit",
                 "AskUserQuestion",
             ]
-
-        if spec_guard_plugin is not None:
-            args += ["--plugin-dir", str(spec_guard_plugin)]
 
         if context_files:
             for f in context_files:
