@@ -978,6 +978,14 @@ def _complete_flow_via_fallback(flow: FlowInstance) -> None:
     """
     flow.status = FlowStatus.COMPLETED
     flow.state.current_step_index = len(flow.state.selected_steps)
+    # This is the second landing of COMPLETED (the engine's own is in
+    # StateMachine.transition_to_next), so the flow's review baselines are
+    # reclaimed here too — otherwise a flow that finishes through the fallback
+    # leaks its snapshots forever. Total by contract: never fails the flow.
+    from ..engine.review_scope import discard_flow_snapshots
+    from ..engine.steps._project_root import resolve_flow_project_root
+
+    discard_flow_snapshots(resolve_flow_project_root(flow), flow.flow_id)
 
 
 def handle_resume_interactive(project_root: Path) -> Optional[str]:

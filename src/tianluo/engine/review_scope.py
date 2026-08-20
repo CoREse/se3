@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import stat
 import subprocess
 import uuid
@@ -35,6 +36,17 @@ logger = logging.getLogger(__name__)
 
 BASELINE_SCHEMA_VERSION = 1
 _SAFE_BASELINE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+# A flow id also becomes a path segment in the snapshot store, but unlike a
+# baseline id it is not minted here — it arrives from persisted flow state and
+# from CLI arguments. Reclaiming a snapshot directory is the only destructive
+# operation in this module, so the id is held to the same single-segment shape
+# rule: a leading alphanumeric rules out "." and "..", and no separator is
+# accepted at all.
+_SAFE_FLOW_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+# Single name for the per-flow snapshot store, so the reclaim guard below and
+# the path construction can never drift apart.
+_SNAPSHOT_STORE_DIR = "review-scopes"
 
 # The finite closed set of transient runtime-state subtree names under the
 # project's runtime directory (the same closed set the commit step uses for its
@@ -391,7 +403,12 @@ class ReviewScopeManager:
     def __init__(self, project_root: Path, flow_id: str):
         self.project_root = Path(project_root).resolve()
         self.flow_id = str(flow_id)
-        self.root = runtime_dir(self.project_root) / "state" / "review-scopes" / self.flow_id
+        self.root = (
+            runtime_dir(self.project_root)
+            / "state"
+            / _SNAPSHOT_STORE_DIR
+            / self.flow_id
+        )
 
     def load_baseline(self, baseline_id: str) -> Optional[ReviewBaseline]:
         """Load one captured baseline descriptor from the runtime store."""
@@ -404,6 +421,47 @@ class ReviewScopeManager:
     def store_exists(self) -> bool:
         """Whether this flow's baseline snapshot directory is still on disk."""
         return self.root.is_dir()
+
+    def discard_snapshots(self) -> bool:
+        """Reclaim this flow's whole baseline snapshot directory.
+
+        Baselines are heavy — a descriptor plus a content blob for every dirty
+        or untracked file at capture time, once per implementation and once per
+        fix iteration — and nothing else ever removes them, so a project that
+        runs many flows accumulates every snapshot it ever took.
+
+        INVARIANT: this may only be called at a flow's *terminal* point. Any
+        flow ``luo run --resume`` still offers (which is every status but
+        COMPLETED — a FAILED flow is offered as a retry) must keep its
+        baselines, because the SELF_CHECK round it resumes into has nothing
+        left to diff against once they are gone.
+
+        Returns True when a directory was actually removed. A flow id that is
+        not a safe single path segment raises :class:`ValueError` — a reclaim
+        must never be talked into walking out of the store — while any other
+        failure is reported as False and logged: freeing disk space must never
+        be the reason a flow fails to terminate.
+        """
+        if not _SAFE_FLOW_ID_RE.match(self.flow_id):
+            raise ValueError(f"unsafe review scope flow id: {self.flow_id!r}")
+        root = self.root
+        # Independent confirmation that the resolved path really is one flow's
+        # entry in the snapshot store: the id check above constrains the
+        # segment, this constrains where the segment sits.
+        if root.parent.name != _SNAPSHOT_STORE_DIR:
+            raise ValueError(f"refusing to reclaim outside the store: {root}")
+        if not root.is_dir():
+            return False
+        try:
+            shutil.rmtree(root)
+        except OSError as exc:
+            logger.warning(
+                "Could not reclaim review baselines for flow %s at %s: %s",
+                self.flow_id, root, exc,
+            )
+            return False
+        logger.debug("Reclaimed review baselines for flow %s", self.flow_id)
+        return True
 
     def list_baselines(self) -> List[ReviewBaseline]:
         """Every persisted descriptor of this flow, oldest capture first."""
@@ -2081,3 +2139,25 @@ def diff_stat(scope: ReviewScope) -> Dict[str, Tuple[int, int]]:
         )
         for path in sorted(paths)
     }
+
+
+def discard_flow_snapshots(project_root: Any, flow_id: Any) -> bool:
+    """Reclaim one flow's review baselines from a flow-termination site.
+
+    The shared entry point for every channel that disposes of a flow (the
+    engine's completion landing, ``luo salvage``, ``luo end-session``), so all
+    of them reclaim the same directory under the same safety rule.
+
+    Total by contract: an unsafe id, an unreadable root, a permission error —
+    none of them may propagate, because every caller is finishing a flow off
+    and a failed reclaim is a disk-space problem, not a flow outcome. The
+    return value says whether anything was actually removed.
+    """
+    try:
+        manager = ReviewScopeManager(Path(project_root), str(flow_id))
+        return manager.discard_snapshots()
+    except Exception:  # noqa: BLE001 - reclaim is never worth failing a flow for
+        logger.debug(
+            "Could not reclaim review baselines for flow %s", flow_id, exc_info=True
+        )
+        return False

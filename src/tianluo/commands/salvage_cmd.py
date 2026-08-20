@@ -344,6 +344,7 @@ def _archive_session(project_root: Path) -> bool:
         True if archived, False if nothing to archive
     """
     from ..engine.persistence import PersistenceManager
+    from ..engine.review_scope import discard_flow_snapshots
 
     pm = PersistenceManager(project_root)
     if pm.state_file.exists():
@@ -366,6 +367,10 @@ def _archive_session(project_root: Path) -> bool:
         pm.clear_state()
         if flow_id:
             pm.clear_resumable_snapshot(flow_id)
+            # A salvaged flow has been dispositioned and can never be resumed,
+            # so its review baselines have no reader left; reclaim them on the
+            # same signal that retires the resumable snapshot.
+            discard_flow_snapshots(project_root, flow_id)
         return True
     return False
 

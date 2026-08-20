@@ -1006,7 +1006,14 @@ def _archive_main_session(
 
     try:
         if flow_id:
+            from ..engine.review_scope import discard_flow_snapshots
+
             PersistenceManager(project_root).clear_resumable_snapshot(flow_id)
+            # An ended session is terminal — it is exactly the "no longer
+            # resumable" signal the review baselines are kept for, so they are
+            # reclaimed on the same step rather than lingering for a flow no
+            # SELF_CHECK round will ever re-enter.
+            discard_flow_snapshots(project_root, flow_id)
             results.append((t("end_session.step.clear_resumable"), "OK", flow_id))
         else:
             results.append((t("end_session.step.clear_resumable"), "SKIP", t("end_session.detail.no_flow_id")))
@@ -1144,12 +1151,19 @@ def _resolve_history_target(
 
 
 def _clear_resumable(worktree_path: Path, flow_id: Optional[str]) -> None:
-    """Clear the resumable snapshot for *flow_id* in the worktree."""
+    """Retire *flow_id*'s resumable state in the worktree.
+
+    Also reclaims the flow's review baselines: the worktree session is over,
+    so the snapshot store in that worktree has no reader left. Kept together
+    with the resumable snapshot so both retire on one signal.
+    """
     from ..engine.persistence import PersistenceManager
+    from ..engine.review_scope import discard_flow_snapshots
 
     if not flow_id:
         return
     PersistenceManager(worktree_path).clear_resumable_snapshot(flow_id)
+    discard_flow_snapshots(worktree_path, flow_id)
 
 
 # --------------------------------------------------------------------------

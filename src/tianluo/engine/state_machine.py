@@ -1718,6 +1718,7 @@ class StateMachine:
             # index via ``selected.index(current_step.step_type)`` above, and
             # ``_current_step`` keys off ``current_step_id``, not this index.
             flow.state.current_step_index = len(selected)
+            self._discard_review_scope_snapshots(flow)
             self.persistence.save_flow(flow)
             return None
 
@@ -3777,6 +3778,28 @@ class StateMachine:
         except Exception:
             logger.debug(
                 "Failed to capture the investigation workspace baseline",
+                exc_info=True,
+            )
+
+    def _discard_review_scope_snapshots(self, flow: FlowInstance) -> None:
+        """Reclaim the flow's review baselines now that it is terminal.
+
+        WHY only here, and not at the FAILED landings: ``luo run --resume``
+        treats every status but COMPLETED as resumable — a FAILED flow is
+        offered back to the operator as a retry — and a resumed SELF_CHECK
+        round can only rebuild its diff while its baselines survive. COMPLETED
+        is also strictly after a worktree flow's merge, because the merge-side
+        steps are part of that flow's own step sequence.
+
+        Non-fatal by contract: reclaiming disk space must never be the reason a
+        flow fails to reach its terminal state.
+        """
+        try:
+            self._review_scope_manager(flow).discard_snapshots()
+        except Exception:  # noqa: BLE001 - see docstring
+            logger.debug(
+                "Failed to reclaim review baselines for flow %s",
+                getattr(flow, "flow_id", "?"),
                 exc_info=True,
             )
 
