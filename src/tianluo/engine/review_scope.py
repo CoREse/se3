@@ -147,6 +147,42 @@ class ReviewScope:
     undecidable: bool = False
     diagnostic: str = ""
     fallback_from_incremental: bool = False
+    # WHY the whole-task anchors travel ALONGSIDE the round's own anchors
+    # instead of being merged into them: an incremental round's attention is
+    # the fix delta (``changed_paths`` / ``causal_anchors``), but its EVIDENCE
+    # domain is every line this flow really changed — a finding anchored in
+    # work an earlier IMPLEMENT/FIX did is grounded in fact and must not be
+    # discarded as fabricated. Merging the two sets would erase which baseline
+    # a path/range came from, and the scope manifest has to be able to tell the
+    # checker "this hunk is the fix you just made, that one is earlier work".
+    # They stay empty for a full round: there the round baseline IS the
+    # implementation baseline, so a second copy would carry no new information.
+    task_baseline_id: str = ""
+    task_changed_paths: List[str] = field(default_factory=list)
+    task_causal_anchors: Dict[str, List[List[int]]] = field(default_factory=dict)
+    task_deletion_anchors: Dict[str, List[List[int]]] = field(default_factory=dict)
+    task_artifact_path: str = ""
+    task_scope_available: bool = False
+    task_scope_diagnostic: str = ""
+    # WHY a full round carries a SECOND, narrower anchor set: its own domain
+    # spans the whole task, so the checker cannot tell which hunks it already
+    # reviewed in the previous full round from the ones the fixes since then
+    # added. These fields answer exactly that, and nothing else — they are
+    # PRESENTATION data for the scope manifest and must never narrow evidence
+    # grounding, which stays the round's own (whole-task) domain. They are
+    # derived from persisted baselines alone, so they carry git facts only: no
+    # fix-iteration count, trigger type, or closed-finding history. Empty on an
+    # incremental round, where the round's own anchors ARE the fix delta.
+    fix_delta_baseline_id: str = ""
+    fix_delta_changed_paths: List[str] = field(default_factory=list)
+    fix_delta_causal_anchors: Dict[str, List[List[int]]] = field(
+        default_factory=dict
+    )
+    fix_delta_deletion_anchors: Dict[str, List[List[int]]] = field(
+        default_factory=dict
+    )
+    fix_delta_available: bool = False
+    fix_delta_diagnostic: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -558,6 +594,54 @@ class ReviewScopeManager:
             return ReviewBaseline.from_dict(latest_dict)
         return None
 
+    def earliest_fix_baseline_after_full_round(
+        self, scope_context: Optional[Dict[str, Any]]
+    ) -> Optional[ReviewBaseline]:
+        """The earliest fix baseline captured since the last full round ran.
+
+        A full round diffs from the implementation baseline, so its own diff
+        cannot say which hunks arrived after the previous full round already
+        reviewed the code. Diffing from this baseline does: everything it holds
+        is work the fixes since that round produced. ``full_round_fix_head`` is
+        the fix-history position recorded when the previous full round started
+        (see ``StateMachine._attach_review_scope``); an empty/unknown marker
+        means no full round has consumed any fix yet, so the whole fix history
+        is "since the last full round".
+
+        Presentation only: a missing answer costs the manifest an annotation
+        and never changes what a round reviews or grounds on.
+        """
+        if not isinstance(scope_context, dict):
+            return None
+        head = str(scope_context.get("full_round_fix_head", "") or "")
+        history = scope_context.get("fix_baseline_history")
+        ordered = [
+            str(entry.get("baseline_id") or "")
+            for entry in (history if isinstance(history, list) else [])
+            if isinstance(entry, dict) and entry.get("baseline_id")
+        ]
+        if ordered:
+            if head in ordered:
+                remaining = ordered[ordered.index(head) + 1:]
+            else:
+                remaining = ordered
+            fix_baselines = self.load_fix_baselines(scope_context)
+            for baseline_id in remaining:
+                baseline = fix_baselines.get(baseline_id)
+                if baseline is not None:
+                    return baseline
+            return None
+        # Pre-history persisted flows and synthetic callers carry only the
+        # latest fix baseline; it is the whole history they have.
+        latest = scope_context.get("latest_fix_baseline")
+        latest_id = (
+            str(latest.get("baseline_id") or "")
+            if isinstance(latest, dict) else ""
+        )
+        if latest_id and latest_id != head:
+            return ReviewBaseline.from_dict(latest)
+        return None
+
     def lookup_baseline(
         self,
         selector: str,
@@ -772,12 +856,33 @@ class ReviewScopeManager:
         baseline: Optional[ReviewBaseline],
         *,
         full_baseline: Optional[ReviewBaseline] = None,
+        fix_delta_baseline: Optional[ReviewBaseline] = None,
         declared_paths: Optional[Sequence[str]] = None,
     ) -> ReviewScope:
-        """Reconstruct a scope, falling incremental failures back to full."""
+        """Reconstruct a scope, falling incremental failures back to full.
+
+        On a decidable incremental round the implementation baseline is
+        reconstructed a SECOND time and attached to the result as the
+        ``task_*`` fields. ``full_baseline`` is therefore no longer only the
+        undecidable-fallback source: it is also the whole-task evidence domain
+        the round grounds findings against (see ``ReviewScope``).
+
+        ``fix_delta_baseline`` plays the mirror-image role on a full round: it
+        is the earliest fix baseline captured since the previous full round, and
+        it is reconstructed only so the scope manifest can mark which of this
+        round's hunks are new since that round. It never narrows the round.
+        """
         mode = "incremental" if requested_mode == "incremental" else "full"
         result = self.reconstruct(mode, baseline, declared_paths=declared_paths)
         if mode != "incremental" or not result.undecidable:
+            if mode == "incremental":
+                self._attach_task_scope(
+                    result, full_baseline, declared_paths=declared_paths
+                )
+            else:
+                self._attach_fix_delta_scope(
+                    result, fix_delta_baseline, declared_paths=declared_paths
+                )
             return result
 
         incremental_diagnostic = result.diagnostic
@@ -791,7 +896,90 @@ class ReviewScopeManager:
             f"the implementation baseline ({incremental_diagnostic})."
         )
         full.diagnostic = f"{prefix} {full.diagnostic}".strip()
+        self._attach_fix_delta_scope(
+            full, fix_delta_baseline, declared_paths=declared_paths
+        )
         return full
+
+    def _attach_fix_delta_scope(
+        self,
+        result: ReviewScope,
+        fix_delta_baseline: Optional[ReviewBaseline],
+        *,
+        declared_paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Attach the since-last-full-round fix anchors to a full scope.
+
+        WHY a failure here never degrades the round, and never writes an
+        artifact: this set is read by the manifest renderer alone. Losing it
+        costs one annotation; letting it turn a usable full round undecidable —
+        or grow the flow's on-disk diff record — would be a real regression for
+        a purely descriptive input.
+        """
+        if fix_delta_baseline is None:
+            return
+        if fix_delta_baseline.baseline_id == result.baseline_id:
+            return
+        delta = self.reconstruct(
+            "incremental",
+            fix_delta_baseline,
+            declared_paths=declared_paths,
+            write_artifact=False,
+        )
+        if delta.undecidable:
+            result.fix_delta_diagnostic = (
+                "changes since the last full round could not be isolated "
+                f"({delta.diagnostic})"
+            )
+            return
+        result.fix_delta_baseline_id = delta.baseline_id
+        result.fix_delta_changed_paths = list(delta.changed_paths)
+        result.fix_delta_causal_anchors = delta.causal_anchors
+        result.fix_delta_deletion_anchors = delta.deletion_anchors
+        result.fix_delta_available = True
+
+    def _attach_task_scope(
+        self,
+        result: ReviewScope,
+        full_baseline: Optional[ReviewBaseline],
+        *,
+        declared_paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Attach the implementation-baseline anchor set to an incremental scope.
+
+        WHY a failure here never degrades the round: the whole-task domain only
+        WIDENS what evidence can ground on. When it cannot be rebuilt the round
+        still has its own decidable fix-delta domain and behaves exactly as it
+        did before this widening existed — turning a usable incremental round
+        undecidable over a purely additive input would be a regression, not a
+        safety measure.
+        """
+        if full_baseline is None:
+            result.task_scope_diagnostic = (
+                "implementation baseline is missing; evidence can only ground "
+                "in this fix's delta"
+            )
+            return
+        if full_baseline.baseline_id == result.baseline_id:
+            # The round already diffs from the implementation baseline, so its
+            # own anchors ARE the whole-task anchors.
+            return
+        task = self.reconstruct(
+            "full", full_baseline, declared_paths=declared_paths
+        )
+        if task.undecidable:
+            result.task_scope_diagnostic = (
+                "whole-task diff could not be reconstructed "
+                f"({task.diagnostic}); evidence can only ground in this fix's "
+                "delta"
+            )
+            return
+        result.task_baseline_id = task.baseline_id
+        result.task_changed_paths = list(task.changed_paths)
+        result.task_causal_anchors = task.causal_anchors
+        result.task_deletion_anchors = task.deletion_anchors
+        result.task_artifact_path = task.artifact_path
+        result.task_scope_available = True
 
     def reconstruct(
         self,
@@ -2102,6 +2290,72 @@ def section_covers_path(section: DiffSection, path: str) -> bool:
         if path == candidate or path.startswith(candidate + "/"):
             return True
     return False
+
+
+def normalize_line_ranges(
+    ranges: Optional[Sequence[Sequence[int]]],
+) -> List[List[int]]:
+    """Well-formed ``[start, end]`` pairs of an anchor list, sorted.
+
+    Anchor lists are persisted state and survive a resume, so a pair that is
+    unusable (non-integer, inverted) is dropped rather than repaired: evidence
+    validation already treats such a pair as no line space at all, and a
+    presentation layer that invented a range would show the checker an anchor
+    it cannot cite.
+    """
+    clean: List[List[int]] = []
+    for item in ranges or ():
+        try:
+            start, end = int(item[0]), int(item[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if end >= start:
+            clean.append([start, end])
+    clean.sort()
+    return clean
+
+
+def union_line_ranges(
+    *groups: Optional[Sequence[Sequence[int]]],
+) -> List[List[int]]:
+    """Every line the given anchor lists cover, as merged ranges.
+
+    Adjacent ranges are merged: two anchor sets rebuilt from different
+    baselines can split one contiguous block at the seam between them, and a
+    reader shown ``10-12, 13-20`` would read a boundary that does not exist.
+    """
+    merged: List[List[int]] = []
+    for group in groups:
+        merged.extend(normalize_line_ranges(group))
+    merged.sort()
+    result: List[List[int]] = []
+    for start, end in merged:
+        if result and start <= result[-1][1] + 1:
+            result[-1][1] = max(result[-1][1], end)
+        else:
+            result.append([start, end])
+    return result
+
+
+def subtract_line_ranges(
+    outer: Optional[Sequence[Sequence[int]]],
+    inner: Optional[Sequence[Sequence[int]]],
+) -> List[List[int]]:
+    """``outer`` minus every line ``inner`` covers, as merged ranges."""
+    remaining = normalize_line_ranges(outer)
+    for cut_start, cut_end in normalize_line_ranges(inner):
+        carried: List[List[int]] = []
+        for start, end in remaining:
+            if cut_end < start or cut_start > end:
+                carried.append([start, end])
+                continue
+            if start < cut_start:
+                carried.append([start, cut_start - 1])
+            if end > cut_end:
+                carried.append([cut_end + 1, end])
+        remaining = carried
+    remaining.sort()
+    return remaining
 
 
 def count_anchor_lines(ranges: Optional[Sequence[Sequence[int]]]) -> int:

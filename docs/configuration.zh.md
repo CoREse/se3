@@ -504,23 +504,34 @@ description、用户 interjection、adjudicated description),外加 charter 与
 `adjudicated_plan` 只是调度 / 历史线索 —— 它们绝不能覆盖、缩窄或扩张需求。
 
 每一轮 review 都由一个可恢复的**基线**界定(存于 runtime state,不进 git;从基线
-到当前工作区的真实 diff 由之重建):
+到当前工作区的真实 diff 由之重建)。
+
+**两种 round 模式都是 diff 审查。**`full` 与 `incremental` 是持久化的 `scope_mode`
+取值,它们命名的是*diff 基线*,而非『有没有 diff』。`full` round 不是对整棵树的
+无范围通读:它审查的是从本 flow 的 **implementation baseline** 起算的 diff(本 flow
+改动的全部内容);`incremental` round 审查的则是从最近一次 **fix baseline** 起算的
+diff(该次 fix 自身的增量)。每一轮的 prompt 都带有 scope manifest —— 变更路径、每个
+文件的增/删行数,以及 citation 可以引用的精确行号区间 —— 以及 diff 全文(内联,或
+按需用只读命令 `luo review-scope diff` 拉取)。用 `git diff` 自行重建审查范围是错的,
+prompt 明确禁止:基线是工作区的*内容*快照而非 commit,且 HEAD 在 flow 内会前进。
 
 1. 首次 IMPLEMENT 之前捕获 **implementation baseline**,使首轮审查覆盖本 flow 引入
    的全部改动,并排除 flow 开始前已有的用户 working-tree 修改。flow 自身产生的提交
    (例如 planned 多 group IMPLEMENT 的逐 group 合并)仍在 scope 内 —— 基线以内容
    寻址,HEAD 前进不影响重建;只有当前历史已不含基线提交(rebase、amend、回退
-   reset)才判为不可判定。首个 SELF_CHECK round 为 `full`(完整有效需求 + 全量
-   diff);full round 干净后直接进入后续关口。
-2. 每次进入 FIX 之前捕获 **fix baseline**;修复后的 round 为 `incremental`(注意力
-   聚焦该次 fix 相对基线的精确 diff、改动文件与尚未关闭的 findings —— 但 checker
-   仍可读取全仓、charter、code-index、测试结果与未修改代码,并沿调用链、共享状态、
-   协议、数据格式、配置、并发与不变量追踪影响面)。
+   reset)才判为不可判定。首个 SELF_CHECK round 为 `full` —— 以完整有效需求验收该
+   implementation baseline 起算的 diff;full round 干净后直接进入后续关口。
+2. 每次进入 FIX 之前捕获 **fix baseline**;修复后的 round 为 `incremental` ——
+   以该 fix baseline 为 diff 起点,注意力聚焦这次 fix 的精确 diff、改动文件与尚未
+   关闭的 findings。但 checker 仍可读取全仓、charter、code-index、测试结果与未修改
+   代码,并沿调用链、共享状态、协议、数据格式、配置、并发与不变量追踪影响面:
+   scope 约束的是注意力,从不约束工具权限。
 3. incremental round 干净之后插入 **full closure round**;只有 closure round 全部
    pass 干净才能进入 INVARIANT_CHECK。closure 发现 finding 时重新进入 FIX,
    随后再次执行 incremental → closure,直至最新 full round 干净。
 4. 有效任务描述被改变(adjudication、interjection)或基线不可判定时,**强制 full
-   round** —— 绝不拿空 diff 冒充增量检查。
+   round** —— 即该轮回落到 implementation baseline 起算的 diff;绝不拿空 diff 冒充
+   增量检查。
 5. **TEST 始终执行项目配置的完整测试命令** —— SELF_CHECK 的 scope 绝不挑选或缩小
    测试范围。
 
@@ -529,7 +540,9 @@ description、用户 interjection、adjudicated description),外加 charter 与
 情况下让一个 round 整体通过。
 
 每个 SELF_CHECK step 都会持久化其 `scope_mode`、baseline id、变更路径、fix
-iteration 与 pass index,供 CLI history 与 Web 控制台的 scope audit 展示。
+iteration 与 pass index,供 CLI history 与 Web 控制台的 scope audit 展示。两个界面
+都把模式渲染成『全量 diff』/『增量 diff』并说明它以哪份基线为起点,使持久化取值不会
+被读成『非 diff 审查』;持久化取值本身仍是 `full` / `incremental`,不改名。
 
 `WorkflowConfig` 还带着一个名为 `self_check_passes_required_explicit` 的字段。它
 **不是配置 key** —— 它在加载时派生(记录 `self_check_passes_required` 是否在 YAML

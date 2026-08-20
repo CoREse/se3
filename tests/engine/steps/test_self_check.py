@@ -793,35 +793,183 @@ class TestDiffScopedEvidence:
         assert "files_read" not in scope_record
 
 
-class TestScopeDiffTruncation:
-    def test_large_diff_is_truncated_with_artifact_pointer(self):
+class TestScopeDiffDelivery:
+    """Over-budget diffs are withheld whole; the manifest always stays."""
+
+    def _oversized_inputs(self):
         from tianluo.engine.truncation import SELF_CHECK_SCOPE_DIFF_MAX_CHARS
 
-        diff = "x" * (SELF_CHECK_SCOPE_DIFF_MAX_CHARS + 5000) + "\nTAIL-SENTINEL-LINE\n"
-        scope = _format_review_scope({
+        head = "HEAD-SENTINEL-LINE\n" + "x" * SELF_CHECK_SCOPE_DIFF_MAX_CHARS
+        return {
             "scope_mode": "full",
             "baseline_id": "impl-abcdef123456",
-            "scope_changed_paths": ["big.py"],
-            "scope_diff": diff,
+            "scope_changed_paths": ["big.py", "other.py"],
+            "scope_causal_anchors": {"big.py": [[10, 12], [40, 40]]},
+            "scope_deletion_anchors": {"other.py": [[7, 9]]},
+            "scope_diff": head + "\nTAIL-SENTINEL-LINE\n",
             "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
             "scope_undecidable": False,
-        })
-        assert "TRUNCATED" in scope
-        assert "tianluo/state/review/diffs/abc.diff" in scope
-        assert "TAIL-SENTINEL-LINE" not in scope
-        assert len(scope) < len(diff) + 500
+        }
 
-    def test_small_diff_is_not_truncated(self):
+    def test_large_diff_is_not_inlined_even_partially(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        # Neither end of the diff may leak: a half diff reads as a whole one.
+        assert "HEAD-SENTINEL-LINE" not in scope
+        assert "TAIL-SENTINEL-LINE" not in scope
+        assert "```diff" not in scope
+        assert "NOT INLINED" in scope
+
+    def test_large_diff_keeps_manifest_with_hunk_ranges(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        assert "scope_manifest" in scope
+        assert "big.py: +4 -0" in scope
+        assert "added lines (current file) 10-12, 40" in scope
+        assert "other.py: +0 -3" in scope
+        assert "deleted lines (baseline file) 7-9" in scope
+
+    def test_large_diff_points_at_the_pull_command_and_artifact(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        assert "luo review-scope diff --baseline implementation" in scope
+        assert "tianluo/state/review/diffs/abc.diff" in scope
+
+    def test_small_diff_is_still_inlined_whole(self):
         scope = _format_review_scope({
             "scope_mode": "full",
             "baseline_id": "impl-abcdef123456",
             "scope_changed_paths": ["small.py"],
+            "scope_causal_anchors": {"small.py": [[1, 1]]},
             "scope_diff": "diff --git a/small.py b/small.py\n+new",
             "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
             "scope_undecidable": False,
         })
-        assert "TRUNCATED" not in scope
+        assert "NOT INLINED" not in scope
         assert "+new" in scope
+        assert "small.py: +1 -0" in scope
+
+
+class TestScopeManifestAndAccess:
+    def _incremental(self):
+        return {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            "scope_task_causal_anchors": {
+                "src/earlier.py": [[3, 5]],
+                "src/fix.py": [[10, 15], [40, 48]],
+            },
+            "scope_task_deletion_anchors": {"src/earlier.py": [[30, 31]]},
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+fixed\n",
+            "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
+        }
+
+    def _full_closure(self):
+        return {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["app.py", "other.py"],
+            "scope_causal_anchors": {
+                "app.py": [[1, 1], [20, 24]],
+                "other.py": [[1, 3]],
+            },
+            "scope_deletion_anchors": {},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": ["app.py", "other.py"],
+            "scope_fix_delta_causal_anchors": {
+                "app.py": [[20, 24]],
+                "other.py": [[1, 3]],
+            },
+            "scope_fix_delta_deletion_anchors": {},
+            "scope_diff": "diff --git a/app.py b/app.py\n+x\n",
+        }
+
+    def test_incremental_manifest_separates_fix_delta_from_earlier_work(self):
+        rendered = _format_review_scope(self._incremental())
+        assert "src/fix.py: +15 -0" in rendered
+        assert "added lines (current file) 10-15, 40-48" in rendered
+        assert "- this fix: added 40-48" in rendered
+        assert "- earlier work in this task: added 10-15" in rendered
+        # A path only the earlier work touched is listed, and labelled as such.
+        assert "src/earlier.py: +3 -2" in rendered
+        assert "- earlier work in this task: added 3-5; deleted 30-31" in rendered
+
+    def test_full_round_manifest_marks_changes_since_last_full_round(self):
+        rendered = _format_review_scope(self._full_closure())
+        assert "app.py: +6 -0" in rendered
+        assert (
+            "- changed by fixes since the last full round: added 20-24"
+            in rendered
+        )
+        assert "- already present at the last full round: added 1" in rendered
+        assert "- changed by fixes since the last full round: added 1-3" in rendered
+
+    def test_manifest_carries_no_fix_iteration_or_closed_findings(self):
+        inputs = self._full_closure()
+        inputs["fix_iteration"] = 3
+        inputs["self_check_round_reason"] = "full_closure"
+        inputs["fix_history"] = [{"iteration": 1, "issues": ["closed one"]}]
+        rendered = _format_review_scope(inputs)
+        assert "fix_iteration" not in rendered
+        assert "closed one" not in rendered
+        assert "full_closure" not in rendered
+
+    def test_initial_full_round_has_no_delta_annotation(self):
+        inputs = self._full_closure()
+        inputs["scope_fix_delta_available"] = False
+        inputs["scope_fix_delta_changed_paths"] = []
+        inputs["scope_fix_delta_causal_anchors"] = {}
+        rendered = _format_review_scope(inputs)
+        assert "app.py: +6 -0" in rendered
+        assert "since the last full round" not in rendered
+
+    def test_access_block_bans_git_diff_and_names_the_command(self):
+        rendered = _format_review_scope(self._incremental(), flow_id="flow-9")
+        assert (
+            "luo review-scope diff --baseline implementation --flow flow-9"
+            in rendered
+        )
+        assert (
+            "luo review-scope diff --baseline implementation --flow flow-9 --stat"
+            in rendered
+        )
+        assert "--path <path>" in rendered
+        assert "luo review-scope diff --baseline fix --flow flow-9" in rendered
+        assert "do NOT rebuild the review range yourself with `git diff`" in rendered
+        assert "NOT a commit" in rendered
+        assert "HEAD advances inside a flow" in rendered
+
+    def test_full_round_does_not_advertise_the_fix_baseline_view(self):
+        rendered = _format_review_scope(self._full_closure())
+        assert "--baseline fix" not in rendered
+
+    def test_undecidable_scope_marks_the_manifest_as_unproven(self):
+        inputs = self._incremental()
+        inputs["scope_undecidable"] = True
+        inputs["scope_diagnostic"] = "baseline unreadable"
+        rendered = _format_review_scope(inputs)
+        assert "UNPROVEN" in rendered
+
+    def test_manifest_range_list_is_capped_with_a_pointer(self):
+        from tianluo.engine.steps.self_check import (
+            _MANIFEST_MAX_RANGES_PER_PATH,
+        )
+
+        ranges = [[n * 10, n * 10 + 1] for n in range(1, 60)]
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["wide.py"],
+            "scope_causal_anchors": {"wide.py": ranges},
+            "scope_diff": "diff --git a/wide.py b/wide.py\n+x\n",
+        })
+        extra = len(ranges) - _MANIFEST_MAX_RANGES_PER_PATH
+        assert f"(+{extra} more)" in rendered
+        # The total is still exact, so a cap never understates the change.
+        assert f"wide.py: +{2 * len(ranges)} -0" in rendered
 
 
 class TestRepeatedSelfCheckFindings:
@@ -1603,3 +1751,237 @@ class TestNoOutOfScopeExemption:
         hint = mock_caller.call.call_args.kwargs["json_schema_hint"]
         assert "out_of_scope" not in prompt
         assert "out_of_scope" not in hint
+
+
+class TestWholeTaskEvidenceDomain:
+    """An incremental round grounds evidence on the union of two diff domains.
+
+    Its attention is the latest fix delta, but the change under review is the
+    whole flow's work: a finding anchored on a line an earlier IMPLEMENT/FIX
+    really wrote is grounded in git fact and must not be dropped as fabricated.
+    """
+
+    def _inputs(self):
+        return {
+            "task_description": "Implement feature X",
+            "task_description_base": "Implement feature X",
+            "changes_made": {"files_changed": ["src/fix.py"]},
+            # Round domain: the latest fix delta only.
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[10, 12]]},
+            # Whole-task domain: everything this flow changed.
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            "scope_task_causal_anchors": {
+                "src/earlier.py": [[5, 8]],
+                "src/fix.py": [[3, 12]],
+            },
+        }
+
+    def test_anchor_in_earlier_flow_work_grounds_the_finding(self):
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_earlier_line_of_a_fix_touched_file_grounds_the_finding(self):
+        # Line 4 of src/fix.py is outside the fix delta but inside the flow's
+        # whole-task change to that same file.
+        issue = _valid_issue(path="src/fix.py", line=4)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_line_outside_both_domains_is_still_rejected(self):
+        # The union widens the domain; it does not abolish it. An unchanged
+        # line is still ungrounded evidence.
+        issue = _valid_issue(path="src/earlier.py", line=20)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        issue = _valid_issue(path="src/untouched.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_without_the_whole_task_domain_the_same_finding_is_dropped(self):
+        # Pins what the widening actually buys: the identical finding on the
+        # fix-delta domain alone is exactly the loss this change removes.
+        inputs = self._inputs()
+        inputs["scope_task_available"] = False
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_regression_grounds_on_the_whole_task_domain(self):
+        # ``require_changed_line`` narrows WHICH citations count, not which
+        # baseline they may come from: a regression caused by earlier flow work
+        # still points into this flow's change.
+        issue = _valid_issue(path="src/earlier.py", line=7)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+        issue["evidence_lines"] = ["src/earlier.py:20"]
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_anchor_less_fix_path_keeps_path_level_grounding(self):
+        # src/bin.dat is deletion-only/binary in the fix delta (anchor-LESS,
+        # grounds at path level) yet anchor-bearing across the whole task.
+        # Merging the two anchor dicts would flip it to anchor-BEARING and start
+        # rejecting the bare-path citation the prompt prescribes there, so the
+        # domains are OR-ed instead.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_task_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_task_causal_anchors"] = {"src/bin.dat": [[1, 2]]}
+        issue = _valid_issue()
+        issue["evidence_lines"] = ["src/bin.dat"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_regression_missing_in_channel_widens_across_domains(self):
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/fix.py"]
+        inputs["scope_causal_anchors"] = {"src/fix.py": [[10, 12]]}
+        inputs["scope_task_changed_paths"] = ["src/gone.py", "src/fix.py"]
+        # src/gone.py is deletion-only across the whole task: anchor-less, so it
+        # grounds a regression at path level under ``missing_in``.
+        inputs["scope_task_causal_anchors"] = {"src/fix.py": [[3, 12]]}
+        issue = _valid_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/gone.py"]
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_full_round_without_task_domain_is_unchanged(self):
+        # A full round already diffs from the implementation baseline and never
+        # carries the extra keys; its grounding must behave exactly as before.
+        inputs = {
+            "task_description": "Implement feature X",
+            "task_description_base": "Implement feature X",
+            "changes_made": {"files_changed": ["src/fix.py"]},
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[10, 12]]},
+        }
+        kept, _ = _validate_and_filter_issues(
+            [_valid_issue(path="src/fix.py", line=11)], inputs
+        )
+        assert len(kept) == 1
+        kept, stats = _validate_and_filter_issues(
+            [_valid_issue(path="src/fix.py", line=4)], inputs
+        )
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_undecidable_scope_relaxation_is_unchanged(self):
+        # A degraded round grounds on naming any path at all, so the second
+        # domain adds nothing and must not disturb the relaxation tally.
+        inputs = self._inputs()
+        inputs["scope_undecidable"] = True
+        issue = _valid_issue(path="src/nowhere.py", line=3)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["undecidable_scope_kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_malformed_task_domain_is_ignored(self):
+        inputs = self._inputs()
+        inputs["scope_task_causal_anchors"] = "not-a-dict"
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        inputs = self._inputs()
+        inputs["scope_task_changed_paths"] = {"src/earlier.py": 1}
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+
+class TestWholeTaskScopeRendering:
+    def _inputs(self):
+        return {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_diff": "@@ -1 +1 @@\n+fixed\n",
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+        }
+
+    def test_incremental_states_the_widened_evidence_rule(self):
+        rendered = _format_review_scope(self._inputs())
+        assert "task_changed_paths" in rendered
+        assert "src/earlier.py" in rendered
+        assert "not only inside the fix delta" in rendered
+        # Attention is unchanged: the fix delta is still the primary object.
+        assert "Focus first on the exact delta that baseline produces" in rendered
+
+    def test_no_fix_iteration_or_closed_finding_metadata_leaks(self):
+        inputs = self._inputs()
+        inputs["fix_iteration"] = 3
+        inputs["fix_history"] = [{"iteration": 1, "issues": ["closed one"]}]
+        rendered = _format_review_scope(inputs)
+        assert "fix_iteration" not in rendered
+        assert "closed one" not in rendered
+
+    def test_full_round_renders_no_second_domain(self):
+        inputs = self._inputs()
+        inputs["scope_mode"] = "full"
+        inputs["scope_task_available"] = False
+        inputs["scope_task_changed_paths"] = []
+        rendered = _format_review_scope(inputs)
+        assert "task_changed_paths" not in rendered
+        assert "not only inside the fix delta" not in rendered
+
+    def test_unavailable_task_domain_renders_no_rule(self):
+        inputs = self._inputs()
+        inputs["scope_task_available"] = False
+        rendered = _format_review_scope(inputs)
+        assert "task_changed_paths" not in rendered
+
+
+class TestManifestWithoutASecondDomain:
+    def test_incremental_without_task_domain_labels_the_manifest(self):
+        # G1's whole-task attachment can fail without degrading the round; the
+        # manifest must then say the ranges are the fix delta rather than let
+        # them read as the whole task.
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_task_available": False,
+            "scope_task_changed_paths": [],
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+fixed\n",
+        })
+        assert "every range below is this fix's own delta" in rendered
+        assert "src/fix.py: +9 -0" in rendered
+
+    def test_empty_scope_still_renders_a_manifest_line(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": [],
+            "scope_diff": "",
+        })
+        assert "scope_manifest" in rendered
+        assert "no changed path in this scope" in rendered

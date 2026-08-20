@@ -204,6 +204,7 @@ G10_WEBUI_KEYS = [
     "scope.label",
     "scope.mode.full",
     "scope.mode.incremental",
+    "scope.modeHint",
     "scope.round.line",
     "scope.baseline",
     "scope.changedPaths",

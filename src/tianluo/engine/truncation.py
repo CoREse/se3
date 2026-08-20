@@ -61,9 +61,11 @@ SELF_CHECK_TASK_GROUPS_MAX_CHARS = 2000
 # ---------------------------------------------------------------------------
 # self_check — baseline-to-current scope diff max chars injected in prompt
 # Used by: self_check._format_review_scope
-# Bounds the reconstructed review-scope diff so a large vendored/generated
-# file cannot blow the model context window; the complete diff stays
-# available at the persisted artifact referenced by the prompt.
+# Decides whether the reconstructed review-scope diff is inlined WHOLE or not
+# at all, so a large vendored/generated file cannot blow the model context
+# window. Above the budget the prompt carries the scope manifest plus the
+# `luo review-scope diff` pull instructions instead — never a cut-off diff,
+# which would read as the complete change set.
 # ---------------------------------------------------------------------------
 SELF_CHECK_SCOPE_DIFF_MAX_CHARS = 20000
 

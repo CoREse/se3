@@ -299,7 +299,7 @@ def test_history_show_scope_round_localized(monkeypatch, tmp_path):
         out = runner.invoke(history_cmd.app, ["show", "f1"]).output
 
     # The scope_mode value itself is localized too (WebUI scope.mode.* parity).
-    assert "增量#2（修复 1）" in out
+    assert "增量 diff #2（修复 1）" in out
     assert "(fix 1)" not in out
     assert "incremental" not in out
 
@@ -309,7 +309,7 @@ def test_history_show_scope_round_localized(monkeypatch, tmp_path):
     with patch.object(history_cmd, "get_project_root", return_value=tmp_path), \
          patch.object(history_cmd, "get_flow_detail", return_value=detail):
         en_out = runner.invoke(history_cmd.app, ["show", "f1"]).output
-    assert "incremental#2 (fix 1)" in en_out
+    assert "incremental diff #2 (fix 1)" in en_out
 
 def test_history_show_plan_mode_value_and_legacy_reason_localized(
     monkeypatch, tmp_path,
@@ -396,6 +396,7 @@ G10_CLI_KEYS = [
     "history.plan.unknown",
     "history.scope.mode.full",
     "history.scope.mode.incremental",
+    "history.field.scope_mode_hint",
     "history.usage.header",
     "history.usage.no_usage",
     "history.usage.calls_header",

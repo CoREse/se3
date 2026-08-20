@@ -704,3 +704,257 @@ def test_plain_diff_terminates_missing_newline_lines_and_keeps_anchors():
     assert "+def\n" in rendered
     assert ranges == [[1, 2]]
     assert deleted_ranges == [[1, 1]]
+
+
+def test_incremental_scope_carries_whole_task_anchors(tmp_path):
+    # An incremental round diffs from the latest fix baseline, but a finding
+    # anchored in work an EARLIER implement/fix did is grounded in git fact.
+    # resolve() must therefore hand self_check both anchor sets, distinguishable
+    # by which baseline they came from.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-union")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (root / "dirty.py").write_text("before = 1\nfix = 3\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.scope_mode == "incremental"
+    assert scope.undecidable is False
+    # The round's own attention stays the fix delta.
+    assert scope.changed_paths == ["dirty.py"]
+    assert "clean.py" not in scope.causal_anchors
+    assert "+fix = 3" in scope.unified_diff
+    assert "+impl = 2" not in scope.unified_diff
+    # The whole-task domain arrives alongside it, not merged into it.
+    assert scope.task_scope_available is True
+    assert scope.task_baseline_id == implementation.baseline_id
+    assert scope.task_changed_paths == ["clean.py", "dirty.py"]
+    assert scope.task_causal_anchors["clean.py"] == [[2, 2]]
+    assert scope.task_causal_anchors["dirty.py"] == [[2, 2]]
+    assert Path(scope.task_artifact_path).read_text(encoding="utf-8").count(
+        "impl = 2"
+    )
+
+
+def test_full_scope_carries_no_separate_whole_task_domain(tmp_path):
+    # A full round already diffs from the implementation baseline, so a second
+    # copy of the same anchors would carry no information.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-full")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+
+    scope = manager.resolve(
+        "full", implementation, full_baseline=implementation,
+    )
+
+    assert scope.scope_mode == "full"
+    assert scope.changed_paths == ["clean.py"]
+    assert scope.task_scope_available is False
+    assert scope.task_changed_paths == []
+    assert scope.task_causal_anchors == {}
+    assert scope.task_deletion_anchors == {}
+    assert scope.task_baseline_id == ""
+
+
+def test_incremental_scope_on_the_implementation_baseline_adds_no_second_domain(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-same")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+
+    scope = manager.resolve(
+        "incremental", implementation, full_baseline=implementation,
+    )
+
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["clean.py"]
+    assert scope.task_scope_available is False
+    assert scope.task_changed_paths == []
+
+
+def test_undecidable_fallback_still_carries_no_whole_task_domain(tmp_path):
+    # The safe fallback IS the implementation-baseline diff, so its own anchors
+    # already are the whole-task anchors — the degraded round must otherwise
+    # behave exactly as before.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-fallback")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    fix_blob = fix.tracked["clean.py"]["blob_sha256"]
+    (manager.root / fix.baseline_id / "blobs" / fix_blob).write_bytes(b"broken")
+    (root / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.scope_mode == "full"
+    assert scope.fallback_from_incremental is True
+    assert scope.undecidable is False
+    assert scope.task_scope_available is False
+    assert scope.task_changed_paths == []
+
+
+def test_unrebuildable_whole_task_domain_never_degrades_the_round(tmp_path):
+    # The whole-task domain only WIDENS what evidence can ground on, so losing
+    # it must leave a perfectly usable incremental round intact.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-broken")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (manager.root / implementation.baseline_id / "descriptor.json").write_text(
+        "{broken", encoding="utf-8"
+    )
+    (root / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.scope_mode == "incremental"
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["clean.py"]
+    assert scope.task_scope_available is False
+    assert "descriptor" in scope.task_scope_diagnostic
+
+    without_baseline = manager.resolve("incremental", fix, full_baseline=None)
+    assert without_baseline.undecidable is False
+    assert without_baseline.task_scope_available is False
+    assert "implementation baseline is missing" in (
+        without_baseline.task_scope_diagnostic
+    )
+
+
+def test_whole_task_domain_keeps_deletion_anchors_in_their_own_space(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-deletions")
+    implementation = manager.capture("implementation")
+    (root / "rename_me.py").write_text("def renamed():\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (root / "clean.py").write_text("value = 1\nlate = 9\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.task_scope_available is True
+    assert scope.task_deletion_anchors["rename_me.py"] == [[2, 2]]
+    assert "rename_me.py" not in scope.task_causal_anchors
+
+
+def test_full_scope_carries_the_fix_delta_since_the_last_full_round(tmp_path):
+    # A full round's own diff spans the whole task, so it cannot say which
+    # hunks the fixes since the previous full round added. The fix-delta
+    # attachment answers exactly that — without narrowing the round.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-full-delta")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (root / "dirty.py").write_text("before = 1\nfix = 3\n", encoding="utf-8")
+
+    scope = manager.resolve(
+        "full",
+        implementation,
+        full_baseline=implementation,
+        fix_delta_baseline=fix,
+    )
+
+    assert scope.scope_mode == "full"
+    assert scope.changed_paths == ["clean.py", "dirty.py"]
+    assert scope.causal_anchors["clean.py"] == [[2, 2]]
+    assert scope.fix_delta_available is True
+    assert scope.fix_delta_baseline_id == fix.baseline_id
+    assert scope.fix_delta_changed_paths == ["dirty.py"]
+    assert scope.fix_delta_causal_anchors["dirty.py"] == [[2, 2]]
+    assert "clean.py" not in scope.fix_delta_causal_anchors
+    # Purely descriptive: it never adds to the flow's on-disk diff record.
+    assert not list(
+        (manager._baseline_dir(fix.baseline_id) / "diffs").glob("*.diff")
+    )
+
+
+def test_unrebuildable_fix_delta_never_degrades_a_full_round(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-full-delta-broken")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+    broken = ReviewBaseline(
+        baseline_id="fix-9-deadbeefdead",
+        kind="fix-9",
+        flow_id="flow-full-delta-broken",
+        captured_at="2026-01-01T00:00:00",
+        project_root=str(root),
+        head_commit="0" * 40,
+        repository_identity="not-this-repository",
+        available=True,
+    )
+
+    scope = manager.resolve(
+        "full",
+        implementation,
+        full_baseline=implementation,
+        fix_delta_baseline=broken,
+    )
+
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["clean.py"]
+    assert scope.fix_delta_available is False
+    assert scope.fix_delta_changed_paths == []
+    assert "could not be isolated" in scope.fix_delta_diagnostic
+
+
+def test_fix_baseline_after_full_round_follows_the_persisted_marker():
+    manager = ReviewScopeManager(Path("/nonexistent"), "flow-marker")
+    context = {
+        "fix_baseline_history": [
+            {"baseline_id": "fix-1-aaaaaaaaaaaa"},
+            {"baseline_id": "fix-2-bbbbbbbbbbbb"},
+        ],
+    }
+    def _baseline(baseline_id: str, kind: str) -> ReviewBaseline:
+        return ReviewBaseline(
+            baseline_id=baseline_id,
+            kind=kind,
+            flow_id="flow-marker",
+            captured_at="2026-01-01T00:00:00",
+            project_root="/nonexistent",
+        )
+
+    loaded = {
+        "fix-1-aaaaaaaaaaaa": _baseline("fix-1-aaaaaaaaaaaa", "fix-1"),
+        "fix-2-bbbbbbbbbbbb": _baseline("fix-2-bbbbbbbbbbbb", "fix-2"),
+    }
+    with patch.object(
+        ReviewScopeManager, "load_fix_baselines", return_value=loaded
+    ):
+        # No full round has consumed a fix yet: the whole history is new.
+        first = manager.earliest_fix_baseline_after_full_round(context)
+        assert first is not None
+        assert first.baseline_id == "fix-1-aaaaaaaaaaaa"
+
+        # After a full round that spanned fix-1, only fix-2 is new.
+        context["full_round_fix_head"] = "fix-1-aaaaaaaaaaaa"
+        second = manager.earliest_fix_baseline_after_full_round(context)
+        assert second is not None
+        assert second.baseline_id == "fix-2-bbbbbbbbbbbb"
+
+        # Nothing captured since the last full round: no annotation at all.
+        context["full_round_fix_head"] = "fix-2-bbbbbbbbbbbb"
+        assert manager.earliest_fix_baseline_after_full_round(context) is None
+
+
+def test_line_range_algebra_merges_adjacent_and_drops_unusable_pairs():
+    from tianluo.engine.review_scope import (
+        normalize_line_ranges,
+        subtract_line_ranges,
+        union_line_ranges,
+    )
+
+    assert normalize_line_ranges([[5, 3], ["a", 2], [1], [4, 6]]) == [[4, 6]]
+    # Adjacent ranges from two baselines describe one contiguous block.
+    assert union_line_ranges([[1, 3]], [[4, 6], [10, 10]]) == [[1, 6], [10, 10]]
+    assert subtract_line_ranges([[1, 20]], [[5, 9], [15, 15]]) == [
+        [1, 4], [10, 14], [16, 20],
+    ]
+    assert subtract_line_ranges([[1, 5]], [[1, 9]]) == []
+    assert subtract_line_ranges([[1, 5]], None) == [[1, 5]]

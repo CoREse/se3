@@ -178,7 +178,14 @@ def _legacy_strategy_label(value: Any) -> str:
 
 
 def _scope_mode_label(value: Any) -> str:
-    """Localize one SELF_CHECK scope_mode (WebUI ``scope.mode.*`` parity)."""
+    """Localize one SELF_CHECK scope_mode (WebUI ``scope.mode.*`` parity).
+
+    WHY the label is not the raw persisted value: ``full`` / ``incremental``
+    are state-compatibility identifiers naming the *diff baseline*, and read
+    bare they suggest a full round is a non-diff review of the whole tree. The
+    label therefore says "diff" in both modes; the baseline each one uses is
+    spelled out by ``history.field.scope_mode_hint`` next to it.
+    """
     text = str(value or "").strip()
     if text in ("full", "incremental"):
         return t(f"history.scope.mode.{text}")
@@ -765,6 +772,11 @@ def show_cmd(
             )
         if scope_parts:
             info_table.add_row(t("history.field.scope"), ", ".join(scope_parts))
+            # The mode label alone still cannot say which baseline it diffs
+            # from, so the distinction is carried on its own continuation line
+            # rather than crammed into the label (the WebUI shows the same
+            # sentence as the scope row's tooltip).
+            info_table.add_row("", t("history.field.scope_mode_hint"))
 
     console.print(info_table)
 
