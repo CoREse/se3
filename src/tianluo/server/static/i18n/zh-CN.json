@@ -590,7 +590,7 @@
   "scope.label": "审查范围",
   "scope.mode.full": "全量 diff",
   "scope.mode.incremental": "增量 diff",
-  "scope.modeHint": "两种 scope 模式都是 diff 审查；模式名指的是 diff 基线 —— 全量 diff 用本 flow 的 implementation 基线（整个任务），增量 diff 用最近一次 fix 基线（该次 fix 自身的增量）。",
+  "scope.modeHint": "两种 scope 模式都是 diff 审查；模式名指的是 diff 基线 —— 全量 diff 用本 flow 的 implementation 基线（整个任务），增量 diff 用本轮所用的 fix 基线（尚未被审查的最早一次 fix，其增量可能跨多次 fix）。",
   "scope.round.line": "{mode} 第 {pass} 轮 · 修复 {fix}",
   "scope.baseline": "基线 {id}",
   "scope.changedPaths": "{count} 个变更路径",

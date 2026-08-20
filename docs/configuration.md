@@ -582,7 +582,9 @@ persisted `scope_mode` values, and they name the *diff baseline* — not the
 presence or absence of a diff. A `full` round is not an unscoped read of the
 whole tree: it reviews the diff from this flow's **implementation baseline**
 (everything the flow changed). An `incremental` round reviews the diff from the
-latest **fix baseline** (that fix's own delta). Every round prompt carries a
+**fix baseline** that round was scoped with — the earliest fix the flow has not
+reviewed yet, so its delta spans every fix captured since, which may be more
+than one. Every round prompt carries a
 scope manifest — the changed paths, their `+`/`-` counts and the exact line
 ranges a citation may reference — and the full diff text, either inlined or
 pulled on demand with the read-only `luo review-scope diff` command. Rebuilding
@@ -601,8 +603,10 @@ inside a flow.
    implementation baseline. A clean full round proceeds directly to the next
    gate.
 2. Before every FIX, a **fix baseline** is captured; the post-fix round is
-   `incremental` — diff-scoped from that fix baseline, with attention focused
-   on the fix's exact diff, its changed files and the still-open findings.
+   `incremental` — diff-scoped from the earliest fix baseline no round has
+   reviewed yet, so when several FIX calls run back to back the delta covers
+   all of them rather than only the last. Attention is focused on that exact
+   diff, its changed files and the still-open findings.
    Checkers may still read the whole repository, the charter, the code-index,
    test results and unmodified code, and must trace impact along call chains,
    shared state, protocols, data formats, configuration, concurrency and

@@ -299,6 +299,15 @@ def _declared_changed_paths(inputs: Mapping[str, Any]) -> List[str]:
     Only used to admit git-ignored files into the review scope (the baseline
     enumerates with ``--exclude-standard`` and can never hold them); the
     reconstructed diff stays authoritative for everything git can see.
+
+    INVARIANT: a nonempty report is carried VERBATIM — surrounding whitespace
+    is only ever tested for emptiness, never trimmed off the stored value. A
+    repository-relative path may legitimately begin or end with a space, and
+    such a file has no diff anchor to fall back on, so silently renaming it
+    here would drop the real file out of the review scope entirely. Reports
+    that carry accidental whitespace instead are reconciled against the
+    filesystem where that is decidable (see
+    ``ReviewScopeManager._ignored_declared_paths``).
     """
     changes = inputs.get("changes_made") or {}
     if not isinstance(changes, dict):
@@ -309,11 +318,11 @@ def _declared_changed_paths(inputs: Mapping[str, Any]) -> List[str]:
     out: List[str] = []
     for entry in files_changed:
         if isinstance(entry, str) and entry.strip():
-            out.append(entry.strip())
+            out.append(entry)
         elif isinstance(entry, dict):
             path = entry.get("path") or entry.get("file_path")
             if isinstance(path, str) and path.strip():
-                out.append(path.strip())
+                out.append(path)
     return out
 
 
@@ -1160,6 +1169,7 @@ class StateMachine:
                         step.outputs["carried_token_usage"] = combined.to_dict()
             except Exception:
                 logger.debug("Failed to record step token usage", exc_info=True)
+
             self.persistence.save_flow(flow)
 
         logger.info(f"Step {step.step_type.value} finished with status: {step.status.value}")
@@ -1718,8 +1728,15 @@ class StateMachine:
             # index via ``selected.index(current_step.step_type)`` above, and
             # ``_current_step`` keys off ``current_step_id``, not this index.
             flow.state.current_step_index = len(selected)
-            self._discard_review_scope_snapshots(flow)
+            # INVARIANT: the terminal state reaches disk BEFORE its baselines
+            # are reclaimed. save_flow can raise (full disk, a lost network
+            # mount), and the flow then stays persisted as RUNNING/PAUSED —
+            # i.e. resumable — so snapshots destroyed first would leave a
+            # resumed SELF_CHECK round unable to reconstruct its own scope.
+            # Reclaiming after the save can only ever leak disk space, which
+            # the next terminal landing or `luo end-session` clears.
             self.persistence.save_flow(flow)
+            self._discard_review_scope_snapshots(flow)
             return None
 
         # Create next step
@@ -3791,10 +3808,30 @@ class StateMachine:
         is also strictly after a worktree flow's merge, because the merge-side
         steps are part of that flow's own step sequence.
 
+        INVARIANT: the reclaim additionally requires the flow's resumable
+        snapshot to be CONFIRMED gone. ``save_flow`` retires it on the
+        COMPLETED landing, but best-effort: a permission or I/O error on
+        ``resumable/<flow_id>.json`` is swallowed there so the primary
+        engine.json write still lands. A snapshot that survives keeps the flow
+        offered as resumable, and a resume that reaches SELF_CHECK without its
+        baselines cannot rebuild its own scope — an unrepairable state, whereas
+        leaving the baselines only costs disk space that the next terminal
+        landing (or ``luo end-session``) reclaims.
+
         Non-fatal by contract: reclaiming disk space must never be the reason a
         flow fails to reach its terminal state.
         """
         try:
+            # Probed through getattr so a persistence double that predates the
+            # published probe still terminates a flow normally.
+            probe = getattr(self.persistence, "resumable_snapshot_exists", None)
+            if callable(probe) and probe(flow.flow_id):
+                logger.warning(
+                    "Resumable snapshot for flow %s survived the completion "
+                    "clear; keeping its review baselines",
+                    flow.flow_id,
+                )
+                return
             self._review_scope_manager(flow).discard_snapshots()
         except Exception:  # noqa: BLE001 - see docstring
             logger.debug(
@@ -3945,6 +3982,53 @@ class StateMachine:
             "diagnostics": list(baseline.diagnostics),
         })
 
+    @staticmethod
+    def _record_declared_paths(
+        scope_context: Dict[str, Any], declared_paths: List[str]
+    ) -> List[str]:
+        """Persist the self-reported paths this round was scoped with.
+
+        The implement step's self-reported files are consulted for one case
+        only: a path git ignores is invisible to baseline capture, so without
+        them a real flow change would never be diffed, anchored or reviewed
+        (see ReviewScopeManager.reconstruct). They are persisted so a round
+        re-prepared later — on a resume, or on a further pass — is scoped with
+        the same input it first ran on.
+
+        WHY the union accumulates rather than being overwritten: a later FIX
+        reports only ITS files, so replacing the list would erase every ignored
+        file an earlier step created and the rebuilt whole-task view would lose
+        it. INVARIANT: it stays ONE flat, flow-wide list — the paths in it
+        produce no diff anchor under any baseline comparison, so no persisted
+        git fact can attribute them to a domain, and manufacturing one would
+        take execution-side bookkeeping of who declared what. The manifest
+        therefore presents them unattributed (see
+        ``ReviewScope.declared_only_paths``), and a surface that speaks as ONE
+        baseline's comparison — ``luo review-scope diff`` — leaves them out
+        rather than claiming a membership that comparison cannot establish.
+
+        INVARIANT: the stored spelling is the reported one, character for
+        character. ``strip()`` appears below only as the emptiness test — an
+        anchor-less path is matched against the filesystem by name and nothing
+        else, so trimming a path that really does carry a leading or trailing
+        space would point every downstream consumer at a file that does not
+        exist and lose the real one.
+        """
+        existing = scope_context.get("declared_changed_paths")
+        merged = {
+            item
+            for item in (existing if isinstance(existing, list) else [])
+            if isinstance(item, str) and item.strip()
+        }
+        merged |= {
+            item
+            for item in declared_paths
+            if isinstance(item, str) and item.strip()
+        }
+        recorded = sorted(merged)
+        scope_context["declared_changed_paths"] = recorded
+        return recorded
+
     def _prepare_self_check_scope(
         self,
         flow: FlowInstance,
@@ -4051,16 +4135,20 @@ class StateMachine:
             flow, scope_context, fix_baselines, active
         )
 
+        # The implement step's self-reported files are consulted for one case
+        # only: a path git ignores is invisible to baseline capture, so without
+        # them a real flow change would never be diffed, anchored or reviewed
+        # (see ReviewScopeManager.reconstruct). Persisted so a re-prepared
+        # round is scoped with the same input it first ran on.
+        declared_paths = self._record_declared_paths(
+            scope_context, _declared_changed_paths(inputs)
+        )
         scope = self._review_scope_manager(flow).resolve(
             str(active.get("scope_mode", "full")),
             baseline,
             full_baseline=implementation_baseline,
             fix_delta_baseline=fix_delta_baseline,
-            # The implement step's self-reported files are consulted for one
-            # case only: a path git ignores is invisible to baseline capture,
-            # so without them a real flow change would never be diffed,
-            # anchored or reviewed (see ReviewScopeManager.reconstruct).
-            declared_paths=_declared_changed_paths(inputs),
+            declared_paths=declared_paths,
         )
         if scope.scope_mode != active.get("scope_mode"):
             active["scope_mode"] = scope.scope_mode
@@ -4073,7 +4161,36 @@ class StateMachine:
                 # credited as a full round. A degrade on a LATER pass leaves
                 # the accounting mode alone: pass #1 already reviewed only the
                 # fix delta, so the mandatory full closure round is still owed.
+                credited_now = active.get("round_scope_mode") != scope.scope_mode
                 active["round_scope_mode"] = scope.scope_mode
+                if credited_now:
+                    # WHY the fix-history marker moves with the accounting and
+                    # not with the mode a round was PREPARED in: "since the
+                    # last full round" is measured from whichever round is
+                    # credited as full, and this one now is. Leaving the marker
+                    # on the previous full round would send the next full round
+                    # searching from a position this one already reviewed past
+                    # — re-selecting a fix baseline whose delta is no longer
+                    # new (here, the very baseline whose corruption forced the
+                    # degrade) and losing the annotation of everything the
+                    # fixes since THIS round produced.
+                    #
+                    # Resolved before the marker moves: the pin is what THIS
+                    # round annotates against, the marker is what the NEXT full
+                    # round measures from.
+                    since_last_full = self._review_scope_manager(
+                        flow
+                    ).earliest_fix_baseline_after_full_round(scope_context)
+                    active["fix_delta_baseline_id"] = (
+                        since_last_full.baseline_id if since_last_full else ""
+                    )
+                    covered = str(
+                        scope_context.get("covered_fix_baseline", "") or ""
+                    )
+                    if covered:
+                        # An empty answer would mean "no fix is covered yet",
+                        # which is never truer than the marker already on file.
+                        scope_context["full_round_fix_head"] = covered
 
         active["scope_changed_paths"] = list(scope.changed_paths)
         active["scope_diff_artifact"] = scope.artifact_path
@@ -4098,6 +4215,8 @@ class StateMachine:
         )
         active["scope_fix_delta_available"] = scope.fix_delta_available
         active["scope_fix_delta_diagnostic"] = scope.fix_delta_diagnostic
+        active["scope_prior_work_paths"] = list(scope.prior_work_paths)
+        active["scope_declared_only_paths"] = list(scope.declared_only_paths)
 
         inputs.update({
             "self_check_round_id": active.get("round_id", ""),
@@ -4135,11 +4254,23 @@ class StateMachine:
             ),
             "scope_fix_delta_available": scope.fix_delta_available,
             "scope_fix_delta_diagnostic": scope.fix_delta_diagnostic,
+            # Path-level fact the manifest needs on top of the two anchor sets:
+            # which of the delta's paths already carried work at the delta
+            # baseline. Anchor-less paths own no range to attribute, so this is
+            # the only evidence that can classify them.
+            "scope_prior_work_paths": list(scope.prior_work_paths),
+            # The complement: paths NO baseline comparison can classify at all
+            # (git-ignored self-reports). They are listed unattributed rather
+            # than guessed at — see ``ReviewScope.declared_only_paths``.
+            "scope_declared_only_paths": list(scope.declared_only_paths),
             "scope_diff": scope.unified_diff,
             "scope_diff_artifact": scope.artifact_path,
             "scope_undecidable": scope.undecidable,
             "scope_diagnostic": scope.diagnostic,
             "scope_fallback_from_incremental": scope.fallback_from_incremental,
+            # Which of the two incremental domains failed, so the prompt can
+            # name the real one instead of always blaming the fix baseline.
+            "scope_fallback_cause": scope.fallback_cause,
             "requirement_fingerprint": active.get("requirement_fingerprint", ""),
             "self_check_round_reason": active.get("round_reason", ""),
         })

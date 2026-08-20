@@ -822,9 +822,9 @@ class TestScopeDiffDelivery:
     def test_large_diff_keeps_manifest_with_hunk_ranges(self):
         scope = _format_review_scope(self._oversized_inputs())
         assert "scope_manifest" in scope
-        assert "big.py: +4 -0" in scope
+        assert "big.py: +4 added (whole task) -0 deleted (implementation baseline)" in scope
         assert "added lines (current file) 10-12, 40" in scope
-        assert "other.py: +0 -3" in scope
+        assert "other.py: +0 added (whole task) -3 deleted (implementation baseline)" in scope
         assert "deleted lines (baseline file) 7-9" in scope
 
     def test_large_diff_points_at_the_pull_command_and_artifact(self):
@@ -844,7 +844,7 @@ class TestScopeDiffDelivery:
         })
         assert "NOT INLINED" not in scope
         assert "+new" in scope
-        assert "small.py: +1 -0" in scope
+        assert "small.py: +1 added (whole task) -0 deleted (implementation baseline)" in scope
 
 
 class TestScopeManifestAndAccess:
@@ -889,17 +889,25 @@ class TestScopeManifestAndAccess:
 
     def test_incremental_manifest_separates_fix_delta_from_earlier_work(self):
         rendered = _format_review_scope(self._incremental())
-        assert "src/fix.py: +15 -0" in rendered
+        assert "src/fix.py: +15 added (whole task + this fix, combined) -0 deleted (this fix's baseline)" in rendered
         assert "added lines (current file) 10-15, 40-48" in rendered
         assert "- this fix: added 40-48" in rendered
         assert "- earlier work in this task: added 10-15" in rendered
         # A path only the earlier work touched is listed, and labelled as such.
-        assert "src/earlier.py: +3 -2" in rendered
-        assert "- earlier work in this task: added 3-5; deleted 30-31" in rendered
+        # Its deletions are numbered in the IMPLEMENTATION baseline, not in
+        # this round's fix baseline, so they get their own labelled line and
+        # never enter the head line's ``-N``.
+        assert "src/earlier.py: +3 added (whole task + this fix, combined) -0 deleted (this fix's baseline)" in rendered
+        assert "- earlier work in this task: added 3-5" in rendered
+        assert (
+            "deleted across the whole task (old-side numbers of the "
+            "implementation baseline, NOT of this round's baseline): "
+            "2 deleted lines at 30-31" in rendered
+        )
 
     def test_full_round_manifest_marks_changes_since_last_full_round(self):
         rendered = _format_review_scope(self._full_closure())
-        assert "app.py: +6 -0" in rendered
+        assert "app.py: +6 added (whole task) -0 deleted (implementation baseline)" in rendered
         assert (
             "- changed by fixes since the last full round: added 20-24"
             in rendered
@@ -923,7 +931,7 @@ class TestScopeManifestAndAccess:
         inputs["scope_fix_delta_changed_paths"] = []
         inputs["scope_fix_delta_causal_anchors"] = {}
         rendered = _format_review_scope(inputs)
-        assert "app.py: +6 -0" in rendered
+        assert "app.py: +6 added (whole task) -0 deleted (implementation baseline)" in rendered
         assert "since the last full round" not in rendered
 
     def test_access_block_bans_git_diff_and_names_the_command(self):
@@ -953,11 +961,13 @@ class TestScopeManifestAndAccess:
         rendered = _format_review_scope(inputs)
         assert "UNPROVEN" in rendered
 
-    def test_manifest_range_list_is_capped_with_a_pointer(self):
-        from tianluo.engine.steps.self_check import (
-            _MANIFEST_MAX_RANGES_PER_PATH,
-        )
+    def test_manifest_range_list_is_never_truncated(self):
+        """Every citable hunk range is written out, however many there are.
 
+        The manifest's contract is that the anchor space it shows IS the space
+        evidence validation grounds in. A hidden range is a hunk the checker
+        can neither see nor cite, while a citation on it would still validate.
+        """
         ranges = [[n * 10, n * 10 + 1] for n in range(1, 60)]
         rendered = _format_review_scope({
             "scope_mode": "full",
@@ -966,10 +976,544 @@ class TestScopeManifestAndAccess:
             "scope_causal_anchors": {"wide.py": ranges},
             "scope_diff": "diff --git a/wide.py b/wide.py\n+x\n",
         })
-        extra = len(ranges) - _MANIFEST_MAX_RANGES_PER_PATH
-        assert f"(+{extra} more)" in rendered
-        # The total is still exact, so a cap never understates the change.
-        assert f"wide.py: +{2 * len(ranges)} -0" in rendered
+        assert "more)" not in rendered
+        for start, end in ranges:
+            assert f"{start}-{end}" in rendered
+        assert f"wide.py: +{2 * len(ranges)} added (whole task) -0 deleted (implementation baseline)" in rendered
+
+
+class TestManifestMarksAnchorLessPaths:
+    """A changed path with no added range still says which domain it is from.
+
+    Binary, rename-only, mode-only and deletion-only paths carry no citable
+    line, so range-granularity labels alone render them identically — and the
+    checker, whose attention the round splits by domain, could not tell a
+    binary the current fix added from one an earlier IMPLEMENT added.
+    """
+
+    def test_incremental_marks_anchor_less_paths_by_domain(self):
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["assets/new.png", "src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": [
+                "assets/new.png", "assets/old.png", "src/fix.py",
+            ],
+            "scope_task_causal_anchors": {"src/fix.py": [[10, 15], [40, 48]]},
+            "scope_task_deletion_anchors": {},
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+x\n",
+        })
+        assert (
+            "assets/new.png: +0 added (whole task + this fix, combined) -0 deleted "
+            "(this fix's baseline) | domain: this fix" in rendered
+        )
+        assert (
+            "assets/old.png: +0 added (whole task + this fix, combined) -0 deleted "
+            "(this fix's baseline) | domain: earlier work in this task"
+            in rendered
+        )
+        # A path with ranges keeps its per-range split and gains the same mark.
+        assert (
+            "domain: this fix + earlier work in this task" in rendered
+        )
+        assert "- this fix: added 40-48" in rendered
+
+    def test_full_round_marks_anchor_less_paths_by_domain(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["assets/new.png", "assets/old.png"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": ["assets/new.png"],
+            "scope_fix_delta_causal_anchors": {},
+            "scope_fix_delta_deletion_anchors": {},
+            "scope_diff": "diff --git a/assets/new.png b/assets/new.png\n",
+        })
+        assert (
+            "assets/new.png: +0 added (whole task) -0 deleted "
+            "(implementation baseline) | domain: changed by fixes since the "
+            "last full round" in rendered
+        )
+        assert (
+            "assets/old.png: +0 added (whole task) -0 deleted "
+            "(implementation baseline) | domain: already present at the last "
+            "full round" in rendered
+        )
+
+    def test_anchor_less_path_in_both_domains_shows_both(self):
+        """A binary IMPLEMENT changed and this fix changed again says so.
+
+        Path membership alone cannot say it (every delta path is a whole-domain
+        path too) and the added remainder is empty by construction, so the mark
+        comes from the persisted baseline-snapshot comparison.
+        """
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["assets/shared.png", "assets/new.png"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["assets/shared.png", "assets/new.png"],
+            "scope_task_causal_anchors": {},
+            "scope_task_deletion_anchors": {},
+            "scope_prior_work_paths": ["assets/shared.png"],
+            "scope_diff": "diff --git a/assets/shared.png b/assets/shared.png\n",
+        })
+        assert (
+            "assets/shared.png: +0 added (whole task + this fix, combined) -0 deleted "
+            "(this fix's baseline) | domain: this fix + earlier work in this "
+            "task" in rendered
+        )
+        # The path the fix alone produced keeps the single mark: the earlier
+        # mark is a proven fact, never a default.
+        assert (
+            "assets/new.png: +0 added (whole task + this fix, combined) -0 deleted "
+            "(this fix's baseline) | domain: this fix\n" in rendered
+        )
+
+    def test_full_round_anchor_less_path_in_both_domains_shows_both(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["assets/shared.png", "assets/new.png"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": [
+                "assets/shared.png", "assets/new.png",
+            ],
+            "scope_fix_delta_causal_anchors": {},
+            "scope_fix_delta_deletion_anchors": {},
+            "scope_prior_work_paths": ["assets/shared.png"],
+            "scope_diff": "diff --git a/assets/shared.png b/assets/shared.png\n",
+        })
+        assert (
+            "assets/shared.png: +0 added (whole task) -0 deleted "
+            "(implementation baseline) | domain: changed by fixes since the "
+            "last full round + already present at the last full round"
+            in rendered
+        )
+        assert (
+            "assets/new.png: +0 added (whole task) -0 deleted "
+            "(implementation baseline) | domain: changed by fixes since the "
+            "last full round\n" in rendered
+        )
+
+    def test_single_domain_round_gets_no_domain_mark(self):
+        # Nothing to distinguish: the head line already names the one domain.
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["assets/new.png"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {},
+            "scope_diff": "diff --git a/assets/new.png b/assets/new.png\n",
+        })
+        assert "domain:" not in rendered
+
+
+class TestManifestKeepsDeletionBaselinesApart:
+    """Old-side line numbers of two baselines are two numbering spaces.
+
+    They name lines of two different file versions, so unioning, subtracting
+    or intersecting them fabricates both a size and line numbers that point at
+    nothing. Each set is rendered alone, under a label naming its baseline.
+    """
+
+    def test_incremental_never_merges_the_two_deletion_spaces(self):
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["a.py"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {"a.py": [[20, 25]]},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["a.py"],
+            "scope_task_causal_anchors": {},
+            "scope_task_deletion_anchors": {"a.py": [[1, 10]]},
+            "scope_diff": "diff --git a/a.py b/a.py\n-x\n",
+        })
+        # 6 + 10 is not a deletion count of anything: the head reports this
+        # round's own (fix) baseline alone.
+        assert "a.py: +0 added (whole task + this fix, combined) -6 deleted (this fix's baseline)" in rendered
+        assert "-16" not in rendered
+        assert "deleted lines (this fix's baseline file) 20-25" in rendered
+        assert "1-10, 20-25" not in rendered
+        # The whole-task deletions survive, on their own named baseline.
+        assert (
+            "deleted across the whole task (old-side numbers of the "
+            "implementation baseline, NOT of this round's baseline): "
+            "10 deleted lines at 1-10" in rendered
+        )
+
+    def test_every_manifest_size_names_the_domain_it_counts(self):
+        # The head line's two sizes are counted over two different domains, so
+        # an unlabelled pair would read as one file's total size: `+3 -0` on a
+        # path the task deleted 2 lines from would say "nothing was deleted".
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            "scope_task_causal_anchors": {
+                "src/earlier.py": [[3, 5]],
+                "src/fix.py": [[40, 48]],
+            },
+            "scope_task_deletion_anchors": {"src/earlier.py": [[30, 31]]},
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+x\n",
+        })
+        assert (
+            "src/earlier.py: +3 added (whole task + this fix, combined) -0 deleted "
+            "(this fix's baseline)" in rendered
+        )
+        # The whole-task deletion size exists too, on its own baseline's line —
+        # never folded into the head line's ``-N``.
+        assert "2 deleted lines at 30-31" in rendered
+        assert "-2 deleted (this fix's baseline)" not in rendered
+
+    def test_full_round_does_not_attribute_by_numeric_coincidence(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["a.py"],
+            "scope_causal_anchors": {},
+            "scope_deletion_anchors": {"a.py": [[1, 10]]},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": ["a.py"],
+            "scope_fix_delta_causal_anchors": {},
+            "scope_fix_delta_deletion_anchors": {"a.py": [[3, 4]]},
+            "scope_diff": "diff --git a/a.py b/a.py\n-x\n",
+        })
+        # Implementation-baseline lines 1-10 were deleted by IMPLEMENT; the fix
+        # baseline's 3-4 numbers a different file version, so it may neither
+        # claim a slice of them nor leave a "already present" remainder.
+        assert "a.py: +0 added (whole task) -10 deleted (implementation baseline) | deleted lines (baseline file) 1-10" in rendered
+        assert "changed by fixes since the last full round: deleted" not in rendered
+        assert "already present at the last full round: deleted" not in rendered
+        assert (
+            "deleted by fixes since the last full round (old-side numbers of "
+            "that fix baseline, NOT of this round's baseline): "
+            "2 deleted lines at 3-4" in rendered
+        )
+
+    def test_single_baseline_round_gets_no_cross_baseline_caveat(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["a.py"],
+            "scope_causal_anchors": {"a.py": [[1, 3]]},
+            "scope_deletion_anchors": {"a.py": [[7, 9]]},
+            "scope_diff": "diff --git a/a.py b/a.py\n+x\n",
+        })
+        assert "a.py: +3 added (whole task) -3 deleted (implementation baseline) | added lines (current file) 1-3" in rendered
+        assert "deleted lines (baseline file) 7-9" in rendered
+        assert "never compare or add them up" not in rendered
+
+
+class TestManifestAddedCountNamesItsOwnDomain:
+    """``+N`` states the domain it is actually counted over.
+
+    On an incremental round carrying both domains that is their UNION, not the
+    whole-task diff alone: a fix that restores an implementation-changed line
+    to its baseline value drops that line out of the whole-task diff while the
+    fix delta still anchors it, so the union genuinely exceeds the whole task.
+    """
+
+    def _restored_line_round(self):
+        return {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            # The fix delta anchors the restored line; the whole-task diff no
+            # longer sees it, but still sees the other implementation change.
+            "scope_changed_paths": ["app.py"],
+            "scope_causal_anchors": {"app.py": [[10, 10]]},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["app.py"],
+            "scope_task_causal_anchors": {"app.py": [[20, 20]]},
+            "scope_task_deletion_anchors": {},
+            "scope_diff": "diff --git a/app.py b/app.py\n+x\n",
+        }
+
+    def test_union_count_is_not_labelled_whole_task(self):
+        rendered = _format_review_scope(self._restored_line_round())
+
+        assert "app.py: +2 added (whole task + this fix, combined)" in rendered
+        assert "app.py: +2 added (whole task)" not in rendered
+        # Both constituent ranges stay citable and separately attributed.
+        assert "- this fix: added 10" in rendered
+        assert "- earlier work in this task: added 20" in rendered
+
+    def test_single_domain_incremental_still_says_this_fix(self):
+        inputs = self._restored_line_round()
+        inputs["scope_task_available"] = False
+        rendered = _format_review_scope(inputs)
+
+        assert "app.py: +1 added (this fix)" in rendered
+
+    def test_full_round_still_says_whole_task(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["app.py"],
+            "scope_causal_anchors": {"app.py": [[1, 3]]},
+            "scope_diff": "diff --git a/app.py b/app.py\n+x\n",
+        })
+
+        assert "app.py: +3 added (whole task)" in rendered
+
+
+class TestManifestMatchesGroundingDomain:
+    """What the manifest advertises as citable must survive evidence validation.
+
+    A full round grounds on its own baseline alone: the pinned fix-delta
+    reconstruction is an annotation of that domain, not a second domain. Only
+    an incremental round, whose two domains are OR-ed in grounding, may present
+    their union.
+    """
+
+    def _cite(self, inputs: dict, location: str) -> tuple:
+        path, line = location.rsplit(":", 1)
+        issue = _valid_issue(
+            quote="Preserve consumer behavior", path=path, line=int(line),
+        )
+        return _validate_and_filter_issues([issue], dict(inputs, **{
+            "task_description": "Preserve consumer behavior",
+            "task_description_base": "Preserve consumer behavior",
+        }))
+
+    def _reverting_fix(self):
+        """IMPLEMENT touched app.py; the fix reverted foo.py:42 and deleted
+        gone.py, so neither survives in the implementation-baseline diff."""
+        return {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["app.py"],
+            "scope_causal_anchors": {"app.py": [[1, 3]]},
+            "scope_deletion_anchors": {},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": ["foo.py", "gone.py"],
+            "scope_fix_delta_causal_anchors": {"foo.py": [[42, 42]]},
+            "scope_fix_delta_deletion_anchors": {"gone.py": [[1, 8]]},
+            "scope_diff": "diff --git a/app.py b/app.py\n+x\n",
+        }
+
+    def test_full_round_manifest_omits_net_reverted_fix_paths(self):
+        rendered = _format_review_scope(self._reverting_fix())
+        assert "app.py: +3 added (whole task) -0 deleted (implementation baseline)" in rendered
+        # Reverted / deleted by the fix: absent from this round's baseline diff,
+        # so the manifest must not offer them as citable anchors.
+        assert "foo.py" not in rendered
+        assert "gone.py" not in rendered
+
+    def test_full_round_clips_delta_ranges_to_its_own_domain(self):
+        inputs = self._reverting_fix()
+        # The fix also re-touched a line app.py's own diff does not carry.
+        inputs["scope_fix_delta_changed_paths"].append("app.py")
+        inputs["scope_fix_delta_causal_anchors"]["app.py"] = [[2, 2], [90, 95]]
+        rendered = _format_review_scope(inputs)
+        assert "app.py: +3 added (whole task) -0 deleted (implementation baseline)" in rendered
+        assert "90-95" not in rendered
+        assert "- changed by fixes since the last full round: added 2" in rendered
+        assert "- already present at the last full round: added 1, 3" in rendered
+
+    def test_every_manifest_anchor_grounds_on_a_full_round(self):
+        inputs = self._reverting_fix()
+        assert self._cite(inputs, "app.py:2")[1]["kept_count"] == 1
+        # Anchors the manifest no longer advertises are still (correctly)
+        # rejected — the manifest and the validator now agree.
+        assert self._cite(inputs, "foo.py:42")[1]["bad_evidence_count"] == 1
+
+    def test_incremental_round_still_unions_both_grounding_domains(self):
+        inputs = {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py"],
+            "scope_task_causal_anchors": {"src/earlier.py": [[3, 5]]},
+            "scope_task_deletion_anchors": {},
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+x\n",
+        }
+        rendered = _format_review_scope(inputs)
+        assert "src/earlier.py: +3 added (whole task + this fix, combined) -0 deleted (this fix's baseline)" in rendered
+        assert "src/fix.py: +9 added (whole task + this fix, combined) -0 deleted (this fix's baseline)" in rendered
+        # Both domains ground, so both may be presented.
+        assert self._cite(inputs, "src/earlier.py:4")[1]["kept_count"] == 1
+        assert self._cite(inputs, "src/fix.py:41")[1]["kept_count"] == 1
+
+    def test_incremental_manifest_drops_a_task_domain_validation_refuses(self):
+        inputs = {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py"],
+            # Malformed: _task_scope_domain refuses a non-dict anchor map, so
+            # the whole-task view is not a grounding domain this round.
+            "scope_task_causal_anchors": "corrupt",
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+x\n",
+        }
+        rendered = _format_review_scope(inputs)
+        assert "src/earlier.py" not in rendered
+        assert "(every range below is this round's fix delta)" in rendered
+
+
+class TestManifestNamesUnrenderablePathsAsTheDiffDoes:
+    """A path the diff can only spell quoted stays citable end to end.
+
+    The diff headers render such a name as a C-quoted token so the header
+    survives as one line; the manifest rows and the changed-path list are
+    single-line records with the same constraint, and the quoted token is then
+    the only spelling a checker can read back off the prompt. So the manifest
+    must show that same token, and evidence validation must accept it.
+    """
+
+    _NAME = "line\nbreak.py"
+    _TOKEN = '"line\\nbreak.py"'
+
+    def _inputs(self):
+        return {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": [self._NAME],
+            "scope_causal_anchors": {self._NAME: [[1, 1]]},
+            "scope_diff": (
+                f"diff --git a/{self._TOKEN} b/{self._TOKEN}\n"
+                "@@ -0,0 +1 @@\n+x\n"
+            ),
+        }
+
+    def test_manifest_row_is_one_line_and_shows_the_quoted_token(self):
+        from tianluo.engine.steps.self_check import _format_scope_manifest
+
+        lines = _format_scope_manifest(self._inputs())
+        # Every rendered element must be a single physical line: a torn row
+        # would put the path on one line and its anchor ranges on another.
+        for line in lines:
+            assert len(line.splitlines()) <= 1, line
+        row = next(line for line in lines if line.startswith(f"  - {self._TOKEN}:"))
+        assert "+1 added (whole task)" in row
+        assert "added lines (current file) 1" in row
+
+    def test_changed_paths_line_shows_the_same_spelling(self):
+        rendered = _format_review_scope(self._inputs())
+        assert f"- changed_paths: {self._TOKEN}" in rendered
+        # The raw name would tear the list line in two.
+        assert "- changed_paths: line\nbreak.py" not in rendered
+
+    def test_citation_in_the_spelling_the_prompt_shows_grounds(self):
+        """The quoted token is what the prompt presents, so it must ground.
+
+        The anchor keys are raw pathnames; without reading the token back, a
+        citation copied straight off the prompt would be counted as bad
+        evidence and a real finding silently dropped.
+        """
+        inputs = dict(
+            self._inputs(),
+            task_description="Preserve consumer behavior",
+            task_description_base="Preserve consumer behavior",
+        )
+        for citation in (f"{self._TOKEN}:1", f"{self._NAME}:1"):
+            issue = _valid_issue(quote="Preserve consumer behavior")
+            issue["evidence_lines"] = [citation]
+            issue["missing_in"] = []
+            kept, stats = _validate_and_filter_issues([issue], inputs)
+            assert len(kept) == 1, citation
+            assert stats["bad_evidence_count"] == 0, citation
+
+
+class TestManifestNamesEdgeWhitespacePathsRecoverably:
+    """A name whose edge whitespace the citation read-back eats is quoted.
+
+    ``_evidence_path_candidates`` strips a citation before parsing it, so a
+    raw `` leading.py`` shown by the manifest would be a spelling that can
+    never ground — the silent bad-evidence drop the manifest exists to
+    prevent. It is presented as a quoted token instead, which survives the
+    strip and decodes back to the exact name.
+    """
+
+    _NAME = " leading.py"
+    _TOKEN = '" leading.py"'
+
+    def _inputs(self):
+        return {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": [self._NAME],
+            "scope_causal_anchors": {self._NAME: [[1, 1]]},
+            "scope_diff": (
+                f"diff --git a/{self._TOKEN} b/{self._TOKEN}\n"
+                "@@ -0,0 +1 @@\n+x\n"
+            ),
+        }
+
+    def test_manifest_shows_the_quoted_token(self):
+        from tianluo.engine.steps.self_check import _format_scope_manifest
+
+        lines = _format_scope_manifest(self._inputs())
+        row = next(line for line in lines if line.startswith(f"  - {self._TOKEN}:"))
+        assert "+1 added (whole task)" in row
+        # The raw spelling must not be what the prompt presents.
+        assert f"  - {self._NAME}:" not in row
+
+    def test_citation_in_the_spelling_the_prompt_shows_grounds(self):
+        inputs = dict(
+            self._inputs(),
+            task_description="Preserve consumer behavior",
+            task_description_base="Preserve consumer behavior",
+        )
+        issue = _valid_issue(quote="Preserve consumer behavior")
+        issue["evidence_lines"] = [f"{self._TOKEN}:1"]
+        issue["missing_in"] = []
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert len(kept) == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_malformed_quoted_citation_does_not_alias_a_real_path(self):
+        """A token nothing presented must not decode onto another real path.
+
+        A repairing decoder collapses the unknown escape in ``"src\\q.py"``
+        to ``srcq.py``; grounding on that would admit a finding whose cited
+        spelling this round never showed.
+        """
+        inputs = {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["srcq.py"],
+            "scope_causal_anchors": {"srcq.py": [[1, 1]]},
+            "scope_diff": "diff --git a/srcq.py b/srcq.py\n@@ -0,0 +1 @@\n+x\n",
+            "task_description": "Preserve consumer behavior",
+            "task_description_base": "Preserve consumer behavior",
+        }
+        issue = _valid_issue(quote="Preserve consumer behavior")
+        issue["evidence_lines"] = ['"src\\q.py":1']
+        issue["missing_in"] = []
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        # The real path, cited as itself, still grounds.
+        good = _valid_issue(quote="Preserve consumer behavior")
+        good["evidence_lines"] = ["srcq.py:1"]
+        good["missing_in"] = []
+        kept, stats = _validate_and_filter_issues([good], inputs)
+        assert len(kept) == 1
 
 
 class TestRepeatedSelfCheckFindings:
@@ -1834,17 +2378,59 @@ class TestWholeTaskEvidenceDomain:
         assert kept == []
         assert stats["bad_evidence_count"] == 1
 
-    def test_anchor_less_fix_path_keeps_path_level_grounding(self):
-        # src/bin.dat is deletion-only/binary in the fix delta (anchor-LESS,
-        # grounds at path level) yet anchor-bearing across the whole task.
-        # Merging the two anchor dicts would flip it to anchor-BEARING and start
-        # rejecting the bare-path citation the prompt prescribes there, so the
-        # domains are OR-ed instead.
+    def test_anchor_bearing_in_either_domain_is_anchor_bearing_in_the_union(self):
+        # src/bin.dat is rename-only/binary in the fix delta (anchor-LESS
+        # there) yet carries current-side changed lines across the whole task.
+        # The two views are UNIONED before grounding is decided, so the path is
+        # anchor-BEARING: a bare-path citation no longer grounds, and the line
+        # the union does hold does.
         inputs = self._inputs()
         inputs["scope_changed_paths"] = ["src/bin.dat"]
         inputs["scope_causal_anchors"] = {}
         inputs["scope_task_changed_paths"] = ["src/bin.dat"]
         inputs["scope_task_causal_anchors"] = {"src/bin.dat": [[1, 2]]}
+
+        issue = _valid_issue()
+        issue["evidence_lines"] = ["src/bin.dat"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        issue = _valid_issue(path="src/bin.dat", line=2)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_regression_bare_path_is_refused_when_the_union_has_a_line(self):
+        # The divergence the union closes: a regression may cite a bare path
+        # only where the path is anchor-less. Deciding that per domain would
+        # let the fix delta's rename-only view keep granting path-level
+        # grounding for a file IMPLEMENT edited by line.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_task_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_task_causal_anchors"] = {"src/bin.dat": [[1, 2]]}
+        issue = _valid_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/bin.dat"]
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_anchor_less_in_both_domains_keeps_path_level_grounding(self):
+        # A path with no current-side line in EITHER view is anchor-less in the
+        # union too, so the bare-path citation the prompt prescribes there is
+        # exactly what grounds it.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_task_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_task_causal_anchors"] = {}
         issue = _valid_issue()
         issue["evidence_lines"] = ["src/bin.dat"]
         kept, stats = _validate_and_filter_issues([issue], inputs)
@@ -1869,6 +2455,48 @@ class TestWholeTaskEvidenceDomain:
         kept, stats = _validate_and_filter_issues([issue], inputs)
         assert kept == [issue]
         assert stats["bad_evidence_count"] == 0
+
+    def test_regression_missing_in_grounds_on_exact_and_quoted_spellings(self):
+        # ``src/gone.py `` (trailing space) is anchor-less across the whole
+        # task, and every surface that shows it to the checker — manifest and
+        # diff headers alike — spells it as the C-quoted token. Both that token
+        # and the raw name must ground the regression, exactly as they do under
+        # ``evidence_lines``: the citation form may not decide the outcome.
+        from tianluo.engine.review_scope import quote_diff_path
+
+        anchor_less = "src/gone.py "
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/fix.py"]
+        inputs["scope_causal_anchors"] = {"src/fix.py": [[10, 12]]}
+        inputs["scope_task_changed_paths"] = [anchor_less, "src/fix.py"]
+        inputs["scope_task_causal_anchors"] = {"src/fix.py": [[3, 12]]}
+
+        quoted = quote_diff_path(anchor_less)
+        assert quoted != anchor_less
+        for cited in (anchor_less, quoted):
+            issue = _valid_issue()
+            issue["evidence_lines"] = []
+            issue["missing_in"] = [cited]
+            issue["expectation_source"] = {
+                "type": "regression",
+                "verbatim_quote": "pre-existing behavior",
+            }
+            kept, stats = _validate_and_filter_issues([issue], inputs)
+            assert kept == [issue], cited
+            assert stats["bad_evidence_count"] == 0, cited
+
+        # The widening offers spellings of a changed path; it does not admit a
+        # path no domain carries. ``src/gone.py`` (trimmed) is a different file.
+        issue = _valid_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = [anchor_less.strip()]
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
 
     def test_full_round_without_task_domain_is_unchanged(self):
         # A full round already diffs from the implementation baseline and never
@@ -1925,6 +2553,11 @@ class TestWholeTaskScopeRendering:
             "scope_diff": "@@ -1 +1 @@\n+fixed\n",
             "scope_task_available": True,
             "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            # The rule is only stated when the whole-task domain really grounds
+            # evidence, so the fixture carries the anchors a reconstructed
+            # task scope always persists alongside its paths.
+            "scope_task_causal_anchors": {"src/earlier.py": [[3, 5]]},
+            "scope_task_deletion_anchors": {},
         }
 
     def test_incremental_states_the_widened_evidence_rule(self):
@@ -1973,8 +2606,8 @@ class TestManifestWithoutASecondDomain:
             "scope_task_changed_paths": [],
             "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+fixed\n",
         })
-        assert "every range below is this fix's own delta" in rendered
-        assert "src/fix.py: +9 -0" in rendered
+        assert "every range below is this round's fix delta" in rendered
+        assert "src/fix.py: +9 added (this fix) -0 deleted (this fix's baseline)" in rendered
 
     def test_empty_scope_still_renders_a_manifest_line(self):
         rendered = _format_review_scope({

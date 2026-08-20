@@ -94,9 +94,10 @@ def _resolve_flow(project_root: Path, flow_id: Optional[str]) -> Tuple[
 ]:
     """Resolve (flow_id, that flow's project root, its persisted context).
 
-    The context is ``None`` when the flow record itself is gone but its
-    snapshot store is still on disk — enough to serve a diff, and the signal
-    the baseline lookup needs to tell "reclaimed" from "never captured".
+    The context is ``None`` when the flow record itself is gone — the snapshot
+    store or the flow's history record then carry what is left of it, and the
+    ``None`` is the signal the baseline lookup needs to tell "reclaimed" from
+    "never captured".
     """
     from ..engine.persistence import PersistenceManager
     from ..engine.steps._project_root import resolve_flow_project_root
@@ -135,13 +136,22 @@ def _render_stat(
             flow_id=flow_id,
         )
     )
-    width = max((len(path) for path in stat), default=0)
+    # WHY the tokens, not the raw pathnames: this view is the diff view's
+    # sibling over the same scope, and a checker copies file names off either
+    # one. A name whose edge whitespace the padding below would swallow — or
+    # that carries a line break — has to appear here in the same C-quoted
+    # spelling the diff headers use, or the two views would name one file two
+    # ways and the padded column would present a spelling nothing can look up.
+    from ..engine.review_scope import quote_diff_path
+
+    tokens = {path: quote_diff_path(path) for path in stat}
+    width = max((len(token) for token in tokens.values()), default=0)
     insertions = 0
     deletions = 0
     for path, (added, removed) in stat.items():
         insertions += added
         deletions += removed
-        typer.echo(f" {path.ljust(width)} | +{added} -{removed}")
+        typer.echo(f" {tokens[path].ljust(width)} | +{added} -{removed}")
     typer.echo(
         t(
             "review_scope.stat.summary",
@@ -179,8 +189,11 @@ def diff_cmd(
         BASELINE_STATUS_NOT_CAPTURED,
         BASELINE_STATUS_UNAVAILABLE,
         ReviewScopeManager,
+        decode_quoted_diff_path,
         diff_stat,
-        section_covers_path,
+        paths_related,
+        quote_diff_path,
+        select_filtered_view,
         split_diff_sections,
     )
 
@@ -197,10 +210,24 @@ def diff_cmd(
             param_hint="--baseline",
         )
 
+    from ..engine.chat_history import flow_history_exists
+
     project_root = get_project_root()
     resolved_id, flow_root, context = _resolve_flow(project_root, flow_id)
     manager = ReviewScopeManager(flow_root, resolved_id)
-    if context is None and not manager.store_exists():
+    # INVARIANT: exit 3 means "this project never ran that flow", so every
+    # surviving trace of the flow must be consulted before claiming it. The
+    # engine holds ONE active slot and archives rotate, so a completed flow
+    # whose snapshots were reclaimed at termination loses both its record and
+    # its store as soon as the next flow starts — while `luo history` still
+    # lists it. Answering that with flow-not-found tells the operator they
+    # misnamed the flow, hiding the real (and actionable) situation the exit-5
+    # cleaned-baseline message spells out.
+    if (
+        context is None
+        and not manager.store_exists()
+        and not flow_history_exists(project_root, resolved_id)
+    ):
         _fail(
             t("review_scope.error.flow_not_found", flow_id=resolved_id),
             EXIT_FLOW_NOT_FOUND,
@@ -233,6 +260,17 @@ def diff_cmd(
             EXIT_BASELINE_MISSING,
         )
 
+    # INVARIANT: what a baseline view contains is derived from ONE fact — the
+    # comparison of the selected persisted snapshot with the current workspace.
+    # The implement steps' self-reported paths are deliberately NOT injected
+    # here: a path git ignores exists in no snapshot on either side, so no
+    # comparison can place it in this view rather than the other one, and the
+    # engine keeps the reports as a single flat flow-wide union precisely
+    # because attributing them would take execution-side bookkeeping of who
+    # declared what (see ``StateMachine._record_declared_paths``). Such a path
+    # is therefore absent from both views rather than present in both under a
+    # membership claim neither baseline supports; the round's prompt manifest
+    # still lists it, by path alone and with no domain mark.
     scope = manager.reconstruct(
         "incremental" if selector == BASELINE_SELECTOR_FIX else "full",
         lookup.baseline,
@@ -256,12 +294,58 @@ def diff_cmd(
 
     sections = split_diff_sections(scope.unified_diff)
     table = diff_stat(scope)
-    requested = [str(item).strip() for item in (paths or []) if str(item).strip()]
-    if requested:
+    supplied = [str(item) for item in (paths or [])]
+    # WHY the filter is passed through verbatim: space is a legal filename
+    # character, so trimming here would resolve `--path pkg` against a changed
+    # file spelled `" pkg/mod.py"` — a path the repository does not hold.
+    # `normalize_scope_path` collapses separators and dot segments only, for
+    # the same reason; a filter naming no changed path is refused below.
+    # WHY a quoted filter also gets its decoded reading: a pathname carrying a
+    # line break, edge whitespace or a non-UTF-8 byte is presented — in the
+    # manifest, in the diff headers and in the --stat column — solely as a
+    # C-quoted token, so that token is the only spelling a checker can copy off
+    # those surfaces and paste back here. Refusing it would leave the one file
+    # whose name cannot be shown raw unreachable through the very command the
+    # prompt sends the checker to.
+    # WHY that decoded reading is preferred OVER a raw match rather than kept
+    # as its fallback: every surface quotes a name that itself contains a quote
+    # character, so a bare token such as ``" pkg/mod.py"`` is what those
+    # surfaces display for the path `` pkg/mod.py`` and NEVER for a file
+    # literally named ``" pkg/mod.py"`` — that one is displayed as
+    # ``"\" pkg/mod.py\""``. Matching raw first would hand the copied token to
+    # the literal namesake whenever both changed, answering a single-file
+    # question with a different file; the literal name stays reachable through
+    # its own escaped token, which decodes straight back to it. Only a
+    # WELL-FORMED token decodes — the same rule ``_evidence_path_candidates``
+    # applies, so a lenient decode can never ground a filter on a path no
+    # surface presented, and anything that does not decode falls through to its
+    # raw spelling (which the admission check below still resolves).
+    def _filter_spelling(raw: str) -> str:
+        decoded = decode_quoted_diff_path(raw)
+        if decoded and any(paths_related(key, decoded) for key in table):
+            return decoded
+        return raw
+
+    requested = [_filter_spelling(raw) for raw in supplied]
+    if supplied:
+        # WHY admission is decided against the changed-path table alone: that
+        # table IS the scope's membership — what --stat renders and what
+        # evidence validation grounds on — so a filter accepted here always
+        # selects something in both views. Section containment must NOT admit
+        # on its own: `paths_related` is one-way precisely so that
+        # `--path <changed-file>/whatever` is refused rather than answered with
+        # that file's diff.
+        #
+        # WHY a blank value is refused rather than dropped: `--path "$TARGET"`
+        # with an unset variable is still an explicit request to narrow the
+        # view, and silently discarding it would answer a single-file question
+        # with the entire diff. An empty path names nothing in this scope, so
+        # it takes the same out-of-scope rejection any other unsupported filter
+        # takes.
         missing = [
-            path for path in requested
-            if not any(section_covers_path(section, path) for section in sections)
-            and not any(_related(key, path) for key in table)
+            (raw if raw.strip() else '""')
+            for raw, path in zip(supplied, requested)
+            if not path or not any(paths_related(key, path) for key in table)
         ]
         if missing:
             typer.echo(
@@ -269,18 +353,22 @@ def diff_cmd(
                 err=True,
             )
             typer.echo(
-                t("review_scope.hint.changed_paths", paths=", ".join(table) or "-"),
+                # Quoted for the same reason the --stat column is: this hint
+                # tells the operator what to retry with, so it must name each
+                # path in a spelling that both survives this line and is
+                # accepted back by --path.
+                t(
+                    "review_scope.hint.changed_paths",
+                    paths=", ".join(quote_diff_path(key) for key in table) or "-",
+                ),
                 err=True,
             )
             raise typer.Exit(EXIT_PATH_NOT_IN_SCOPE)
-        sections = [
-            section for section in sections
-            if any(section_covers_path(section, path) for path in requested)
-        ]
-        table = {
-            key: value for key, value in table.items()
-            if any(_related(key, path) for path in requested)
-        }
+        # Both views are resolved by one call, so they cover the same files by
+        # construction — an exact rename is a single section naming two paths,
+        # which a per-view containment scan would resolve to two different file
+        # sets (see ``select_filtered_view``).
+        sections, table = select_filtered_view(sections, table, requested)
 
     if stat:
         _render_stat(scope, table, resolved_id, selector)
@@ -298,19 +386,3 @@ def diff_cmd(
 
     typer.echo("".join(section.text for section in sections), nl=False)
     raise typer.Exit(EXIT_OK)
-
-
-def _related(candidate: str, requested: str) -> bool:
-    """Whether a changed path and a requested filter path name each other.
-
-    Containment in both directions: ``--path vendor`` selects the submodule's
-    inner files, and ``--path vendor/inner.py`` selects the submodule entry that
-    renders it.
-    """
-    if not candidate or not requested:
-        return False
-    return (
-        candidate == requested
-        or candidate.startswith(requested + "/")
-        or requested.startswith(candidate + "/")
-    )

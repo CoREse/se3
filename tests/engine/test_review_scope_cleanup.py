@@ -17,6 +17,8 @@ stays parallel-safe.
 
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import tempfile
 import uuid
@@ -176,6 +178,97 @@ class TestEngineTerminalReclaim:
             assert flow.status == FlowStatus.COMPLETED
 
 
+class TestReclaimOrdering:
+    """The terminal state reaches disk BEFORE its baselines are reclaimed.
+
+    ``save_flow`` can raise (full disk, a lost network mount). The flow then
+    stays persisted as RUNNING/PAUSED — i.e. resumable — so snapshots destroyed
+    first would leave a resumed SELF_CHECK round unable to reconstruct its own
+    scope, irreversibly. Reclaiming after the save can only leak disk space.
+    """
+
+    def test_a_failing_terminal_save_leaves_the_snapshots_intact(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sm = StateMachine(root)
+            _register_passing_handlers(sm)
+
+            flow = sm.create_flow("terminal save explodes", task_type="small")
+            store = _seed_snapshots(root, flow.flow_id)
+            flow.status = FlowStatus.RUNNING
+
+            saves = {"n": 0}
+            real_save = sm.persistence.save_flow
+
+            def failing_save(instance):
+                saves["n"] += 1
+                # Only the terminal save fails; every mid-flow one is real, so
+                # the flow really is persisted as resumable when it does.
+                if instance.status == FlowStatus.COMPLETED:
+                    raise OSError("no space left on device")
+                return real_save(instance)
+
+            with patch.object(sm.persistence, "save_flow", failing_save):
+                with pytest.raises(OSError):
+                    _run_flow(sm, flow)
+
+            assert saves["n"] > 1
+            assert store.is_dir(), (
+                "the persisted flow is still resumable, so its review "
+                "baselines must survive a failed terminal save"
+            )
+
+    def test_run_loop_fallback_saves_before_reclaiming(self):
+        """The second COMPLETED landing follows the same order."""
+        from tianluo.commands import run as run_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sm = StateMachine(root)
+            flow = sm.create_flow("fallback completion", task_type="small")
+            store = _seed_snapshots(root, flow.flow_id)
+
+            run_cmd._complete_flow_via_fallback(flow)
+
+            assert flow.status == FlowStatus.COMPLETED
+            # Flipping the status must not itself destroy anything: the caller
+            # persists first and only then reclaims.
+            assert store.is_dir()
+
+            # The run loop's own order: save (which retires the resumable
+            # snapshot on COMPLETED), then reclaim.
+            sm.persistence.save_flow(flow)
+            run_cmd._reclaim_review_snapshots(flow)
+            assert not store.exists()
+
+    def test_surviving_resumable_snapshot_keeps_the_baselines(self):
+        """A snapshot that could not be retired keeps the flow resumable."""
+        from tianluo.commands import run as run_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sm = StateMachine(root)
+            flow = sm.create_flow("snapshot unlink fails", task_type="small")
+            store = _seed_snapshots(root, flow.flow_id)
+
+            run_cmd._complete_flow_via_fallback(flow)
+            # clear_resumable_snapshot swallows the unlink error, so the
+            # snapshot survives the terminal save and the flow stays resumable.
+            with patch.object(
+                Path, "unlink", side_effect=PermissionError("read-only store")
+            ):
+                sm.persistence.save_flow(flow)
+            assert (
+                root / "tianluo" / "state" / "resumable" / f"{flow.flow_id}.json"
+            ).exists()
+
+            run_cmd._reclaim_review_snapshots(flow)
+            assert store.is_dir(), (
+                "a still-resumable flow must keep the baselines its next "
+                "SELF_CHECK round diffs against"
+            )
+
+
 class TestReclaimSafety:
     @pytest.mark.parametrize(
         "unsafe",
@@ -243,6 +336,131 @@ class TestDispositionChannels:
 
             assert not store.exists()
 
+    def test_worktree_archive_never_carries_the_snapshots_into_the_copy(self):
+        """The copy is kept clean by the exclusion, not by an early delete.
+
+        ``luo end-session`` archives a worktree by copying the directory into
+        ``tianluo/worktrees/.archive/``. Snapshots that reached the archive
+        would stay there forever — a heavy content store with no reader left,
+        one per terminated worktree session. The live copies are still on disk
+        while that copy runs (they are only reclaimed afterwards, behind the
+        ownership re-read), so the *request* to exclude them is what has to be
+        made here, and the reclaim still lands by the end of the cleanup.
+        """
+        from tianluo.commands import end_session_cmd
+        from tianluo.engine.merge import cleanup as merge_cleanup
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "project"
+            worktree = Path(tmpdir) / "wt"
+            archive = Path(tmpdir) / "archive"
+            root.mkdir(parents=True)
+            worktree.mkdir(parents=True)
+
+            flow_id = _flow_id()
+            store = _seed_snapshots(worktree, flow_id)
+            assert store.is_dir()
+
+            def fake_archive(project_root, branch, wt_path, **kwargs):
+                # Mirrors the real archiver's contract: whatever it is asked to
+                # exclude never enters the permanent copy.
+                excludes = set(kwargs.get("exclude_relpaths") or ())
+                shutil.copytree(
+                    wt_path,
+                    archive,
+                    ignore=lambda d, names: {
+                        n
+                        for n in names
+                        if str((Path(d) / n).relative_to(wt_path)) in excludes
+                    },
+                )
+                # The store must still be live at copy time — deleting it up
+                # front is what a mid-archive takeover could not undo.
+                assert store.is_dir()
+                return archive
+
+            with patch.object(merge_cleanup, "_archive_worktree", fake_archive):
+                end_session_cmd._archive_worktree_session(
+                    root,
+                    flow_id,
+                    {
+                        "worktree_path": str(worktree),
+                        "worktree_branch": "impl/isolated",
+                    },
+                    [],
+                )
+
+            assert archive.is_dir()
+            assert not (
+                archive / "tianluo" / "state" / "review-scopes" / flow_id
+            ).exists()
+            assert not store.exists()
+
+    def test_worktree_archive_excludes_snapshots_when_the_reclaim_fails(self):
+        """A failed reclaim must not make the archive keep them forever.
+
+        The in-place reclaim is best-effort (an undeletable parent whose
+        contents are still readable reports False without raising), and the
+        archive is the *permanent* copy — so the copy has to exclude the
+        directory itself rather than trust the deletion that precedes it.
+        Only this flow's store may be dropped: a second flow's baselines and a
+        same-named directory elsewhere in the operator's WIP are recovery data.
+        """
+        from tianluo.commands import end_session_cmd
+        from tianluo.engine import review_scope as review_scope_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "project"
+            worktree = Path(tmpdir) / "wt"
+            root.mkdir(parents=True)
+            worktree.mkdir(parents=True)
+
+            flow_id = _flow_id()
+            other_flow_id = _flow_id()
+            store = _seed_snapshots(worktree, flow_id)
+            other_store = _seed_snapshots(worktree, other_flow_id)
+            (worktree / "work.py").write_text("wip = 1\n", encoding="utf-8")
+            decoy = (
+                worktree / "nested" / "tianluo" / "state"
+                / "review-scopes" / flow_id
+            )
+            decoy.mkdir(parents=True)
+            (decoy / "keep.txt").write_text("not the store", encoding="utf-8")
+
+            with patch.object(
+                review_scope_mod, "discard_flow_snapshots", return_value=False
+            ):
+                end_session_cmd._archive_worktree_session(
+                    root,
+                    flow_id,
+                    {
+                        "worktree_path": str(worktree),
+                        "worktree_branch": "impl/isolated",
+                    },
+                    [],
+                )
+
+            # The reclaim was refused, so the live copy is untouched...
+            assert store.is_dir()
+            archives = sorted(
+                (root / "tianluo" / "worktrees" / ".archive").iterdir()
+            )
+            assert len(archives) == 1
+            archived = archives[0]
+            # ...but the permanent copy never received it.
+            assert not (
+                archived / "tianluo" / "state" / "review-scopes" / flow_id
+            ).exists()
+            assert (archived / "work.py").is_file()
+            assert (
+                archived / "tianluo" / "state" / "review-scopes" / other_flow_id
+            ).is_dir()
+            assert (
+                archived / "nested" / "tianluo" / "state"
+                / "review-scopes" / flow_id / "keep.txt"
+            ).is_file()
+            assert other_store.is_dir()
+
     def test_end_session_without_a_flow_id_reclaims_nothing(self):
         from tianluo.commands.end_session_cmd import _clear_resumable
 
@@ -253,6 +471,94 @@ class TestDispositionChannels:
             _clear_resumable(root, None)
 
             assert store.is_dir()
+
+    def test_takeover_during_the_snapshot_clear_spares_the_baselines(self):
+        """The reclaim owes its own ownership re-read, not the caller's.
+
+        Clearing the resumable snapshot and dropping the baselines are two
+        separate destructive calls. A pre-upgrade ``luo run`` on another host
+        publishes ``run.pid`` unconditionally, so it can take the flow back
+        *between* them — and the re-owned flow is live again with a SELF_CHECK
+        scope it can only rebuild from those baselines.
+        """
+        from tianluo.commands import end_session_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flow_id = _flow_id()
+            store = _seed_snapshots(root, flow_id)
+
+            marker, ok = end_session_cmd._claim_session_ownership(
+                root, None, flow_id
+            )
+            assert ok and marker is not None
+
+            def steal_the_claim(self, _flow_id):
+                # A remote writer that does not follow the exclusive protocol.
+                Path(marker).write_text(
+                    f"{os.getpid() + 1}\nsome-other-host\n{flow_id}\n",
+                    encoding="utf-8",
+                )
+                # The snapshot itself retired fine — the ownership re-read is
+                # what must spare the baselines here.
+                return True
+
+            with patch.object(
+                PersistenceManager, "clear_resumable_snapshot", steal_the_claim
+            ):
+                assert (
+                    end_session_cmd._clear_resumable(root, flow_id, marker) is False
+                )
+
+            assert store.is_dir()
+
+    def test_a_held_claim_still_reclaims_the_baselines(self):
+        from tianluo.commands import end_session_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flow_id = _flow_id()
+            store = _seed_snapshots(root, flow_id)
+
+            marker, ok = end_session_cmd._claim_session_ownership(
+                root, None, flow_id
+            )
+            assert ok and marker is not None
+
+            assert end_session_cmd._clear_resumable(root, flow_id, marker) is True
+            assert not store.exists()
+
+    def test_main_session_cleanup_reports_the_spared_baselines(self):
+        """The mid-step takeover surfaces as a FAIL row, not a silent OK."""
+        from tianluo.commands import end_session_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flow_id = _flow_id()
+            store = _seed_snapshots(root, flow_id)
+
+            marker, ok = end_session_cmd._claim_session_ownership(
+                root, None, flow_id
+            )
+            assert ok and marker is not None
+
+            def steal_the_claim(self, _flow_id):
+                Path(marker).write_text(
+                    f"{os.getpid() + 1}\nsome-other-host\n{flow_id}\n",
+                    encoding="utf-8",
+                )
+                return True
+
+            results = []
+            with patch.object(
+                PersistenceManager, "clear_resumable_snapshot", steal_the_claim
+            ):
+                end_session_cmd._archive_main_session(
+                    root, flow_id, results, marker
+                )
+
+            assert store.is_dir()
+            assert any(status == "FAIL" for _, status, _ in results)
 
 
 def _git(root: Path, *args: str) -> None:
@@ -308,3 +614,158 @@ class TestCommandContractAfterReclaim:
 
         assert after.exit_code == 5
         assert "reclaimed" in after.output
+
+    def test_history_only_flow_reports_cleaned_not_flow_not_found(self, tmp_path):
+        """engine.json holds ONE slot; `luo history` outlives it.
+
+        After flow A completes and its baselines are reclaimed, starting flow B
+        overwrites the single active slot. A is then invisible to the flow
+        record and to the baseline store, yet `luo history` still lists it — so
+        naming it must produce the actionable cleaned-baseline error (exit 5),
+        not "no such flow" (exit 3), which would send the operator looking for
+        a typo that is not there.
+        """
+        from tianluo.runtime_paths import runtime_dir
+
+        root = tmp_path / "project"
+        root.mkdir()
+
+        flow_id = _flow_id()
+        # The only surviving trace: this flow's history record.
+        history = runtime_dir(root) / "history" / flow_id
+        history.mkdir(parents=True)
+        (history / "self_check.jsonl").write_text("", encoding="utf-8")
+
+        assert not ReviewScopeManager(root, flow_id).store_exists()
+
+        with patch(
+            "tianluo.commands.review_scope_cmd.get_project_root", return_value=root
+        ):
+            result = runner.invoke(
+                app, ["review-scope", "diff", "--flow", flow_id]
+            )
+
+        assert result.exit_code == 5
+        assert "reclaimed" in result.output
+
+    def test_genuinely_unknown_flow_still_reports_not_found(self, tmp_path):
+        root = tmp_path / "project"
+        root.mkdir()
+
+        with patch(
+            "tianluo.commands.review_scope_cmd.get_project_root", return_value=root
+        ):
+            result = runner.invoke(
+                app, ["review-scope", "diff", "--flow", _flow_id()]
+            )
+
+        assert result.exit_code == 3
+
+
+class TestSnapshotRetirementGatesTheReclaim:
+    """Baselines are reclaimed only once the resumable snapshot is CONFIRMED gone.
+
+    ``clear_resumable_snapshot`` swallows unlink failures so the rest of the
+    terminal bookkeeping still runs; a snapshot that survives keeps the flow
+    resumable, and a resume that reaches SELF_CHECK without its baselines
+    cannot rebuild its own scope.
+    """
+
+    def test_engine_completion_keeps_baselines_when_the_snapshot_survives(self):
+        """The engine's COMPLETED landing — the channel every normal flow takes.
+
+        ``save_flow`` retires the snapshot on COMPLETED, but swallows a
+        permission/IO error so the primary engine.json write still lands. Here
+        the unlink of ``resumable/<flow_id>.json`` fails exactly as it would on
+        a read-only store: the flow is still offered as resumable afterwards,
+        so the baselines its resumed SELF_CHECK round diffs against must stay.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            sm = StateMachine(root)
+            _register_passing_handlers(sm)
+
+            flow = sm.create_flow("snapshot survives completion", task_type="small")
+            store = _seed_snapshots(root, flow.flow_id)
+            snapshot = (
+                root / "tianluo" / "state" / "resumable" / f"{flow.flow_id}.json"
+            )
+
+            real_unlink = Path.unlink
+
+            def failing_unlink(self, *args, **kwargs):
+                # Only this flow's snapshot is undeletable; every other unlink
+                # the flow performs stays real.
+                if self == snapshot:
+                    raise PermissionError("read-only store")
+                return real_unlink(self, *args, **kwargs)
+
+            with patch.object(Path, "unlink", failing_unlink):
+                _run_flow(sm, flow)
+
+            assert flow.status == FlowStatus.COMPLETED
+            assert snapshot.exists(), (
+                "the swallowed unlink failure is what makes this flow still "
+                "resumable after its terminal save"
+            )
+            assert store.is_dir(), (
+                "a still-resumable flow must keep the baselines its next "
+                "SELF_CHECK round diffs against"
+            )
+
+    def test_end_session_keeps_baselines_when_the_snapshot_survives(self):
+        from tianluo.commands import end_session_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            flow_id = _flow_id()
+            store = _seed_snapshots(root, flow_id)
+
+            marker, ok = end_session_cmd._claim_session_ownership(
+                root, None, flow_id
+            )
+            assert ok and marker is not None
+
+            with patch.object(
+                PersistenceManager,
+                "clear_resumable_snapshot",
+                lambda self, _flow_id: False,
+            ):
+                assert (
+                    end_session_cmd._clear_resumable(root, flow_id, marker)
+                    is False
+                )
+
+            assert store.is_dir()
+
+    def test_salvage_keeps_baselines_when_the_snapshot_survives(self):
+        from tianluo.commands import salvage_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pm = PersistenceManager(root)
+            flow = FlowInstance(flow_id=_flow_id(), task_description="salvage me")
+            pm.save_flow(flow)
+            store = _seed_snapshots(root, flow.flow_id)
+
+            with patch.object(
+                PersistenceManager,
+                "clear_resumable_snapshot",
+                lambda self, _flow_id: False,
+            ):
+                assert salvage_cmd._archive_session(root) is True
+
+            assert store.is_dir()
+
+    def test_salvage_reclaims_when_the_snapshot_is_retired(self):
+        from tianluo.commands import salvage_cmd
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            pm = PersistenceManager(root)
+            flow = FlowInstance(flow_id=_flow_id(), task_description="salvage me")
+            pm.save_flow(flow)
+            store = _seed_snapshots(root, flow.flow_id)
+
+            assert salvage_cmd._archive_session(root) is True
+            assert not store.exists()

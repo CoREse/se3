@@ -65,6 +65,184 @@ _HUNK_RE = re.compile(
     r"\+(?P<new>\d+)(?:,(?P<new_count>\d+))? @@"
 )
 
+# Every character ``str.splitlines`` — the section reader's own splitter —
+# treats as a line ending. Quoting is triggered by those plus the two
+# characters a quoted token could not otherwise carry (``"`` and ``\``).
+_LINE_BREAK_CHARS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
+_DIFF_PATH_NEEDS_QUOTING_RE = re.compile(
+    '[\x00-\x1f\x7f"\\\\\u0085\u2028\u2029\ud800-\udfff]'
+)
+_NAMED_ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+_NAMED_UNESCAPES = {"\\": "\\", '"': '"', "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _diff_path_escape_bytes(char: str) -> bytes:
+    """The byte spelling one escaped pathname character is rendered as.
+
+    WHY the ``surrogateescape`` handler rather than a plain ``str.encode``: a
+    POSIX pathname is bytes, and every path in this module reaches Python
+    through ``decode("utf-8", "surrogateescape")`` (git's ``-z`` output, the
+    index, the status porcelain), so a Git-visible byte that is not valid
+    UTF-8 arrives here as a lone surrogate. Plain encoding raises on it, and
+    the raised error — swallowed by the reconstruction's own catch-all — turns
+    a perfectly real baseline-to-current change into an undecidable empty
+    scope. The escape handler yields back the original byte instead, which is
+    both git's own quoting spelling for that name and the exact input
+    :func:`decode_quoted_diff_path` inverts.
+    """
+    try:
+        return char.encode("utf-8", "surrogateescape")
+    except UnicodeEncodeError:
+        # A surrogate outside the escape range encodes to no byte sequence at
+        # all, so it names no file on any filesystem and can only arrive from
+        # a fabricated declared path. WTF-8 keeps the render total (the point
+        # of this helper) rather than re-raising; the decoder resolves such a
+        # token to the byte-accurate name, never back to the fabricated one.
+        return char.encode("utf-8", "surrogatepass")
+
+
+def quote_diff_path(label: str) -> str:
+    """Render one pathname as a single, unambiguous diff-header token.
+
+    WHY: the rendered diff is split back into per-file sections by reading it
+    LINE BY LINE (see :func:`split_diff_sections`), so a pathname that itself
+    contains a line break would tear its own ``diff --git`` header in two and
+    the section would lose the path it names — while ``diff_stat`` keeps the
+    exact pathname, leaving the ``--stat`` and diff views of one ``--path``
+    filter disagreeing about which files changed. Such a name is escaped into
+    a quoted token instead, in git's own C-quoting spelling, so the header
+    stays one line and :func:`unquote_diff_path` recovers the exact name.
+    Ordinary paths are emitted verbatim, exactly as before.
+
+    WHY the second trigger — a leading or trailing whitespace character, which
+    a single-line record CAN carry: every surface that shows a path is also a
+    surface a checker copies citations off, and a citation is read back after
+    ``str.strip()`` (see ``_evidence_path_candidates``), which is exactly the
+    spelling the edge whitespace does not survive. Rendered raw, such a name
+    would be presented as a spelling that can never ground — the silent
+    bad-evidence drop the quoting exists to prevent — and would additionally
+    be indistinguishable from its stripped namesake when both changed. The
+    quoted token pins the edge characters inside the quotes, so the stripped
+    citation still decodes to the exact name.
+
+    WHY the third trigger — a lone surrogate, which is how a Git-visible path
+    byte that is not valid UTF-8 reaches Python: rendered raw, that character
+    makes the whole diff un-encodable, and the ``UnicodeEncodeError`` the
+    artifact write then raises is swallowed upstream into an undecidable empty
+    scope, silently hiding that file's real change from SELF_CHECK. Escaped to
+    its own byte (see :func:`_diff_path_escape_bytes`), the token is plain
+    ASCII, the diff and its artifact stay exactly reconstructable, and the
+    name still round-trips.
+    """
+    text = str(label)
+    if not _DIFF_PATH_NEEDS_QUOTING_RE.search(text) and text == text.strip():
+        return text
+    out = ['"']
+    for char in text:
+        named = _NAMED_ESCAPES.get(char)
+        if named is not None:
+            out.append(named)
+        elif (
+            ord(char) < 0x20
+            or ord(char) == 0x7f
+            or 0xD800 <= ord(char) <= 0xDFFF
+            or char in _LINE_BREAK_CHARS
+        ):
+            # Octal per pathname byte, as git does, so the token survives a
+            # round trip through byte-oriented tooling as well.
+            out.extend(f"\\{byte:03o}" for byte in _diff_path_escape_bytes(char))
+        else:
+            out.append(char)
+    out.append('"')
+    return "".join(out)
+
+
+def decode_quoted_diff_path(token: str) -> Optional[str]:
+    """Decode *token* iff it is a well-formed :func:`quote_diff_path` token.
+
+    Returns ``None`` — not a repaired string — for anything else: a token that
+    is not quoted at all, or one whose escape sequences this renderer could
+    never have emitted (an unknown escape, a lone trailing backslash, an
+    unescaped inner quote, or an octal escape outside byte range).
+
+    INVARIANT: decoding never invents a spelling. A caller uses the decoded
+    name to select a real file (a diff section, an evidence anchor), so
+    silently dropping the backslash of an unknown escape would let a token
+    that names nothing — ``"src\\q.py"`` — alias the unrelated real path
+    ``srcq.py``, either selecting the wrong file or passing evidence whose
+    cited spelling was never presented. Rejection keeps the malformed token as
+    the caller's own problem, matching nothing.
+
+    INVARIANT: the octal escapes are inverted BYTEWISE, with the very
+    ``surrogateescape`` handler every path in this module was decoded by — so
+    non-UTF-8 octal bytes are a decodable name, not a malformed token. A
+    POSIX pathname is bytes, so ``"\\301\\301"`` is the exact rendering of a
+    real Git-visible file (see :func:`_diff_path_escape_bytes`); rejecting it
+    here would leave the presented token grounding nothing, which is the same
+    silent bad-evidence drop the quoting exists to prevent. This does not
+    weaken the invariant above: the byte-to-name mapping is the platform's own
+    and injective, so a decoded name is always precisely the file whose bytes
+    the token spelled and can never alias a different real path.
+    """
+    text = str(token)
+    if len(text) < 2 or not text.startswith('"') or not text.endswith('"'):
+        return None
+    body = text[1:-1]
+    chunks: List[str] = []
+    pending = bytearray()
+
+    def flush() -> None:
+        if pending:
+            chunks.append(bytes(pending).decode("utf-8", "surrogateescape"))
+            pending.clear()
+
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char == '"':
+            # An unescaped quote closes a token; one inside the body means the
+            # real token ended earlier and this text is not that token.
+            return None
+        if char != "\\":
+            flush()
+            chunks.append(char)
+            index += 1
+            continue
+        index += 1
+        if index >= len(body):
+            return None
+        marker = body[index]
+        if marker in _NAMED_UNESCAPES:
+            flush()
+            chunks.append(_NAMED_UNESCAPES[marker])
+            index += 1
+            continue
+        digits = body[index:index + 3]
+        if len(digits) == 3 and all(digit in "01234567" for digit in digits):
+            value = int(digits, 8)
+            if value > 0xFF:
+                return None
+            pending.append(value)
+            index += 3
+            continue
+        return None
+    flush()
+    return "".join(chunks)
+
+
+def unquote_diff_path(token: str) -> str:
+    """Recover the pathname :func:`quote_diff_path` rendered as *token*.
+
+    An unquoted token is its own pathname; anything malformed is returned
+    verbatim rather than repaired, because a section path is presentation
+    state and inventing a name would select the wrong file. Callers that must
+    tell "not a quoted token" from "decoded a quoted token" use
+    :func:`decode_quoted_diff_path` directly.
+    """
+    text = str(token)
+    decoded = decode_quoted_diff_path(text)
+    return text if decoded is None else decoded
+
 
 @dataclass
 class ReviewBaseline:
@@ -147,6 +325,14 @@ class ReviewScope:
     undecidable: bool = False
     diagnostic: str = ""
     fallback_from_incremental: bool = False
+    # WHY the fallback records WHICH domain failed: an incremental round grounds
+    # findings in two domains, and either one going missing routes to the same
+    # full/undecidable fallback. Without this, the round can only say "the fix
+    # baseline was untrustworthy" — which is a false accusation, and a
+    # misleading availability claim, when the fix baseline rebuilt fine and it
+    # was the implementation-baseline half that was missing or corrupt.
+    # ``fix_baseline`` / ``task_baseline``; empty when no fallback happened.
+    fallback_cause: str = ""
     # WHY the whole-task anchors travel ALONGSIDE the round's own anchors
     # instead of being merged into them: an incremental round's attention is
     # the fix delta (``changed_paths`` / ``causal_anchors``), but its EVIDENCE
@@ -183,6 +369,28 @@ class ReviewScope:
     )
     fix_delta_available: bool = False
     fix_delta_diagnostic: str = ""
+    # WHY a THIRD, purely path-level fact travels with the two anchor sets:
+    # the manifest tells "this delta touched the path" from "the path also
+    # carries earlier work" by subtracting added ranges, and an anchor-less
+    # path (binary, mode-only, rename-only, deletion-only) has no ranges to
+    # subtract — it would always read as delta-only. These are the delta paths
+    # the two baseline SNAPSHOTS prove work already touched before the delta
+    # baseline was taken (inside a captured submodule too) — a recorded git
+    # fact of the same kind as the anchors: no fix-iteration count, trigger
+    # type or closed-finding history rides in.
+    prior_work_paths: List[str] = field(default_factory=list)
+    # INVARIANT: the changed paths that entered this scope from a step's
+    # self-report alone, because git cannot see them at all (ignored files) and
+    # no baseline snapshot can hold them. They produce no diff anchor under ANY
+    # baseline comparison the round grounds on — a verdict from ONE
+    # reconstruction is not enough, since a file tracked at one capture and
+    # ignored by the next is declared-only for the later snapshot while the
+    # earlier one anchors it, which is why the attach helpers subtract every
+    # path a grounding comparison placed. Hence NOTHING persisted can say which
+    # domain they belong to — the manifest lists them by path with no domain mark rather
+    # than guessing one, and no execution-side bookkeeping is introduced to
+    # manufacture the missing attribution.
+    declared_only_paths: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -221,6 +429,37 @@ class BaselineLookup:
     @property
     def ok(self) -> bool:
         return self.status == BASELINE_STATUS_OK and self.baseline is not None
+
+
+def _anchored_paths(
+    changed_paths: Sequence[str], declared_only_paths: Sequence[str]
+) -> set:
+    """The paths a reconstruction's baseline comparison actually placed.
+
+    WHY the subtraction is spelled once, here: "the comparison placed this
+    path" is exactly "it entered ``changed_paths`` other than as a declared-only
+    self-report", and both attach helpers must apply the same test to keep the
+    manifest's anchor-less list equal to the paths NO grounding comparison can
+    reach.
+    """
+    return set(_clean_path_list(list(changed_paths))) - set(
+        _clean_path_list(list(declared_only_paths))
+    )
+
+
+def _clean_path_list(value: Any) -> List[str]:
+    # INVARIANT: drop blanks, never rewrite a nonempty entry. These are
+    # repository-relative paths whose only identity is their exact spelling —
+    # a file really named with a leading or trailing space is reachable under
+    # that name and no other — so ``strip()`` is the emptiness test here, not
+    # a normalization.
+    if not isinstance(value, list):
+        return []
+    return [
+        item
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ]
 
 
 def requirement_fingerprint(description: str) -> str:
@@ -452,7 +691,31 @@ class ReviewScopeManager:
             descriptor_path = self._baseline_dir(baseline_id) / "descriptor.json"
         except ValueError:
             return None
-        return self._read_descriptor(descriptor_path)
+        baseline = self._read_descriptor(descriptor_path)
+        if baseline is None or not self._owns_descriptor(baseline, str(baseline_id)):
+            return None
+        return baseline
+
+    def _owns_descriptor(
+        self, baseline: ReviewBaseline, expected_id: str
+    ) -> bool:
+        """Whether a descriptor really is THIS flow's snapshot of that id.
+
+        INVARIANT: a descriptor's persisted identity must agree with where it
+        was found before anything reconstructs from it. Location alone is not
+        evidence of identity — a descriptor is a plain JSON file that a copy, a
+        restored backup or a hand edit can put under another id or another
+        flow's store — and every consumer downstream treats what loads here as
+        the baseline the caller asked for. Accepting a foreign one would let a
+        different flow's snapshot be rendered as this flow's review scope, an
+        answer that is wrong while looking entirely healthy; refusing it routes
+        the file through the corrupt-descriptor diagnostic instead, which names
+        a real defect the operator can act on.
+        """
+        return (
+            baseline.baseline_id == expected_id
+            and baseline.flow_id == self.flow_id
+        )
 
     def store_exists(self) -> bool:
         """Whether this flow's baseline snapshot directory is still on disk."""
@@ -512,7 +775,10 @@ class ReviewScopeManager:
             if not entry.is_dir():
                 continue
             baseline = self._read_descriptor(entry / "descriptor.json")
-            if baseline is not None:
+            # Same ownership rule as ``load_baseline``: a role resolved by
+            # scanning the store must not pick up a descriptor that belongs
+            # somewhere else.
+            if baseline is not None and self._owns_descriptor(baseline, entry.name):
                 found.append(baseline)
         found.sort(key=lambda item: (item.captured_at, item.baseline_id))
         return found
@@ -610,6 +876,16 @@ class ReviewScopeManager:
 
         Presentation only: a missing answer costs the manifest an annotation
         and never changes what a round reviews or grounds on.
+
+        INVARIANT: only the EARLIEST baseline after the marker may answer, and
+        an unloadable one answers None rather than deferring to the next entry.
+        A later baseline was captured after some of the post-full-round fixes
+        had already landed, so its diff holds only the tail of the cumulative
+        delta — annotating with it would label the skipped fixes' hunks
+        "already present at the last full round", which is exactly the claim
+        this annotation exists to make and exactly the one that would be false.
+        Losing the annotation is presentation-only; asserting a wrong one is
+        not.
         """
         if not isinstance(scope_context, dict):
             return None
@@ -625,12 +901,9 @@ class ReviewScopeManager:
                 remaining = ordered[ordered.index(head) + 1:]
             else:
                 remaining = ordered
-            fix_baselines = self.load_fix_baselines(scope_context)
-            for baseline_id in remaining:
-                baseline = fix_baselines.get(baseline_id)
-                if baseline is not None:
-                    return baseline
-            return None
+            if not remaining:
+                return None
+            return self.load_fix_baselines(scope_context).get(remaining[0])
         # Pre-history persisted flows and synthetic callers carry only the
         # latest fix baseline; it is the whole history they have.
         latest = scope_context.get("latest_fix_baseline")
@@ -641,6 +914,39 @@ class ReviewScopeManager:
         if latest_id and latest_id != head:
             return ReviewBaseline.from_dict(latest)
         return None
+
+    @staticmethod
+    def declared_changed_paths(
+        flow_context: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """The implement-reported paths the flow's rounds were scoped with.
+
+        WHY the flow persists them at all: ``reconstruct`` consults declared
+        paths for exactly one case — a file git ignores, which baseline capture
+        provably cannot hold — and a later FIX reports only ITS own files, so a
+        round rebuilt from the last report alone would lose every ignored file
+        an earlier step created. The accumulated union is what each round is
+        scoped with, and it is read back here so a round is re-prepared (on a
+        resume, or on a later pass) with the same input it first ran on.
+
+        INVARIANT: one flat, flow-wide union — never split or attributed per
+        baseline. Such a path produces no diff anchor under ANY baseline
+        comparison, so no persisted git fact can say which domain it belongs
+        to; inferring one would take execution-side bookkeeping of who declared
+        what. Consumers therefore either present these paths WITHOUT a domain
+        mark (the round manifest — see ``ReviewScope.declared_only_paths``) or
+        leave them out entirely, as ``luo review-scope diff`` does: a view that
+        claims to be one baseline's comparison may not carry a path that
+        comparison cannot place.
+        """
+        scope_context: Dict[str, Any] = {}
+        if isinstance(flow_context, dict):
+            candidate = flow_context.get("review_scope")
+            if isinstance(candidate, dict):
+                scope_context = candidate
+        return sorted(set(
+            _clean_path_list(scope_context.get("declared_changed_paths"))
+        ))
 
     def lookup_baseline(
         self,
@@ -673,8 +979,42 @@ class ReviewScopeManager:
         if baseline_id:
             baseline = self.load_baseline(baseline_id)
             if baseline is None:
-                # The flow still names this baseline, so it WAS captured; the
-                # descriptor is simply no longer on disk.
+                # INVARIANT: "capture failed" outranks "reclaimed" when the
+                # descriptor is absent. A capture that raised never wrote one —
+                # the state machine synthesizes an ``available=False`` record
+                # into the flow context instead (see
+                # ``_ensure_implementation_review_baseline``) — so the absence
+                # on disk IS that failure, not a later cleanup. Reporting it as
+                # reclaimed would swallow the capture diagnostic and send the
+                # operator after a snapshot that never existed; the two stay
+                # separately reportable, including when a later reclaim runs
+                # over a store that already held no descriptor for this id.
+                failure = self._recorded_capture_failure(scope_context, baseline_id)
+                if failure is not None:
+                    return BaselineLookup(
+                        status=BASELINE_STATUS_UNAVAILABLE,
+                        selector=selector,
+                        baseline_id=baseline_id,
+                        diagnostic=failure,
+                    )
+                # The flow still names this baseline, so it WAS captured, and
+                # the store tells which of the two remaining situations it is.
+                # INVARIANT: "reclaimed" is claimed ONLY when the whole store
+                # is gone, because reclaiming is all-or-nothing — cleanup
+                # removes this flow's entire snapshot directory (see
+                # ``discard_snapshots``). A store still on disk means cleanup
+                # never ran, so a descriptor that will not load there is a
+                # damaged or hand-removed snapshot of a flow that may still be
+                # resumable; telling its operator the snapshots were reclaimed
+                # at flow termination names an event that did not happen and
+                # points the remedy at the wrong thing.
+                if self.store_exists():
+                    return BaselineLookup(
+                        status=BASELINE_STATUS_UNAVAILABLE,
+                        selector=selector,
+                        baseline_id=baseline_id,
+                        diagnostic=self._descriptor_defect(baseline_id),
+                    )
                 return BaselineLookup(
                     status=BASELINE_STATUS_CLEANED,
                     selector=selector,
@@ -692,6 +1032,74 @@ class ReviewScopeManager:
         return BaselineLookup(
             status=BASELINE_STATUS_NOT_CAPTURED, selector=selector
         )
+
+    def _descriptor_defect(self, baseline_id: str) -> str:
+        """Why a named baseline's descriptor did not load, for the operator.
+
+        Missing and corrupt are separated because the remedies differ: a
+        descriptor file that is simply not there points at something outside
+        the flow having removed it, while one that is present but unreadable
+        points at a truncated or partially written file.
+        """
+        try:
+            descriptor_path = self._baseline_dir(baseline_id) / "descriptor.json"
+        except ValueError:
+            return f"unsafe review baseline id: {baseline_id!r}"
+        if not descriptor_path.exists():
+            return (
+                "baseline snapshot descriptor is missing while the flow's "
+                f"snapshot store is still present: {descriptor_path}"
+            )
+        return (
+            "baseline snapshot descriptor is unreadable or corrupt: "
+            f"{descriptor_path}"
+        )
+
+    @staticmethod
+    def _recorded_capture_failure(
+        scope_context: Dict[str, Any], baseline_id: str
+    ) -> Optional[str]:
+        """The capture diagnostic the flow recorded for ``baseline_id``, if any.
+
+        Returns ``None`` when the flow's own records do not say the capture
+        failed — the id may simply not appear, or appear as a healthy capture.
+        An empty diagnostic list still yields a (generic) string, because the
+        distinction the caller needs is "was this ever a usable snapshot", and
+        a failed capture that recorded no detail is still a failed capture.
+
+        WHY every record naming the id is read instead of the first: the same
+        baseline is written to more than one place (the role slot AND the fix
+        history entry), and the copies do not all carry the diagnostic — the
+        history entry has it while the ``latest_fix_baseline`` slot may not.
+        Stopping at the first match would report the generic fallback while the
+        real reason sat one record away.
+        """
+        records: List[Dict[str, Any]] = []
+        for key in ("implementation_baseline", "latest_fix_baseline"):
+            value = scope_context.get(key)
+            if isinstance(value, dict):
+                records.append(value)
+        history = scope_context.get("fix_baseline_history")
+        if isinstance(history, list):
+            records.extend(item for item in history if isinstance(item, dict))
+        failed = False
+        details: List[str] = []
+        for record in records:
+            if str(record.get("baseline_id") or "") != baseline_id:
+                continue
+            if record.get("available") is not False:
+                continue
+            failed = True
+            diagnostics = record.get("diagnostics")
+            if not isinstance(diagnostics, list):
+                continue
+            for item in diagnostics:
+                text = str(item)
+                if text and text not in details:
+                    details.append(text)
+        if not failed:
+            return None
+        return "; ".join(details) or "baseline capture failed (no diagnostic recorded)"
 
     @staticmethod
     def _lookup_from_descriptor(
@@ -871,33 +1279,70 @@ class ReviewScopeManager:
         is the earliest fix baseline captured since the previous full round, and
         it is reconstructed only so the scope manifest can mark which of this
         round's hunks are new since that round. It never narrows the round.
+
+        INVARIANT: an incremental round is decidable only when BOTH of its
+        evidence domains were rebuilt. The whole-task domain is not an optional
+        widening of the fix delta — it is half of the domain the round grounds
+        findings in, so losing it would silently narrow the evidence rule back
+        to the fix delta while the round still reported itself decidable, and a
+        finding anchored on real earlier task work would be dropped as bad
+        evidence. Losing it therefore takes the SAME established route as an
+        undecidable incremental baseline: fall back to full, where the round's
+        own baseline is the implementation baseline and the whole task is in
+        scope by construction.
         """
         mode = "incremental" if requested_mode == "incremental" else "full"
         result = self.reconstruct(mode, baseline, declared_paths=declared_paths)
-        if mode != "incremental" or not result.undecidable:
-            if mode == "incremental":
-                self._attach_task_scope(
-                    result, full_baseline, declared_paths=declared_paths
-                )
-            else:
-                self._attach_fix_delta_scope(
-                    result, fix_delta_baseline, declared_paths=declared_paths
-                )
+        if mode != "incremental":
+            self._attach_fix_delta_scope(
+                result,
+                fix_delta_baseline,
+                round_baseline=baseline,
+                declared_paths=declared_paths,
+            )
             return result
 
-        incremental_diagnostic = result.diagnostic
+        if not result.undecidable:
+            if self._attach_task_scope(
+                result,
+                full_baseline,
+                round_baseline=baseline,
+                declared_paths=declared_paths,
+            ):
+                return result
+            incremental_diagnostic = result.task_scope_diagnostic
+            fallback_cause = "task_baseline"
+            # WHY the two causes are worded apart: naming the fix baseline as
+            # the failure when it rebuilt cleanly sends the reader (and the
+            # checker reading the prompt built from this) after a healthy
+            # snapshot, and hides that the implementation-baseline domain — the
+            # very one the fallback routes to — is what is missing.
+            failure = (
+                "the fix baseline rebuilt, but the whole-task half of the "
+                "incremental evidence domain did not"
+            )
+        else:
+            incremental_diagnostic = result.diagnostic
+            fallback_cause = "fix_baseline"
+            failure = "the fix baseline was undecidable"
+
         full = self.reconstruct(
             "full", full_baseline, declared_paths=declared_paths
         )
         full.requested_mode = "incremental"
         full.fallback_from_incremental = True
+        full.fallback_cause = fallback_cause
         prefix = (
-            "Incremental baseline was undecidable; review safely fell back to "
-            f"the implementation baseline ({incremental_diagnostic})."
+            f"Incremental round could not be reconstructed ({failure}); review "
+            "safely fell back to the implementation baseline "
+            f"({incremental_diagnostic})."
         )
         full.diagnostic = f"{prefix} {full.diagnostic}".strip()
         self._attach_fix_delta_scope(
-            full, fix_delta_baseline, declared_paths=declared_paths
+            full,
+            fix_delta_baseline,
+            round_baseline=full_baseline,
+            declared_paths=declared_paths,
         )
         return full
 
@@ -906,6 +1351,7 @@ class ReviewScopeManager:
         result: ReviewScope,
         fix_delta_baseline: Optional[ReviewBaseline],
         *,
+        round_baseline: Optional[ReviewBaseline] = None,
         declared_paths: Optional[Sequence[str]] = None,
     ) -> None:
         """Attach the since-last-full-round fix anchors to a full scope.
@@ -937,49 +1383,301 @@ class ReviewScopeManager:
         result.fix_delta_causal_anchors = delta.causal_anchors
         result.fix_delta_deletion_anchors = delta.deletion_anchors
         result.fix_delta_available = True
+        # INVARIANT: a path this round's OWN (grounding) comparison anchored
+        # never joins the declared-only set, however the auxiliary
+        # reconstruction classified it. A file tracked when the implementation
+        # baseline was captured and git-ignored by the time the fix baseline
+        # was, then self-reported, is declared-only for the fix reconstruction
+        # alone — unioning that verdict in would make the manifest present an
+        # anchor-bearing path as anchor-less, suppressing its counts, ranges
+        # and deletion lines and inviting the one citation form
+        # ``_validate_evidence`` then drops as bad evidence.
+        result.declared_only_paths = sorted(
+            (set(result.declared_only_paths) | set(delta.declared_only_paths))
+            - _anchored_paths(result.changed_paths, result.declared_only_paths)
+        )
+        # Earlier here means "already present at the previous full round": the
+        # round's own (implementation) baseline is the earlier snapshot, the
+        # pinned fix baseline the later one.
+        result.prior_work_paths = self.paths_changed_between(
+            round_baseline, fix_delta_baseline, delta.changed_paths
+        )
 
     def _attach_task_scope(
         self,
         result: ReviewScope,
         full_baseline: Optional[ReviewBaseline],
         *,
+        round_baseline: Optional[ReviewBaseline] = None,
         declared_paths: Optional[Sequence[str]] = None,
-    ) -> None:
+    ) -> bool:
         """Attach the implementation-baseline anchor set to an incremental scope.
 
-        WHY a failure here never degrades the round: the whole-task domain only
-        WIDENS what evidence can ground on. When it cannot be rebuilt the round
-        still has its own decidable fix-delta domain and behaves exactly as it
-        did before this widening existed — turning a usable incremental round
-        undecidable over a purely additive input would be a regression, not a
-        safety measure.
+        Returns whether the whole-task evidence domain is now available on
+        ``result``.
+
+        WHY a failure here is NOT absorbed as a lost annotation: the whole-task
+        diff is one of the two domains an incremental round grounds findings
+        in, not a decoration on top of the fix delta. Keeping the round
+        decidable without it would silently narrow the evidence rule back to
+        the fix delta — a finding anchored on real earlier task work would then
+        be dropped as bad evidence, with nothing in the round saying the domain
+        was missing. The caller therefore routes a ``False`` into the same
+        full/undecidable fallback an undecidable incremental baseline takes,
+        where the whole task is in scope by construction.
         """
         if full_baseline is None:
             result.task_scope_diagnostic = (
-                "implementation baseline is missing; evidence can only ground "
-                "in this fix's delta"
+                "implementation baseline is missing, so the whole-task "
+                "evidence domain could not be reconstructed"
             )
-            return
+            return False
         if full_baseline.baseline_id == result.baseline_id:
             # The round already diffs from the implementation baseline, so its
             # own anchors ARE the whole-task anchors.
-            return
+            return True
         task = self.reconstruct(
             "full", full_baseline, declared_paths=declared_paths
         )
         if task.undecidable:
             result.task_scope_diagnostic = (
                 "whole-task diff could not be reconstructed "
-                f"({task.diagnostic}); evidence can only ground in this fix's "
-                "delta"
+                f"({task.diagnostic})"
             )
-            return
+            return False
         result.task_baseline_id = task.baseline_id
         result.task_changed_paths = list(task.changed_paths)
         result.task_causal_anchors = task.causal_anchors
         result.task_deletion_anchors = task.deletion_anchors
         result.task_artifact_path = task.artifact_path
         result.task_scope_available = True
+        # INVARIANT: an incremental round grounds on BOTH comparisons, so a
+        # path either of them anchored never joins the declared-only set. A
+        # file tracked at implementation-baseline capture and git-ignored by
+        # fix-baseline capture is declared-only for the fix reconstruction
+        # only, while the whole-task comparison holds real anchors for it —
+        # unioning that verdict in would advertise an anchor-bearing path as
+        # anchor-less and turn a bare-path citation into a silent bad-evidence
+        # drop.
+        result.declared_only_paths = sorted(
+            (set(result.declared_only_paths) | set(task.declared_only_paths))
+            - _anchored_paths(result.changed_paths, result.declared_only_paths)
+            - _anchored_paths(task.changed_paths, task.declared_only_paths)
+        )
+        # Earlier here means "done by this task before the current fix": the
+        # implementation baseline is the earlier snapshot, this round's own fix
+        # baseline the later one.
+        result.prior_work_paths = self.paths_changed_between(
+            full_baseline, round_baseline, result.changed_paths
+        )
+        return True
+
+    def paths_changed_between(
+        self,
+        earlier: Optional[ReviewBaseline],
+        later: Optional[ReviewBaseline],
+        paths: Sequence[str],
+    ) -> List[str]:
+        """Which of ``paths`` differ between two captured baseline snapshots.
+
+        WHY this exists next to the anchor sets: a manifest domain mark that is
+        read off added ranges alone cannot classify an anchor-less path
+        (binary, mode-only, rename-only, deletion-only), because such a path
+        owns no range to attribute. Two snapshots of the SAME path, however,
+        answer "did work already touch this before the later baseline was
+        taken" directly — and the snapshots are exactly the persisted git facts
+        the round is already built on.
+
+        Read-only and total: a snapshot whose blob can no longer be read leaves
+        its path out of the answer rather than failing the round, because the
+        result is a presentation annotation and losing one mark must never cost
+        a usable review.
+        """
+        if earlier is None or later is None:
+            return []
+        out: List[str] = []
+        for path in sorted({str(item) for item in paths if str(item)}):
+            try:
+                if self._baseline_entry_differs(earlier, later, path):
+                    out.append(path)
+            except Exception as exc:  # noqa: BLE001 - annotation, never a gate
+                logger.debug(
+                    "Review baseline comparison unavailable for %s: %s", path, exc
+                )
+        return out
+
+    def _baseline_entry_differs(
+        self, earlier: ReviewBaseline, later: ReviewBaseline, path: str
+    ) -> bool:
+        before = earlier.tracked.get(path) or earlier.untracked.get(path)
+        after = later.tracked.get(path) or later.untracked.get(path)
+        before_absent = not before or before.get("storage") == "missing"
+        after_absent = not after or after.get("storage") == "missing"
+        if before_absent and after_absent:
+            # A submodule's inner files are rendered as changed paths in their
+            # own right, but a snapshot holds them under the PARENT gitlink's
+            # manifest, never under the inner path itself. Look there before
+            # concluding anything, or every anchor-less inner path (a binary
+            # both IMPLEMENT and this fix rewrote, say) would read as
+            # untouched-before and be credited entirely to this fix.
+            parent = self._gitlink_parent(earlier, later, path)
+            if parent is not None:
+                return self._gitlink_inner_differs(
+                    earlier, later, parent, path[len(parent) + 1:]
+                )
+            # Neither snapshot holds the path. A file git ignores is invisible
+            # to both captures, so "same" is the only claim the snapshots
+            # support — never an assertion that it was changed. Such a path
+            # carries no domain mark at all rather than a guessed one; see
+            # ``ReviewScope.declared_only_paths``.
+            return False
+        if before_absent != after_absent:
+            return True
+        assert before is not None and after is not None
+        before_ref = self._descriptor_identity(before)
+        after_ref = self._descriptor_identity(after)
+        if (
+            before_ref is not None
+            and after_ref is not None
+            and before_ref[0] == after_ref[0]
+        ):
+            # Same storage form on both sides: the recorded reference is
+            # content-addressed within that one space, so it decides equality
+            # without reading a single blob back.
+            return before_ref != after_ref
+        return self._entry_identity(
+            self._load_baseline_entry(earlier, before)
+        ) != self._entry_identity(self._load_baseline_entry(later, after))
+
+    @staticmethod
+    def _gitlink_descriptor(
+        baseline: ReviewBaseline, path: str
+    ) -> Optional[Dict[str, Any]]:
+        descriptor = baseline.tracked.get(path) or baseline.untracked.get(path)
+        if not descriptor or descriptor.get("storage") == "missing":
+            return None
+        if str(descriptor.get("kind", "file")) != "gitlink":
+            return None
+        return descriptor
+
+    def _gitlink_parent(
+        self, earlier: ReviewBaseline, later: ReviewBaseline, path: str
+    ) -> Optional[str]:
+        """The submodule one rendered inner path lives in, if any.
+
+        The longest ancestor wins so a nested submodule is attributed to the
+        checkout that actually records the file, not to the outer one.
+        """
+        segments = str(path).split("/")
+        for cut in range(len(segments) - 1, 0, -1):
+            candidate = "/".join(segments[:cut])
+            if (
+                self._gitlink_descriptor(earlier, candidate) is not None
+                or self._gitlink_descriptor(later, candidate) is not None
+            ):
+                return candidate
+        return None
+
+    @staticmethod
+    def _gitlink_inner_identity(
+        descriptor: Optional[Dict[str, Any]], inner: str
+    ) -> Optional[Tuple[str, ...]]:
+        """One inner file's recorded identity inside a captured submodule.
+
+        The worktree hashes win over the index entry because the manifest
+        records them exactly when the checkout's content differs from what the
+        index says — the index sha would then name a version that was never on
+        disk at capture. ``None`` means the submodule did not hold the file.
+        """
+        if not descriptor:
+            return None
+        manifest = descriptor.get("submodule_manifest")
+        if not isinstance(manifest, dict):
+            return None
+        for key in ("dirty_hashes", "untracked"):
+            table = manifest.get(key)
+            if isinstance(table, dict) and inner in table:
+                return ("worktree", str(table[inner]))
+        files = manifest.get("files")
+        if isinstance(files, dict) and inner in files:
+            spec = files[inner]
+            if isinstance(spec, (list, tuple)) and len(spec) >= 2:
+                return ("index", str(spec[0]), str(spec[1]))
+        return None
+
+    def _gitlink_inner_differs(
+        self,
+        earlier: ReviewBaseline,
+        later: ReviewBaseline,
+        parent: str,
+        inner: str,
+    ) -> bool:
+        """Whether the snapshots recorded different content for an inner file."""
+        if not inner or not self._safe_inner_path(inner):
+            return False
+        before_desc = self._gitlink_descriptor(earlier, parent)
+        after_desc = self._gitlink_descriptor(later, parent)
+        before_id = self._gitlink_inner_identity(before_desc, inner)
+        after_id = self._gitlink_inner_identity(after_desc, inner)
+        if before_id is None and after_id is None:
+            return False
+        if before_id is None or after_id is None:
+            return True
+        if before_id[0] == after_id[0]:
+            # Same recorded form on both sides: the reference is
+            # content-addressed within that one space and decides equality
+            # outright, with no blob read.
+            return before_id != after_id
+        # The two sides recorded the file in different spaces (a git blob sha1
+        # against a worktree sha256), which are not comparable as references —
+        # only the bytes themselves answer, so a checkout that committed the
+        # very content the earlier snapshot saw dirty is not mis-marked.
+        before_bytes = self._gitlink_inner_content(earlier, parent, inner)
+        after_bytes = self._gitlink_inner_content(later, parent, inner)
+        if before_bytes is None or after_bytes is None:
+            return True
+        return before_bytes != after_bytes
+
+    def _gitlink_inner_content(
+        self, baseline: ReviewBaseline, parent: str, inner: str
+    ) -> Optional[bytes]:
+        """One inner file's captured bytes, or ``None`` when unreadable."""
+        descriptor = self._gitlink_descriptor(baseline, parent)
+        if descriptor is None:
+            return None
+        entry = self._load_baseline_entry(baseline, descriptor)
+        if entry is None:
+            return None
+        spec: Optional[List[str]] = None
+        manifest = entry.get("manifest")
+        if isinstance(manifest, dict):
+            files = manifest.get("files")
+            raw = files.get(inner) if isinstance(files, dict) else None
+            if isinstance(raw, (list, tuple)) and len(raw) >= 2:
+                spec = [str(raw[0]), str(raw[1])]
+        return self._gitlink_file_before(entry, parent, inner, spec)
+
+    @staticmethod
+    def _descriptor_identity(descriptor: Dict[str, Any]) -> Optional[Tuple[str, ...]]:
+        """A descriptor's content-addressed identity, when it has one.
+
+        ``None`` means the descriptor cannot be compared without loading it
+        (an unknown storage form, or a gitlink whose identity is its submodule
+        manifest rather than the recorded reference).
+        """
+        storage = str(descriptor.get("storage", ""))
+        kind = str(descriptor.get("kind", "file"))
+        if kind == "gitlink":
+            return None
+        if storage == "git":
+            reference = str(descriptor.get("object_id", ""))
+        elif storage == "blob":
+            reference = str(descriptor.get("blob_sha256", ""))
+        else:
+            return None
+        if not reference:
+            return None
+        return (storage, kind, str(descriptor.get("mode", "")), reference)
 
     def reconstruct(
         self,
@@ -1027,8 +1725,11 @@ class ReviewScopeManager:
             result.diagnostic = identity_error or "repository identity changed since baseline"
             return result
 
-        descriptor_path = self._baseline_dir(baseline.baseline_id) / "descriptor.json"
-        on_disk = self._read_descriptor(descriptor_path)
+        # Loaded through the ownership check rather than read raw: the caller's
+        # copy may itself have come from a persisted flow record, so "the two
+        # agree" only proves the snapshot is this flow's when the file on disk
+        # was accepted as this flow's first (see ``_owns_descriptor``).
+        on_disk = self.load_baseline(baseline.baseline_id)
         if on_disk is None or on_disk.to_dict() != baseline.to_dict():
             result.undecidable = True
             result.diagnostic = "persisted baseline descriptor is missing or corrupt"
@@ -1135,6 +1836,7 @@ class ReviewScopeManager:
             result.changed_paths = sorted(
                 set(changes) | set(inner_paths) | set(ignored)
             )
+            result.declared_only_paths = list(ignored)
             result.causal_anchors = anchors
             result.deletion_anchors = deletions
             result.unified_diff = diff_text
@@ -1149,6 +1851,7 @@ class ReviewScopeManager:
             result.changed_paths = []
             result.causal_anchors = {}
             result.deletion_anchors = {}
+            result.declared_only_paths = []
             result.unified_diff = ""
             logger.warning("Review diff reconstruction unavailable: %s", exc)
             return result
@@ -1178,32 +1881,71 @@ class ReviewScopeManager:
         for raw in declared_paths:
             if not isinstance(raw, str) or not raw.strip():
                 continue
-            path = raw.strip().replace("\\", "/")
-            # Trim a leading "./" only — a character-class strip would eat the
-            # leading dot of a legitimate dotfile such as ``.env.local``.
-            while path.startswith("./"):
-                path = path[2:]
-            if not path or path in known:
-                continue
-            try:
-                self._validate_relative_path(path)
-            except ValueError:
-                continue
-            if (
-                path in current_tracked
-                or path in current_untracked
-                or path in baseline.tracked
-                or path in baseline.untracked
-                or self._is_runtime_untracked(path)
+            # WHY the reported spelling is tried before the trimmed one, and
+            # why the first spelling that RESOLVES ends the search: a
+            # repository path may legitimately carry a leading or trailing
+            # space, and such a file is anchor-less by definition — no diff can
+            # correct the name, so trimming it unconditionally would silently
+            # substitute a nonexistent path and lose the real change. The
+            # trimmed spelling stays as a fallback because a report is
+            # LLM-authored text that just as often carries stray whitespace;
+            # it is consulted only where the reported spelling names nothing
+            # this repository holds. A spelling git already accounts for — one
+            # the reconstruction already carries, one listed on either side of
+            # the comparison, or one excluded as runtime state — has resolved
+            # just as decisively as one found on disk: falling through it would
+            # let a real changed ``"a.py "`` resolve a second time to an
+            # unrelated ignored ``a.py`` and put a file the flow never touched
+            # into the manifest. Separator normalization (``\`` → ``/``) is one
+            # more fallback of exactly the same shape and for the same reason:
+            # on POSIX a backslash is an ordinary filename character, so a
+            # changed ``tracked\file.py`` must be resolved as spelled before
+            # the Windows reading is tried — rewriting it up front would
+            # silently resolve an unrelated ignored ``tracked/file.py`` and
+            # drop the real change from the manifest. Every test applied to a
+            # candidate obeys that same order, runtime-state exclusion
+            # included: it reads each spelling with this platform's
+            # separators only, so the Windows reading of
+            # ``tianluo\state\note.py`` is judged runtime state only once
+            # that exact spelling has resolved nowhere and the normalized
+            # candidate is reached.
+            candidates: List[str] = []
+            for spelling in (
+                raw,
+                raw.strip(),
+                raw.replace("\\", "/"),
+                raw.strip().replace("\\", "/"),
             ):
-                continue
-            absolute = self.project_root / path
-            try:
-                if not absolute.is_file():
+                if spelling and spelling not in candidates:
+                    candidates.append(spelling)
+            for path in candidates:
+                # Trim a leading "./" only — a character-class strip would eat
+                # the leading dot of a legitimate dotfile like ``.env.local``.
+                while path.startswith("./"):
+                    path = path[2:]
+                if not path:
                     continue
-            except OSError:
-                continue
-            out.append(path)
+                try:
+                    self._validate_relative_path(path)
+                except ValueError:
+                    continue
+                if (
+                    path in known
+                    or path in current_tracked
+                    or path in current_untracked
+                    or path in baseline.tracked
+                    or path in baseline.untracked
+                    or self._is_runtime_untracked(path)
+                ):
+                    break
+                absolute = self.project_root / path
+                try:
+                    if not absolute.is_file():
+                        continue
+                except OSError:
+                    continue
+                out.append(path)
+                break
         return sorted(set(out))
 
     @staticmethod
@@ -1211,9 +1953,10 @@ class ReviewScopeManager:
         """Explicit notes for git-ignored declared paths (never a fake diff)."""
         lines: List[str] = []
         for path in paths:
-            lines.append(f"diff --git a/{path} b/{path}\n")
+            token = quote_diff_path(path)
+            lines.append(f"diff --git a/{token} b/{token}\n")
             lines.append(
-                f"@@ {path} @@ (git-ignored path reported changed by the "
+                f"@@ {token} @@ (git-ignored path reported changed by the "
                 "implementation; ignored files are outside baseline capture, "
                 "so no line diff can be reconstructed — read the file "
                 "directly to review it)\n"
@@ -1355,8 +2098,27 @@ class ReviewScopeManager:
         ]
 
     def _is_runtime_untracked(self, path: str) -> bool:
+        """Whether a repository path names runtime state left out of capture.
+
+        WHY separators are read platform-literally and ``\\`` is never
+        rewritten to ``/``: on POSIX a backslash is an ordinary filename
+        character, and both path sources this predicate serves spell paths
+        that way. Git enumerates every path with ``/``, so a backslash it
+        reports is part of the name — rewriting it would drop a real changed
+        ``tianluo\\state\\note.py`` from baseline capture as though it were
+        runtime state, leaving that file's baseline-to-current diff
+        unreconstructable. A DECLARED path is resolved as spelled first for
+        the same reason, and its caller offers the separator-normalized
+        spelling as a later candidate, so the Windows reading of such a
+        spelling is still classified — only after the exact spelling has
+        resolved nowhere. Honouring just the separators this platform actually
+        has therefore serves both sources with one reading.
+        """
         runtime = runtime_dir_name(self.project_root).rstrip("/")
-        parts = [part for part in path.replace("\\", "/").split("/") if part]
+        spelling = path.replace(os.sep, "/")
+        if os.altsep:
+            spelling = spelling.replace(os.altsep, "/")
+        parts = [part for part in spelling.split("/") if part]
         return len(parts) >= 2 and parts[0] == runtime and parts[1] in _RUNTIME_STATE_SUBTREES
 
     @staticmethod
@@ -1792,10 +2554,12 @@ class ReviewScopeManager:
             new_path = matches[0]
             paired.add(old_path)
             paired.add(new_path)
+            old_token = quote_diff_path(old_path)
+            new_token = quote_diff_path(new_path)
             pieces.append(
-                f"diff --git a/{old_path} b/{new_path}\n"
+                f"diff --git a/{old_token} b/{new_token}\n"
                 "similarity index 100%\n"
-                f"rename from {old_path}\nrename to {new_path}\n"
+                f"rename from {old_token}\nrename to {new_token}\n"
             )
 
         for path, (before, after) in sorted(changes.items()):
@@ -1846,9 +2610,10 @@ class ReviewScopeManager:
         before: Optional[Dict[str, Any]],
         after: Optional[Dict[str, Any]],
     ) -> Tuple[str, List[List[int]], List[List[int]]]:
-        old_label = f"a/{path}" if before is not None else "/dev/null"
-        new_label = f"b/{path}" if after is not None else "/dev/null"
-        lines = [f"diff --git a/{path} b/{path}\n"]
+        token = quote_diff_path(path)
+        old_label = f"a/{token}" if before is not None else "/dev/null"
+        new_label = f"b/{token}" if after is not None else "/dev/null"
+        lines = [f"diff --git a/{token} b/{token}\n"]
         if before is None and after is not None:
             lines.append(f"new file mode {after.get('mode', '100644')}\n")
         elif before is not None and after is None:
@@ -1982,10 +2747,11 @@ class ReviewScopeManager:
         resolved still grounds a citation at path level instead of being
         dropped as ungrounded evidence.
         """
-        lines = [f"diff --git a/{path} b/{path}\n"]
+        token = quote_diff_path(path)
+        lines = [f"diff --git a/{token} b/{token}\n"]
         if before is None or after is None:
             lines.append(
-                f"{'new' if before is None else 'deleted'} submodule {path}\n"
+                f"{'new' if before is None else 'deleted'} submodule {token}\n"
             )
             return "".join(lines), {}, {}, []
 
@@ -2081,19 +2847,38 @@ class ReviewScopeManager:
                 else None
             )
             label = f"{path}/{inner}"
+            label_token = quote_diff_path(label)
             if old_content is None and (old is not None or old_untracked):
                 # The baseline content is unavailable: the change is real (the
                 # manifest hashes differ) but its exact before-side text is
                 # not reconstructable — say so instead of faking an empty file.
+                #
+                # INVARIANT: a degraded note carries its OWN ``diff --git``
+                # header, exactly as a reconstructable inner file does. The
+                # header is what splits the rendered diff into per-path
+                # sections, so without one this note would ride inside the
+                # parent gitlink section (or, when a reconstructable inner
+                # file was rendered first, inside THAT file's section) and a
+                # single-file view of a sibling path would expose an unrelated
+                # changed file the ``--stat`` view of the same filter does not
+                # list. Both views resolve a filter through path containment
+                # alone, so every path the diff names must be splittable out
+                # under its own name.
                 lines.append(
-                    f"@@ {label} @@ (baseline content unavailable; "
+                    f"diff --git a/{label_token} b/{label_token}\n"
+                )
+                lines.append(
+                    f"@@ {label_token} @@ (baseline content unavailable; "
                     "change detected via submodule index/status fingerprint)\n"
                 )
                 inner_rendered.append(label)
                 continue
             if new_content is None and (new is not None or new_untracked):
                 lines.append(
-                    f"@@ {label} @@ (current content unavailable; "
+                    f"diff --git a/{label_token} b/{label_token}\n"
+                )
+                lines.append(
+                    f"@@ {label_token} @@ (current content unavailable; "
                     "change detected via submodule index/status fingerprint)\n"
                 )
                 inner_rendered.append(label)
@@ -2186,16 +2971,27 @@ class ReviewScopeManager:
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / "descriptor.json"
         temporary = directory / f".descriptor.{uuid.uuid4().hex}.tmp"
+        # WHY the descriptor is written (and read) through
+        # ``surrogateescape``: its keys are pathnames, and a POSIX pathname is
+        # bytes — a Git-visible byte that is not valid UTF-8 arrives as a lone
+        # surrogate that plain UTF-8 encoding refuses. This write is the LAST
+        # step of ``capture`` and sits outside its degradation guard, so
+        # raising here would abort the whole IMPLEMENT/FIX step rather than
+        # degrade; the escape handler restores the original byte instead,
+        # keeping the descriptor an exact record of what was captured.
         temporary.write_text(
             json.dumps(baseline.to_dict(), ensure_ascii=False, sort_keys=True),
             encoding="utf-8",
+            errors="surrogateescape",
         )
         os.replace(str(temporary), str(target))
 
     @staticmethod
     def _read_descriptor(path: Path) -> Optional[ReviewBaseline]:
         try:
-            return ReviewBaseline.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            return ReviewBaseline.from_dict(
+                json.loads(path.read_text(encoding="utf-8", errors="surrogateescape"))
+            )
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
@@ -2223,24 +3019,74 @@ class DiffSection:
 _DIFF_HEADER_PREFIX = "diff --git "
 
 
+def _quoted_token_end(text: str) -> Optional[int]:
+    """Index of the closing quote of a quoted token starting at position 0."""
+    index = 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == '"':
+            return index
+        index += 1
+    return None
+
+
 def _split_header_paths(header: str) -> Tuple[str, str]:
     """Recover the (old, new) paths a ``diff --git`` header names.
 
-    Paths are emitted unquoted and may contain spaces, so the split point is
-    searched from the right: the b-side marker is always the last ``" b/"`` in
-    a header the renderer produced.
+    A side whose pathname could not be written literally is a quoted token
+    (see :func:`quote_diff_path`); a quoted token is self-delimiting, so it is
+    read out directly and only the all-literal header needs the scan below.
+
+    WHY the split point of an all-literal header is not simply the last (or
+    first) ``" b/"``: literal paths may themselves contain that sequence, so a
+    file named ``pkg b/generated.py`` yields ``a/pkg b/generated.py b/pkg
+    b/generated.py`` and either end-anchored scan cuts inside a filename.
+    Every candidate split is therefore considered and the one whose two sides
+    agree wins — the only self-consistent reading, and the shape of every
+    header except a rename. A rename is disambiguated by its own ``rename
+    from``/``rename to`` lines (see :func:`split_diff_sections`), which carry
+    one path each and need no splitting at all; the leftmost candidate is the
+    fallback here so the a-side stays the shortest reading rather than
+    swallowing the b-side.
     """
     rest = header[len(_DIFF_HEADER_PREFIX):].rstrip("\n")
     if not rest.startswith("a/"):
         return "", ""
-    index = rest.rfind(" b/")
+    body = rest[2:]
+    if body.startswith('"'):
+        end = _quoted_token_end(body)
+        if end is None or not body[end + 1:].startswith(" b/"):
+            return "", ""
+        old = unquote_diff_path(body[:end + 1])
+        new = unquote_diff_path(body[end + 4:])
+        return (old, new) if old and new else ("", "")
+    # A literal a-side carries no quote character at all (that is precisely
+    # what forces quoting), so the first ``" b/\""`` in it can only be the
+    # separator ahead of a quoted b-side.
+    marker = body.find(' b/"')
+    if marker != -1:
+        old, new = body[:marker], unquote_diff_path(body[marker + 3:])
+        return (old, new) if old and new else ("", "")
+    candidates: List[Tuple[str, str]] = []
+    index = body.find(" b/")
     while index != -1:
-        old = rest[2:index]
-        new = rest[index + 3:]
+        old, new = body[:index], body[index + 3:]
         if old and new:
-            return old, new
-        index = rest.rfind(" b/", 0, index)
-    return "", ""
+            if old == new:
+                return old, new
+            candidates.append((old, new))
+        index = body.find(" b/", index + 1)
+    return candidates[0] if candidates else ("", "")
+
+
+# Emitted by the renderer for an exact rename, one path per line, so they name
+# the two sides unambiguously even when a path contains the header's own
+# separator sequence.
+_RENAME_FROM_PREFIX = "rename from "
+_RENAME_TO_PREFIX = "rename to "
 
 
 def split_diff_sections(diff_text: str) -> List[DiffSection]:
@@ -2258,8 +3104,24 @@ def split_diff_sections(diff_text: str) -> List[DiffSection]:
     def flush() -> None:
         if not current:
             return
+        # The rename lines win over the header split: they are unambiguous,
+        # while the header packs both paths onto one line. Only the section
+        # preamble is scanned, so a hunk's content can never be mistaken for
+        # one (every body line carries a diff prefix, but the bound is free).
+        old_name, new_name = old_path, new_path
+        for line in current[1:]:
+            if line.startswith("@@") or line.startswith("--- "):
+                break
+            if line.startswith(_RENAME_FROM_PREFIX):
+                old_name = unquote_diff_path(
+                    line[len(_RENAME_FROM_PREFIX):].rstrip("\n")
+                )
+            elif line.startswith(_RENAME_TO_PREFIX):
+                new_name = unquote_diff_path(
+                    line[len(_RENAME_TO_PREFIX):].rstrip("\n")
+                )
         sections.append(
-            DiffSection(path=new_path, old_path=old_path, text="".join(current))
+            DiffSection(path=new_name, old_path=old_name, text="".join(current))
         )
 
     for line in diff_text.splitlines(keepends=True):
@@ -2274,22 +3136,128 @@ def split_diff_sections(diff_text: str) -> List[DiffSection]:
     return sections
 
 
-def section_covers_path(section: DiffSection, path: str) -> bool:
-    """Whether a section renders ``path``.
+def normalize_scope_path(value: str) -> str:
+    """Reduce one path to the spelling the scope's changed-path table uses.
 
-    A submodule section is named by the gitlink path while its hunks are
-    labeled with inner paths, so an inner file is matched by containment — a
-    filter naming a real changed file must never come back empty just because
-    its diff lives inside its submodule's section.
+    WHY: that table holds repository-relative POSIX paths carrying no trailing
+    separator and no redundant segments, so equivalent spellings of the same
+    directory have to collapse onto that one spelling BEFORE any containment
+    question is asked. Comparing raw strings instead made ``--path pkg/`` test
+    for the prefix ``pkg//`` and refuse a directory the scope does hold.
+
+    INVARIANT: a leading ``/`` survives normalization. An absolute path is not
+    repository-relative, so it must keep naming nothing in this scope and be
+    refused as out of scope, rather than be silently re-rooted onto a changed
+    file that merely shares its tail.
+
+    ``..`` segments are likewise left literal: resolving them here would let a
+    filter climb out of the scope and land back inside it under a name the
+    scope never held, which is the one-way containment rule below in disguise.
+
+    INVARIANT: normalization touches SEPARATORS and dot segments only — never
+    the characters of a name. Space is a legal filename character on every
+    platform this runs on, so trimming surrounding whitespace would rewrite
+    both sides of the containment question into paths the repository does not
+    hold: ``--path pkg`` would be admitted against the changed file
+    ``" pkg/mod.py"``, and a name ending in a space would select a different
+    file than the one asked for. A filter that names no changed path must stay
+    unmatched here so the command refuses it (exit 6).
     """
-    if not path:
+    text = str(value or "")
+    if not text:
+        return ""
+    normalized = "/".join(
+        segment for segment in text.split("/") if segment and segment != "."
+    )
+    return "/" + normalized if text.startswith("/") else normalized
+
+
+def paths_related(candidate: str, requested: str) -> bool:
+    """Whether *candidate* is the requested path itself or lives beneath it.
+
+    INVARIANT: containment runs ONE way — a filter selects the changed paths at
+    or under it, never the other way round. The reverse direction would admit a
+    filter that names nothing: ``--path src/foo.py/not-real`` is not a subtree
+    of the changed file ``src/foo.py``, it is a path that does not exist, and
+    answering it with that file's diff reports changes the operator never asked
+    for under a name the scope never held.
+
+    INVARIANT: this is the predicate that decides ``--path`` ADMISSION, and it
+    resolves the filter against the scope's changed-path table — the very set
+    ``--stat`` renders and evidence validation grounds on. Both views resolve
+    the filter through the same membership question, so neither can report "no
+    changes" for a filter the other accepted. Normalization is applied HERE,
+    on both sides, for the same reason: every caller — admission and selection
+    alike — then decides containment on one spelling of each path instead of
+    normalizing separately and drifting apart.
+    """
+    left = normalize_scope_path(candidate)
+    right = normalize_scope_path(requested)
+    if not left or not right:
         return False
-    for candidate in (section.path, section.old_path):
-        if not candidate:
-            continue
-        if path == candidate or path.startswith(candidate + "/"):
-            return True
-    return False
+    return left == right or left.startswith(right + "/")
+
+
+def section_covers_path(section: DiffSection, path: str) -> bool:
+    """Whether a section is AT or UNDER ``path``, on either side of a rename.
+
+    Selection only, never admission (see ``paths_related``), but deliberately
+    the SAME containment relation admission uses: the ``--stat`` table keeps
+    the changed paths at or under the filter, so resolving sections through any
+    wider relation would let the two views of one filter disagree about which
+    files they cover.
+
+    INVARIANT: containment does not run the other way — a section is never
+    selected because the filter names something INSIDE it. A submodule's inner
+    files used to reach the diff view only through that reverse direction, so
+    an inner-path filter pulled in the whole parent gitlink section and with it
+    every sibling inner path the section happened to render. Every inner label
+    now carries its own ``diff --git`` header (degraded notes included, see
+    ``_render_gitlink_diff``), so it splits out under its own name and the
+    reverse direction buys nothing but that leak.
+    """
+    return any(
+        paths_related(candidate, path)
+        for candidate in (section.path, section.old_path)
+        if candidate
+    )
+
+
+def select_filtered_view(
+    sections: Sequence[DiffSection],
+    table: Dict[str, Tuple[int, int]],
+    requested: Sequence[str],
+) -> Tuple[List[DiffSection], Dict[str, Tuple[int, int]]]:
+    """Resolve one ``--path`` filter into the (sections, stat rows) it selects.
+
+    INVARIANT: both views of a filter are resolved HERE, together, so they
+    cover the same files by construction rather than by two containment scans
+    that happen to agree. They do not always agree on their own: an exact
+    rename is ONE change rendered as ONE section naming two paths, and the
+    rendered text cannot be cut in half, so selecting it by either side selects
+    the whole change — while a per-key scan of the stat table keeps only the
+    named side's row. The section selection is therefore authoritative, and the
+    table takes every path the selected sections name.
+
+    The widening runs one way only: a section pulls in its own other side, it
+    never pulls in a path it does not name, and a table row is never invented
+    for a path the reconstruction did not record as changed.
+    """
+    selected = [
+        section for section in sections
+        if any(section_covers_path(section, path) for path in requested)
+    ]
+    keys = {
+        key for key in table
+        if any(paths_related(key, path) for path in requested)
+    }
+    for section in selected:
+        for candidate in (section.path, section.old_path):
+            if candidate in table:
+                keys.add(candidate)
+    return selected, {
+        key: value for key, value in table.items() if key in keys
+    }
 
 
 def normalize_line_ranges(
@@ -2358,6 +3326,27 @@ def subtract_line_ranges(
     return remaining
 
 
+def intersect_line_ranges(
+    left: Optional[Sequence[Sequence[int]]],
+    right: Optional[Sequence[Sequence[int]]],
+) -> List[List[int]]:
+    """Only the lines BOTH anchor lists cover, as merged ranges.
+
+    Used to clip an annotation domain down to the domain a round actually
+    grounds evidence against: a presentation layer may narrate which slice of
+    the citable line space a later step touched, but it must never advertise a
+    line outside that space (see ``_format_scope_manifest``).
+    """
+    clipped: List[List[int]] = []
+    rights = normalize_line_ranges(right)
+    for start, end in normalize_line_ranges(left):
+        for other_start, other_end in rights:
+            low, high = max(start, other_start), min(end, other_end)
+            if low <= high:
+                clipped.append([low, high])
+    return union_line_ranges(clipped)
+
+
 def count_anchor_lines(ranges: Optional[Sequence[Sequence[int]]]) -> int:
     """Number of individual lines covered by merged inclusive line ranges."""
     total = 0
@@ -2393,6 +3382,32 @@ def diff_stat(scope: ReviewScope) -> Dict[str, Tuple[int, int]]:
         )
         for path in sorted(paths)
     }
+
+
+def flow_snapshot_relpath(project_root: Any, flow_id: Any) -> Optional[str]:
+    """Where one flow's baselines live, *relative* to *project_root*.
+
+    For termination sites that must keep the snapshot store out of a copy of
+    the project tree (the worktree archive) rather than only delete it in
+    place: a best-effort :func:`discard_flow_snapshots` that failed would
+    otherwise have the archive preserve the baselines for good.
+
+    WHY relative: the consumer matches this against paths derived textually
+    from its own (possibly unresolved) project path, which an absolute path
+    resolved through a different symlink prefix would not match. Returns None
+    when the id is not a safe single path segment — the same rule that stops
+    a reclaim from walking out of the store.
+    """
+    try:
+        if not _SAFE_FLOW_ID_RE.match(str(flow_id)):
+            return None
+        manager = ReviewScopeManager(Path(project_root), str(flow_id))
+        return manager.root.relative_to(manager.project_root).as_posix()
+    except Exception:  # noqa: BLE001 - a locating helper never fails a flow
+        logger.debug(
+            "Could not locate review baselines for flow %s", flow_id, exc_info=True
+        )
+        return None
 
 
 def discard_flow_snapshots(project_root: Any, flow_id: Any) -> bool:

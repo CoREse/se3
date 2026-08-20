@@ -14763,8 +14763,9 @@ function appendPlanModeSection(body, flow) {
 // needs a pre-built fallback for the no-dictionary path.
 const SCOPE_MODE_HINT_EN = "Both scope modes are diff-scoped; the mode names "
   + "the diff baseline — full diff = this flow's implementation baseline (the "
-  + "whole task), incremental diff = the latest fix baseline (that fix's own "
-  + "delta).";
+  + "whole task), incremental diff = the fix baseline the round was scoped "
+  + "with, i.e. the earliest fix not reviewed yet, whose delta may span "
+  + "several fixes.";
 
 // Build the scope-audit rows from a review_scope projection, or null when the
 // flow recorded none. `changedPathCount` is optional extra context from the

@@ -79,8 +79,22 @@ def _canonical_json(obj: Any) -> str:
 
 
 def _content_hash(obj: Any) -> str:
-    """Content hash of a cold payload, used to skip rewriting unchanged files."""
-    return hashlib.sha256(_canonical_json(obj).encode("utf-8")).hexdigest()
+    """Content hash of a cold payload, used to skip rewriting unchanged files.
+
+    WHY the encode is not the strict default: a POSIX pathname is bytes, so a
+    Git-visible path byte that is not valid UTF-8 reaches a persisted payload
+    (a review baseline's tracked/untracked file map is keyed by pathname) as a
+    lone surrogate, which strict UTF-8 refuses. Raising here would make the
+    whole flow unsavable over one oddly named file — and this is the FIRST
+    strict encode a captured baseline meets, before it is ever written. The
+    handler is total and injective over those code points, which is all a
+    comparison hash needs: this value is only ever compared with another hash
+    computed the same way, never with a hash of the bytes actually written
+    (:meth:`PersistenceManager._atomic_write_json` may escape them instead).
+    """
+    return hashlib.sha256(
+        _canonical_json(obj).encode("utf-8", "surrogatepass")
+    ).hexdigest()
 
 
 def _is_hotcold(data: Any) -> bool:
@@ -304,7 +318,26 @@ class PersistenceManager:
         content = json.dumps(data, indent=2, ensure_ascii=False, default=str)
         temp_file = path.with_name(path.name + ".tmp")
         try:
-            temp_file.write_text(content, encoding="utf-8")
+            try:
+                temp_file.write_text(content, encoding="utf-8")
+            except UnicodeEncodeError:
+                # WHY the ASCII-escaped retry rather than a surrogate-tolerant
+                # error handler: the payload may carry a pathname whose bytes
+                # are not valid UTF-8 (a review baseline's file map keys), which
+                # arrives here as a lone surrogate. Writing it back as its raw
+                # byte would make the file undecodable for every reader in this
+                # module and in the daemon, all of which read strict UTF-8 and
+                # degrade a decode failure to "no state"; raising instead would
+                # abort the run entirely. ``ensure_ascii=True`` renders the
+                # surrogate as a plain ``\uXXXX`` escape, so the file stays pure
+                # ASCII, every existing reader keeps working unchanged, and
+                # ``json.loads`` restores the exact same string on resume. Only
+                # a payload that could not be written at all pays this, so
+                # ordinary state files stay human-readable.
+                temp_file.write_text(
+                    json.dumps(data, indent=2, ensure_ascii=True, default=str),
+                    encoding="utf-8",
+                )
             temp_file.replace(path)
         except Exception:
             if temp_file.exists():
@@ -908,7 +941,24 @@ class PersistenceManager:
             return None
         return flow
 
-    def clear_resumable_snapshot(self, flow_id: str) -> None:
+    def resumable_snapshot_exists(self, flow_id: str) -> bool:
+        """Whether a resumable snapshot for ``flow_id`` is still on disk.
+
+        WHY this is a published probe: retiring a flow's resumable snapshot and
+        reclaiming its review baselines are two separate deletions, and the
+        second is only safe once the first is CONFIRMED done — a surviving
+        snapshot keeps the flow resumable, and a resumed SELF_CHECK round has
+        nothing to diff against once its baselines are gone. Callers therefore
+        gate the baseline reclaim on this answer rather than on having *called*
+        :meth:`clear_resumable_snapshot`. An unreadable snapshot dir is
+        answered "still there", which keeps the baselines.
+        """
+        try:
+            return (self.resumable_dir / f"{flow_id}.json").exists()
+        except OSError:  # pragma: no cover - defensive
+            return True
+
+    def clear_resumable_snapshot(self, flow_id: str) -> bool:
         """Remove the per-flow resumable snapshot for ``flow_id`` (best effort).
 
         The snapshot is a *reference* to the shared ``steps/<flow_id>/`` cold
@@ -920,14 +970,28 @@ class PersistenceManager:
         snapshot. Without pruning here, that live partition would be referenced
         by nothing yet never deleted (self-check fix, issue #244 B5). So after
         unlinking the snapshot, reclaim the partition if it is now unreferenced.
+
+        INVARIANT: returns whether the snapshot is CONFIRMED absent afterwards.
+        Best-effort deletion swallows the unlink failure (a permission or I/O
+        error must never break the caller's terminal bookkeeping), but a
+        swallowed failure leaves the flow resumable — so the outcome has to be
+        reportable, or the callers that go on to reclaim the flow's review
+        baselines would strip a still-resumable flow of the snapshots its next
+        SELF_CHECK round needs. Verified by re-probing the path rather than by
+        trusting the unlink call, so a concurrent re-write is seen too.
         """
         snapshot_file = self.resumable_dir / f"{flow_id}.json"
         try:
             snapshot_file.unlink(missing_ok=True)
         except OSError:
-            pass
+            logger.warning(
+                "Could not remove resumable snapshot %s; flow stays resumable",
+                snapshot_file,
+                exc_info=True,
+            )
         self._prune_cold_partition_if_orphan(flow_id)
         self._touch_dirty_sentinel()
+        return not self.resumable_snapshot_exists(flow_id)
 
     def _prune_cold_partition_if_orphan(self, flow_id: str) -> None:
         """Delete ``steps/<flow_id>/`` when nothing references it any more.

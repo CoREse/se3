@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.11.0 - 2026-08-21
+
+- Add read-only `luo review-scope diff` command that rebuilds the exact baseline→worktree diff from persisted review-scope snapshots, with implementation/fix baseline selection, `--stat` overview and single-path filtering
+- Ground incremental SELF_CHECK evidence validation on the union of the implementation-baseline and fix-baseline diffs, so findings anchored on real task changes outside the current fix delta are no longer dropped as bad evidence
+- Inline a persistent scope manifest in every SELF_CHECK prompt — changed paths, per-file added/removed counts, hunk line ranges, and per-baseline domain annotations — so the checker can anchor `path:line` references directly
+- Stop inlining truncated half diffs when the scope diff exceeds SELF_CHECK_SCOPE_DIFF_MAX_CHARS; the prompt now carries the manifest plus explicit on-demand fetch guidance instead
+- Direct the checker to use `luo review-scope diff` for the full change set and forbid rebuilding review scope with `git diff`, which yields the wrong range because baselines are worktree snapshots and HEAD advances mid-flow
+- Clean up `tianluo/state/review-scopes/<flow_id>/` snapshots at flow completion and termination, leaving resumable and unmerged-worktree flows intact, with actionable errors for already-cleaned baselines
+- Clarify in the SELF_CHECK prompt, `luo history show`, the WebUI scope labels and docs/configuration{,.zh}.md that both `full` and `incremental` are diff-scoped and differ only in diff baseline, removing the misleading "full = non-diff review" reading
 ## 12.10.0 - 2026-08-19
 
 - Retire the spec write-protection mechanism end to end: no step's prompt carries a `SPEC FILE WRITE PROTECTION` section any more, the PreToolUse guard plugin and `--plugin-dir` injection are gone, and the per-step snapshot/diff/rollback guard over `tianluo/specs/` no longer runs

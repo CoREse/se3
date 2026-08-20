@@ -41,7 +41,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional, Set
 
 from ..worktree import (
     _cleanup_git_worktree_metadata,
@@ -360,12 +360,50 @@ def _get_worktree_path_for_branch(
     return None
 
 
+def _archive_ignore(wt_path: Path, exclude_relpaths: Optional[Iterable[str]]):
+    """Build the ``copytree`` ignore callable for a worktree archive.
+
+    Always drops ``.git``; additionally drops each worktree-relative path in
+    *exclude_relpaths*. WHY a path-aware callable rather than
+    ``shutil.ignore_patterns``: the patterns match bare *names* at any depth,
+    which cannot express "this one directory, at this one location" — an
+    exclusion like a single flow's review-baseline store must not also delete
+    a same-named directory elsewhere in the operator's WIP.
+    """
+    excluded: Set[str] = set()
+    for entry in exclude_relpaths or ():
+        raw = str(entry)
+        if not raw or os.path.isabs(raw):
+            continue
+        normalized = os.path.normpath(raw)
+        if normalized in (".", os.pardir) or normalized.startswith(
+            os.pardir + os.sep
+        ):
+            continue
+        excluded.add(normalized)
+
+    root = os.fspath(wt_path)
+
+    def _ignore(directory, names):
+        dropped = {name for name in names if name == ".git"}
+        if not excluded:
+            return dropped
+        rel_dir = os.path.relpath(os.fspath(directory), root)
+        for name in names:
+            if os.path.normpath(os.path.join(rel_dir, name)) in excluded:
+                dropped.add(name)
+        return dropped
+
+    return _ignore
+
+
 def _archive_worktree(
     project_root: Path,
     branch: str,
     wt_path: Path,
     *,
     archive_name: Optional[str] = None,
+    exclude_relpaths: Optional[Iterable[str]] = None,
 ) -> Path:
     """Copy a worktree directory to ``tianluo/worktrees/.archive/<slug>-<ts>/``
     before it is removed by ``delete_merged_branches``.
@@ -399,6 +437,14 @@ def _archive_worktree(
             the requested ``worktree_<name>-<epoch>`` convention (its branch
             may be an opaque SHA-ish name that would make an unrecognizable
             slug), while the branch identity is still preserved in metadata.
+        exclude_relpaths: Worktree-relative paths to keep OUT of the archive,
+            on top of the always-excluded ``.git``. WHY relative and not
+            absolute: the exclusion is matched against the paths ``copytree``
+            derives textually from *wt_path*, so a caller-resolved absolute
+            path would silently stop matching whenever *wt_path* reaches this
+            function through a different symlink prefix. Entries that are
+            absolute, empty, or that climb out of the worktree are dropped —
+            an exclusion may only ever narrow the copy from inside.
 
     Returns:
         Path to the resulting archive directory.
@@ -423,7 +469,7 @@ def _archive_worktree(
     shutil.copytree(
         wt_path,
         dest,
-        ignore=shutil.ignore_patterns(".git"),
+        ignore=_archive_ignore(wt_path, exclude_relpaths),
         dirs_exist_ok=False,
         symlinks=True,
     )

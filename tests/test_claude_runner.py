@@ -891,18 +891,16 @@ class TestBuildCallArgs:
             di = args.index("--disallowedTools")
             assert "ReportFindings" in args[di + 1:]
 
-    def test_single_disallowed_tools_flag_with_plugin_and_files(self, tmp_path):
+    def test_single_disallowed_tools_flag_with_context_files(self, tmp_path):
         """The merged denial list stays a single flag and does not swallow the
-        --plugin-dir / --file flags that follow it."""
+        --file flags that follow it."""
         f = tmp_path / "spec.md"
         f.write_text("# Spec", encoding="utf-8")
-        plugin = tmp_path / "guard_plugin"
         runner = ClaudeCodeRunner(command={"cmd": "claude", "priority": 0})
         args = runner.build_call_args(
             prompt="analyze",
             read_only=True,
             context_files=[f],
-            spec_guard_plugin=plugin,
         )
         assert args == [
             "--output-format", "stream-json",
@@ -910,7 +908,6 @@ class TestBuildCallArgs:
             "-p", "analyze",
             "--disallowedTools",
             "Write", "Edit", "NotebookEdit", "AskUserQuestion", "ReportFindings",
-            "--plugin-dir", str(plugin),
             "--file", str(f),
         ]
 

@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+import psutil
 import pytest
 
 from tianluo.commands import end_session_cmd
@@ -726,3 +727,86 @@ def test_unresolvable_root_returns_one(tmp_path: Path, monkeypatch) -> None:
     )
     rc = end_session(project_root=None, flow_id="x")
     assert rc == 1
+
+
+# --------------------------------------------------------------------------
+# ``_pid_is_live_se3_run``: an unreadable cmdline is INCONCLUSIVE
+# --------------------------------------------------------------------------
+class _FakePsutil:
+    """Stand-in for the ``psutil`` module whose ``Process`` raises on cmdline().
+
+    Only the surface ``_pid_is_live_se3_run`` touches is provided; the real
+    exception classes are reused so the production ``except`` clauses match.
+    """
+
+    NoSuchProcess = psutil.NoSuchProcess
+    AccessDenied = psutil.AccessDenied
+    STATUS_ZOMBIE = psutil.STATUS_ZOMBIE
+
+    def __init__(self, raiser):
+        self._raiser = raiser
+
+    def Process(self, pid=None):  # noqa: N802 - mirrors the psutil API
+        outer = self
+
+        class _P:
+            def cmdline(self):
+                raise outer._raiser()
+
+        return _P()
+
+
+@pytest.mark.parametrize(
+    "raiser",
+    [
+        lambda: psutil.AccessDenied(1234),
+        lambda: OSError("cmdline unreadable"),
+    ],
+    ids=["access-denied", "other-error"],
+)
+def test_unreadable_cmdline_keeps_live_verdict(
+    monkeypatch: pytest.MonkeyPatch, raiser
+) -> None:
+    """A confirmed-live pid whose cmdline cannot be read stays "live".
+
+    Regression guard: returning False here made end-session report *no live
+    process* for a run it had already proven alive, so the destructive
+    snapshot/worktree cleanup could run underneath a still-executing flow.
+    """
+    monkeypatch.setattr(end_session_cmd, "_proc_alive", lambda pid: True)
+    monkeypatch.setattr(end_session_cmd, "psutil", _FakePsutil(raiser))
+
+    assert end_session_cmd._pid_is_live_se3_run(1234) is True
+
+
+def test_vanished_pid_is_not_live(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A process that disappears during inspection is genuinely stale."""
+    monkeypatch.setattr(end_session_cmd, "_proc_alive", lambda pid: True)
+    monkeypatch.setattr(
+        end_session_cmd,
+        "psutil",
+        _FakePsutil(lambda: psutil.NoSuchProcess(1234)),
+    )
+
+    assert end_session_cmd._pid_is_live_se3_run(1234) is False
+
+
+def test_unreadable_cmdline_marker_is_not_cleared(tmp_path: Path, monkeypatch) -> None:
+    """The abandoned-marker reclaim must not unlink a live-but-opaque run."""
+    from tianluo.core.machine_id import stable_machine_id
+    from tianluo.core.run_pidfile import encode_run_pidfile
+
+    state = tmp_path / "tianluo" / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    marker = state / "run.pid"
+    marker.write_text(encode_run_pidfile(4242, stable_machine_id()), encoding="utf-8")
+
+    monkeypatch.setattr(end_session_cmd, "_proc_alive", lambda pid: True)
+    monkeypatch.setattr(
+        end_session_cmd,
+        "psutil",
+        _FakePsutil(lambda: psutil.AccessDenied(4242)),
+    )
+
+    assert end_session_cmd._clear_stale_local_run_pidfile(tmp_path) is False
+    assert marker.exists()

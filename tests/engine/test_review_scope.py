@@ -6,6 +6,8 @@ import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from tianluo.engine.review_scope import (
     ReviewBaseline,
     ReviewScopeManager,
@@ -529,6 +531,121 @@ def test_declared_path_does_not_re_add_an_unchanged_tracked_file(tmp_path):
     assert scope.changed_paths == []
 
 
+def test_declared_spelling_that_resolves_stops_the_trimmed_fallback(tmp_path):
+    # Two distinct files whose names differ only by a trailing space: the
+    # tracked one the flow really changed, and an unrelated git-ignored one.
+    # The reported spelling names the tracked file, which the reconstruction
+    # already covers — falling through to the trimmed spelling would put the
+    # ignored file into the manifest as a change nobody made.
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ntracked.py\n", encoding="utf-8"
+    )
+    (root / "tracked.py ").write_text("value = 1\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "tracked with a trailing space")
+
+    manager = ReviewScopeManager(root, "flow-exact-spelling")
+    baseline = manager.capture("implementation")
+    (root / "tracked.py ").write_text("value = 2\n", encoding="utf-8")
+    (root / "tracked.py").write_text("generated = True\n", encoding="utf-8")
+
+    scope = manager.reconstruct(
+        "full", baseline, declared_paths=["tracked.py "]
+    )
+
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["tracked.py "]
+    assert scope.declared_only_paths == []
+
+    # The fallback still exists for the stray whitespace an LLM-authored
+    # report carries: there the reported spelling resolves to nothing.
+    (root / "generated.js").write_text("var x = 1;\n", encoding="utf-8")
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ntracked.py\ngenerated.js\n", encoding="utf-8"
+    )
+    padded = manager.reconstruct(
+        "full", baseline, declared_paths=["  generated.js  "]
+    )
+    assert padded.declared_only_paths == ["generated.js"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="a backslash cannot appear in a Windows filename"
+)
+def test_declared_backslash_spelling_resolves_before_separator_fallback(tmp_path):
+    # On POSIX a backslash is an ordinary filename character. Two distinct
+    # git-ignored files: the one the flow really wrote is literally named
+    # ``tracked\\file.py``, the unrelated one lives at ``tracked/file.py``.
+    # Rewriting separators before trying the reported spelling would resolve
+    # the unrelated file and drop the real change from the manifest.
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ntracked/\ntracked?file.py\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore both spellings")
+
+    manager = ReviewScopeManager(root, "flow-backslash-spelling")
+    baseline = manager.capture("implementation")
+
+    (root / "tracked").mkdir()
+    (root / "tracked" / "file.py").write_text("unrelated = 1\n", encoding="utf-8")
+    (root / "tracked\\file.py").write_text("changed = 1\n", encoding="utf-8")
+
+    scope = manager.reconstruct(
+        "full", baseline, declared_paths=["tracked\\file.py"]
+    )
+
+    assert scope.undecidable is False
+    assert scope.declared_only_paths == ["tracked\\file.py"]
+    assert "tracked/file.py" not in scope.changed_paths
+
+    # The separator fallback survives for a genuinely Windows-style report:
+    # there the reported spelling names nothing this repository holds.
+    (root / "vendor").mkdir()
+    (root / "vendor" / "gen.js").write_text("var x = 1;\n", encoding="utf-8")
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ntracked/\ntracked?file.py\nvendor/\n", encoding="utf-8"
+    )
+    windows = manager.reconstruct(
+        "full", baseline, declared_paths=["vendor\\gen.js"]
+    )
+    assert windows.declared_only_paths == ["vendor/gen.js"]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="a backslash cannot appear in a Windows filename"
+)
+def test_git_visible_literal_backslash_path_is_captured_and_diffed(tmp_path):
+    # Git enumerates every path with "/", so a backslash it reports is part of
+    # the filename, not a separator. A non-ignored file literally named
+    # ``tianluo\state\note.py`` is an ordinary root-level file: reading it as
+    # runtime state would keep it out of both snapshots, and the command would
+    # then report no change where a real one exists.
+    root = _repo(tmp_path)
+    literal = root / "tianluo\\state\\note.py"
+    literal.write_text("value = 1\n", encoding="utf-8")
+
+    manager = ReviewScopeManager(root, "flow-git-visible-backslash")
+    baseline = manager.capture("implementation")
+    assert "tianluo\\state\\note.py" in baseline.untracked
+
+    literal.write_text("value = 2\n", encoding="utf-8")
+    scope = manager.reconstruct("full", baseline)
+
+    assert scope.undecidable is False
+    assert "tianluo\\state\\note.py" in scope.changed_paths
+    assert "value = 2" in scope.unified_diff
+    # Real runtime state stays out of capture and out of the manifest.
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state" / "note.py").write_text(
+        "runtime = True\n", encoding="utf-8"
+    )
+    again = manager.reconstruct("full", baseline)
+    assert "tianluo/state/note.py" not in again.changed_paths
+
+
 def test_causal_ranges_classify_by_marker_not_content_prefix():
     # A deleted line whose text began with "--" (a YAML document separator)
     # renders as "----"; it must anchor the OLD-side line, not shift every
@@ -738,6 +855,73 @@ def test_incremental_scope_carries_whole_task_anchors(tmp_path):
     )
 
 
+def test_incremental_scope_names_delta_paths_that_carry_earlier_work(tmp_path):
+    # An anchor-less path (binary) owns no added range, so the manifest cannot
+    # subtract its way to "this path also carries earlier task work". The two
+    # baseline SNAPSHOTS answer it directly, and that is the only fact that
+    # keeps a binary IMPLEMENT and this fix both touched apart from one the fix
+    # introduced.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-prior-work")
+    implementation = manager.capture("implementation")
+    (root / "binary.bin").write_bytes(b"\x00implemented\xff")
+    (root / "fresh.bin").write_bytes(b"\x00fresh\xff")
+
+    fix = manager.capture("fix-1")
+    (root / "binary.bin").write_bytes(b"\x00fixed\xff")
+    (root / "fresh.bin").write_bytes(b"\x00fresh-again\xff")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.undecidable is False
+    assert set(scope.changed_paths) == {"binary.bin", "fresh.bin"}
+    assert not scope.causal_anchors.get("binary.bin")
+    # ``binary.bin`` existed before the task and IMPLEMENT changed it;
+    # ``fresh.bin`` was created after the implementation baseline but BEFORE
+    # the fix baseline — both therefore carry earlier work, while a path the
+    # fix alone produced would not.
+    assert scope.prior_work_paths == ["binary.bin", "fresh.bin"]
+
+
+def test_path_the_fix_alone_produced_carries_no_earlier_work(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-no-prior-work")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+
+    fix = manager.capture("fix-1")
+    (root / "only-fix.bin").write_bytes(b"\x00fix\xff")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.changed_paths == ["only-fix.bin"]
+    # Neither snapshot holds it, so no earlier-work claim is made.
+    assert scope.prior_work_paths == []
+
+
+def test_full_round_names_delta_paths_present_at_the_last_full_round(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-prior-work-full")
+    implementation = manager.capture("implementation")
+    (root / "binary.bin").write_bytes(b"\x00implemented\xff")
+
+    fix = manager.capture("fix-1")
+    (root / "binary.bin").write_bytes(b"\x00fixed\xff")
+    (root / "fresh.bin").write_bytes(b"\x00fresh\xff")
+
+    scope = manager.resolve(
+        "full",
+        implementation,
+        full_baseline=implementation,
+        fix_delta_baseline=fix,
+    )
+
+    assert scope.fix_delta_available is True
+    assert set(scope.fix_delta_changed_paths) == {"binary.bin", "fresh.bin"}
+    # Only ``binary.bin`` already differed at the pinned fix baseline.
+    assert scope.prior_work_paths == ["binary.bin"]
+
+
 def test_full_scope_carries_no_separate_whole_task_domain(tmp_path):
     # A full round already diffs from the implementation baseline, so a second
     # copy of the same anchors would carry no information.
@@ -797,9 +981,14 @@ def test_undecidable_fallback_still_carries_no_whole_task_domain(tmp_path):
     assert scope.task_changed_paths == []
 
 
-def test_unrebuildable_whole_task_domain_never_degrades_the_round(tmp_path):
-    # The whole-task domain only WIDENS what evidence can ground on, so losing
-    # it must leave a perfectly usable incremental round intact.
+def test_unrebuildable_whole_task_domain_falls_back_to_full(tmp_path):
+    """The whole-task domain is half the round's evidence, not a decoration.
+
+    Losing it while the round stays decidable would silently narrow evidence
+    grounding back to the fix delta, so a finding anchored on real earlier task
+    work would be dropped as bad evidence with nothing saying why. It therefore
+    takes the same established route as an undecidable incremental baseline.
+    """
     root = _repo(tmp_path)
     manager = ReviewScopeManager(root, "flow-task-broken")
     implementation = manager.capture("implementation")
@@ -812,18 +1001,103 @@ def test_unrebuildable_whole_task_domain_never_degrades_the_round(tmp_path):
 
     scope = manager.resolve("incremental", fix, full_baseline=implementation)
 
-    assert scope.scope_mode == "incremental"
-    assert scope.undecidable is False
-    assert scope.changed_paths == ["clean.py"]
+    assert scope.scope_mode == "full"
+    assert scope.requested_mode == "incremental"
+    assert scope.fallback_from_incremental is True
     assert scope.task_scope_available is False
-    assert "descriptor" in scope.task_scope_diagnostic
+    # The implementation baseline is what broke, so the fallback cannot rebuild
+    # either — the round degrades to the undecidable relaxation instead of
+    # reviewing a narrowed domain while claiming to be decidable.
+    assert scope.undecidable is True
 
     without_baseline = manager.resolve("incremental", fix, full_baseline=None)
-    assert without_baseline.undecidable is False
-    assert without_baseline.task_scope_available is False
-    assert "implementation baseline is missing" in (
-        without_baseline.task_scope_diagnostic
+    assert without_baseline.scope_mode == "full"
+    assert without_baseline.fallback_from_incremental is True
+    assert without_baseline.undecidable is True
+    assert "whole-task evidence domain" in without_baseline.diagnostic
+
+
+def test_whole_task_fallback_stays_decidable_when_the_implementation_rebuilds(
+    tmp_path,
+):
+    """Only the round's OWN baseline being usable makes the fallback decidable.
+
+    A fix baseline whose snapshot is gone, with the implementation baseline
+    intact, is the ordinary fallback: full scope, whole task in view, no
+    relaxation needed.
+    """
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-task-fallback")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (manager.root / fix.baseline_id / "descriptor.json").write_text(
+        "{broken", encoding="utf-8"
     )
+    (root / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.scope_mode == "full"
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["clean.py"]
+
+
+def test_fallback_diagnostic_names_the_domain_that_actually_failed(tmp_path):
+    """Either half of the incremental domain failing takes this same route, so
+    the fallback has to say WHICH one broke: blaming the fix baseline when it
+    rebuilt cleanly sends the reader after a healthy snapshot and hides that
+    the implementation baseline — the one the fallback routes to — is gone."""
+    root = _repo(tmp_path)
+
+    manager = ReviewScopeManager(root, "flow-cause-fix")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    fix_blob = fix.tracked["clean.py"]["blob_sha256"]
+    (manager.root / fix.baseline_id / "blobs" / fix_blob).write_bytes(b"broken")
+    (root / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    broken_fix = manager.resolve("incremental", fix, full_baseline=implementation)
+    assert broken_fix.fallback_from_incremental is True
+    assert broken_fix.fallback_cause == "fix_baseline"
+    assert "fix baseline was undecidable" in broken_fix.diagnostic
+
+    (tmp_path / "other").mkdir()
+    other = _repo(tmp_path / "other")
+    manager2 = ReviewScopeManager(other, "flow-cause-task")
+    implementation2 = manager2.capture("implementation")
+    (other / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix2 = manager2.capture("fix-1")
+    (manager2.root / implementation2.baseline_id / "descriptor.json").write_text(
+        "{broken", encoding="utf-8"
+    )
+    (other / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    broken_task = manager2.resolve(
+        "incremental", fix2, full_baseline=implementation2
+    )
+    assert broken_task.fallback_from_incremental is True
+    assert broken_task.fallback_cause == "task_baseline"
+    # The healthy snapshot must not be named as the failure.
+    assert "fix baseline was undecidable" not in broken_task.diagnostic
+    assert "whole-task" in broken_task.diagnostic
+
+    missing = manager2.resolve("incremental", fix2, full_baseline=None)
+    assert missing.fallback_cause == "task_baseline"
+
+
+def test_no_fallback_leaves_the_cause_empty(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-cause-none")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (root / "clean.py").write_text("value = 3\n", encoding="utf-8")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+    assert scope.fallback_from_incremental is False
+    assert scope.fallback_cause == ""
 
 
 def test_whole_task_domain_keeps_deletion_anchors_in_their_own_space(tmp_path):
@@ -943,6 +1217,140 @@ def test_fix_baseline_after_full_round_follows_the_persisted_marker():
         assert manager.earliest_fix_baseline_after_full_round(context) is None
 
 
+def test_fix_baseline_after_full_round_omits_a_missing_earliest_baseline():
+    """A later baseline may NOT stand in for an unloadable earlier one.
+
+    fix-2 was captured after fix-1's work had already landed, so diffing from
+    it reconstructs only the tail of the cumulative delta — and the manifest
+    would then label fix-1's hunks "already present at the last full round",
+    the exact claim the annotation exists to make. Losing the annotation is
+    presentation-only; asserting a false one is not.
+    """
+    manager = ReviewScopeManager(Path("/nonexistent"), "flow-marker-gap")
+    context = {
+        "fix_baseline_history": [
+            {"baseline_id": "fix-1-aaaaaaaaaaaa"},
+            {"baseline_id": "fix-2-bbbbbbbbbbbb"},
+        ],
+    }
+    only_the_later = {
+        "fix-2-bbbbbbbbbbbb": ReviewBaseline(
+            baseline_id="fix-2-bbbbbbbbbbbb",
+            kind="fix-2",
+            flow_id="flow-marker-gap",
+            captured_at="2026-01-01T00:00:00",
+            project_root="/nonexistent",
+        )
+    }
+    with patch.object(
+        ReviewScopeManager, "load_fix_baselines", return_value=only_the_later
+    ):
+        assert manager.earliest_fix_baseline_after_full_round(context) is None
+
+        # The marker moving past the missing entry makes fix-2 the earliest
+        # one again, and it answers normally.
+        context["full_round_fix_head"] = "fix-1-aaaaaaaaaaaa"
+        answer = manager.earliest_fix_baseline_after_full_round(context)
+        assert answer is not None and answer.baseline_id == "fix-2-bbbbbbbbbbbb"
+
+
+def test_diff_path_quoting_round_trips_every_unrenderable_name():
+    """A pathname that cannot be written literally survives the quoted form.
+
+    The quoted token is what keeps a ``diff --git`` header on ONE line, so the
+    escape table has to cover every character the reader's own splitter treats
+    as a line ending — not just ``\\n`` — and the round trip has to be exact,
+    or a section would name a file the repository does not hold.
+    """
+    from tianluo.engine.review_scope import quote_diff_path, unquote_diff_path
+
+    names = [
+        "src/plain.py",
+        "pkg b/generated.py",
+        " leading-space.py",
+        "\u4e2d\u6587/\u6587\u4ef6.py",
+        "line\nbreak.py",
+        "carriage\rreturn.py",
+        "vertical\vtab.py",
+        "form\ffeed.py",
+        "next\x85line.py",
+        "para\u2029sep.py",
+        "line\u2028sep.py",
+        'quo"te.py',
+        "back\\slash.py",
+        'mixed\n"and\\.py',
+    ]
+    for name in names:
+        token = quote_diff_path(name)
+        # One line for the reader, whatever the name contains.
+        assert len(token.splitlines()) == 1, name
+        assert unquote_diff_path(token) == name
+
+    # Ordinary paths are untouched, so an existing rendered diff is unchanged.
+    assert quote_diff_path("src/plain.py") == "src/plain.py"
+    assert unquote_diff_path("src/plain.py") == "src/plain.py"
+
+
+def test_degraded_inner_note_is_split_out_under_its_own_path(tmp_path):
+    """Every inner label a gitlink diff renders owns a ``diff --git`` header.
+
+    Without one, an inner file whose baseline content cannot be resolved rides
+    inside the parent submodule section (or inside a sibling inner file's
+    section), and a single-file view of the sibling then exposes a changed
+    file the matching ``--stat`` view does not list.
+    """
+    import base64
+
+    from tianluo.engine.review_scope import split_diff_sections
+
+    root = _repo(tmp_path)
+    (root / "vendor").mkdir()
+    (root / "vendor" / "b.py").write_text("value = 2\n", encoding="utf-8")
+    manager = ReviewScopeManager(root, "flow-gitlink-sections")
+
+    before = {
+        "kind": "gitlink",
+        "manifest": {
+            "head": "h",
+            # a.py's blob is not in the stored map and the submodule is not a
+            # git repo here, so its baseline content is unresolvable.
+            "files": {
+                "a.py": ["100644", "0" * 40],
+                "b.py": ["100644", "1" * 40],
+            },
+            "untracked": {},
+        },
+        "blob_map": {"b.py": base64.b64encode(b"value = 1\n").decode("ascii")},
+    }
+    after = {
+        "kind": "gitlink",
+        "manifest": {
+            "head": "h",
+            "files": {
+                "a.py": ["100644", "2" * 40],
+                "b.py": ["100644", "3" * 40],
+            },
+            "untracked": {},
+        },
+    }
+
+    text, _anchors, _deletions, inner = manager._render_gitlink_diff(
+        "vendor", before, after
+    )
+
+    assert sorted(inner) == ["vendor/a.py", "vendor/b.py"]
+    sections = split_diff_sections(text)
+    assert [section.path for section in sections] == [
+        "vendor", "vendor/a.py", "vendor/b.py",
+    ]
+    # The degraded note travels with its own path, not with the parent.
+    degraded = next(s for s in sections if s.path == "vendor/a.py")
+    assert "baseline content unavailable" in degraded.text
+    assert "vendor/a.py" not in next(
+        s for s in sections if s.path == "vendor"
+    ).text.replace("diff --git a/vendor b/vendor", "")
+
+
 def test_line_range_algebra_merges_adjacent_and_drops_unusable_pairs():
     from tianluo.engine.review_scope import (
         normalize_line_ranges,
@@ -958,3 +1366,303 @@ def test_line_range_algebra_merges_adjacent_and_drops_unusable_pairs():
     ]
     assert subtract_line_ranges([[1, 5]], [[1, 9]]) == []
     assert subtract_line_ranges([[1, 5]], None) == [[1, 5]]
+
+
+def test_intersect_line_ranges_clips_to_the_overlap():
+    from tianluo.engine.review_scope import intersect_line_ranges
+
+    assert intersect_line_ranges([[1, 20]], [[5, 9], [15, 30]]) == [
+        [5, 9], [15, 20],
+    ]
+    # Adjacent survivors still merge into the one block they describe.
+    assert intersect_line_ranges([[1, 20]], [[5, 9], [10, 12]]) == [[5, 12]]
+    # No overlap, and a missing side, both clip to nothing: an annotation
+    # domain may never widen the domain it annotates.
+    assert intersect_line_ranges([[1, 3]], [[10, 12]]) == []
+    assert intersect_line_ranges([[1, 3]], None) == []
+    assert intersect_line_ranges(None, [[1, 3]]) == []
+    assert intersect_line_ranges([[5, 3], [4, 6]], [[1, 100]]) == [[4, 6]]
+
+
+def test_submodule_inner_binary_touched_before_the_fix_is_earlier_work(tmp_path):
+    """A binary inside a submodule that IMPLEMENT and the fix both rewrote.
+
+    Inner submodule paths are rendered as changed paths in their own right, but
+    a snapshot records them under the PARENT gitlink's manifest — a lookup by
+    the inner path finds nothing in either snapshot, and the path would be
+    credited entirely to this fix even though earlier task work is in it.
+    """
+    root = _repo_with_submodule(tmp_path)
+    (root / "vendor" / "asset.bin").write_bytes(b"\x00base\xff")
+    _git(root / "vendor", "add", "-A")
+    _git(root / "vendor", "commit", "-m", "sub asset")
+
+    manager = ReviewScopeManager(root, "flow-submodule-prior-work")
+    implementation = manager.capture("implementation")
+    # IMPLEMENT rewrites the binary inside the submodule.
+    (root / "vendor" / "asset.bin").write_bytes(b"\x00implemented\xff")
+
+    fix = manager.capture("fix-1")
+    # The fix rewrites the very same binary again.
+    (root / "vendor" / "asset.bin").write_bytes(b"\x00fixed\xff")
+    (root / "vendor" / "fresh.bin").write_bytes(b"\x00fresh\xff")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert scope.undecidable is False
+    assert "vendor/asset.bin" in scope.changed_paths
+    assert not scope.causal_anchors.get("vendor/asset.bin")
+    # ``fresh.bin`` first appears after the fix baseline, so only the binary
+    # the earlier IMPLEMENT already rewrote carries earlier work.
+    assert "vendor/asset.bin" in scope.prior_work_paths
+    assert "vendor/fresh.bin" not in scope.prior_work_paths
+
+
+def test_submodule_inner_path_the_fix_alone_touched_carries_no_earlier_work(
+    tmp_path,
+):
+    root = _repo_with_submodule(tmp_path)
+    manager = ReviewScopeManager(root, "flow-submodule-no-prior-work")
+    implementation = manager.capture("implementation")
+    (root / "other.py").write_text("value = 1\n", encoding="utf-8")
+
+    fix = manager.capture("fix-1")
+    (root / "vendor" / "asset.bin").write_bytes(b"\x00fix-only\xff")
+
+    scope = manager.resolve("incremental", fix, full_baseline=implementation)
+
+    assert "vendor/asset.bin" in scope.changed_paths
+    assert scope.prior_work_paths == []
+
+
+def test_edge_whitespace_path_is_quoted_so_a_stripped_citation_recovers_it():
+    """A name whose edge whitespace a citation read-back would eat is quoted.
+
+    Every surface that shows a path is a surface a checker copies citations
+    off, and ``_evidence_path_candidates`` reads a citation back after
+    ``str.strip()``. Rendered raw, ``" leading.py"`` would be presented as a
+    spelling that can never ground — and would be indistinguishable from its
+    stripped namesake — so it has to appear as a quoted token instead.
+    """
+    from tianluo.engine.review_scope import quote_diff_path, unquote_diff_path
+
+    for name in (" leading.py", "trailing.py ", " nbsp.py", " both "):
+        token = quote_diff_path(name)
+        assert token != name, name
+        assert token.strip() == token, name
+        assert unquote_diff_path(token) == name, name
+
+    # A path with only INTERIOR spaces is still emitted verbatim: it survives
+    # the strip untouched, so quoting it would churn existing rendered diffs.
+    assert quote_diff_path("src/two words.py") == "src/two words.py"
+
+
+def test_malformed_quoted_token_is_rejected_not_repaired():
+    """Decoding never invents a spelling out of a token nothing emitted.
+
+    A repairing decoder collapses the unknown escape in ``"src\\q.py"`` down
+    to ``srcq.py`` — an unrelated real path — which would select the wrong
+    diff section and ground evidence whose cited spelling no surface ever
+    presented.
+    """
+    from tianluo.engine.review_scope import (
+        decode_quoted_diff_path,
+        quote_diff_path,
+        unquote_diff_path,
+    )
+
+    malformed = [
+        '"src\\q.py"',       # unknown escape
+        '"trailing\\"',      # lone backslash before the closing quote
+        '"in"ner.py"',       # unescaped quote inside the body
+        '"\\777"',           # octal escape outside byte range
+        "unquoted.py",       # not a quoted token at all
+        '"',                 # too short to be a token
+    ]
+    for token in malformed:
+        assert decode_quoted_diff_path(token) is None, token
+        # The lenient reader keeps it verbatim rather than repairing it.
+        assert unquote_diff_path(token) == token, token
+
+    # Well-formed tokens still decode, including the octal-escaped forms.
+    for name in ('quo"te.py', "back\\slash.py", "line\nbreak.py", " edge.py"):
+        assert decode_quoted_diff_path(quote_diff_path(name)) == name, name
+
+    # Octal bytes that are not valid UTF-8 are NOT malformed: a POSIX pathname
+    # is bytes, so this is the exact rendering of a real Git-visible file whose
+    # name git decodes to lone surrogates. Rejecting it would leave the only
+    # spelling the prompt ever shows for that file grounding nothing.
+    assert decode_quoted_diff_path('"\\301\\301"') == "\udcc1\udcc1"
+    assert quote_diff_path("\udcc1\udcc1") == '"\\301\\301"'
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="a backslash cannot appear in a Windows filename"
+)
+def test_declared_literal_backslash_is_not_read_as_runtime_state(tmp_path):
+    # Runtime-state exclusion must obey the same resolution order as every
+    # other test applied to a declared spelling. On POSIX a git-ignored file
+    # literally named ``tianluo\state\note.py`` is an ordinary root-level file,
+    # not runtime state: classifying it by the rewritten spelling would end
+    # candidate resolution before its filesystem spelling was consulted and
+    # drop a real change from the manifest.
+    root = _repo(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/\ntianluo?state?note.py\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore runtime dir and the literal spelling")
+
+    manager = ReviewScopeManager(root, "flow-runtime-literal")
+    baseline = manager.capture("implementation")
+
+    (root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+    (root / "tianluo" / "state" / "note.py").write_text(
+        "runtime = True\n", encoding="utf-8"
+    )
+    (root / "tianluo\\state\\note.py").write_text(
+        "changed = 1\n", encoding="utf-8"
+    )
+
+    scope = manager.reconstruct(
+        "full", baseline, declared_paths=["tianluo\\state\\note.py"]
+    )
+
+    assert scope.undecidable is False
+    assert scope.declared_only_paths == ["tianluo\\state\\note.py"]
+    assert "tianluo\\state\\note.py" in scope.changed_paths
+    assert "tianluo/state/note.py" not in scope.changed_paths
+
+    # Real runtime state stays excluded: there the reported spelling IS the
+    # runtime path, and the literal reading classifies it just the same.
+    runtime = manager.reconstruct(
+        "full", baseline, declared_paths=["tianluo/state/note.py"]
+    )
+    assert runtime.declared_only_paths == []
+    assert runtime.changed_paths == []
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="a Windows filename cannot carry an arbitrary byte"
+)
+def test_non_utf8_path_byte_reconstructs_instead_of_going_undecidable(tmp_path):
+    """A Git-visible path byte that is not UTF-8 must not erase its own change.
+
+    Such a byte reaches Python as a lone surrogate (every path in the module is
+    decoded with ``surrogateescape``). Rendered raw, it makes the descriptor
+    and the rendered diff un-encodable, and the ``UnicodeEncodeError`` that
+    follows is swallowed into an undecidable, EMPTY scope — SELF_CHECK would be
+    told the file did not change at all. The C-quoted token keeps every
+    persisted surface plain ASCII and exactly reconstructable.
+    """
+    root = _repo(tmp_path)
+    weird = os.fsdecode(b"src/we\xffird.py")
+    (root / "src").mkdir(exist_ok=True)
+    absolute = root / weird
+    absolute.write_text("one\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "add byte-named file")
+
+    manager = ReviewScopeManager(root, "flow-nonutf8")
+    baseline = manager.capture("implementation")
+    assert baseline.available is True, baseline.diagnostics
+    # The descriptor is written OUTSIDE capture's degradation guard, so it has
+    # to survive the byte losslessly or the whole step aborts.
+    reloaded = manager.load_baseline(baseline.baseline_id)
+    assert reloaded is not None
+    assert weird in reloaded.tracked
+
+    absolute.write_text("one\ntwo\n", encoding="utf-8")
+    scope = manager.reconstruct("full", baseline)
+
+    assert scope.undecidable is False, scope.diagnostic
+    assert scope.changed_paths == [weird]
+    assert scope.causal_anchors == {weird: [[2, 2]]}
+    # The diff — and therefore the artifact hashed and written from it — is
+    # encodable, which is the failure this test pins.
+    assert scope.unified_diff.encode("utf-8")
+    assert '"src/we\\377ird.py"' in scope.unified_diff
+    assert Path(scope.artifact_path).read_text(encoding="utf-8") == scope.unified_diff
+
+    # The section splitter recovers the exact name, so a citation copied off
+    # the quoted token still grounds on the raw anchor key.
+    from tianluo.engine.review_scope import split_diff_sections
+
+    assert [section.path for section in split_diff_sections(scope.unified_diff)] == [
+        weird
+    ]
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="a Windows filename cannot carry an arbitrary byte"
+)
+def test_non_utf8_path_byte_survives_every_channel_up_to_self_check(tmp_path):
+    """The captured baseline has to reach SELF_CHECK, not just its descriptor.
+
+    The descriptor is written through ``surrogateescape``, but the SAME
+    baseline dict is embedded in the flow context and then travels two further
+    strict-UTF-8 channels before the round runs: the hot/cold state save (whose
+    content hash and file write both encode it) and the SELF_CHECK scope
+    history record (which writes the raw scope paths). A lone surrogate raising
+    in any of them aborts the flow — the save happens immediately before
+    IMPLEMENT — leaving a persisted baseline no round can be scoped with.
+    """
+    from tianluo.engine.chat_history import record_self_check_scope
+    from tianluo.engine.models import FlowInstance
+    from tianluo.engine.persistence import PersistenceManager
+
+    root = _repo(tmp_path)
+    weird = os.fsdecode(b"src/we\xffird.py")
+    (root / "src").mkdir(exist_ok=True)
+    absolute = root / weird
+    absolute.write_text("one\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "add byte-named file")
+
+    manager = ReviewScopeManager(root, "flow-nonutf8-channels")
+    baseline = manager.capture("implementation")
+    assert baseline.available is True, baseline.diagnostics
+    assert weird in baseline.tracked
+
+    flow = FlowInstance(flow_id="flow-nonutf8-channels", task_description="byte path")
+    flow.state.context["review_scope"] = {
+        "implementation_baseline": baseline.to_dict()
+    }
+    persistence = PersistenceManager(root)
+    persistence.save_flow(flow)
+
+    # Reloading is what an IMPLEMENT resume does; the baseline must come back
+    # byte-identical or the round is scoped against a name that exists nowhere.
+    reloaded = persistence.load_flow()
+    assert reloaded is not None
+    restored = reloaded.state.context["review_scope"]["implementation_baseline"]
+    assert weird in restored["tracked"]
+    assert ReviewBaseline.from_dict(restored).to_dict() == baseline.to_dict()
+
+    absolute.write_text("one\ntwo\n", encoding="utf-8")
+    scope = manager.reconstruct("full", baseline)
+    assert scope.changed_paths == [weird]
+
+    record_self_check_scope(
+        project_root=root,
+        flow_id="flow-nonutf8-channels",
+        step_id="self-check-1",
+        step_type="self_check",
+        scope_metadata={
+            "scope_mode": "full",
+            "baseline_id": baseline.baseline_id,
+            "scope_changed_paths": list(scope.changed_paths),
+            "fix_iteration": 0,
+            "round_id": "round-1",
+            "pass_index": 1,
+        },
+    )
+    history = (
+        root / "tianluo" / "history" / "flow-nonutf8-channels" / "self-check-1.jsonl"
+    )
+    records = [
+        json.loads(line)
+        for line in history.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [record["scope_changed_paths"] for record in records] == [[weird]]

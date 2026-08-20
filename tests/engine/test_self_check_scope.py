@@ -12,6 +12,7 @@ from tianluo.engine.models import (
     StepStatus,
     StepType,
 )
+from tianluo.engine.review_scope import ReviewBaseline
 from tianluo.engine.review_scope import ReviewScopeManager
 from tianluo.engine.review_scope import SelfCheckRoundController
 from tianluo.engine.state_machine import StateMachine
@@ -821,6 +822,41 @@ def test_gitignored_file_written_by_the_flow_reaches_the_review_scope(tmp_path):
     assert not inputs["scope_causal_anchors"].get("generated/out.js")
 
 
+def test_declared_paths_are_persisted_for_the_read_only_diff_command(tmp_path):
+    """The round records the declared paths it was scoped with.
+
+    ``luo review-scope diff`` rebuilds the same round from the persisted
+    baselines; without the persisted declared paths it would rebuild WITHOUT
+    the git-ignored files the round's manifest advertises and reject them as
+    out of scope.
+    """
+    root, machine, flow, implement = _machine_and_flow(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ngenerated/\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore generated")
+    (root / "generated").mkdir()
+    (root / "generated" / "out.js").write_text("var x = 1;\n", encoding="utf-8")
+    implement.outputs["files_changed"] = ["app.py", "generated/out.js"]
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert "generated/out.js" in inputs["scope_changed_paths"]
+    persisted = ReviewScopeManager.declared_changed_paths(flow.state.context)
+    assert "generated/out.js" in persisted
+
+    rebuilt = ReviewScopeManager(root, flow.flow_id).reconstruct(
+        "full",
+        ReviewBaseline.from_dict(
+            flow.state.context["review_scope"]["implementation_baseline"]
+        ),
+        declared_paths=persisted,
+        write_artifact=False,
+    )
+    assert "generated/out.js" in rebuilt.changed_paths
+
+
 def test_incremental_round_inputs_carry_the_whole_task_evidence_domain(tmp_path):
     """End-to-end: an incremental round keeps a finding anchored in earlier work.
 
@@ -868,6 +904,42 @@ def test_incremental_round_inputs_carry_the_whole_task_evidence_domain(tmp_path)
     kept, stats = _validate_and_filter_issues([issue], inputs)
     assert kept == [issue]
     assert stats["bad_evidence_count"] == 0
+
+
+def test_incremental_round_inputs_name_binaries_that_carry_earlier_work(tmp_path):
+    """End-to-end: a binary IMPLEMENT and the fix both touched is not delta-only.
+
+    An anchor-less path owns no added range, so the manifest's earlier-work
+    mark can only come from comparing the two persisted baseline snapshots.
+    """
+    from tianluo.engine.steps.self_check import _format_review_scope
+
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    (root / "asset.bin").write_bytes(b"\x00base\xff")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "asset")
+    # The implementation baseline predates the commit above, so re-capture it
+    # the way the flow would have: before any of this task's writes.
+    baseline = ReviewScopeManager(root, flow.flow_id).capture("implementation")
+    flow.state.context["review_scope"]["implementation_baseline"] = baseline.to_dict()
+    (root / "asset.bin").write_bytes(b"\x00implemented\xff")
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = fix_baseline.to_dict()
+    flow.state.fix_iterations = 1
+    (root / "asset.bin").write_bytes(b"\x00fixed\xff")
+    (root / "fresh.bin").write_bytes(b"\x00fresh\xff")
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "incremental"
+    assert set(inputs["scope_changed_paths"]) == {"asset.bin", "fresh.bin"}
+    assert inputs["scope_prior_work_paths"] == ["asset.bin"]
+    rendered = _format_review_scope(inputs)
+    assert "asset.bin" in rendered
+    assert "domain: this fix + earlier work in this task" in rendered
 
 
 def test_full_closure_round_inputs_carry_no_separate_task_domain(tmp_path):
@@ -992,3 +1064,374 @@ def test_full_round_marker_advances_so_the_next_one_measures_from_it(tmp_path):
         == second_fix.baseline_id
     )
     assert later_closure.inputs["scope_fix_delta_changed_paths"] == ["third.py"]
+
+
+def test_a_pass_one_full_fallback_also_advances_the_full_round_marker(tmp_path):
+    """The marker follows the ACCOUNTING, not the mode a round was prepared in.
+
+    An incremental round whose fix baseline cannot be rebuilt degrades to the
+    implementation baseline and — when nothing has been reviewed yet on it —
+    is credited as the flow's full round. If the "since the last full round"
+    marker stayed behind on the previous full round, the NEXT closure round
+    would search from a position this one already reviewed past: it would
+    re-select the very fix baseline whose corruption forced the degrade and
+    lose the annotation of everything the later fixes produced.
+    """
+    import shutil
+
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    _complete_initial_full(machine, flow)
+    scope_context = flow.state.context["review_scope"]
+
+    manager = ReviewScopeManager(root, flow.flow_id)
+    first_fix = manager.capture("fix-1")
+    scope_context["latest_fix_baseline"] = first_fix.to_dict()
+    scope_context["fix_baseline_history"] = [{"baseline_id": first_fix.baseline_id}]
+    flow.state.fix_iterations = 1
+    (root / "other.py").write_text("helper = 1\n", encoding="utf-8")
+    # The descriptor survives (so the baseline is still a selectable history
+    # entry) but its content blobs are gone, so the round cannot be rebuilt
+    # from it — the degrade this test is about.
+    shutil.rmtree(manager._baseline_dir(first_fix.baseline_id) / "blobs")
+
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+    degraded = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert degraded["scope_mode"] == "full"
+    assert degraded["scope_fallback_from_incremental"] is True
+    assert scope_context["full_round_fix_head"] == first_fix.baseline_id
+    _add_current(flow, degraded)
+    assert machine.transition_to_next(flow) is not None
+
+    # A later, healthy fix and its closure round must measure from the fix the
+    # degraded round already covered — not from the corrupt one.
+    second_fix = manager.capture("fix-2")
+    scope_context["latest_fix_baseline"] = second_fix.to_dict()
+    scope_context["fix_baseline_history"].append(
+        {"baseline_id": second_fix.baseline_id}
+    )
+    (root / "third.py").write_text("third = 1\n", encoding="utf-8")
+    SelfCheckRoundController(flow.state.context).mark_findings()
+    flow.state.fix_iterations = 2
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+    incremental = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+    assert incremental["scope_mode"] == "incremental"
+    _add_current(flow, incremental)
+
+    closure = machine.transition_to_next(flow)
+    assert closure is not None
+    assert closure.inputs["scope_mode"] == "full"
+    assert closure.inputs["scope_fix_delta_baseline_id"] == second_fix.baseline_id
+    assert closure.inputs["scope_fix_delta_changed_paths"] == ["third.py"]
+
+
+def test_gitignored_path_is_listed_without_a_domain_mark(tmp_path):
+    """No baseline snapshot holds a git-ignored path, on either side.
+
+    Its membership in a domain comes from the step's self-report, not from a
+    diff, so no persisted git fact can attribute it — and manufacturing one
+    would take execution-side bookkeeping of who declared what, which is
+    deliberately not kept. The manifest therefore lists the path and stops.
+    """
+    from tianluo.engine.steps.self_check import _format_review_scope
+
+    root, machine, flow, implement = _machine_and_flow(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ngenerated/\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore generated")
+    (root / "generated").mkdir()
+    (root / "generated" / "shared.js").write_text(
+        "var shared = 1;\n", encoding="utf-8"
+    )
+    implement.outputs["files_changed"] = ["app.py", "generated/shared.js"]
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = (
+        fix_baseline.to_dict()
+    )
+    flow.state.fix_iterations = 1
+    (root / "generated" / "shared.js").write_text(
+        "var shared = 2;\n", encoding="utf-8"
+    )
+    flow.state.add_step(
+        Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            inputs={"is_fix_iteration": True},
+            outputs={"files_changed": ["generated/shared.js"]},
+        )
+    )
+    flow.state.current_step_index = flow.state.selected_steps.index(
+        StepType.SELF_CHECK
+    )
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "incremental"
+    assert "generated/shared.js" in inputs["scope_changed_paths"]
+    assert inputs["scope_declared_only_paths"] == ["generated/shared.js"]
+    rendered = _format_review_scope(inputs)
+    manifest_line = next(
+        line for line in rendered.splitlines()
+        if line.strip().startswith("- generated/shared.js")
+    )
+    # By path ALONE: no domain mark, and no `+N -M` sizes either — a
+    # domain-labelled zero pair would read as "both baselines compared this
+    # path and found it unchanged", the same claim no snapshot supports.
+    assert manifest_line.strip() == "- generated/shared.js"
+    assert "domain:" not in manifest_line
+    # A path the baselines CAN compare still carries its mark, so the absence
+    # above is the declared-path exception and not a lost feature.
+    assert "domain: " in rendered
+    # And the exception is stated, not silent: the pull command cannot render
+    # such a path either, so the checker is told to open the file instead of
+    # concluding from an out-of-scope answer that it needs no review.
+    assert "no `luo review-scope diff` rendering" in rendered
+    assert "open the file itself to review it: generated/shared.js" in rendered
+
+
+def test_declared_paths_accumulate_across_the_flow(tmp_path):
+    """A later FIX's report must not erase what an earlier step declared.
+
+    Declared paths exist for one case: a file git ignores, invisible to
+    baseline capture. Replacing the list on every round would delete the whole
+    task's record of the ignored file the first IMPLEMENT created, and with it
+    the ``--baseline implementation`` view of that file.
+    """
+    root, machine, flow, implement = _machine_and_flow(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ngenerated/\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore generated")
+    (root / "generated").mkdir()
+    (root / "generated" / "early.js").write_text(
+        "var early = 1;\n", encoding="utf-8"
+    )
+    implement.outputs["files_changed"] = ["app.py", "generated/early.js"]
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = (
+        fix_baseline.to_dict()
+    )
+    flow.state.fix_iterations = 1
+    (root / "app.py").write_text("value = 3\n", encoding="utf-8")
+    # The fix reports only its own file.
+    flow.state.add_step(
+        Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            inputs={"is_fix_iteration": True},
+            outputs={"files_changed": ["app.py"]},
+        )
+    )
+    flow.state.current_step_index = flow.state.selected_steps.index(
+        StepType.SELF_CHECK
+    )
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "incremental"
+    assert "generated/early.js" in ReviewScopeManager.declared_changed_paths(
+        flow.state.context
+    )
+    assert "generated/early.js" in inputs["scope_task_changed_paths"]
+
+
+def test_declared_path_keeps_the_spelling_the_step_reported(tmp_path):
+    """A repository path may legitimately begin or end with a space.
+
+    Such a path is anchor-less by construction — no baseline holds it, so no
+    diff can correct a name the pipeline rewrote on the way in. Trimming the
+    report would make reconstruction look for a file that does not exist and
+    drop the real change out of the round's scope entirely, while the trimmed
+    spelling is still accepted for the ordinary case of a report that carries
+    accidental whitespace.
+    """
+    from tianluo.engine.steps.self_check import _format_review_scope
+
+    root, machine, flow, implement = _machine_and_flow(tmp_path)
+    (root / ".gitignore").write_text(
+        "/tianluo/state/\ngenerated/\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "ignore generated")
+    (root / "generated").mkdir()
+    # A trailing space is part of the name: ``"generated/trailing.js ".strip()``
+    # is a DIFFERENT, nonexistent path.
+    (root / "generated" / "trailing.js ").write_text(
+        "var spaced = 1;\n", encoding="utf-8"
+    )
+    # One report spelled exactly, one carrying stray whitespace around a
+    # path that really has none.
+    implement.outputs["files_changed"] = [
+        "generated/trailing.js ",
+        "  app.py  ",
+    ]
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    persisted = ReviewScopeManager.declared_changed_paths(flow.state.context)
+    assert "generated/trailing.js " in persisted
+    assert inputs["scope_declared_only_paths"] == ["generated/trailing.js "]
+    assert "generated/trailing.js " in inputs["scope_changed_paths"]
+    rendered = _format_review_scope(inputs)
+    # Rendered through ``quote_diff_path`` like every manifest row, so the
+    # trailing space survives as part of the quoted token rather than being
+    # lost to the line's own trimming.
+    assert '- "generated/trailing.js "' in rendered
+    # The whitespace-slop report resolves to the real tracked file, which the
+    # diff already covers, so it is NOT admitted as an anchor-less path.
+    assert "  app.py  " not in rendered
+    assert "app.py" in inputs["scope_changed_paths"]
+
+
+def test_path_ignored_after_capture_keeps_the_anchors_the_task_diff_holds(tmp_path):
+    """A declared-only verdict from ONE domain never hides the other's anchors.
+
+    A tracked file the implementation baseline snapshotted, then removed from
+    git's index and ignored mid-flow, is invisible to the LATER fix baseline —
+    so the fix reconstruction can only classify it as a declared-only
+    self-report, while the whole-task comparison still holds real line anchors
+    for it. An incremental round grounds on the UNION of the two, so listing
+    such a path as anchor-less would advertise "cite the bare path" for the one
+    citation form ``_validate_evidence`` then drops as bad evidence.
+    """
+    from tianluo.engine.steps.self_check import (
+        _format_review_scope,
+        _validate_and_filter_issues,
+    )
+
+    root = tmp_path / "project"
+    root.mkdir()
+    _git(root, "init")
+    _git(root, "config", "user.email", "scope@example.com")
+    _git(root, "config", "user.name", "Scope Test")
+    (root / ".gitignore").write_text("/tianluo/state/\n", encoding="utf-8")
+    (root / "app.py").write_text("value = 1\n", encoding="utf-8")
+    (root / "secret.py").write_text("token = 0\n", encoding="utf-8")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-m", "initial")
+
+    with patch("tianluo.engine.state_machine.PersistenceManager"):
+        machine = StateMachine(root)
+    machine._get_workflow_config = lambda **kwargs: WorkflowConfig(
+        self_check_passes_required=1,
+    )
+    flow = FlowInstance(
+        flow_id="ignored-after-capture",
+        task_description="Change value safely",
+        task_type="feature",
+        status=FlowStatus.RUNNING,
+    )
+    flow.state.context["project_root"] = str(root)
+    flow.state.selected_steps = [
+        StepType.IMPLEMENT,
+        StepType.TEST,
+        StepType.SELF_CHECK,
+        StepType.INVARIANT_CHECK,
+        StepType.COMMIT,
+    ]
+    baseline = ReviewScopeManager(root, flow.flow_id).capture("implementation")
+    flow.state.context["review_scope"] = {
+        "implementation_baseline": baseline.to_dict(),
+    }
+
+    # IMPLEMENT edits both files and takes secret.py out of git's sight.
+    (root / "app.py").write_text("value = 2\n", encoding="utf-8")
+    (root / "secret.py").write_text("token = 0\ntoken = 1\n", encoding="utf-8")
+    _git(root, "rm", "--cached", "secret.py")
+    with (root / ".gitignore").open("a", encoding="utf-8") as handle:
+        handle.write("secret.py\n")
+    # The flow commits during IMPLEMENT (each DAG leaf branch is merged back),
+    # so the removal is in HEAD by the time the fix baseline is captured — which
+    # is what makes secret.py invisible to that LATER snapshot while the earlier
+    # implementation baseline still holds it.
+    _git(root, "add", ".gitignore")
+    _git(root, "commit", "-m", "stop tracking secret.py")
+    flow.state.add_step(
+        Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["app.py", "secret.py"]},
+        )
+    )
+    flow.state.add_step(
+        Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": True}},
+        )
+    )
+    flow.state.current_step_index = flow.state.selected_steps.index(
+        StepType.SELF_CHECK
+    )
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = (
+        fix_baseline.to_dict()
+    )
+    flow.state.fix_iterations = 1
+    (root / "app.py").write_text("value = 3\n", encoding="utf-8")
+    flow.state.add_step(
+        Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            inputs={"is_fix_iteration": True},
+            outputs={"files_changed": ["app.py", "secret.py"]},
+        )
+    )
+    flow.state.current_step_index = flow.state.selected_steps.index(
+        StepType.SELF_CHECK
+    )
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "incremental"
+    assert inputs["scope_task_available"] is True
+    # The whole-task comparison places the path and anchors it...
+    assert "secret.py" in inputs["scope_task_changed_paths"]
+    assert inputs["scope_task_causal_anchors"].get("secret.py")
+    # ...while the fix baseline cannot see it at all, so its reconstruction can
+    # only call the path a declared-only self-report.
+    assert not inputs["scope_causal_anchors"].get("secret.py")
+    # That verdict must not survive the union: the round grounds on both
+    # domains at once, so the path is anchor-BEARING for this round.
+    assert "secret.py" not in inputs["scope_declared_only_paths"]
+
+    rendered = _format_review_scope(inputs)
+    manifest_line = next(
+        line for line in rendered.splitlines()
+        if line.strip().startswith("- secret.py:")
+    )
+    assert "added lines (current file)" in manifest_line
+    assert "domain:" in manifest_line
+    # The anchor-less note must not name a path the round can anchor, or the
+    # checker is steered straight into the bad-evidence drop.
+    assert "no line anchors" not in rendered or "secret.py" not in next(
+        line for line in rendered.splitlines() if "no line anchors" in line
+    )
+
+    kept, _stats = _validate_and_filter_issues(
+        [
+            {
+                "severity": "medium",
+                "file_path": "secret.py",
+                # A regression source bypasses the verbatim-quote pool and
+                # leans on diff grounding alone — the strictest reading of the
+                # union domain, so it proves the anchors really are citable.
+                "expectation_source": {"type": "regression"},
+                "evidence_lines": ["secret.py:2"],
+                "actual_behavior": "a secret is written to a git-ignored file",
+                "expected_behavior": "no secret is written",
+                "divergence": "the token leaks to disk",
+            }
+        ],
+        inputs,
+    )
+    assert len(kept) == 1

@@ -1107,7 +1107,7 @@ class TestRunPidfileFlowStamp:
         from tianluo.core.run_pidfile import read_run_holder
 
         persistence = self._persistence(tmp_path)
-        run_cmd._write_run_pidfile(persistence)
+        run_cmd._acquire_run_pidfile(persistence)
         assert read_run_holder(persistence.state_dir).flow_id is None
 
         run_cmd._stamp_run_pidfile_flow(persistence, "flow-abc")

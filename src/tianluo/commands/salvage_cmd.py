@@ -366,11 +366,23 @@ def _archive_session(project_root: Path) -> bool:
             flow_id = None
         pm.clear_state()
         if flow_id:
-            pm.clear_resumable_snapshot(flow_id)
-            # A salvaged flow has been dispositioned and can never be resumed,
-            # so its review baselines have no reader left; reclaim them on the
-            # same signal that retires the resumable snapshot.
-            discard_flow_snapshots(project_root, flow_id)
+            # INVARIANT: the baselines are reclaimed only once the resumable
+            # snapshot is CONFIRMED retired. A salvaged flow has been
+            # dispositioned and can never be resumed, so its review baselines
+            # have no reader left — but ``clear_resumable_snapshot`` is
+            # best-effort, and a snapshot that survives a permission/IO error
+            # leaves the flow resumable after all. Dropping its baselines then
+            # would let a later resume reach SELF_CHECK with nothing to diff
+            # against; keeping them only costs disk space the next terminal
+            # landing reclaims.
+            if pm.clear_resumable_snapshot(flow_id):
+                discard_flow_snapshots(project_root, flow_id)
+            else:
+                logger.warning(
+                    "Resumable snapshot for %s survived the clear; keeping its "
+                    "review baselines",
+                    flow_id,
+                )
         return True
     return False
 

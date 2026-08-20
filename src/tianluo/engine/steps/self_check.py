@@ -22,6 +22,9 @@ from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
 from ..review_scope import (
     count_anchor_lines,
+    decode_quoted_diff_path,
+    intersect_line_ranges,
+    quote_diff_path,
     subtract_line_ranges,
     union_line_ranges,
 )
@@ -152,21 +155,79 @@ def _evidence_path_candidates(entry: str) -> list[tuple[str, int | None]]:
     nothing citable. Such a line is ignored as an invalid line number rather
     than making the whole citation unparseable. Both readings are returned so
     an anchor-BEARING path still has to validate on its real line.
+
+    INVARIANT: every spelling this round's own surfaces present for a path is
+    a valid citation of it. A pathname carrying a line break (or a quote, a
+    backslash, or edge whitespace this very function's ``strip`` would eat) is
+    shown in the diff headers and in the manifest as a C-quoted token instead
+    — see :func:`quote_diff_path` — because the raw name would tear those
+    single-line records in two or not survive the read-back, so the quoted
+    token is the only spelling a checker can copy off the prompt. Anchor keys
+    are raw pathnames, so each reading is additionally offered decoded;
+    without that, a citation copied verbatim from the prompt would miss the
+    anchor set and a real finding on such a file would be silently dropped as
+    bad evidence.
+
+    INVARIANT: only a WELL-FORMED quoted token yields that decoded reading
+    (:func:`decode_quoted_diff_path` returns ``None`` otherwise). A lenient
+    decode would let a spelling no surface ever presented — ``"src\\q.py"``,
+    whose unknown escape a repairing decoder collapses away — ground on the
+    unrelated real path ``srcq.py``, admitting a finding whose evidence names
+    a file it never cited.
     """
     text = entry.strip()
     if not text:
         return []
     out: list[tuple[str, int | None]] = []
+
+    def _add(path: str, line_number: int | None) -> None:
+        decoded = decode_quoted_diff_path(path)
+        readings = (path,) if decoded is None else (path, decoded)
+        for reading in readings:
+            if reading and (reading, line_number) not in out:
+                out.append((reading, line_number))
+
     parsed = _parse_evidence_line(text)
     if parsed is not None:
-        out.append((parsed[0], parsed[1]))
+        _add(parsed[0], parsed[1])
     else:
         # ``path:0`` / ``path:abc`` — drop the unusable suffix and keep the
         # path so path-level grounding can still be decided on it.
         prefix, sep, _suffix = text.rpartition(":")
         if sep and prefix:
-            out.append((prefix, None))
-    out.append((text, None))
+            _add(prefix, None)
+    _add(text, None)
+    return out
+
+
+def _missing_in_path_candidates(entry: Any) -> list[str]:
+    """Readings of one ``missing_in`` entry as changed-path spellings.
+
+    INVARIANT: a path is matched against the changed set by exactly the same
+    spellings under ``missing_in`` as under ``evidence_lines`` (see
+    :func:`_evidence_path_candidates`) — the citation FORM the reviewer picked
+    may never decide whether a regression grounds. Both readings that function
+    offers apply here too: the reported spelling as written, because a
+    repository path may legitimately carry edge whitespace and trimming it
+    would name a different file; and the decode of a well-formed C-quoted
+    token, because such a path is presented to the checker ONLY in that quoted
+    form (the manifest and the diff headers both quote it), so the spelling it
+    can copy off the prompt is not the raw anchor key. The trimmed spelling
+    stays as the fallback for the stray whitespace an LLM-authored report
+    carries. Only a well-formed quoted token decodes, for the reason stated in
+    ``_evidence_path_candidates``: a lenient decode would ground a citation on
+    a path it never named.
+
+    No line-number reading is offered — ``missing_in`` is a path channel, and
+    the paths it grounds on are anchor-less by definition.
+    """
+    if not isinstance(entry, str) or not entry.strip():
+        return []
+    out: list[str] = []
+    for spelling in (entry, entry.strip()):
+        for reading in (spelling, decode_quoted_diff_path(spelling)):
+            if reading and reading not in out:
+                out.append(reading)
     return out
 
 
@@ -343,11 +404,11 @@ def _prior_finding_paths(step_inputs: dict) -> set[str]:
 def _task_scope_domain(step_inputs: dict) -> tuple[set[str], Any] | None:
     """The whole-task evidence domain an incremental round also grounds on.
 
-    WHY an incremental round grounds on two domains: its diff baseline is the
-    latest uncovered FIX, but the change the checker is looking at is the whole
-    flow's work. A finding whose ``evidence_lines`` land on a line an earlier
-    IMPLEMENT or FIX really wrote is grounded in git fact — dropping it as
-    fabricated evidence merely because the LATEST fix did not touch that line
+    WHY an incremental round grounds on the whole task too: its diff baseline is
+    the latest uncovered FIX, but the change the checker is looking at is the
+    whole flow's work. A finding whose ``evidence_lines`` land on a line an
+    earlier IMPLEMENT or FIX really wrote is grounded in git fact — dropping it
+    as fabricated evidence merely because the LATEST fix did not touch that line
     silently loses a true finding, and left the rules inconsistent: the same
     finding routed through ``missing_in`` landed unconditionally.
 
@@ -356,13 +417,15 @@ def _task_scope_domain(step_inputs: dict) -> tuple[set[str], Any] | None:
     path at all, so a second domain adds nothing), and when the whole-task diff
     could not be rebuilt — the round then keeps exactly its fix-delta domain.
 
-    The domain deliberately stays SEPARATE from the round's own rather than
-    being merged into one anchor dict: merging would turn a path that is
-    anchor-less in the fix delta (deletion-only, binary, rename-only) but
-    anchor-bearing across the whole task into an anchor-BEARING path, which
-    would start rejecting the bare-path citation the prompt prescribes there.
-    Grounding is therefore evaluated per domain and OR-ed, which can only widen
-    what lands, never narrow it.
+    INVARIANT: this domain is UNIONED with the round's own before any grounding
+    decision is taken (:func:`_union_evidence_domains`), never validated
+    separately and OR-ed. OR-ing decides "anchor-bearing vs anchor-less" per
+    domain, so a path the fix delta only renamed (anchor-less there) would keep
+    granting path-level grounding even though the whole-task diff proves it has
+    current-side changed lines — letting a regression cite the bare path where
+    the union demands a ``path:line``. The union is also exactly the anchor
+    space the manifest presents as citable, so what the prompt advertises and
+    what the validator accepts stay the same one domain.
     """
     if bool(step_inputs.get("scope_undecidable")):
         return None
@@ -381,6 +444,23 @@ def _task_scope_domain(step_inputs: dict) -> tuple[set[str], Any] | None:
     return changed, anchors
 
 
+def _task_domain_grounds(step_inputs: dict) -> bool:
+    """Whether the whole-task diff really is one of this round's evidence
+    domains, and may therefore be presented to the checker as citable.
+
+    INVARIANT: every path or line range the prompt offers as citable space —
+    the widened evidence rule and the manifest's second domain alike — must
+    ground in ``_validate_and_filter_issues``. Advertising one that does not
+    invites a citation the validator then counts as bad evidence and silently
+    drops, which is exactly the failure the manifest exists to prevent. Under
+    an undecidable scope grounding accepts any named path, so the wider view
+    stays honest there even though ``_task_scope_domain`` bows out.
+    """
+    if bool(step_inputs.get("scope_undecidable")):
+        return True
+    return _task_scope_domain(step_inputs) is not None
+
+
 def _validate_evidence(
     issue: dict,
     changed: set[str],
@@ -395,10 +475,11 @@ def _validate_evidence(
     have edited X but didn't" cases that naturally cannot point at a changed
     line.
 
-    This decides grounding within ONE diff domain. A round may carry more than
-    one (an incremental round grounds on its fix delta and on the whole-task
-    diff — see ``_task_scope_domain``); ``_grounded_in_any_domain`` OR-s them,
-    so every rule below is stated per domain.
+    This decides grounding against ONE diff domain. A round may reconstruct
+    more than one view (an incremental round grounds on its fix delta and on
+    the whole-task diff — see ``_task_scope_domain``), but
+    ``_union_evidence_domains`` folds them into a single domain BEFORE this
+    runs, so every rule below reads that union.
 
     INVARIANT: grounding of a citation is decided by whether its changed path
     is anchor-BEARING or anchor-LESS, and by nothing else:
@@ -477,22 +558,20 @@ def _validate_evidence(
         # ``evidence_lines``. Where a causal line does exist, the citation
         # requirement stands.
         for mp in missing_in:
-            if not isinstance(mp, str) or not mp.strip():
-                continue
-            path = mp.strip()
-            if scope_undecidable:
-                # Degraded scope: under ``evidence_lines`` ANY named path
-                # grounds here, so the ``missing_in`` channel must not be the
-                # narrower one — that asymmetry would drop a finding purely on
-                # the citation form the reviewer chose, in the state where the
-                # mechanism most needs to keep findings.
-                return True
-            if not isinstance(causal_anchors, dict):
-                continue
-            if path in changed and not _usable_anchor_ranges(
-                causal_anchors.get(path)
-            ):
-                return True
+            for path in _missing_in_path_candidates(mp):
+                if scope_undecidable:
+                    # Degraded scope: under ``evidence_lines`` ANY named path
+                    # grounds here, so the ``missing_in`` channel must not be
+                    # the narrower one — that asymmetry would drop a finding
+                    # purely on the citation form the reviewer chose, in the
+                    # state where the mechanism most needs to keep findings.
+                    return True
+                if not isinstance(causal_anchors, dict):
+                    continue
+                if path in changed and not _usable_anchor_ranges(
+                    causal_anchors.get(path)
+                ):
+                    return True
         return False
     for mp in missing_in:
         if isinstance(mp, str) and mp.strip():
@@ -500,29 +579,43 @@ def _validate_evidence(
     return False
 
 
-def _grounded_in_any_domain(
-    issue: dict,
+def _union_evidence_domains(
     domains: list[tuple[set[str], Any]],
-    *,
-    require_changed_line: bool = False,
-    scope_undecidable: bool = False,
-) -> bool:
-    """Ground an issue against the union of this round's evidence domains.
+) -> tuple[set[str], Any]:
+    """Fold this round's diff views into the ONE domain evidence grounds on.
 
-    Each domain is one ``(changed_paths, causal_anchors)`` diff view; a finding
-    lands when it grounds in ANY of them. See ``_task_scope_domain`` for why an
-    incremental round carries two and why they are OR-ed rather than merged.
+    Each input is one ``(changed_paths, causal_anchors)`` view — the round's own
+    baseline and, on an incremental round, the whole-task diff
+    (:func:`_task_scope_domain`).
+
+    INVARIANT: the views are unioned FIRST and grounding is decided once
+    against the result; they are never validated separately and OR-ed. Both
+    views number the current side of the same workspace, so their anchor
+    ranges live in one numbering space and merge cleanly — while a per-view
+    decision would read the same path as anchor-less in one view and
+    anchor-bearing in the other, and the OR would keep the weaker reading. That
+    is how a fix that only renamed a file IMPLEMENT had edited would let a
+    regression ground on the bare path, despite the union holding the very
+    changed line a ``path:line`` citation is required to name.
+
+    A view whose ``causal_anchors`` is not a dict carries NO anchor information
+    at all (grounding there stands at path level for every path), so the union
+    with it is likewise anchor-free: an absent map is "unknown", not "this path
+    has no lines", and inventing anchors for it would narrow what lands.
     """
-    return any(
-        _validate_evidence(
-            issue,
-            changed,
-            require_changed_line=require_changed_line,
-            causal_anchors=anchors,
-            scope_undecidable=scope_undecidable,
-        )
-        for changed, anchors in domains
-    )
+    changed: set[str] = set()
+    merged: dict[str, list] = {}
+    anchors_known = True
+    for domain_changed, domain_anchors in domains:
+        changed |= domain_changed
+        if not isinstance(domain_anchors, dict):
+            anchors_known = False
+            continue
+        for path, ranges in domain_anchors.items():
+            bucket = merged.setdefault(str(path), [])
+            if isinstance(ranges, list):
+                bucket.extend(ranges)
+    return changed, (merged if anchors_known else None)
 
 
 def _describe_issue(issue: dict) -> str:
@@ -614,14 +707,16 @@ def _validate_and_filter_issues(
     changed = changed | prior_paths
 
     # An incremental round grounds on the union of its fix delta and the whole
-    # task's diff (``_task_scope_domain``). The prior-finding path widening
-    # applies to every domain: it is a property of the finding, not of a
+    # task's diff (``_task_scope_domain``), folded into one domain BEFORE any
+    # grounding decision (``_union_evidence_domains``). The prior-finding path
+    # widening applies to every view: it is a property of the finding, not of a
     # baseline.
     domains: list[tuple[set[str], Any]] = [(changed, causal_anchors)]
     task_domain = _task_scope_domain(step_inputs)
     if task_domain is not None:
         task_changed, task_anchors = task_domain
         domains.append((task_changed | prior_paths, task_anchors))
+    changed, causal_anchors = _union_evidence_domains(domains)
 
     for issue in raw_issues:
         stats["input_count"] += 1
@@ -664,20 +759,22 @@ def _validate_and_filter_issues(
                 stats["quote_not_in_source_count"] += 1
                 continue
 
-        grounded = _grounded_in_any_domain(
+        grounded = _validate_evidence(
             issue,
-            domains,
+            changed,
             require_changed_line=(src_type == "regression"),
+            causal_anchors=causal_anchors,
         )
         if not grounded and scope_undecidable:
             # Degraded state: the changed-path hint could not be proven, so it
             # must not be the reason an evidence-bearing finding disappears.
             # Keeping it (and tallying the relaxation) is the safe direction —
             # the fix loop can judge it, a silent drop cannot.
-            grounded = _grounded_in_any_domain(
+            grounded = _validate_evidence(
                 issue,
-                domains,
+                changed,
                 require_changed_line=(src_type == "regression"),
+                causal_anchors=causal_anchors,
                 scope_undecidable=True,
             )
             if grounded:
@@ -859,13 +956,6 @@ def _format_project_constraints(sources: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-# A path whose diff is a few thousand hunks would otherwise turn the manifest
-# into the very wall of text the inline-diff budget exists to avoid. The cut is
-# announced with the exact command that shows the rest, so a capped path is
-# never mistaken for a fully enumerated one.
-_MANIFEST_MAX_RANGES_PER_PATH = 30
-
-
 def _anchor_map(value: Any) -> dict:
     """Normalize a persisted anchor mapping into ``{path: ranges}``."""
     if not isinstance(value, dict):
@@ -881,26 +971,53 @@ def _path_list(value: Any) -> list:
     return [str(item) for item in value] if isinstance(value, list) else []
 
 
+def _prior_work_paths(step_inputs: dict) -> set:
+    """Delta paths the persisted baselines prove already carried work.
+
+    "Before the delta baseline was taken", that is — see
+    ``ReviewScope.prior_work_paths`` for how the two snapshots prove it.
+    """
+    return set(_path_list(step_inputs.get("scope_prior_work_paths")))
+
+
 def _format_line_ranges(ranges: list) -> str:
-    """Render merged inclusive ranges the way a checker would cite them."""
-    parts = [
+    """Render merged inclusive ranges the way a checker would cite them.
+
+    INVARIANT: every range is written out — the list is never capped. The
+    manifest's contract is that the anchor space it shows IS the space evidence
+    validation grounds in, and a hidden range is a hunk the checker can neither
+    see nor cite while a citation on it would still validate. A path with very
+    many hunks makes a long line; a path with an invisible hunk makes an
+    unciteable one, and only the second breaks the round.
+    """
+    return ", ".join(
         str(start) if start == end else f"{start}-{end}"
-        for start, end in ranges[:_MANIFEST_MAX_RANGES_PER_PATH]
-    ]
-    if len(ranges) > _MANIFEST_MAX_RANGES_PER_PATH:
-        parts.append(f"(+{len(ranges) - _MANIFEST_MAX_RANGES_PER_PATH} more)")
-    return ", ".join(parts)
+        for start, end in ranges
+    )
 
 
 def _review_scope_domains(step_inputs: dict) -> tuple:
     """Split the round's anchors into its whole domain and its newest slice.
 
-    Returns ``(whole, delta, delta_label, rest_label)`` where each domain is
-    ``(paths, causal_anchors, deletion_anchors)``. The delta is what the round
-    is newly accountable for — the fix delta on an incremental round, the fixes
-    made since the previous full round on a full one — and is ``None`` when the
-    round has no earlier slice to distinguish it from (the initial full round),
-    or when the second reconstruction was unavailable.
+    Returns ``(whole, delta, delta_label, rest_label, delta_grounds,
+    prior_work)`` where each domain is ``(paths, causal_anchors,
+    deletion_anchors)`` and ``prior_work`` is the subset of the delta's paths
+    that the persisted baselines prove already carried work before the delta
+    baseline was taken (see ``ReviewScope.prior_work_paths``). The delta is
+    what the round is newly accountable for — the fix delta on an incremental
+    round, the fixes made since the previous full round on a full one — and is
+    ``None`` when the round has no earlier slice to distinguish it from (the
+    initial full round), or when the second reconstruction was unavailable.
+
+    INVARIANT: ``delta_grounds`` states whether the delta view is itself part
+    of the domain ``_validate_and_filter_issues`` grounds citations against,
+    and it is the ONLY licence to widen the presented line space beyond
+    ``whole``. It is true only on an incremental round, where the fix delta is
+    the round's own baseline and ``_union_evidence_domains`` folds it together
+    with the whole-task view. On a full round the delta is a pinned reconstruction
+    kept purely to narrate which slice the fixes touched — a full round grounds
+    on its own baseline alone, so a delta path or range that does not also
+    exist there is NOT citable and the caller must clip it away.
     """
     mode = str(step_inputs.get("scope_mode", "full") or "full")
     round_domain = (
@@ -910,34 +1027,40 @@ def _review_scope_domains(step_inputs: dict) -> tuple:
     )
     if mode == "incremental":
         if not step_inputs.get("scope_task_available"):
-            return round_domain, None, "", ""
+            return round_domain, None, "", "", False, set()
         task_domain = (
             _path_list(step_inputs.get("scope_task_changed_paths")),
             _anchor_map(step_inputs.get("scope_task_causal_anchors")),
             _anchor_map(step_inputs.get("scope_task_deletion_anchors")),
         )
         if not task_domain[0]:
-            return round_domain, None, "", ""
+            return round_domain, None, "", "", False, set()
+        if not _task_domain_grounds(step_inputs):
+            return round_domain, None, "", "", False, set()
         return (
             task_domain,
             round_domain,
             "this fix",
             "earlier work in this task",
+            True,
+            _prior_work_paths(step_inputs),
         )
     if not step_inputs.get("scope_fix_delta_available"):
-        return round_domain, None, "", ""
+        return round_domain, None, "", "", False, set()
     delta_domain = (
         _path_list(step_inputs.get("scope_fix_delta_changed_paths")),
         _anchor_map(step_inputs.get("scope_fix_delta_causal_anchors")),
         _anchor_map(step_inputs.get("scope_fix_delta_deletion_anchors")),
     )
     if not delta_domain[0]:
-        return round_domain, None, "", ""
+        return round_domain, None, "", "", False, set()
     return (
         round_domain,
         delta_domain,
         "changed by fixes since the last full round",
         "already present at the last full round",
+        False,
+        _prior_work_paths(step_inputs),
     )
 
 
@@ -950,15 +1073,151 @@ def _format_scope_manifest(step_inputs: dict) -> list:
     else. Everything here is derived from the persisted baselines, so it states
     git facts only: no fix-iteration count, no trigger type, no list of
     findings an earlier round closed.
+
+    INVARIANT: every path and every ADDED range rendered here must ground in
+    ``_validate_and_filter_issues``. A non-grounding delta domain (see
+    ``_review_scope_domains``' ``delta_grounds``) is therefore CLIPPED to the
+    round's own domain rather than unioned into it: a fix that net-reverts flow
+    work anchors lines the round's baseline no longer sees, and advertising
+    them would invite a citation that is then silently counted as bad evidence
+    and dropped.
+
+    INVARIANT: added ranges and deleted ranges live in DIFFERENT numbering
+    spaces, and so do the deleted ranges of two different baselines. Added
+    (causal) anchors are current-file numbers, so every domain of this round
+    numbers them identically and they may be unioned, subtracted and split
+    across the domain labels. Deletion anchors are old-side numbers of ONE
+    baseline snapshot: this round's own baseline (the fix baseline on an
+    incremental round, the implementation baseline on a full one) and the other
+    domain's baseline are two different file versions, so their deletion
+    ranges must never be unioned, subtracted or intersected with each other —
+    the arithmetic would invent both a size and line numbers that name nothing.
+    Each deletion set is therefore rendered on its own, under a label naming
+    the baseline it is numbered in, and carrying its own deleted-line count —
+    a size that lives in no head line, since the head's ``-N`` may only count
+    this round's own baseline.
+
+    INVARIANT: on a round that carries a delta, every path the baselines can
+    compare is marked with the domain it belongs to, not only the paths that
+    own added ranges. Anchor-less changed paths (binary, rename-only,
+    mode-only, deletion-only) exist in both domains, and a manifest that marks
+    domains at range granularity alone renders them identically — a binary this
+    fix added and one an earlier IMPLEMENT added would be indistinguishable,
+    defeating the attention split the round is built on. The delta half of the
+    mark is read off domain MEMBERSHIP, which no anchor set can empty. The
+    whole-domain half cannot be (every delta path is a whole-domain path too),
+    so it is read off an added remainder OR ``scope_prior_work_paths`` — the
+    persisted proof that the two baseline SNAPSHOTS of the path differ
+    (including inside a captured submodule). Without that second source an
+    anchor-less path changed both before and during the fix is
+    indistinguishable from one the fix introduced, since its remainder is
+    empty by construction.
+
+    The exception is ``scope_declared_only_paths``: a git-ignored path exists
+    in NO snapshot on either side, so nothing persisted can say which domain it
+    belongs to — nor how much of it changed. Such a path is rendered as its
+    path and nothing else: no domain mark, no anchor ranges, and no ``+N -M``
+    sizes, since a domain-labelled zero pair asserts the same unsupported
+    attribution the mark would, and reads as "compared, and unchanged".
+
+    INVARIANT: every path is rendered through ``quote_diff_path``, the same
+    spelling the diff headers use. A row here is a single physical line
+    carrying a path and its anchor ranges, so a pathname containing a line
+    break would tear its own row in two and the groundable spelling would
+    never appear as one token in the very block the prompt declares to be the
+    citable anchor space — reintroducing, for exactly those names, the silent
+    bad-evidence drop this manifest exists to prevent. Naming a path here
+    identically to the diff also keeps the two surfaces from showing one file
+    under two spellings. ``_evidence_path_candidates`` reads the quoted token
+    back, so a citation copied off either surface grounds.
+
+    INVARIANT: every size the manifest states names the domain it is counted
+    over. On a round carrying two domains the head line's ``+N`` and ``-N`` are
+    counted over different ones (the union of the citable added space vs. this
+    round's own baseline deletions), so an unlabelled pair would read as one
+    file's total size and make a file the task deleted from look untouched.
     """
-    whole, delta, delta_label, rest_label = _review_scope_domains(step_inputs)
+    (
+        whole,
+        delta,
+        delta_label,
+        rest_label,
+        delta_grounds,
+        prior_work,
+    ) = _review_scope_domains(step_inputs)
     whole_paths, whole_causal, whole_deletion = whole
     delta_paths, delta_causal, delta_deletion = delta or ([], {}, {})
+    incremental = str(step_inputs.get("scope_mode", "")) == "incremental"
 
+    unattributable = set(_path_list(step_inputs.get("scope_declared_only_paths")))
+    # INVARIANT: the anchor-less list may never hold a path this round's
+    # grounding domain anchors. Membership there is a self-report, and a
+    # declared path can still be anchored by a baseline comparison the report
+    # knows nothing about (a file tracked at one capture and git-ignored by the
+    # next). Rendering it bare would advertise "no line anchors" for a path
+    # whose only groundable citation IS a line, so the citation the checker is
+    # steered to write is then dropped as bad evidence — the exact silent loss
+    # this manifest exists to prevent.
+    grounding_anchor_paths = set(whole_causal) | set(whole_deletion)
+    if delta_grounds:
+        grounding_anchor_paths |= set(delta_causal) | set(delta_deletion)
+    unattributable -= grounding_anchor_paths
     paths = set(whole_paths) | set(whole_causal) | set(whole_deletion)
-    paths |= set(delta_paths) | set(delta_causal) | set(delta_deletion)
+    delta_domain_paths = (
+        set(delta_paths) | set(delta_causal) | set(delta_deletion)
+        if delta is not None
+        else set()
+    )
+    if delta_grounds:
+        paths |= delta_domain_paths
     if not paths:
         return ["- scope_manifest: (no changed path in this scope)"]
+
+    # The round's own baseline is the one the head line's ``-N`` and its range
+    # list are numbered in; the other domain's deletions get their own labelled
+    # line. On an incremental round the round baseline is the fix baseline
+    # (``delta`` when the whole-task domain is present, ``whole`` when it is
+    # not), on a full round it is the implementation baseline (``whole``).
+    if incremental and delta is not None:
+        own_deletion, other_deletion = delta_deletion, whole_deletion
+        other_deletion_label = (
+            "deleted across the whole task (old-side numbers of the "
+            "implementation baseline, NOT of this round's baseline)"
+        )
+    else:
+        own_deletion, other_deletion = whole_deletion, delta_deletion
+        other_deletion_label = (
+            "deleted by fixes since the last full round (old-side numbers of "
+            "that fix baseline, NOT of this round's baseline)"
+        )
+    own_deletion_label = (
+        "deleted lines (this fix's baseline file)"
+        if incremental
+        else "deleted lines (baseline file)"
+    )
+    # The head line's two sizes are counted over two different domains
+    # whenever a second one is in play: ``+N`` spans everything the citable
+    # (added) space covers, while ``-N`` can only span this round's own
+    # baseline, because old-side numbers of the other baseline name another
+    # file version. An unlabelled pair would therefore read as one file's
+    # total size and make a file the task deleted from look untouched, so each
+    # number states the domain it is counted over.
+    #
+    # INVARIANT: ``+N`` is labelled with the domain it is actually counted
+    # over, which on an incremental round carrying both domains is their UNION,
+    # not the whole-task diff alone. A fix that restores an implementation-
+    # changed line to its baseline value drops that line out of the whole-task
+    # diff while the fix delta still anchors it, so the union genuinely exceeds
+    # the whole task and a "whole task" label would overstate that domain.
+    if not incremental:
+        added_domain_label = "whole task"
+    elif delta is None:
+        added_domain_label = "this fix"
+    else:
+        added_domain_label = "whole task + this fix, combined"
+    own_deletion_domain_label = (
+        "this fix's baseline" if incremental else "implementation baseline"
+    )
 
     if step_inputs.get("scope_undecidable"):
         # The reconstruction failed, so the same relaxation the evidence check
@@ -973,51 +1232,135 @@ def _format_scope_manifest(step_inputs: dict) -> list:
             "- scope_manifest (changed paths, sizes, and the exact anchor",
             "  ranges a `path:line` citation may reference):",
         ]
-    if delta is None and str(step_inputs.get("scope_mode", "")) == "incremental":
+    if delta is None and incremental:
         # Without a second domain the split cannot be shown, and an unlabelled
         # incremental manifest would read as the whole task.
-        lines.append("  (every range below is this fix's own delta)")
+        lines.append("  (every range below is this round's fix delta)")
+    if any(other_deletion.get(path) for path in paths):
+        # Two baselines are in play, so the deleted-line numbers below are only
+        # meaningful together with the baseline naming them.
+        lines.append(
+            "  (added ranges are current-file numbers; each deleted range is "
+            "numbered in the baseline its label names — two baselines number "
+            "different file versions, so never compare or add them up)"
+        )
+    listed_unattributable = sorted(unattributable & paths)
+    if listed_unattributable:
+        # WHY these paths get a note of their own: no snapshot holds a
+        # git-ignored file on EITHER side, so they carry no anchors, no domain
+        # mark — and `luo review-scope diff` does not render them either, since
+        # a view that speaks as one baseline's comparison may not claim a path
+        # that comparison cannot place. Without this line the checker would
+        # read a manifest path, follow the pull command listed below, be told
+        # it is out of scope, and conclude the file needs no review.
+        lines.append(
+            "  (git-ignored self-reports — no baseline snapshot holds them, so "
+            "they are listed by path alone: no line anchors, no change counts, "
+            "no domain mark and no `luo "
+            "review-scope diff` rendering; open the file itself to review it: "
+            + ", ".join(quote_diff_path(p) for p in listed_unattributable)
+            + ")"
+        )
     for path in sorted(paths):
-        added = union_line_ranges(
-            whole_causal.get(path), delta_causal.get(path)
-        )
-        removed = union_line_ranges(
-            whole_deletion.get(path), delta_deletion.get(path)
-        )
+        # INVARIANT: a path the baselines cannot compare at all — a git-ignored
+        # self-report, which no snapshot holds on either side — is listed by
+        # path ALONE: no counts, no anchor ranges, no domain mark. Its
+        # membership in a domain comes from the declaration, not from a diff,
+        # so a mark here would assert an attribution no persisted git fact
+        # supports; only execution-side bookkeeping of who declared what could
+        # supply one, and that is deliberately not kept. The sizes go with it:
+        # a domain-labelled ``+0 added (whole task + this fix, combined)
+        # -0 deleted (this fix's baseline)`` reads as "both baselines compared
+        # this path and found it unchanged", which is the same false claim in
+        # arithmetic form — and would tell the checker the file needs no
+        # review. The dedicated note above already says why they carry nothing.
+        if path in unattributable:
+            lines.append(f"  - {quote_diff_path(path)}")
+            continue
+        if delta_grounds:
+            added = union_line_ranges(
+                whole_causal.get(path), delta_causal.get(path)
+            )
+        else:
+            added = union_line_ranges(whole_causal.get(path))
+        removed = union_line_ranges(own_deletion.get(path))
+        other_removed = union_line_ranges(other_deletion.get(path))
+        if delta is None:
+            own_added, rest_added = [], []
+        elif delta_grounds:
+            own_added = union_line_ranges(delta_causal.get(path))
+            rest_added = subtract_line_ranges(added, own_added)
+        else:
+            # Annotation-only delta: it may only name a slice OF the citable
+            # space, never extend it.
+            own_added = intersect_line_ranges(delta_causal.get(path), added)
+            rest_added = subtract_line_ranges(added, own_added)
         head = (
-            f"  - {path}: "
-            f"+{count_anchor_lines(added)} -{count_anchor_lines(removed)}"
+            f"  - {quote_diff_path(path)}: "
+            f"+{count_anchor_lines(added)} added ({added_domain_label}) "
+            f"-{count_anchor_lines(removed)} deleted "
+            f"({own_deletion_domain_label})"
         )
         if added:
             head += f" | added lines (current file) {_format_line_ranges(added)}"
         if removed:
             head += (
-                " | deleted lines (baseline file) "
+                f" | {own_deletion_label} "
                 f"{_format_line_ranges(removed)}"
             )
+        # WHY the path itself carries the domain mark, on top of the per-range
+        # split below: a changed path need not own a single added range —
+        # binary, rename-only, mode-only and deletion-only paths are anchor-
+        # less by construction — and range-granularity labels alone would
+        # render such a path with no domain at all, leaving the checker unable
+        # to tell a binary THIS fix added from one an earlier IMPLEMENT added,
+        # exactly the distinction the round's attention is directed by. Path
+        # membership (not the added ranges) decides the delta mark, so it
+        # survives an empty anchor set. The whole-domain mark cannot be read
+        # off membership alone (every delta path is a whole-domain path too),
+        # so it takes either an added remainder OR the persisted proof that
+        # the path already carried work before the delta baseline was taken —
+        # the second is what classifies an anchor-less path, for which the
+        # remainder is empty by construction and would silently hide the
+        # earlier work on a binary both IMPLEMENT and this fix touched (a
+        # submodule-inner one included, which is why that proof cannot be a
+        # top-level snapshot comparison alone). Paths no baseline comparison
+        # can place never reach here — see the INVARIANT at the top of the
+        # loop, which lists them by path alone.
+        if delta is not None:
+            marks = []
+            in_delta = path in delta_domain_paths
+            if in_delta:
+                marks.append(delta_label)
+            if rest_added or not in_delta or path in prior_work:
+                marks.append(rest_label)
+            if marks:
+                head += f" | domain: {' + '.join(marks)}"
         lines.append(head)
+        if other_removed:
+            # This set is never folded into the head line's ``-N`` (different
+            # numbering space), so it carries its own size — otherwise the
+            # only rendered deletion count would be the wrong domain's.
+            lines.append(
+                f"      - {other_deletion_label}: "
+                f"{count_anchor_lines(other_removed)} deleted lines at "
+                f"{_format_line_ranges(other_removed)}"
+            )
         if delta is None:
             continue
-        own_added = union_line_ranges(delta_causal.get(path))
-        own_removed = union_line_ranges(delta_deletion.get(path))
-        rest_added = subtract_line_ranges(added, own_added)
-        rest_removed = subtract_line_ranges(removed, own_removed)
-        for label, add_ranges, del_ranges in (
-            (delta_label, own_added, own_removed),
-            (rest_label, rest_added, rest_removed),
+        for label, add_ranges in (
+            (delta_label, own_added),
+            (rest_label, rest_added),
         ):
-            if not add_ranges and not del_ranges:
+            if not add_ranges:
                 continue
-            parts = []
-            if add_ranges:
-                parts.append(f"added {_format_line_ranges(add_ranges)}")
-            if del_ranges:
-                parts.append(f"deleted {_format_line_ranges(del_ranges)}")
-            lines.append(f"      - {label}: {'; '.join(parts)}")
+            lines.append(f"      - {label}: added {_format_line_ranges(add_ranges)}")
     return lines
 
 
-def _format_scope_access(mode: str, flow_id: str, artifact: str) -> list:
+def _format_scope_access(
+    mode: str, flow_id: str, artifact: str, undecidable: bool = False
+) -> list:
     """Render how to pull the full diff, and why not to rebuild it with git."""
     flag = f" --flow {flow_id}" if flow_id else ""
     lines = [
@@ -1028,12 +1371,23 @@ def _format_scope_access(mode: str, flow_id: str, artifact: str) -> list:
         f"    luo review-scope diff --baseline implementation{flag} --stat"
         "     # per-file overview",
         f"    luo review-scope diff --baseline implementation{flag} "
-        "--path <path>   # one file only",
+        "--path <path>   # one file, or a directory subtree",
     ]
     if mode == "incremental":
         lines.append(
             f"    luo review-scope diff --baseline fix{flag}"
             "                       # only the fix delta above"
+        )
+    if undecidable:
+        # WHY the caveat rides with the commands: this round is here precisely
+        # because a baseline could not be rebuilt, so the command above may
+        # fail too. Presenting it bare would read as "the diff is available" —
+        # and an error would then be mistaken for "nothing changed".
+        lines.append(
+            "  This round's baseline could not be reconstructed, so these "
+            "commands may report the baseline as unavailable. That answer "
+            "means the change set is unknown, NOT that it is empty — fall "
+            "back to inspecting the repository directly."
         )
     if artifact:
         lines.append(
@@ -1067,11 +1421,22 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
     diagnostic = str(step_inputs.get("scope_diagnostic", "") or "")
 
     if mode == "incremental":
+        # WHY the baseline is described as "the earliest fix not yet reviewed"
+        # rather than "the last fix": several FIX calls can run with no round
+        # between them, and the round is then scoped from the EARLIEST
+        # uncovered baseline so no unreviewed fix falls out of the diff (see
+        # ``ReviewScopeManager.earliest_unreviewed_fix_baseline``). Telling the
+        # checker the diff starts at the latest fix would understate what it is
+        # looking at and invite it to dismiss an earlier unreviewed fix's hunks
+        # as out of scope.
         purpose = (
-            "Incremental round — diff-scoped from this fix's persisted fix "
-            "baseline. Focus first on the exact delta that baseline produces "
-            "(the manifest below), while still validating the complete "
-            "effective requirements and tracing impact across the repository."
+            "Incremental round — diff-scoped from the persisted fix baseline "
+            "this round was scoped with: the earliest fix this flow has not "
+            "reviewed yet, so the delta spans every fix made since it was "
+            "captured, which may be more than one. Focus first on the exact "
+            "delta that baseline produces (the manifest below), while still "
+            "validating the complete effective requirements and tracing impact "
+            "across the repository."
         )
     else:
         purpose = (
@@ -1089,9 +1454,13 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
         # the checker outside the change set it is accountable for.
         f"- scope_mode: {mode} (names the diff baseline; both modes are "
         "diff-scoped — full = implementation baseline (whole task), "
-        "incremental = the latest fix baseline (that fix's own delta))",
+        "incremental = the fix baseline this round was scoped with, i.e. the "
+        "earliest fix not reviewed yet, whose delta may span several fixes)",
         f"- baseline_id: {baseline_id}",
-        f"- changed_paths: {', '.join(str(p) for p in changed_paths) if changed_paths else '(none)' }",
+        # WHY the paths are quoted here too: this list and the manifest below
+        # must name a file the same way, or the checker reads two spellings of
+        # one path and cannot tell they are the same file.
+        f"- changed_paths: {', '.join(quote_diff_path(str(p)) for p in changed_paths) if changed_paths else '(none)' }",
         f"- purpose: {purpose}",
     ]
     task_paths = step_inputs.get("scope_task_changed_paths")
@@ -1100,6 +1469,7 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
         and step_inputs.get("scope_task_available")
         and isinstance(task_paths, list)
         and task_paths
+        and _task_domain_grounds(step_inputs)
     ):
         # WHY the widened evidence rule is stated to the checker: the handler
         # now grounds a citation on the whole-task diff too, and a rule the
@@ -1110,7 +1480,7 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
         # fix-iteration count, trigger type, or list of already-closed findings.
         lines.append(
             "- task_changed_paths (whole flow, implementation baseline → now): "
-            + ", ".join(str(p) for p in task_paths)
+            + ", ".join(quote_diff_path(str(p)) for p in task_paths)
         )
         lines.append(
             "- evidence rule: a citation grounds on ANY line this flow changed "
@@ -1119,11 +1489,40 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
             "cite the line you actually verified it on and report it."
         )
     if step_inputs.get("scope_fallback_from_incremental"):
-        lines.append(
-            "- fallback: the fix baseline was not trustworthy, so this round is "
-            "diff-scoped from the implementation baseline instead; do not treat "
-            "an unavailable incremental diff as empty."
-        )
+        # WHY the note is branched on the recorded cause instead of stating one
+        # story: either half of the incremental evidence domain failing takes
+        # this same route, so a fixed "the fix baseline was not trustworthy"
+        # line accuses a healthy snapshot whenever it was the implementation
+        # baseline that broke — and, worse, promises an implementation-baseline
+        # diff that in exactly that case does not exist. An unrecognised cause
+        # (older persisted state) says only what is certainly true.
+        cause = str(step_inputs.get("scope_fallback_cause", "") or "")
+        if cause == "task_baseline":
+            reason = (
+                "the fix baseline rebuilt cleanly, but the whole-task "
+                "(implementation baseline) half of the incremental evidence "
+                "domain could not be reconstructed"
+            )
+        elif cause == "fix_baseline":
+            reason = "the fix baseline was not trustworthy"
+        else:
+            reason = (
+                "the combined incremental evidence domain could not be "
+                "reconstructed"
+            )
+        if undecidable:
+            lines.append(
+                f"- fallback: {reason}, so this round fell back to the "
+                "implementation baseline — which is itself unavailable here "
+                "(see the baseline diagnostic below). No diff is being "
+                "withheld as empty: treat every missing diff as unavailable."
+            )
+        else:
+            lines.append(
+                f"- fallback: {reason}, so this round is diff-scoped from the "
+                "implementation baseline instead; do not treat an unavailable "
+                "incremental diff as empty."
+            )
     if undecidable:
         lines.extend([
             f"- baseline diagnostic: {diagnostic or 'scope reconstruction unavailable'}",
@@ -1138,7 +1537,10 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
     lines.extend(_format_scope_manifest(step_inputs))
     lines.extend(
         _format_scope_access(
-            mode, flow_id, str(step_inputs.get("scope_diff_artifact", "") or "")
+            mode,
+            flow_id,
+            str(step_inputs.get("scope_diff_artifact", "") or ""),
+            undecidable=undecidable,
         )
     )
 
@@ -1252,6 +1654,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "scope_undecidable",
         "scope_diagnostic",
         "scope_fallback_from_incremental",
+        "scope_fallback_cause",
         "self_check_round_id",
         "self_check_round_reason",
         "requirement_fingerprint",

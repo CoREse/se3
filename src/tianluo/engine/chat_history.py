@@ -140,6 +140,28 @@ def _history_file(project_root: Path, flow_id: str, step_id: str) -> Path:
     return _history_dir(project_root, flow_id) / f"{step_id}.jsonl"
 
 
+def _json_line(record: Any) -> str:
+    """Render one jsonl record so a strict-UTF-8 stream can always take it.
+
+    WHY the ASCII-escaped fallback: history records carry pathnames, and a
+    POSIX pathname is bytes — a Git-visible byte that is not valid UTF-8
+    arrives as a lone surrogate (see ``review_scope.quote_diff_path``), which
+    ``ensure_ascii=False`` leaves in the string and the strict UTF-8 file
+    stream then refuses. The resulting ``UnicodeEncodeError`` is not an
+    ``OSError``, so it escapes the write guards that make every recorder here
+    fail soft and would abort the running step over a line of pure telemetry —
+    the SELF_CHECK scope record writes exactly such raw scope paths. Escaping
+    the surrogate keeps the line writable and pure ASCII, and ``json.loads``
+    restores the identical string on read, so no reader changes.
+    """
+    text = json.dumps(record, ensure_ascii=False, default=str)
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(record, ensure_ascii=True, default=str)
+    return text + "\n"
+
+
 def record_prompt(
     project_root: Path,
     flow_id: str,
@@ -387,7 +409,7 @@ def record_step_event(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record step event for %s: %s", step_id, exc)
 
@@ -432,7 +454,7 @@ def record_self_check_scope(
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as output:
-            output.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            output.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record SELF_CHECK scope for %s: %s", step_id, exc)
 
@@ -479,7 +501,7 @@ def record_step_started(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record step started for %s: %s", step_id, exc)
 
@@ -526,7 +548,7 @@ def record_waiting_for_lock(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record waiting_for_lock for %s: %s", step_id, exc)
 
@@ -580,7 +602,7 @@ def record_lock_acquired(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record lock-acquired for %s: %s", step_id, exc)
 
@@ -626,7 +648,7 @@ def record_step_status(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record step status for %s: %s", step_id, exc)
 
@@ -943,7 +965,7 @@ def record_stream_progress(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning("Failed to record stream progress for %s: %s", step_id, exc)
 
@@ -1016,7 +1038,7 @@ def record_group_status(
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning(
             "Failed to record group status for %s/%s (%s=%s): %s",
@@ -1087,7 +1109,7 @@ def record_index_progress(
     try:
         fpath.parent.mkdir(parents=True, exist_ok=True)
         with fpath.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            f.write(_json_line(record))
     except OSError as exc:
         logger.warning(
             "Failed to record index progress for %s/%s (%s %d/%d): %s",
@@ -1194,6 +1216,29 @@ def get_flow_history(project_root: Path, flow_id: str) -> List[ChatSession]:
             sessions.append(session)
 
     return sessions
+
+
+def flow_history_exists(project_root: Path, flow_id: str) -> bool:
+    """Whether *flow_id* still has a history record under this project.
+
+    WHY a separate probe instead of ``flow_id in list_flows(...)``: the history
+    record is the LAST surviving trace of a flow — engine.json holds a single
+    slot that the next run overwrites, and archives rotate — so callers use it
+    to tell "this project never knew that flow" from "that flow ran here and
+    its state has since been retired". Scanning the whole history root to
+    answer one id would grow with every flow the project ever ran.
+
+    A flow id that is not a single safe path segment can name nothing here, so
+    it is answered ``False`` rather than resolved into a directory outside the
+    history root.
+    """
+    candidate = str(flow_id or "")
+    if not candidate or candidate in (".", "..") or "/" in candidate or "\\" in candidate:
+        return False
+    try:
+        return _history_dir(project_root, candidate).is_dir()
+    except OSError:  # pragma: no cover - defensive
+        return False
 
 
 def list_flows(project_root: Path) -> List[str]:

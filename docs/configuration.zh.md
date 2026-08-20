@@ -509,8 +509,9 @@ description、用户 interjection、adjudicated description),外加 charter 与
 **两种 round 模式都是 diff 审查。**`full` 与 `incremental` 是持久化的 `scope_mode`
 取值,它们命名的是*diff 基线*,而非『有没有 diff』。`full` round 不是对整棵树的
 无范围通读:它审查的是从本 flow 的 **implementation baseline** 起算的 diff(本 flow
-改动的全部内容);`incremental` round 审查的则是从最近一次 **fix baseline** 起算的
-diff(该次 fix 自身的增量)。每一轮的 prompt 都带有 scope manifest —— 变更路径、每个
+改动的全部内容);`incremental` round 审查的则是从本轮所用的 **fix baseline** 起算
+的 diff —— 该基线是尚未被审查的最早一次 fix,因此其增量涵盖此后的每一次 fix,可能
+不止一次。每一轮的 prompt 都带有 scope manifest —— 变更路径、每个
 文件的增/删行数,以及 citation 可以引用的精确行号区间 —— 以及 diff 全文(内联,或
 按需用只读命令 `luo review-scope diff` 拉取)。用 `git diff` 自行重建审查范围是错的,
 prompt 明确禁止:基线是工作区的*内容*快照而非 commit,且 HEAD 在 flow 内会前进。
@@ -522,8 +523,9 @@ prompt 明确禁止:基线是工作区的*内容*快照而非 commit,且 HEAD �
    reset)才判为不可判定。首个 SELF_CHECK round 为 `full` —— 以完整有效需求验收该
    implementation baseline 起算的 diff;full round 干净后直接进入后续关口。
 2. 每次进入 FIX 之前捕获 **fix baseline**;修复后的 round 为 `incremental` ——
-   以该 fix baseline 为 diff 起点,注意力聚焦这次 fix 的精确 diff、改动文件与尚未
-   关闭的 findings。但 checker 仍可读取全仓、charter、code-index、测试结果与未修改
+   以尚未被任何 round 审查过的最早一份 fix baseline 为 diff 起点,因此连续多次 FIX
+   之后的增量涵盖这几次 fix 的全部改动,而非只有最后一次。注意力聚焦该增量的精确
+   diff、改动文件与尚未关闭的 findings。但 checker 仍可读取全仓、charter、code-index、测试结果与未修改
    代码,并沿调用链、共享状态、协议、数据格式、配置、并发与不变量追踪影响面:
    scope 约束的是注意力,从不约束工具权限。
 3. incremental round 干净之后插入 **full closure round**;只有 closure round 全部

@@ -962,6 +962,47 @@ def _consume_paused_interjection_prefix(flow: FlowInstance) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _reclaim_review_snapshots(flow: FlowInstance) -> None:
+    """Reclaim a terminal flow's review baselines.
+
+    INVARIANT: called only AFTER the terminal status is durably saved. This is
+    the second landing of COMPLETED (the engine's own is in
+    StateMachine.transition_to_next), and the same ordering rule holds: a save
+    that raises leaves the flow persisted as resumable, and baselines destroyed
+    first would leave a resumed SELF_CHECK round unable to reconstruct its own
+    scope.
+
+    INVARIANT: it additionally requires the flow's resumable snapshot to be
+    CONFIRMED gone. ``save_flow`` retires it on the COMPLETED landing, but
+    best-effort — a permission or I/O error there is swallowed so the primary
+    engine.json write still lands — and a surviving snapshot keeps the flow
+    resumable. Reclaiming its baselines anyway is the one half-clean state
+    nothing can repair; keeping them only costs disk space.
+
+    Total by contract: reclaiming disk space never fails a flow.
+    """
+    from ..engine.persistence import PersistenceManager
+    from ..engine.review_scope import discard_flow_snapshots
+    from ..engine.steps._project_root import resolve_flow_project_root
+
+    try:
+        flow_root = resolve_flow_project_root(flow)
+        if PersistenceManager(flow_root).resumable_snapshot_exists(flow.flow_id):
+            logger.warning(
+                "Resumable snapshot for flow %s survived the completion clear; "
+                "keeping its review baselines",
+                flow.flow_id,
+            )
+            return
+        discard_flow_snapshots(flow_root, flow.flow_id)
+    except Exception:  # noqa: BLE001 - see docstring
+        logger.debug(
+            "Failed to reclaim review baselines for flow %s",
+            getattr(flow, "flow_id", "?"),
+            exc_info=True,
+        )
+
+
 def _complete_flow_via_fallback(flow: FlowInstance) -> None:
     """Mark ``flow`` COMPLETED via the no-current-step fallback path.
 
@@ -978,14 +1019,6 @@ def _complete_flow_via_fallback(flow: FlowInstance) -> None:
     """
     flow.status = FlowStatus.COMPLETED
     flow.state.current_step_index = len(flow.state.selected_steps)
-    # This is the second landing of COMPLETED (the engine's own is in
-    # StateMachine.transition_to_next), so the flow's review baselines are
-    # reclaimed here too — otherwise a flow that finishes through the fallback
-    # leaks its snapshots forever. Total by contract: never fails the flow.
-    from ..engine.review_scope import discard_flow_snapshots
-    from ..engine.steps._project_root import resolve_flow_project_root
-
-    discard_flow_snapshots(resolve_flow_project_root(flow), flow.flow_id)
 
 
 def handle_resume_interactive(project_root: Path) -> Optional[str]:
@@ -2205,8 +2238,10 @@ def run_flow(
             (``worktree_original_branch``) so resume can drive the trailing
             merge. Ignored on resume.
         manage_pidfile: When ``True`` (default for a synchronous ``luo run``),
-            ``run_flow`` writes ``tianluo/state/run.pid`` on entry and clears it on
-            exit so ``luo end-session`` can locate the live process. When
+            ``run_flow`` takes ``tianluo/state/run.pid`` on entry (exclusively —
+            it REFUSES to start when another owner holds it, see
+            :func:`_acquire_run_pidfile`) and clears it on exit so
+            ``luo end-session`` can locate the live process. When
             ``False`` — the case for a ``--worktree`` run's isolated flow body —
             the CALLER (``run_worktree_mode`` / ``_resume_worktree_run``) owns
             the pidfile for the WHOLE worktree-run lifecycle, INCLUDING the
@@ -2260,14 +2295,24 @@ def run_flow(
     # has no descendant whose cwd is inside the worktree. Cwd/descendant scanning
     # cannot find such a parent; the on-disk pid does. The file lives in the same
     # state dir as engine.json (the worktree's for a worktree run), so there is
-    # at most one writer per state dir. It is cleared on every exit path below.
+    # at most one writer per state dir — enforced, not assumed: the marker is
+    # taken exclusively and a run that cannot take it does not start, which is
+    # what makes it a real ownership token for ``luo end-session`` to claim
+    # against. It is cleared on every exit path below.
     #
     # For a ``--worktree`` flow body the CALLER owns the pidfile for the whole
     # worktree-run lifecycle (flow body + trailing merge), so it passes
     # ``manage_pidfile=False`` and we neither write nor clear it here — see the
     # ``manage_pidfile`` docstring above.
     if manage_pidfile:
-        _write_run_pidfile(persistence, flow_id)
+        claim = _acquire_run_pidfile(persistence, flow_id)
+        # Refuse BEFORE the try below: a run that never took the marker must not
+        # reach the ``finally`` that drops it, or it would clear the owner's.
+        # That finally is also what restores SIGINT, so this early exit has to
+        # hand the caller's handler back itself.
+        if _refuse_on_held_run_marker(claim, persistence.state_dir):
+            signal.signal(signal.SIGINT, old_sigint_handler)
+            return 1
     try:
         if acquire_main_lock:
             from .merge.merge_lock import MergeLock
@@ -2306,10 +2351,27 @@ def run_flow(
             _clear_run_pidfile(persistence)
 
 
-def _write_run_pidfile(
+def _run_marker_is_stale(holder: "RunHolder") -> bool:
+    """Whether a LOCAL ``run.pid`` record may be reclaimed by a starting run.
+
+    Only bare liveness is consulted, never "does the pid look like an luo run":
+    the marker is also the token ``luo end-session`` claims for its destructive
+    window, and that claim names a live ``luo end-session`` process. Judging
+    staleness by cmdline would declare that claim stale and steal it — putting
+    a fresh engine back into exactly the window the claim exists to close. A
+    live pid therefore always means "held"; only a dead one is reclaimable, and
+    a genuinely recycled pid stays recoverable through ``luo end-session``,
+    which clears its own host's abandoned markers.
+    """
+    from ..daemon.supervisor import _is_alive
+
+    return not _is_alive(int(getattr(holder, "pid", 0) or 0))
+
+
+def _acquire_run_pidfile(
     persistence: PersistenceManager, flow_id: Optional[str] = None
-) -> None:
-    """Best-effort: record the current pid + machine id (+ flow id) into ``run.pid``.
+) -> "MarkerClaim":
+    """Take ``run.pid`` for this process, refusing when another owner holds it.
 
     Read by ``luo end-session`` to reliably locate the live flow process, and by
     the resume double-spawn guards to reject a second engine when the marker is
@@ -2319,24 +2381,70 @@ def _write_run_pidfile(
     tell "*your* flow runs there" from "*another* flow holds that root" and
     never point the operator at ending an unrelated session. ``flow_id`` is
     unknown for a brand-new run (the engine mints it later) — see
-    :func:`_stamp_run_pidfile_flow`, which fills it in. Never raises — a failure
-    to write the marker only degrades end-session back to its process-scan
-    heuristics.
-    """
-    try:
-        from ..core.machine_id import stable_machine_id
-        from ..core.run_pidfile import encode_run_pidfile
+    :func:`_stamp_run_pidfile_flow`, which fills it in.
 
+    INVARIANT: publication is exclusive (``acquire_run_marker``), and a blocked
+    claim ABORTS the run. The marker is not merely advisory bookkeeping: it is
+    the token ``luo end-session`` claims to make its archive/cleanup mutually
+    exclusive with a start/resume. Overwriting an existing marker here — as a
+    plain tmp+rename does — would let this engine start *inside* another host's
+    destructive window, which then deletes this flow's worktree and review
+    baselines while it runs. Refusing to start is recoverable; that is not.
+
+    INVARIANT: the run fails CLOSED. A claim that could not be established for
+    a local I/O reason (unwritable state dir, EIO/EACCES on a shared mount) is
+    refused exactly like a competing owner: the failure proves nothing about
+    ownership, and starting anyway would put this engine into the flow with no
+    token at all — writing state next to an ``luo end-session`` that still
+    believes it owns the flow and is deleting its baselines. Never raises.
+    """
+    from ..core.run_pidfile import MarkerClaim, acquire_run_marker
+
+    try:
         persistence.ensure_directories()
-        pid_file = persistence.state_dir / "run.pid"
-        tmp = pid_file.with_suffix(".pid.tmp")
-        tmp.write_text(
-            encode_run_pidfile(os.getpid(), stable_machine_id(), flow_id),
-            encoding="utf-8",
+        return acquire_run_marker(
+            persistence.state_dir, flow_id, is_stale=_run_marker_is_stale
         )
-        tmp.replace(pid_file)
-    except Exception:  # noqa: BLE001 - the marker is purely advisory
+    except Exception:  # noqa: BLE001 - unestablished ownership blocks the run
         logger.debug("Failed to write run.pid marker", exc_info=True)
+        return MarkerClaim(False, None, True)
+
+
+def _refuse_on_held_run_marker(claim: "MarkerClaim", state_dir: Path) -> bool:
+    """Display the refusal for a ``run.pid`` this run does not own; ``True`` when refused.
+
+    A claim that is not ``blocked`` means the marker already names THIS
+    process and only its refresh failed — ownership is intact, so there is
+    nothing to refuse — see :func:`_acquire_run_pidfile`.
+
+    Two holder-less refusals are told apart by re-probing the marker, because
+    the operator action differs: a record that is THERE but nobody can decode
+    is recoverable only by inspecting and removing that file (and must never be
+    broken automatically — on a shared filesystem it may be the live remote run
+    this refusal is protecting), whereas a claim that failed with an I/O error
+    leaves ownership simply unestablished, and the fix is to make the state
+    directory writable and retry.
+    """
+    from ..core.machine_id import is_local_machine
+    from ..core.run_pidfile import probe_run_marker
+
+    if not claim.blocked:
+        return False
+    holder = claim.holder
+    if holder is None:
+        key = (
+            "cli.run.marker.held_unreadable"
+            if probe_run_marker(Path(state_dir)).present
+            else "cli.run.marker.unverifiable"
+        )
+        display_error(t(key, path=str(Path(state_dir) / "run.pid")))
+    elif is_local_machine(holder.machine_id):
+        display_error(t("cli.run.marker.held_locally", pid=holder.pid))
+    else:
+        display_error(
+            t("cli.run.marker.held_by_machine", machine=holder.machine_id)
+        )
+    return True
 
 
 def _stamp_run_pidfile_flow(
@@ -2365,7 +2473,9 @@ def _stamp_run_pidfile_flow(
             or holder.flow_id == str(flow_id)
         ):
             return
-        _write_run_pidfile(persistence, str(flow_id))
+        # Re-taking a marker we already own is idempotent and rewrites the
+        # record in place, so this cannot clobber a competitor.
+        _acquire_run_pidfile(persistence, str(flow_id))
     except Exception:  # noqa: BLE001 - the marker is purely advisory
         logger.debug("Failed to stamp flow id into run.pid marker", exc_info=True)
 
@@ -2373,25 +2483,18 @@ def _stamp_run_pidfile_flow(
 def _clear_run_pidfile(persistence: PersistenceManager) -> None:
     """Best-effort: remove ``tianluo/state/run.pid`` when it still names this process.
 
-    Only unlinks when the recorded pid is our own pid on THIS machine (or the
-    record is unreadable), so a concurrently-relaunched flow that overwrote the
-    marker — or, critically, a live run that owns it from another host — is
-    never clobbered. Never raises.
+    Only unlinks a record that is our own pid on THIS machine, so a
+    concurrently-relaunched flow — or, critically, a live run or an
+    ``luo end-session`` claim that owns it from another host — is never
+    clobbered. Shares :func:`~tianluo.core.run_pidfile.release_run_marker` with
+    end-session's claim release so both sides drop the token by the same rule;
+    ``drop_undecodable`` is this side's alone, because a corrupted record in the
+    state dir this run owned would otherwise be read as "held" forever and wedge
+    both a later start and end-session. Never raises.
     """
-    try:
-        from ..core.machine_id import is_local_machine
-        from ..core.run_pidfile import read_run_pidfile
+    from ..core.run_pidfile import release_run_marker
 
-        pid_file = persistence.state_dir / "run.pid"
-        if not pid_file.exists():
-            return
-        recorded_pid, recorded_machine = read_run_pidfile(persistence.state_dir)
-        if recorded_pid is None or (
-            recorded_pid == os.getpid() and is_local_machine(recorded_machine)
-        ):
-            pid_file.unlink()
-    except Exception:  # noqa: BLE001 - the marker is purely advisory
-        logger.debug("Failed to clear run.pid marker", exc_info=True)
+    release_run_marker(persistence.state_dir, drop_undecodable=True)
 
 
 def _run_flow_impl(
@@ -2645,6 +2748,7 @@ def _run_flow_impl(
             get_console().print(t("cli.run.no_current_step"))
             _complete_flow_via_fallback(flow)
             persistence.save_flow(flow)
+            _reclaim_review_snapshots(flow)
             break
 
         # If the current step already finished (process crashed after the step
@@ -3819,7 +3923,10 @@ def run_worktree_mode(
     # may have already deleted the worktree (and the marker with it), in which
     # case the clear is a harmless no-op.
     wt_persistence = PersistenceManager(worktree_path)
-    _write_run_pidfile(wt_persistence)
+    if _refuse_on_held_run_marker(
+        _acquire_run_pidfile(wt_persistence), wt_persistence.state_dir
+    ):
+        return 1
     try:
         # Run the flow inside the worktree. acquire_main_lock=False: the flow body
         # runs lock-free so concurrent --worktree runs do not serialise here; only
@@ -4091,7 +4198,10 @@ def _resume_worktree_run(
     # keeping the still-live process discoverable by ``luo end-session``. See the
     # ``run_flow`` ``manage_pidfile`` docstring.
     wt_persistence = PersistenceManager(worktree_path)
-    _write_run_pidfile(wt_persistence, run["id"])
+    if _refuse_on_held_run_marker(
+        _acquire_run_pidfile(wt_persistence, run["id"]), wt_persistence.state_dir
+    ):
+        return 1
     try:
         exit_code = run_flow(
             project_root=worktree_path,

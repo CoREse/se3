@@ -13,6 +13,8 @@ import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import tianluo.commands.run as run
 from tianluo.core.machine_id import stable_machine_id
 from tianluo.core.run_pidfile import read_run_pidfile
@@ -114,6 +116,23 @@ class TestRunFlowMainLock:
 # run_worktree_mode orchestration
 # --------------------------------------------------------------------------
 class TestRunWorktreeMode:
+    @pytest.fixture
+    def own_run_marker(self, monkeypatch: pytest.MonkeyPatch):
+        """Hand these orchestration tests an acquired ``run.pid`` claim.
+
+        The worktree here is a fictitious path with no filesystem behind it, so
+        the real claim fails with an I/O error — which the acquisition now
+        (deliberately) reports as *held*, since a failed exclusive create can
+        never prove the state dir is unowned. That refusal is exercised by the
+        marker protocol's own tests; what these ones are about is the
+        fork → run_flow → cleanup orchestration around it.
+        """
+        from tianluo.core.run_pidfile import MarkerClaim
+
+        monkeypatch.setattr(
+            run, "_acquire_run_pidfile", lambda *a, **k: MarkerClaim(True, None, False)
+        )
+
     @patch("tianluo.commands.run._worktree_flow_status", return_value="completed")
     @patch("tianluo.commands.run._finalize_worktree_cleanup", return_value=0)
     @patch("tianluo.commands.run.run_flow", return_value=0)
@@ -122,7 +141,7 @@ class TestRunWorktreeMode:
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_success_merges_back(
         self, _mock_clear, mock_branch, mock_fork, mock_run_flow, mock_cleanup,
-        _mock_status,
+        _mock_status, own_run_marker,
     ):
         rc = run.run_worktree_mode(
             project_root=Path("/repo"),
@@ -157,7 +176,8 @@ class TestRunWorktreeMode:
     @patch("tianluo.engine.worktree.get_current_branch", return_value="main")
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_failure_preserves_and_skips_merge(
-        self, _mock_clear, _mock_branch, _mock_fork, _mock_run_flow, mock_merge
+        self, _mock_clear, _mock_branch, _mock_fork, _mock_run_flow, mock_merge,
+        own_run_marker,
     ):
         rc = run.run_worktree_mode(project_root=Path("/repo"), task="Add feature")
         assert rc == 2
@@ -171,7 +191,7 @@ class TestRunWorktreeMode:
     @patch("tianluo.commands.run.clear_main_repo_root_cache")
     def test_paused_json_flow_skips_merge(
         self, _mock_clear, _mock_branch, _mock_fork, _mock_run_flow, mock_merge,
-        _mock_status,
+        _mock_status, own_run_marker,
     ):
         """A daemon-spawned --worktree --discover run that PAUSES returns 0 from
         run_flow (json mode), but its on-disk status is PAUSED, not COMPLETED.
