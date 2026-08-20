@@ -793,35 +793,183 @@ class TestDiffScopedEvidence:
         assert "files_read" not in scope_record
 
 
-class TestScopeDiffTruncation:
-    def test_large_diff_is_truncated_with_artifact_pointer(self):
+class TestScopeDiffDelivery:
+    """Over-budget diffs are withheld whole; the manifest always stays."""
+
+    def _oversized_inputs(self):
         from tianluo.engine.truncation import SELF_CHECK_SCOPE_DIFF_MAX_CHARS
 
-        diff = "x" * (SELF_CHECK_SCOPE_DIFF_MAX_CHARS + 5000) + "\nTAIL-SENTINEL-LINE\n"
-        scope = _format_review_scope({
+        head = "HEAD-SENTINEL-LINE\n" + "x" * SELF_CHECK_SCOPE_DIFF_MAX_CHARS
+        return {
             "scope_mode": "full",
             "baseline_id": "impl-abcdef123456",
-            "scope_changed_paths": ["big.py"],
-            "scope_diff": diff,
+            "scope_changed_paths": ["big.py", "other.py"],
+            "scope_causal_anchors": {"big.py": [[10, 12], [40, 40]]},
+            "scope_deletion_anchors": {"other.py": [[7, 9]]},
+            "scope_diff": head + "\nTAIL-SENTINEL-LINE\n",
             "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
             "scope_undecidable": False,
-        })
-        assert "TRUNCATED" in scope
-        assert "tianluo/state/review/diffs/abc.diff" in scope
-        assert "TAIL-SENTINEL-LINE" not in scope
-        assert len(scope) < len(diff) + 500
+        }
 
-    def test_small_diff_is_not_truncated(self):
+    def test_large_diff_is_not_inlined_even_partially(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        # Neither end of the diff may leak: a half diff reads as a whole one.
+        assert "HEAD-SENTINEL-LINE" not in scope
+        assert "TAIL-SENTINEL-LINE" not in scope
+        assert "```diff" not in scope
+        assert "NOT INLINED" in scope
+
+    def test_large_diff_keeps_manifest_with_hunk_ranges(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        assert "scope_manifest" in scope
+        assert "big.py: +4 -0" in scope
+        assert "added lines (current file) 10-12, 40" in scope
+        assert "other.py: +0 -3" in scope
+        assert "deleted lines (baseline file) 7-9" in scope
+
+    def test_large_diff_points_at_the_pull_command_and_artifact(self):
+        scope = _format_review_scope(self._oversized_inputs())
+        assert "luo review-scope diff --baseline implementation" in scope
+        assert "tianluo/state/review/diffs/abc.diff" in scope
+
+    def test_small_diff_is_still_inlined_whole(self):
         scope = _format_review_scope({
             "scope_mode": "full",
             "baseline_id": "impl-abcdef123456",
             "scope_changed_paths": ["small.py"],
+            "scope_causal_anchors": {"small.py": [[1, 1]]},
             "scope_diff": "diff --git a/small.py b/small.py\n+new",
             "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
             "scope_undecidable": False,
         })
-        assert "TRUNCATED" not in scope
+        assert "NOT INLINED" not in scope
         assert "+new" in scope
+        assert "small.py: +1 -0" in scope
+
+
+class TestScopeManifestAndAccess:
+    def _incremental(self):
+        return {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_deletion_anchors": {},
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            "scope_task_causal_anchors": {
+                "src/earlier.py": [[3, 5]],
+                "src/fix.py": [[10, 15], [40, 48]],
+            },
+            "scope_task_deletion_anchors": {"src/earlier.py": [[30, 31]]},
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+fixed\n",
+            "scope_diff_artifact": "tianluo/state/review/diffs/abc.diff",
+        }
+
+    def _full_closure(self):
+        return {
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["app.py", "other.py"],
+            "scope_causal_anchors": {
+                "app.py": [[1, 1], [20, 24]],
+                "other.py": [[1, 3]],
+            },
+            "scope_deletion_anchors": {},
+            "scope_fix_delta_available": True,
+            "scope_fix_delta_baseline_id": "fix-1-abcdef123456",
+            "scope_fix_delta_changed_paths": ["app.py", "other.py"],
+            "scope_fix_delta_causal_anchors": {
+                "app.py": [[20, 24]],
+                "other.py": [[1, 3]],
+            },
+            "scope_fix_delta_deletion_anchors": {},
+            "scope_diff": "diff --git a/app.py b/app.py\n+x\n",
+        }
+
+    def test_incremental_manifest_separates_fix_delta_from_earlier_work(self):
+        rendered = _format_review_scope(self._incremental())
+        assert "src/fix.py: +15 -0" in rendered
+        assert "added lines (current file) 10-15, 40-48" in rendered
+        assert "- this fix: added 40-48" in rendered
+        assert "- earlier work in this task: added 10-15" in rendered
+        # A path only the earlier work touched is listed, and labelled as such.
+        assert "src/earlier.py: +3 -2" in rendered
+        assert "- earlier work in this task: added 3-5; deleted 30-31" in rendered
+
+    def test_full_round_manifest_marks_changes_since_last_full_round(self):
+        rendered = _format_review_scope(self._full_closure())
+        assert "app.py: +6 -0" in rendered
+        assert (
+            "- changed by fixes since the last full round: added 20-24"
+            in rendered
+        )
+        assert "- already present at the last full round: added 1" in rendered
+        assert "- changed by fixes since the last full round: added 1-3" in rendered
+
+    def test_manifest_carries_no_fix_iteration_or_closed_findings(self):
+        inputs = self._full_closure()
+        inputs["fix_iteration"] = 3
+        inputs["self_check_round_reason"] = "full_closure"
+        inputs["fix_history"] = [{"iteration": 1, "issues": ["closed one"]}]
+        rendered = _format_review_scope(inputs)
+        assert "fix_iteration" not in rendered
+        assert "closed one" not in rendered
+        assert "full_closure" not in rendered
+
+    def test_initial_full_round_has_no_delta_annotation(self):
+        inputs = self._full_closure()
+        inputs["scope_fix_delta_available"] = False
+        inputs["scope_fix_delta_changed_paths"] = []
+        inputs["scope_fix_delta_causal_anchors"] = {}
+        rendered = _format_review_scope(inputs)
+        assert "app.py: +6 -0" in rendered
+        assert "since the last full round" not in rendered
+
+    def test_access_block_bans_git_diff_and_names_the_command(self):
+        rendered = _format_review_scope(self._incremental(), flow_id="flow-9")
+        assert (
+            "luo review-scope diff --baseline implementation --flow flow-9"
+            in rendered
+        )
+        assert (
+            "luo review-scope diff --baseline implementation --flow flow-9 --stat"
+            in rendered
+        )
+        assert "--path <path>" in rendered
+        assert "luo review-scope diff --baseline fix --flow flow-9" in rendered
+        assert "do NOT rebuild the review range yourself with `git diff`" in rendered
+        assert "NOT a commit" in rendered
+        assert "HEAD advances inside a flow" in rendered
+
+    def test_full_round_does_not_advertise_the_fix_baseline_view(self):
+        rendered = _format_review_scope(self._full_closure())
+        assert "--baseline fix" not in rendered
+
+    def test_undecidable_scope_marks_the_manifest_as_unproven(self):
+        inputs = self._incremental()
+        inputs["scope_undecidable"] = True
+        inputs["scope_diagnostic"] = "baseline unreadable"
+        rendered = _format_review_scope(inputs)
+        assert "UNPROVEN" in rendered
+
+    def test_manifest_range_list_is_capped_with_a_pointer(self):
+        from tianluo.engine.steps.self_check import (
+            _MANIFEST_MAX_RANGES_PER_PATH,
+        )
+
+        ranges = [[n * 10, n * 10 + 1] for n in range(1, 60)]
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": ["wide.py"],
+            "scope_causal_anchors": {"wide.py": ranges},
+            "scope_diff": "diff --git a/wide.py b/wide.py\n+x\n",
+        })
+        extra = len(ranges) - _MANIFEST_MAX_RANGES_PER_PATH
+        assert f"(+{extra} more)" in rendered
+        # The total is still exact, so a cap never understates the change.
+        assert f"wide.py: +{2 * len(ranges)} -0" in rendered
 
 
 class TestRepeatedSelfCheckFindings:
@@ -1809,3 +1957,31 @@ class TestWholeTaskScopeRendering:
         inputs["scope_task_available"] = False
         rendered = _format_review_scope(inputs)
         assert "task_changed_paths" not in rendered
+
+
+class TestManifestWithoutASecondDomain:
+    def test_incremental_without_task_domain_labels_the_manifest(self):
+        # G1's whole-task attachment can fail without degrading the round; the
+        # manifest must then say the ranges are the fix delta rather than let
+        # them read as the whole task.
+        rendered = _format_review_scope({
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1-abcdef123456",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[40, 48]]},
+            "scope_task_available": False,
+            "scope_task_changed_paths": [],
+            "scope_diff": "diff --git a/src/fix.py b/src/fix.py\n+fixed\n",
+        })
+        assert "every range below is this fix's own delta" in rendered
+        assert "src/fix.py: +9 -0" in rendered
+
+    def test_empty_scope_still_renders_a_manifest_line(self):
+        rendered = _format_review_scope({
+            "scope_mode": "full",
+            "baseline_id": "impl-abcdef123456",
+            "scope_changed_paths": [],
+            "scope_diff": "",
+        })
+        assert "scope_manifest" in rendered
+        assert "no changed path in this scope" in rendered

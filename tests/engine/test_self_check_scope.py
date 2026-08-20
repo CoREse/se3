@@ -894,3 +894,101 @@ def test_full_closure_round_inputs_carry_no_separate_task_domain(tmp_path):
     assert closure.inputs["scope_task_changed_paths"] == []
     assert closure.inputs["scope_task_causal_anchors"] == {}
     assert set(closure.inputs["scope_changed_paths"]) == {"app.py", "other.py"}
+
+
+def test_initial_full_round_has_no_fix_delta_annotation(tmp_path):
+    _root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "full"
+    # Nothing has been fixed yet, so there is no "since the last full round"
+    # slice to mark — and inventing one would label the original implement
+    # work as a fix.
+    assert inputs["scope_fix_delta_available"] is False
+    assert inputs["scope_fix_delta_changed_paths"] == []
+    assert inputs["scope_fix_delta_baseline_id"] == ""
+
+
+def test_full_closure_round_marks_the_fix_changes_since_the_last_full_round(
+    tmp_path,
+):
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = fix_baseline.to_dict()
+    flow.state.fix_iterations = 1
+    (root / "other.py").write_text("helper = 1\n", encoding="utf-8")
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+
+    incremental = _add_current(
+        flow, machine._build_step_inputs(flow, StepType.SELF_CHECK)
+    )
+    assert incremental.inputs["scope_mode"] == "incremental"
+
+    closure = machine.transition_to_next(flow)
+    assert closure is not None
+    assert closure.inputs["scope_mode"] == "full"
+    # The round reviews the whole task (app.py + other.py) but the manifest can
+    # still say which of it the fix produced.
+    assert set(closure.inputs["scope_changed_paths"]) == {"app.py", "other.py"}
+    assert closure.inputs["scope_fix_delta_available"] is True
+    assert closure.inputs["scope_fix_delta_baseline_id"] == fix_baseline.baseline_id
+    assert closure.inputs["scope_fix_delta_changed_paths"] == ["other.py"]
+    assert "app.py" not in closure.inputs["scope_fix_delta_causal_anchors"]
+
+    from tianluo.engine.steps.self_check import _format_review_scope
+
+    rendered = _format_review_scope(closure.inputs)
+    assert "changed by fixes since the last full round" in rendered
+    assert "already present at the last full round" in rendered
+    # Every marking is a git fact: no iteration counter, no trigger reason.
+    assert "fix_iteration" not in rendered
+    assert "round_reason" not in rendered
+
+
+def test_full_round_marker_advances_so_the_next_one_measures_from_it(tmp_path):
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    _complete_initial_full(machine, flow)
+    scope_context = flow.state.context["review_scope"]
+
+    manager = ReviewScopeManager(root, flow.flow_id)
+    first_fix = manager.capture("fix-1")
+    scope_context["latest_fix_baseline"] = first_fix.to_dict()
+    scope_context["fix_baseline_history"] = [
+        {"baseline_id": first_fix.baseline_id}
+    ]
+    flow.state.fix_iterations = 1
+    (root / "other.py").write_text("helper = 1\n", encoding="utf-8")
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+    _add_current(flow, machine._build_step_inputs(flow, StepType.SELF_CHECK))
+    closure = machine.transition_to_next(flow)
+    assert closure is not None
+    assert closure.inputs["scope_fix_delta_baseline_id"] == first_fix.baseline_id
+    # The closure round consumed the first fix, so the marker now sits on it.
+    assert scope_context["full_round_fix_head"] == first_fix.baseline_id
+
+    # A later fix + its own closure round measures from the SECOND fix only:
+    # the first one was already inside a full round.
+    second_fix = manager.capture("fix-2")
+    scope_context["latest_fix_baseline"] = second_fix.to_dict()
+    scope_context["fix_baseline_history"].append(
+        {"baseline_id": second_fix.baseline_id}
+    )
+    (root / "third.py").write_text("third = 1\n", encoding="utf-8")
+    controller = SelfCheckRoundController(flow.state.context)
+    controller.mark_findings()
+    flow.state.fix_iterations = 2
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+    incremental = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+    assert incremental["scope_mode"] == "incremental"
+    _add_current(flow, incremental)
+
+    later_closure = machine.transition_to_next(flow)
+    assert later_closure is not None
+    assert later_closure.inputs["scope_mode"] == "full"
+    assert (
+        later_closure.inputs["scope_fix_delta_baseline_id"]
+        == second_fix.baseline_id
+    )
+    assert later_closure.inputs["scope_fix_delta_changed_paths"] == ["third.py"]

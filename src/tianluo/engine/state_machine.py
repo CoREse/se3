@@ -3823,6 +3823,32 @@ class StateMachine:
             scope_context
         )
 
+    def _pinned_fix_delta_baseline(
+        self,
+        flow: FlowInstance,
+        scope_context: Dict[str, Any],
+        fix_baselines: Dict[str, ReviewBaseline],
+        active: Dict[str, Any],
+    ) -> Optional[ReviewBaseline]:
+        """Load the baseline this full round annotates its new hunks against.
+
+        The id was pinned when the round was created, so later passes resolve
+        the same baseline even after further fixes moved the history head.
+        """
+        baseline_id = str(active.get("fix_delta_baseline_id", "") or "")
+        if not baseline_id:
+            return None
+        found = fix_baselines.get(baseline_id)
+        if found is not None:
+            return found
+        latest = scope_context.get("latest_fix_baseline")
+        if (
+            isinstance(latest, dict)
+            and str(latest.get("baseline_id") or "") == baseline_id
+        ):
+            return self._review_baseline_from(latest)
+        return self._review_scope_manager(flow).load_baseline(baseline_id)
+
     def _ensure_implementation_review_baseline(
         self, flow: FlowInstance, step: Step
     ) -> None:
@@ -3934,8 +3960,25 @@ class StateMachine:
             # implementation baseline, an incremental one from the earliest
             # uncovered fix baseline — both span the latest fix).
             latest = scope_context.get("latest_fix_baseline")
-            if isinstance(latest, dict) and latest.get("baseline_id"):
-                scope_context["covered_fix_baseline"] = latest.get("baseline_id")
+            latest_id = (
+                str(latest.get("baseline_id") or "")
+                if isinstance(latest, dict) else ""
+            )
+            if active.get("scope_mode") == "full":
+                # Resolved BEFORE the marker moves: the manifest annotation of
+                # THIS round is "what the fixes since the PREVIOUS full round
+                # changed", and the new marker is what the NEXT full round will
+                # measure from. Pinned onto the round so every pass of it — and
+                # a resume between passes — annotates identically.
+                since_last_full = self._review_scope_manager(
+                    flow
+                ).earliest_fix_baseline_after_full_round(scope_context)
+                active["fix_delta_baseline_id"] = (
+                    since_last_full.baseline_id if since_last_full else ""
+                )
+                scope_context["full_round_fix_head"] = latest_id
+            if latest_id:
+                scope_context["covered_fix_baseline"] = latest_id
         if not had_round_state:
             # Old persisted flows (and pre-scope synthetic callers) may already
             # be between pass #1 and pass #N. Adopt that position once, then
@@ -3981,10 +4024,15 @@ class StateMachine:
         else:
             baseline = None
 
+        fix_delta_baseline = self._pinned_fix_delta_baseline(
+            flow, scope_context, fix_baselines, active
+        )
+
         scope = self._review_scope_manager(flow).resolve(
             str(active.get("scope_mode", "full")),
             baseline,
             full_baseline=implementation_baseline,
+            fix_delta_baseline=fix_delta_baseline,
             # The implement step's self-reported files are consulted for one
             # case only: a path git ignores is invisible to baseline capture,
             # so without them a real flow change would never be diffed,
@@ -4019,6 +4067,14 @@ class StateMachine:
         )
         active["scope_task_available"] = scope.task_scope_available
         active["scope_task_diagnostic"] = scope.task_scope_diagnostic
+        # Only the summary of the fix-delta annotation is recorded on the
+        # round: its anchors are rebuilt on every render and a third anchor
+        # mapping in the persisted state would grow engine.json for nothing.
+        active["scope_fix_delta_changed_paths"] = list(
+            scope.fix_delta_changed_paths
+        )
+        active["scope_fix_delta_available"] = scope.fix_delta_available
+        active["scope_fix_delta_diagnostic"] = scope.fix_delta_diagnostic
 
         inputs.update({
             "self_check_round_id": active.get("round_id", ""),
@@ -4043,6 +4099,19 @@ class StateMachine:
             "scope_task_diff_artifact": scope.task_artifact_path,
             "scope_task_available": scope.task_scope_available,
             "scope_task_diagnostic": scope.task_scope_diagnostic,
+            # Manifest annotation of a full round: which of its hunks the fixes
+            # since the previous full round produced. Empty on an incremental
+            # round, whose own anchors already ARE the fix delta.
+            "scope_fix_delta_baseline_id": scope.fix_delta_baseline_id,
+            "scope_fix_delta_changed_paths": list(scope.fix_delta_changed_paths),
+            "scope_fix_delta_causal_anchors": copy.deepcopy(
+                scope.fix_delta_causal_anchors
+            ),
+            "scope_fix_delta_deletion_anchors": copy.deepcopy(
+                scope.fix_delta_deletion_anchors
+            ),
+            "scope_fix_delta_available": scope.fix_delta_available,
+            "scope_fix_delta_diagnostic": scope.fix_delta_diagnostic,
             "scope_diff": scope.unified_diff,
             "scope_diff_artifact": scope.artifact_path,
             "scope_undecidable": scope.undecidable,

@@ -20,6 +20,11 @@ from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ._project_root import resolve_flow_project_root
 from ..prompt_markers import inject_boundary
+from ..review_scope import (
+    count_anchor_lines,
+    subtract_line_ranges,
+    union_line_ranges,
+)
 from ..truncation import (
     PHASE_STDERR_TAIL_CHARS,
     PHASE_STDOUT_TAIL_CHARS,
@@ -777,7 +782,7 @@ Each issue MUST be a JSON object with these fields:
     - `task_description` / `user_interjection` / `charter` / `why_comment`: `verbatim_quote` MUST be a literal substring of the effective task, one interjection, the Charter, or a harvested WHY:/INVARIANT: comment. The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops a finding whose normalized quote is absent. Quote a substantive rule, not a generic noun.
     - `regression`: use for the Regression dimension, where the violated expectation is PRE-EXISTING behavior outside the task scope (it has no entry in the text above). `verbatim_quote` is NOT substring-checked for this type; instead you MUST ground the issue in the change that caused it: `evidence_lines` pointing at the causal changed line, or — where that changed path has no current-side line at all (see below) — naming the changed path itself, in `evidence_lines` or in `missing_in`.
 - `evidence_lines`: array of `"path:N"` strings (or a bare `"path"`, see below). At least one entry MUST ground in the current review-scope diff (the handler verifies), as follows:
-    - Changed path WITH current-side added/modified lines: cite one of them. `N` MUST be the line number in the CURRENT file (the `+`-side number shown in the diff) — an old-side number of a deleted line never anchors, since it names no line that exists now.
+    - Changed path WITH current-side added/modified lines: cite one of them. `N` MUST be the line number in the CURRENT file (the `+`-side number shown in the diff, i.e. a line inside one of the `added lines (current file)` ranges the scope_manifest lists for that path) — an old-side number of a deleted line never anchors, since it names no line that exists now.
     - Changed path with NO current-side line by construction (binary, mode-only, rename-only, deletion-only — including a wholly deleted file — or a bare submodule gitlink): cite the path itself. Grounding is at path level there; write the bare `"path"` (a trailing line number is ignored). Do NOT invent a line number and do NOT drop a real finding just because the path has no line to cite.
   Once that causal anchor is present, additional entries MAY point into unchanged files whose behavior is affected. At least one causal entry is required UNLESS `missing_in` is non-empty.
 - `missing_in`: array of file paths that should have been edited/created but were not. Use this for a requirement omission or missed integration point that has no changed causal line.
@@ -854,7 +859,201 @@ def _format_project_constraints(sources: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
-def _format_review_scope(step_inputs: dict) -> str:
+# A path whose diff is a few thousand hunks would otherwise turn the manifest
+# into the very wall of text the inline-diff budget exists to avoid. The cut is
+# announced with the exact command that shows the rest, so a capped path is
+# never mistaken for a fully enumerated one.
+_MANIFEST_MAX_RANGES_PER_PATH = 30
+
+
+def _anchor_map(value: Any) -> dict:
+    """Normalize a persisted anchor mapping into ``{path: ranges}``."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(path): ranges
+        for path, ranges in value.items()
+        if isinstance(ranges, (list, tuple))
+    }
+
+
+def _path_list(value: Any) -> list:
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
+def _format_line_ranges(ranges: list) -> str:
+    """Render merged inclusive ranges the way a checker would cite them."""
+    parts = [
+        str(start) if start == end else f"{start}-{end}"
+        for start, end in ranges[:_MANIFEST_MAX_RANGES_PER_PATH]
+    ]
+    if len(ranges) > _MANIFEST_MAX_RANGES_PER_PATH:
+        parts.append(f"(+{len(ranges) - _MANIFEST_MAX_RANGES_PER_PATH} more)")
+    return ", ".join(parts)
+
+
+def _review_scope_domains(step_inputs: dict) -> tuple:
+    """Split the round's anchors into its whole domain and its newest slice.
+
+    Returns ``(whole, delta, delta_label, rest_label)`` where each domain is
+    ``(paths, causal_anchors, deletion_anchors)``. The delta is what the round
+    is newly accountable for — the fix delta on an incremental round, the fixes
+    made since the previous full round on a full one — and is ``None`` when the
+    round has no earlier slice to distinguish it from (the initial full round),
+    or when the second reconstruction was unavailable.
+    """
+    mode = str(step_inputs.get("scope_mode", "full") or "full")
+    round_domain = (
+        _path_list(step_inputs.get("scope_changed_paths")),
+        _anchor_map(step_inputs.get("scope_causal_anchors")),
+        _anchor_map(step_inputs.get("scope_deletion_anchors")),
+    )
+    if mode == "incremental":
+        if not step_inputs.get("scope_task_available"):
+            return round_domain, None, "", ""
+        task_domain = (
+            _path_list(step_inputs.get("scope_task_changed_paths")),
+            _anchor_map(step_inputs.get("scope_task_causal_anchors")),
+            _anchor_map(step_inputs.get("scope_task_deletion_anchors")),
+        )
+        if not task_domain[0]:
+            return round_domain, None, "", ""
+        return (
+            task_domain,
+            round_domain,
+            "this fix",
+            "earlier work in this task",
+        )
+    if not step_inputs.get("scope_fix_delta_available"):
+        return round_domain, None, "", ""
+    delta_domain = (
+        _path_list(step_inputs.get("scope_fix_delta_changed_paths")),
+        _anchor_map(step_inputs.get("scope_fix_delta_causal_anchors")),
+        _anchor_map(step_inputs.get("scope_fix_delta_deletion_anchors")),
+    )
+    if not delta_domain[0]:
+        return round_domain, None, "", ""
+    return (
+        round_domain,
+        delta_domain,
+        "changed by fixes since the last full round",
+        "already present at the last full round",
+    )
+
+
+def _format_scope_manifest(step_inputs: dict) -> list:
+    """Render the anchor set evidence validation grounds on, path by path.
+
+    WHY the anchors are shown at all: they decide whether a citation is kept,
+    and a checker that cannot see them can only guess which line numbers are
+    citable — the previous rendering exposed the changed paths and nothing
+    else. Everything here is derived from the persisted baselines, so it states
+    git facts only: no fix-iteration count, no trigger type, no list of
+    findings an earlier round closed.
+    """
+    whole, delta, delta_label, rest_label = _review_scope_domains(step_inputs)
+    whole_paths, whole_causal, whole_deletion = whole
+    delta_paths, delta_causal, delta_deletion = delta or ([], {}, {})
+
+    paths = set(whole_paths) | set(whole_causal) | set(whole_deletion)
+    paths |= set(delta_paths) | set(delta_causal) | set(delta_deletion)
+    if not paths:
+        return ["- scope_manifest: (no changed path in this scope)"]
+
+    if step_inputs.get("scope_undecidable"):
+        # The reconstruction failed, so the same relaxation the evidence check
+        # applies has to be stated here: these anchors are an unproven hint and
+        # a finding outside them is still kept.
+        lines = [
+            "- scope_manifest (UNPROVEN — the reconstruction failed, so this is",
+            "  a hint, not the citable line space; cite the line you verified):",
+        ]
+    else:
+        lines = [
+            "- scope_manifest (changed paths, sizes, and the exact anchor",
+            "  ranges a `path:line` citation may reference):",
+        ]
+    if delta is None and str(step_inputs.get("scope_mode", "")) == "incremental":
+        # Without a second domain the split cannot be shown, and an unlabelled
+        # incremental manifest would read as the whole task.
+        lines.append("  (every range below is this fix's own delta)")
+    for path in sorted(paths):
+        added = union_line_ranges(
+            whole_causal.get(path), delta_causal.get(path)
+        )
+        removed = union_line_ranges(
+            whole_deletion.get(path), delta_deletion.get(path)
+        )
+        head = (
+            f"  - {path}: "
+            f"+{count_anchor_lines(added)} -{count_anchor_lines(removed)}"
+        )
+        if added:
+            head += f" | added lines (current file) {_format_line_ranges(added)}"
+        if removed:
+            head += (
+                " | deleted lines (baseline file) "
+                f"{_format_line_ranges(removed)}"
+            )
+        lines.append(head)
+        if delta is None:
+            continue
+        own_added = union_line_ranges(delta_causal.get(path))
+        own_removed = union_line_ranges(delta_deletion.get(path))
+        rest_added = subtract_line_ranges(added, own_added)
+        rest_removed = subtract_line_ranges(removed, own_removed)
+        for label, add_ranges, del_ranges in (
+            (delta_label, own_added, own_removed),
+            (rest_label, rest_added, rest_removed),
+        ):
+            if not add_ranges and not del_ranges:
+                continue
+            parts = []
+            if add_ranges:
+                parts.append(f"added {_format_line_ranges(add_ranges)}")
+            if del_ranges:
+                parts.append(f"deleted {_format_line_ranges(del_ranges)}")
+            lines.append(f"      - {label}: {'; '.join(parts)}")
+    return lines
+
+
+def _format_scope_access(mode: str, flow_id: str, artifact: str) -> list:
+    """Render how to pull the full diff, and why not to rebuild it with git."""
+    flag = f" --flow {flow_id}" if flow_id else ""
+    lines = [
+        "- reading the full change set (read-only, and the exact same "
+        "reconstruction this round was scoped with):",
+        f"    luo review-scope diff --baseline implementation{flag}"
+        "            # whole task, full diff text",
+        f"    luo review-scope diff --baseline implementation{flag} --stat"
+        "     # per-file overview",
+        f"    luo review-scope diff --baseline implementation{flag} "
+        "--path <path>   # one file only",
+    ]
+    if mode == "incremental":
+        lines.append(
+            f"    luo review-scope diff --baseline fix{flag}"
+            "                       # only the fix delta above"
+        )
+    if artifact:
+        lines.append(
+            f"  A materialized copy of this round's diff is also at {artifact}."
+        )
+    lines.append(
+        "- do NOT rebuild the review range yourself with `git diff` / `git "
+        "show` / `git log`: a review baseline is a content snapshot of the "
+        "workspace (dirty tracked files and pre-existing untracked files "
+        "included), NOT a commit, and HEAD advances inside a flow as it "
+        "commits. Any range you compose by hand is therefore the wrong range — "
+        "it will hide real changes and show you changes nobody asked you to "
+        "review. The command above (and the persisted artifact it mirrors) is "
+        "the only correct source for the change set; git remains available for "
+        "every other question (file contents, blame, history)."
+    )
+    return lines
+
+
+def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
     """Render the persisted review scope without implying a read whitelist."""
     mode = str(step_inputs.get("scope_mode", "full") or "full")
     baseline_id = str(step_inputs.get("baseline_id", "") or "<unavailable>")
@@ -925,6 +1124,13 @@ def _format_review_scope(step_inputs: dict) -> str:
             "not a filter — a finding on a file it omits is still kept.",
         ])
 
+    lines.extend(_format_scope_manifest(step_inputs))
+    lines.extend(
+        _format_scope_access(
+            mode, flow_id, str(step_inputs.get("scope_diff_artifact", "") or "")
+        )
+    )
+
     unresolved = []
     for key in ("prev_self_check_issues", "self_check_deferred_issues"):
         value = step_inputs.get(key) or []
@@ -937,22 +1143,28 @@ def _format_review_scope(step_inputs: dict) -> str:
         lines.append("- unresolved_findings: []")
 
     lines.append("\n### Exact Baseline-to-Current Diff")
-    artifact = str(step_inputs.get("scope_diff_artifact", "") or "")
     if diff_text:
         if len(diff_text) > SELF_CHECK_SCOPE_DIFF_MAX_CHARS:
-            diff_text = diff_text[:SELF_CHECK_SCOPE_DIFF_MAX_CHARS]
+            # WHY the oversized diff is withheld ENTIRELY instead of being cut
+            # at the budget: a diff sliced mid-file reads exactly like a
+            # complete one — nothing in the remaining text says which files
+            # never appeared — so the checker silently reviews a fraction of
+            # the change and calls it covered. The manifest above still names
+            # every changed path and every citable anchor range, and the full
+            # text is one read-only command away, so nothing is lost but the
+            # false impression of completeness.
             lines.append(
-                f"(TRUNCATED: shown diff is limited to the first "
-                f"{SELF_CHECK_SCOPE_DIFF_MAX_CHARS} chars. The complete "
-                f"baseline-to-current diff is persisted at {artifact} — read "
-                "that artifact for the full change set before judging coverage.)"
-                if artifact
-                else
-                f"(TRUNCATED: shown diff is limited to the first "
-                f"{SELF_CHECK_SCOPE_DIFF_MAX_CHARS} chars; the persisted diff "
-                "artifact is unavailable.)"
+                f"(NOT INLINED: this diff is {len(diff_text)} chars, over the "
+                f"{SELF_CHECK_SCOPE_DIFF_MAX_CHARS}-char inline budget. It is "
+                "withheld whole rather than cut in half — a half diff would "
+                "look complete. The scope_manifest above lists every changed "
+                "path and anchor range in it; pull the text itself with the "
+                "`luo review-scope diff` commands above, per file when it "
+                "helps. Read it before judging coverage: an unread file is "
+                "not a clean file.)"
             )
-        lines.append(f"```diff\n{diff_text}\n```")
+        else:
+            lines.append(f"```diff\n{diff_text}\n```")
     elif undecidable:
         lines.append("(unavailable)")
     else:
@@ -1018,6 +1230,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "scope_task_diff_artifact",
         "scope_task_available",
         "scope_task_diagnostic",
+        # The fix-delta anchors themselves stay out of the persisted outputs:
+        # they are manifest decoration rebuilt on every render, and a third
+        # anchor mapping in engine.json buys nothing a resume can use.
+        "scope_fix_delta_baseline_id",
+        "scope_fix_delta_changed_paths",
+        "scope_fix_delta_available",
+        "scope_fix_delta_diagnostic",
         "scope_diff_artifact",
         "scope_undecidable",
         "scope_diagnostic",
@@ -1051,7 +1270,9 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     prompt = SELF_CHECK_PROMPT.format(
         task_description=task_description,
-        review_scope=_format_review_scope(step.inputs),
+        review_scope=_format_review_scope(
+            step.inputs, flow_id=str(getattr(flow, "flow_id", "") or "")
+        ),
         changes_made=changes_text,
         test_results=test_text,
         project_constraints=_format_project_constraints(constraint_sources),

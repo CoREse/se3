@@ -839,3 +839,122 @@ def test_whole_task_domain_keeps_deletion_anchors_in_their_own_space(tmp_path):
     assert scope.task_scope_available is True
     assert scope.task_deletion_anchors["rename_me.py"] == [[2, 2]]
     assert "rename_me.py" not in scope.task_causal_anchors
+
+
+def test_full_scope_carries_the_fix_delta_since_the_last_full_round(tmp_path):
+    # A full round's own diff spans the whole task, so it cannot say which
+    # hunks the fixes since the previous full round added. The fix-delta
+    # attachment answers exactly that — without narrowing the round.
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-full-delta")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+    fix = manager.capture("fix-1")
+    (root / "dirty.py").write_text("before = 1\nfix = 3\n", encoding="utf-8")
+
+    scope = manager.resolve(
+        "full",
+        implementation,
+        full_baseline=implementation,
+        fix_delta_baseline=fix,
+    )
+
+    assert scope.scope_mode == "full"
+    assert scope.changed_paths == ["clean.py", "dirty.py"]
+    assert scope.causal_anchors["clean.py"] == [[2, 2]]
+    assert scope.fix_delta_available is True
+    assert scope.fix_delta_baseline_id == fix.baseline_id
+    assert scope.fix_delta_changed_paths == ["dirty.py"]
+    assert scope.fix_delta_causal_anchors["dirty.py"] == [[2, 2]]
+    assert "clean.py" not in scope.fix_delta_causal_anchors
+    # Purely descriptive: it never adds to the flow's on-disk diff record.
+    assert not list(
+        (manager._baseline_dir(fix.baseline_id) / "diffs").glob("*.diff")
+    )
+
+
+def test_unrebuildable_fix_delta_never_degrades_a_full_round(tmp_path):
+    root = _repo(tmp_path)
+    manager = ReviewScopeManager(root, "flow-full-delta-broken")
+    implementation = manager.capture("implementation")
+    (root / "clean.py").write_text("value = 1\nimpl = 2\n", encoding="utf-8")
+    broken = ReviewBaseline(
+        baseline_id="fix-9-deadbeefdead",
+        kind="fix-9",
+        flow_id="flow-full-delta-broken",
+        captured_at="2026-01-01T00:00:00",
+        project_root=str(root),
+        head_commit="0" * 40,
+        repository_identity="not-this-repository",
+        available=True,
+    )
+
+    scope = manager.resolve(
+        "full",
+        implementation,
+        full_baseline=implementation,
+        fix_delta_baseline=broken,
+    )
+
+    assert scope.undecidable is False
+    assert scope.changed_paths == ["clean.py"]
+    assert scope.fix_delta_available is False
+    assert scope.fix_delta_changed_paths == []
+    assert "could not be isolated" in scope.fix_delta_diagnostic
+
+
+def test_fix_baseline_after_full_round_follows_the_persisted_marker():
+    manager = ReviewScopeManager(Path("/nonexistent"), "flow-marker")
+    context = {
+        "fix_baseline_history": [
+            {"baseline_id": "fix-1-aaaaaaaaaaaa"},
+            {"baseline_id": "fix-2-bbbbbbbbbbbb"},
+        ],
+    }
+    def _baseline(baseline_id: str, kind: str) -> ReviewBaseline:
+        return ReviewBaseline(
+            baseline_id=baseline_id,
+            kind=kind,
+            flow_id="flow-marker",
+            captured_at="2026-01-01T00:00:00",
+            project_root="/nonexistent",
+        )
+
+    loaded = {
+        "fix-1-aaaaaaaaaaaa": _baseline("fix-1-aaaaaaaaaaaa", "fix-1"),
+        "fix-2-bbbbbbbbbbbb": _baseline("fix-2-bbbbbbbbbbbb", "fix-2"),
+    }
+    with patch.object(
+        ReviewScopeManager, "load_fix_baselines", return_value=loaded
+    ):
+        # No full round has consumed a fix yet: the whole history is new.
+        first = manager.earliest_fix_baseline_after_full_round(context)
+        assert first is not None
+        assert first.baseline_id == "fix-1-aaaaaaaaaaaa"
+
+        # After a full round that spanned fix-1, only fix-2 is new.
+        context["full_round_fix_head"] = "fix-1-aaaaaaaaaaaa"
+        second = manager.earliest_fix_baseline_after_full_round(context)
+        assert second is not None
+        assert second.baseline_id == "fix-2-bbbbbbbbbbbb"
+
+        # Nothing captured since the last full round: no annotation at all.
+        context["full_round_fix_head"] = "fix-2-bbbbbbbbbbbb"
+        assert manager.earliest_fix_baseline_after_full_round(context) is None
+
+
+def test_line_range_algebra_merges_adjacent_and_drops_unusable_pairs():
+    from tianluo.engine.review_scope import (
+        normalize_line_ranges,
+        subtract_line_ranges,
+        union_line_ranges,
+    )
+
+    assert normalize_line_ranges([[5, 3], ["a", 2], [1], [4, 6]]) == [[4, 6]]
+    # Adjacent ranges from two baselines describe one contiguous block.
+    assert union_line_ranges([[1, 3]], [[4, 6], [10, 10]]) == [[1, 6], [10, 10]]
+    assert subtract_line_ranges([[1, 20]], [[5, 9], [15, 15]]) == [
+        [1, 4], [10, 14], [16, 20],
+    ]
+    assert subtract_line_ranges([[1, 5]], [[1, 9]]) == []
+    assert subtract_line_ranges([[1, 5]], None) == [[1, 5]]
