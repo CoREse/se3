@@ -14756,6 +14756,16 @@ function appendPlanModeSection(body, flow) {
   body.appendChild(section);
 }
 
+// English baseline for the scope-mode tooltip. WHY it exists as a constant:
+// `full` / `incremental` are persisted state identifiers naming the diff
+// baseline, and read bare they suggest a full round is a non-diff review of
+// the whole tree — both scope renderers below attach this sentence, and tf()
+// needs a pre-built fallback for the no-dictionary path.
+const SCOPE_MODE_HINT_EN = "Both scope modes are diff-scoped; the mode names "
+  + "the diff baseline — full diff = this flow's implementation baseline (the "
+  + "whole task), incremental diff = the latest fix baseline (that fix's own "
+  + "delta).";
+
 // Build the scope-audit rows from a review_scope projection, or null when the
 // flow recorded none. `changedPathCount` is optional extra context from the
 // last self_check outputs.
@@ -14795,6 +14805,10 @@ function buildScopeRows(reviewScope, changedPathCount) {
   }
   if (!parts.length) return null;
   const row = el("div", "kv");
+  // The mode label says "diff" in both modes but cannot spell out *which*
+  // baseline each diffs from; the tooltip carries that, mirroring the CLI's
+  // `history.field.scope_mode_hint` continuation line.
+  row.title = tf("scope.modeHint", SCOPE_MODE_HINT_EN);
   row.append(
     el("span", "k", tf("scope.label", "Review scope")),
     el("span", "v", parts.join(" · ")),
@@ -14867,6 +14881,7 @@ function renderHistoryStrategyScope(container, session, records) {
       parts.push(tf("scope.changedPaths", `${count} changed path(s)`, { count }));
     }
     const scopeSec = el("div", "history-meta-block");
+    scopeSec.title = tf("scope.modeHint", SCOPE_MODE_HINT_EN);
     scopeSec.appendChild(el(
       "span", "history-meta-label", tf("scope.label", "Review scope") + ":"));
     scopeSec.appendChild(el("span", "history-meta-value", parts.join(" · ")));

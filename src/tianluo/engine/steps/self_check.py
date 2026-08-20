@@ -1068,18 +1068,28 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
 
     if mode == "incremental":
         purpose = (
-            "Incremental round: focus first on the exact delta made by this fix "
-            "relative to its persisted fix baseline, while still validating the "
-            "complete effective requirements and tracing impact across the repository."
+            "Incremental round — diff-scoped from this fix's persisted fix "
+            "baseline. Focus first on the exact delta that baseline produces "
+            "(the manifest below), while still validating the complete "
+            "effective requirements and tracing impact across the repository."
         )
     else:
         purpose = (
-            "Full round: review the complete effective requirements and every code "
-            "change introduced since the persisted implementation baseline."
+            "Full round — diff-scoped from this flow's persisted implementation "
+            "baseline, so its diff is everything this flow changed. \"Full\" "
+            "names that baseline, not an unscoped read of the tree: review the "
+            "complete effective requirements against the changes in the "
+            "manifest below."
         )
 
     lines = [
-        f"- scope_mode: {mode}",
+        # WHY the mode value is annotated: `full` / `incremental` are persisted
+        # state identifiers naming the diff baseline, and read bare `full` is
+        # taken as "review the whole repository, no diff" — which would send
+        # the checker outside the change set it is accountable for.
+        f"- scope_mode: {mode} (names the diff baseline; both modes are "
+        "diff-scoped — full = implementation baseline (whole task), "
+        "incremental = the latest fix baseline (that fix's own delta))",
         f"- baseline_id: {baseline_id}",
         f"- changed_paths: {', '.join(str(p) for p in changed_paths) if changed_paths else '(none)' }",
         f"- purpose: {purpose}",
@@ -1110,8 +1120,9 @@ def _format_review_scope(step_inputs: dict, flow_id: str = "") -> str:
         )
     if step_inputs.get("scope_fallback_from_incremental"):
         lines.append(
-            "- fallback: the incremental baseline was not trustworthy, so this is "
-            "a full review; do not treat an unavailable incremental diff as empty."
+            "- fallback: the fix baseline was not trustworthy, so this round is "
+            "diff-scoped from the implementation baseline instead; do not treat "
+            "an unavailable incremental diff as empty."
         )
     if undecidable:
         lines.extend([

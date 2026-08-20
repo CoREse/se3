@@ -1933,7 +1933,7 @@ class TestWholeTaskScopeRendering:
         assert "src/earlier.py" in rendered
         assert "not only inside the fix delta" in rendered
         # Attention is unchanged: the fix delta is still the primary object.
-        assert "focus first on the exact delta made by this fix" in rendered
+        assert "Focus first on the exact delta that baseline produces" in rendered
 
     def test_no_fix_iteration_or_closed_finding_metadata_leaks(self):
         inputs = self._inputs()

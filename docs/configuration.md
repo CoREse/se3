@@ -575,7 +575,20 @@ constraints. PLAN, `task_groups`, the implementation summary and the legacy
 narrow, widen or override the requirements.
 
 Rounds are scoped by a persisted, recoverable **baseline** (stored in runtime
-state, never in git; the workspace diff is rebuilt from it):
+state, never in git; the workspace diff is rebuilt from it).
+
+**Both round modes are diff-scoped.** `full` and `incremental` are the
+persisted `scope_mode` values, and they name the *diff baseline* — not the
+presence or absence of a diff. A `full` round is not an unscoped read of the
+whole tree: it reviews the diff from this flow's **implementation baseline**
+(everything the flow changed). An `incremental` round reviews the diff from the
+latest **fix baseline** (that fix's own delta). Every round prompt carries a
+scope manifest — the changed paths, their `+`/`-` counts and the exact line
+ranges a citation may reference — and the full diff text, either inlined or
+pulled on demand with the read-only `luo review-scope diff` command. Rebuilding
+the range by hand with `git diff` is wrong and the prompt forbids it: a
+baseline is a workspace *content* snapshot, not a commit, and HEAD advances
+inside a flow.
 
 1. Before the first IMPLEMENT, an **implementation baseline** is captured so
    the first review covers everything this flow changed and excludes the
@@ -584,20 +597,23 @@ state, never in git; the workspace diff is rebuilt from it):
    inside the scope — the baseline is content-keyed, so it survives HEAD
    moving forward; only history that no longer contains the baseline commit
    (rebase, amend, a backwards reset) is undecidable. The first SELF_CHECK
-   round is `full` (complete requirements + the whole flow diff). A clean full
-   round proceeds directly to the next gate.
+   round is `full` — the complete requirements against the diff from that
+   implementation baseline. A clean full round proceeds directly to the next
+   gate.
 2. Before every FIX, a **fix baseline** is captured; the post-fix round is
-   `incremental` (attention focused on the fix's exact diff, its changed files
-   and the still-open findings — while checkers may still read the whole
-   repository, the charter, the code-index, test results and unmodified code,
-   and must trace impact along call chains, shared state, protocols, data
-   formats, configuration, concurrency and invariants).
+   `incremental` — diff-scoped from that fix baseline, with attention focused
+   on the fix's exact diff, its changed files and the still-open findings.
+   Checkers may still read the whole repository, the charter, the code-index,
+   test results and unmodified code, and must trace impact along call chains,
+   shared state, protocols, data formats, configuration, concurrency and
+   invariants: the scope controls attention, never tool permissions.
 3. A clean incremental round is followed by a **full closure round**; only a
    clean closure round reaches INVARIANT_CHECK. A closure finding re-enters
    FIX and the incremental → closure cycle repeats.
 4. Any change to the effective task description (adjudication, interjection)
-   or an undecidable baseline **forces a full round** — an empty diff is never
-   used to fake an incremental review.
+   or an undecidable baseline **forces a full round** — i.e. the round falls
+   back to the implementation baseline; an empty diff is never used to fake an
+   incremental review.
 5. **TEST always runs the project's full configured test commands** — SELF_CHECK
    scope never selects or shrinks tests.
 
@@ -607,7 +623,9 @@ round with unresolved findings.
 
 Each SELF_CHECK step persists its `scope_mode`, baseline id, changed paths, fix
 iteration and pass index for the CLI history view and the web console's scope
-audit.
+audit. Both surfaces render the mode as *full diff* / *incremental diff* and
+state which baseline it diffs from, so the persisted value is never read as
+"non-diff review"; the persisted values themselves stay `full` / `incremental`.
 
 `WorkflowConfig` also carries a field named `self_check_passes_required_explicit`.
 It is **not a config key** — it is derived at load time (it records whether
