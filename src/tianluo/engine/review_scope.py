@@ -140,6 +140,41 @@ class ReviewScope:
         return asdict(self)
 
 
+# The role names a caller may ask a flow's baselines for. Ids are never a
+# public selector: which concrete baseline plays the "fix" role is a persisted
+# round-state decision (see ``earliest_unreviewed_fix_baseline``), not something
+# an operator can be expected to reproduce by hand.
+BASELINE_SELECTOR_IMPLEMENTATION = "implementation"
+BASELINE_SELECTOR_FIX = "fix"
+BASELINE_SELECTORS = (BASELINE_SELECTOR_IMPLEMENTATION, BASELINE_SELECTOR_FIX)
+
+# INVARIANT: these four outcomes stay mutually exclusive and separately
+# reportable. "never captured" (the flow has not crossed the baseline boundary
+# yet), "captured but unusable" (git could not answer at capture time) and
+# "reclaimed" (the snapshot directory was cleaned at flow termination) are three
+# different operator situations with three different remedies; collapsing any of
+# them into a generic "no baseline" tells the operator nothing actionable.
+BASELINE_STATUS_OK = "ok"
+BASELINE_STATUS_NOT_CAPTURED = "not_captured"
+BASELINE_STATUS_UNAVAILABLE = "unavailable"
+BASELINE_STATUS_CLEANED = "cleaned"
+
+
+@dataclass
+class BaselineLookup:
+    """Outcome of resolving one persisted baseline by its role in the flow."""
+
+    status: str
+    selector: str
+    baseline: Optional[ReviewBaseline] = None
+    baseline_id: str = ""
+    diagnostic: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.status == BASELINE_STATUS_OK and self.baseline is not None
+
+
 def requirement_fingerprint(description: str) -> str:
     """Stable identity for the effective requirement text of a review round."""
     return hashlib.sha256((description or "").encode("utf-8")).hexdigest()
@@ -366,6 +401,223 @@ class ReviewScopeManager:
             return None
         return self._read_descriptor(descriptor_path)
 
+    def store_exists(self) -> bool:
+        """Whether this flow's baseline snapshot directory is still on disk."""
+        return self.root.is_dir()
+
+    def list_baselines(self) -> List[ReviewBaseline]:
+        """Every persisted descriptor of this flow, oldest capture first."""
+        if not self.root.is_dir():
+            return []
+        found: List[ReviewBaseline] = []
+        try:
+            entries = sorted(self.root.iterdir())
+        except OSError:
+            return []
+        for entry in entries:
+            if not entry.is_dir():
+                continue
+            baseline = self._read_descriptor(entry / "descriptor.json")
+            if baseline is not None:
+                found.append(baseline)
+        found.sort(key=lambda item: (item.captured_at, item.baseline_id))
+        return found
+
+    def load_fix_baselines(
+        self, scope_context: Optional[Dict[str, Any]]
+    ) -> Dict[str, ReviewBaseline]:
+        """Load every captured fix baseline named by the flow's scope context."""
+        result: Dict[str, ReviewBaseline] = {}
+        if not isinstance(scope_context, dict):
+            return result
+        history = scope_context.get("fix_baseline_history")
+        if not isinstance(history, list):
+            return result
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            baseline_id = str(entry.get("baseline_id") or "")
+            if not baseline_id:
+                continue
+            baseline = self.load_baseline(baseline_id)
+            if baseline is not None:
+                result[baseline_id] = baseline
+        return result
+
+    def earliest_unreviewed_fix_baseline(
+        self, scope_context: Optional[Dict[str, Any]]
+    ) -> Optional[ReviewBaseline]:
+        """The EARLIEST fix baseline not yet covered by a review round.
+
+        Multiple FIXes can run with no SELF_CHECK round between them. A round
+        diffed from the earliest uncovered baseline spans the union of every
+        such fix's changes, so a defect introduced by an earlier unreviewed
+        fix keeps its causal anchors inside the scope — diffing from only the
+        LAST fix would drop that fix's delta from the round entirely. When
+        the earliest uncovered baseline cannot be loaded the union cannot be
+        reconstructed, so this returns None and the round degrades to the
+        full fallback instead of silently narrowing the scope.
+        """
+        if not isinstance(scope_context, dict):
+            return None
+        history = scope_context.get("fix_baseline_history")
+        covered = scope_context.get("covered_fix_baseline")
+        latest_dict = scope_context.get("latest_fix_baseline")
+        latest_id = (
+            latest_dict.get("baseline_id")
+            if isinstance(latest_dict, dict)
+            else None
+        )
+        if not isinstance(history, list) or not history:
+            # Pre-history persisted flows and synthetic callers that carry
+            # only the latest-fix-baseline key: there the latest baseline IS
+            # the earliest unreviewed one.
+            return ReviewBaseline.from_dict(latest_dict)
+        fix_baselines = self.load_fix_baselines(scope_context)
+        found_covered = not covered
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            baseline_id = str(entry.get("baseline_id") or "")
+            if not baseline_id:
+                continue
+            if not found_covered:
+                if baseline_id == covered:
+                    found_covered = True
+                continue
+            # The first entry AFTER the covered baseline is the earliest
+            # unreviewed fix.
+            if baseline_id in fix_baselines:
+                return fix_baselines[baseline_id]
+            return None
+        # Everything in history is covered: only a newer fix baseline beyond
+        # the covered marker is still unreviewed (and its history entry may
+        # be missing in pre-history synthetic callers).
+        if latest_id and latest_id != covered:
+            baseline = fix_baselines.get(latest_id)
+            if baseline is not None:
+                return baseline
+            return ReviewBaseline.from_dict(latest_dict)
+        return None
+
+    def lookup_baseline(
+        self,
+        selector: str,
+        flow_context: Optional[Dict[str, Any]] = None,
+    ) -> BaselineLookup:
+        """Resolve one baseline by role, reporting WHY it is not usable.
+
+        Read-only: nothing here captures, writes or repairs a descriptor, so a
+        display surface can call it against a finished flow without reviving
+        state the flow no longer owns.
+
+        ``flow_context`` is a flow's persisted ``state.context``. ``None`` means
+        the flow record itself is gone, and then the snapshot store is the only
+        evidence left — an absent store there is a reclaimed snapshot, not a
+        baseline that was never taken.
+        """
+        selector = (
+            BASELINE_SELECTOR_FIX
+            if str(selector) == BASELINE_SELECTOR_FIX
+            else BASELINE_SELECTOR_IMPLEMENTATION
+        )
+        has_context = isinstance(flow_context, dict)
+        context: Dict[str, Any] = flow_context if has_context else {}
+        scope_context = context.get("review_scope")
+        if not isinstance(scope_context, dict):
+            scope_context = {}
+
+        baseline_id = self._selected_baseline_id(selector, context, scope_context)
+        if baseline_id:
+            baseline = self.load_baseline(baseline_id)
+            if baseline is None:
+                # The flow still names this baseline, so it WAS captured; the
+                # descriptor is simply no longer on disk.
+                return BaselineLookup(
+                    status=BASELINE_STATUS_CLEANED,
+                    selector=selector,
+                    baseline_id=baseline_id,
+                )
+            return self._lookup_from_descriptor(selector, baseline)
+
+        scanned = self._scan_store_for(selector)
+        if scanned is not None:
+            return self._lookup_from_descriptor(selector, scanned)
+        if not has_context and not self.store_exists():
+            return BaselineLookup(
+                status=BASELINE_STATUS_CLEANED, selector=selector
+            )
+        return BaselineLookup(
+            status=BASELINE_STATUS_NOT_CAPTURED, selector=selector
+        )
+
+    @staticmethod
+    def _lookup_from_descriptor(
+        selector: str, baseline: ReviewBaseline
+    ) -> BaselineLookup:
+        if not baseline.available:
+            return BaselineLookup(
+                status=BASELINE_STATUS_UNAVAILABLE,
+                selector=selector,
+                baseline=baseline,
+                baseline_id=baseline.baseline_id,
+                diagnostic="; ".join(baseline.diagnostics),
+            )
+        return BaselineLookup(
+            status=BASELINE_STATUS_OK,
+            selector=selector,
+            baseline=baseline,
+            baseline_id=baseline.baseline_id,
+        )
+
+    def _selected_baseline_id(
+        self,
+        selector: str,
+        context: Dict[str, Any],
+        scope_context: Dict[str, Any],
+    ) -> str:
+        if selector == BASELINE_SELECTOR_IMPLEMENTATION:
+            declared = scope_context.get("implementation_baseline")
+            if isinstance(declared, dict):
+                return str(declared.get("baseline_id") or "")
+            return ""
+        # WHY the active round comes first for the fix role: once a round is
+        # created the flow marks every fix baseline up to the latest one as
+        # covered, so ``earliest_unreviewed_fix_baseline`` answers None for
+        # exactly the window in which a checker is reading the scope. The
+        # round's own baseline is what that checker is being asked to review.
+        active = context.get("self_check_review")
+        active_round = active.get("active_round") if isinstance(active, dict) else None
+        if isinstance(active_round, dict):
+            round_id = str(active_round.get("baseline_id") or "")
+            round_kind = str(active_round.get("baseline_kind") or "")
+            if round_id and round_kind != BASELINE_SELECTOR_IMPLEMENTATION:
+                return round_id
+        earliest = self.earliest_unreviewed_fix_baseline(scope_context)
+        if earliest is not None:
+            return earliest.baseline_id
+        latest = scope_context.get("latest_fix_baseline")
+        if isinstance(latest, dict):
+            return str(latest.get("baseline_id") or "")
+        return ""
+
+    def _scan_store_for(self, selector: str) -> Optional[ReviewBaseline]:
+        """Last-resort role resolution from the descriptors alone.
+
+        A flow whose engine record no longer carries the scope context (an old
+        persisted flow, an archive pruned of its context) still has its
+        descriptors on disk, and they are self-describing.
+        """
+        matches = [
+            baseline for baseline in self.list_baselines()
+            if (
+                baseline.kind == BASELINE_SELECTOR_IMPLEMENTATION
+                if selector == BASELINE_SELECTOR_IMPLEMENTATION
+                else baseline.kind.startswith("fix")
+            )
+        ]
+        return matches[-1] if matches else None
+
     def unavailable_baseline(self, kind: str, diagnostic: str) -> ReviewBaseline:
         baseline = ReviewBaseline(
             baseline_id=self._new_baseline_id(kind),
@@ -489,8 +741,14 @@ class ReviewScopeManager:
         baseline: Optional[ReviewBaseline],
         *,
         declared_paths: Optional[Sequence[str]] = None,
+        write_artifact: bool = True,
     ) -> ReviewScope:
         """Build the actual baseline-to-current unified diff.
+
+        ``write_artifact=False`` keeps the reconstruction purely observational:
+        a display surface re-reads a baseline the flow already owns and must not
+        add files to that flow's runtime state as a side effect of being looked
+        at.
 
         ``declared_paths`` are the paths the implementation step reported it
         changed. They are only consulted for files git cannot see at all
@@ -634,9 +892,10 @@ class ReviewScopeManager:
             result.causal_anchors = anchors
             result.deletion_anchors = deletions
             result.unified_diff = diff_text
-            result.artifact_path = self._write_diff_artifact(
-                baseline.baseline_id, diff_text
-            )
+            if write_artifact:
+                result.artifact_path = self._write_diff_artifact(
+                    baseline.baseline_id, diff_text
+                )
             return result
         except Exception as exc:  # noqa: BLE001 - never fake an empty diff
             result.undecidable = True
@@ -1704,3 +1963,121 @@ class ReviewScopeManager:
             temporary.write_text(content, encoding="utf-8")
             os.replace(str(temporary), str(target))
         return str(target)
+
+
+@dataclass
+class DiffSection:
+    """One rendered per-file section of a reconstructed review diff."""
+
+    path: str
+    old_path: str
+    text: str
+
+
+_DIFF_HEADER_PREFIX = "diff --git "
+
+
+def _split_header_paths(header: str) -> Tuple[str, str]:
+    """Recover the (old, new) paths a ``diff --git`` header names.
+
+    Paths are emitted unquoted and may contain spaces, so the split point is
+    searched from the right: the b-side marker is always the last ``" b/"`` in
+    a header the renderer produced.
+    """
+    rest = header[len(_DIFF_HEADER_PREFIX):].rstrip("\n")
+    if not rest.startswith("a/"):
+        return "", ""
+    index = rest.rfind(" b/")
+    while index != -1:
+        old = rest[2:index]
+        new = rest[index + 3:]
+        if old and new:
+            return old, new
+        index = rest.rfind(" b/", 0, index)
+    return "", ""
+
+
+def split_diff_sections(diff_text: str) -> List[DiffSection]:
+    """Split a reconstructed unified diff into its per-file sections.
+
+    Presentation-only: the sections are the exact substrings of the rendered
+    diff, so re-joining a selection reproduces byte-identical diff text rather
+    than a re-rendered approximation of it.
+    """
+    sections: List[DiffSection] = []
+    current: List[str] = []
+    old_path = ""
+    new_path = ""
+
+    def flush() -> None:
+        if not current:
+            return
+        sections.append(
+            DiffSection(path=new_path, old_path=old_path, text="".join(current))
+        )
+
+    for line in diff_text.splitlines(keepends=True):
+        if line.startswith(_DIFF_HEADER_PREFIX):
+            flush()
+            current = [line]
+            old_path, new_path = _split_header_paths(line)
+            continue
+        if current:
+            current.append(line)
+    flush()
+    return sections
+
+
+def section_covers_path(section: DiffSection, path: str) -> bool:
+    """Whether a section renders ``path``.
+
+    A submodule section is named by the gitlink path while its hunks are
+    labeled with inner paths, so an inner file is matched by containment — a
+    filter naming a real changed file must never come back empty just because
+    its diff lives inside its submodule's section.
+    """
+    if not path:
+        return False
+    for candidate in (section.path, section.old_path):
+        if not candidate:
+            continue
+        if path == candidate or path.startswith(candidate + "/"):
+            return True
+    return False
+
+
+def count_anchor_lines(ranges: Optional[Sequence[Sequence[int]]]) -> int:
+    """Number of individual lines covered by merged inclusive line ranges."""
+    total = 0
+    for item in ranges or ():
+        try:
+            start, end = int(item[0]), int(item[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        if end >= start:
+            total += end - start + 1
+    return total
+
+
+def diff_stat(scope: ReviewScope) -> Dict[str, Tuple[int, int]]:
+    """Per-path ``(insertions, deletions)`` of a reconstructed scope.
+
+    Counted from the scope's own anchors rather than by re-parsing the diff
+    text: the anchors are what evidence validation grounds against, so a stat
+    view and a finding's grounding can never disagree about which lines
+    changed. Paths with no countable lines (binary, mode-only, submodule
+    pointer moves) stay in the table at 0/0 — omitting them would present a
+    changed file as unchanged.
+    """
+    paths = (
+        set(scope.changed_paths)
+        | set(scope.causal_anchors)
+        | set(scope.deletion_anchors)
+    )
+    return {
+        path: (
+            count_anchor_lines(scope.causal_anchors.get(path)),
+            count_anchor_lines(scope.deletion_anchors.get(path)),
+        )
+        for path in sorted(paths)
+    }

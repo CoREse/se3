@@ -3807,75 +3807,21 @@ class StateMachine:
         self, flow: FlowInstance, scope_context: Dict[str, Any]
     ) -> Dict[str, ReviewBaseline]:
         """Load every captured fix baseline by id from the runtime store."""
-        history = scope_context.get("fix_baseline_history")
-        manager = self._review_scope_manager(flow)
-        result: Dict[str, ReviewBaseline] = {}
-        if not isinstance(history, list):
-            return result
-        for entry in history:
-            if not isinstance(entry, dict):
-                continue
-            baseline_id = str(entry.get("baseline_id") or "")
-            if not baseline_id:
-                continue
-            baseline = manager.load_baseline(baseline_id)
-            if baseline is not None:
-                result[baseline_id] = baseline
-        return result
+        return self._review_scope_manager(flow).load_fix_baselines(scope_context)
 
     def _incremental_fix_baseline(
         self, flow: FlowInstance, scope_context: Dict[str, Any]
     ) -> Optional[ReviewBaseline]:
         """The EARLIEST fix baseline not yet covered by a review round.
 
-        Multiple FIXes can run with no SELF_CHECK round between them. A round
-        diffed from the earliest uncovered baseline spans the union of every
-        such fix's changes, so a defect introduced by an earlier unreviewed
-        fix keeps its causal anchors inside the scope — diffing from only the
-        LAST fix would drop that fix's delta from the round entirely. When
-        the earliest uncovered baseline cannot be loaded the union cannot be
-        reconstructed, so this returns None and the round degrades to the
-        full fallback instead of silently narrowing the scope.
+        The selection rule itself lives on the manager so the read-only
+        ``luo review-scope diff`` surface resolves the very same baseline the
+        round under review was diffed from — two implementations of "which fix
+        baseline" would let the command show a scope no round ever saw.
         """
-        history = scope_context.get("fix_baseline_history")
-        covered = scope_context.get("covered_fix_baseline")
-        latest_dict = scope_context.get("latest_fix_baseline")
-        latest_id = (
-            latest_dict.get("baseline_id")
-            if isinstance(latest_dict, dict)
-            else None
+        return self._review_scope_manager(flow).earliest_unreviewed_fix_baseline(
+            scope_context
         )
-        if not isinstance(history, list) or not history:
-            # Pre-history persisted flows and synthetic callers that carry
-            # only the latest-fix-baseline key: there the latest baseline IS
-            # the earliest unreviewed one.
-            return self._review_baseline_from(latest_dict)
-        fix_baselines = self._fix_baselines(flow, scope_context)
-        found_covered = not covered
-        for entry in history:
-            if not isinstance(entry, dict):
-                continue
-            baseline_id = str(entry.get("baseline_id") or "")
-            if not baseline_id:
-                continue
-            if not found_covered:
-                if baseline_id == covered:
-                    found_covered = True
-                continue
-            # The first entry AFTER the covered baseline is the earliest
-            # unreviewed fix.
-            if baseline_id in fix_baselines:
-                return fix_baselines[baseline_id]
-            return None
-        # Everything in history is covered: only a newer fix baseline beyond
-        # the covered marker is still unreviewed (and its history entry may
-        # be missing in pre-history synthetic callers).
-        if latest_id and latest_id != covered:
-            baseline = fix_baselines.get(latest_id)
-            if baseline is not None:
-                return baseline
-            return self._review_baseline_from(latest_dict)
-        return None
 
     def _ensure_implementation_review_baseline(
         self, flow: FlowInstance, step: Step
