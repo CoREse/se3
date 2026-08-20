@@ -610,6 +610,11 @@ from .commands.worktree_cmd import worktree_app
 # reaches for the `tianluo[e2e]` extra.
 from .commands.e2e_cmd import e2e_app
 
+# Import review-scope command (read-only reconstruction of the diff a SELF_CHECK
+# round reviews). Its engine imports sit inside the command bodies, so building
+# the command tree never pulls the engine in.
+from .commands.review_scope_cmd import review_scope_app
+
 
 @app.command(name="init", help=t("cli.help.init.desc"))
 def init_cmd(
@@ -653,6 +658,16 @@ app.add_typer(worktree_app, name="worktree", help=t("cli.help.worktree"))
 # Register e2e command (run / list / doctor / bootstrap). Shares session.run_e2e
 # with the engine's E2E step so a manual run and a flow run cannot diverge.
 app.add_typer(e2e_app, name="e2e", help=t("cli.help.e2e"))
+
+# Register review-scope command (`luo review-scope diff` rebuilds the exact
+# baseline→worktree diff a SELF_CHECK round reviews). Read-only: it is the
+# supported way to read a review scope, since a hand-written `git diff` spans a
+# different range than the content-keyed baseline does.
+app.add_typer(
+    review_scope_app,
+    name="review-scope",
+    help=t("cli.help.review_scope"),
+)
 
 
 # ---------------------------------------------------------------------------

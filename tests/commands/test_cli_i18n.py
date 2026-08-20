@@ -45,6 +45,9 @@ MIGRATED_MODULES = [
     "tianluo/commands/init_cmd.py",
     "tianluo/commands/code_index_cmd.py",
     "tianluo/commands/worktree_cmd.py",
+    # Added with the command itself: every user-visible string of
+    # `luo review-scope diff` goes through the catalog from day one.
+    "tianluo/commands/review_scope_cmd.py",
 ]
 
 
