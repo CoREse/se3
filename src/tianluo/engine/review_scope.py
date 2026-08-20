@@ -135,6 +135,23 @@ class ReviewScope:
     undecidable: bool = False
     diagnostic: str = ""
     fallback_from_incremental: bool = False
+    # WHY the whole-task anchors travel ALONGSIDE the round's own anchors
+    # instead of being merged into them: an incremental round's attention is
+    # the fix delta (``changed_paths`` / ``causal_anchors``), but its EVIDENCE
+    # domain is every line this flow really changed — a finding anchored in
+    # work an earlier IMPLEMENT/FIX did is grounded in fact and must not be
+    # discarded as fabricated. Merging the two sets would erase which baseline
+    # a path/range came from, and the scope manifest has to be able to tell the
+    # checker "this hunk is the fix you just made, that one is earlier work".
+    # They stay empty for a full round: there the round baseline IS the
+    # implementation baseline, so a second copy would carry no new information.
+    task_baseline_id: str = ""
+    task_changed_paths: List[str] = field(default_factory=list)
+    task_causal_anchors: Dict[str, List[List[int]]] = field(default_factory=dict)
+    task_deletion_anchors: Dict[str, List[List[int]]] = field(default_factory=dict)
+    task_artifact_path: str = ""
+    task_scope_available: bool = False
+    task_scope_diagnostic: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -464,10 +481,21 @@ class ReviewScopeManager:
         full_baseline: Optional[ReviewBaseline] = None,
         declared_paths: Optional[Sequence[str]] = None,
     ) -> ReviewScope:
-        """Reconstruct a scope, falling incremental failures back to full."""
+        """Reconstruct a scope, falling incremental failures back to full.
+
+        On a decidable incremental round the implementation baseline is
+        reconstructed a SECOND time and attached to the result as the
+        ``task_*`` fields. ``full_baseline`` is therefore no longer only the
+        undecidable-fallback source: it is also the whole-task evidence domain
+        the round grounds findings against (see ``ReviewScope``).
+        """
         mode = "incremental" if requested_mode == "incremental" else "full"
         result = self.reconstruct(mode, baseline, declared_paths=declared_paths)
         if mode != "incremental" or not result.undecidable:
+            if mode == "incremental":
+                self._attach_task_scope(
+                    result, full_baseline, declared_paths=declared_paths
+                )
             return result
 
         incremental_diagnostic = result.diagnostic
@@ -482,6 +510,49 @@ class ReviewScopeManager:
         )
         full.diagnostic = f"{prefix} {full.diagnostic}".strip()
         return full
+
+    def _attach_task_scope(
+        self,
+        result: ReviewScope,
+        full_baseline: Optional[ReviewBaseline],
+        *,
+        declared_paths: Optional[Sequence[str]] = None,
+    ) -> None:
+        """Attach the implementation-baseline anchor set to an incremental scope.
+
+        WHY a failure here never degrades the round: the whole-task domain only
+        WIDENS what evidence can ground on. When it cannot be rebuilt the round
+        still has its own decidable fix-delta domain and behaves exactly as it
+        did before this widening existed — turning a usable incremental round
+        undecidable over a purely additive input would be a regression, not a
+        safety measure.
+        """
+        if full_baseline is None:
+            result.task_scope_diagnostic = (
+                "implementation baseline is missing; evidence can only ground "
+                "in this fix's delta"
+            )
+            return
+        if full_baseline.baseline_id == result.baseline_id:
+            # The round already diffs from the implementation baseline, so its
+            # own anchors ARE the whole-task anchors.
+            return
+        task = self.reconstruct(
+            "full", full_baseline, declared_paths=declared_paths
+        )
+        if task.undecidable:
+            result.task_scope_diagnostic = (
+                "whole-task diff could not be reconstructed "
+                f"({task.diagnostic}); evidence can only ground in this fix's "
+                "delta"
+            )
+            return
+        result.task_baseline_id = task.baseline_id
+        result.task_changed_paths = list(task.changed_paths)
+        result.task_causal_anchors = task.causal_anchors
+        result.task_deletion_anchors = task.deletion_anchors
+        result.task_artifact_path = task.artifact_path
+        result.task_scope_available = True
 
     def reconstruct(
         self,

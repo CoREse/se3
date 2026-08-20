@@ -819,3 +819,78 @@ def test_gitignored_file_written_by_the_flow_reaches_the_review_scope(tmp_path):
     assert "generated/out.js" in inputs["scope_diff"]
     # Anchor-less: no baseline content exists, so no line anchor is invented.
     assert not inputs["scope_causal_anchors"].get("generated/out.js")
+
+
+def test_incremental_round_inputs_carry_the_whole_task_evidence_domain(tmp_path):
+    """End-to-end: an incremental round keeps a finding anchored in earlier work.
+
+    The fix delta is the round's attention, but a defect the checker spots on a
+    line the ORIGINAL implement wrote is grounded in git fact — before the
+    whole-task domain existed it was discarded as bad evidence while the same
+    finding routed through ``missing_in`` landed unconditionally.
+    """
+    from tianluo.engine.steps.self_check import _validate_and_filter_issues
+
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = fix_baseline.to_dict()
+    flow.state.fix_iterations = 1
+    # The fix touches a different file than the implement step did.
+    (root / "other.py").write_text("helper = 1\n", encoding="utf-8")
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+
+    inputs = machine._build_step_inputs(flow, StepType.SELF_CHECK)
+
+    assert inputs["scope_mode"] == "incremental"
+    assert inputs["scope_changed_paths"] == ["other.py"]
+    assert "app.py" not in inputs["scope_causal_anchors"]
+    assert inputs["scope_task_available"] is True
+    assert set(inputs["scope_task_changed_paths"]) == {"app.py", "other.py"}
+    assert inputs["scope_task_causal_anchors"]["app.py"] == [[1, 1]]
+    assert inputs["scope_task_baseline_id"] == (
+        flow.state.context["review_scope"]["implementation_baseline"]["baseline_id"]
+    )
+
+    issue = {
+        "severity": "high",
+        "actual_behavior": "value is 2",
+        "expected_behavior": "value stays safe",
+        "divergence": "consumers read the wrong constant",
+        "expectation_source": {
+            "type": "task_description",
+            "verbatim_quote": "Change value safely",
+        },
+        "evidence_lines": ["app.py:1"],
+        "missing_in": [],
+    }
+    kept, stats = _validate_and_filter_issues([issue], inputs)
+    assert kept == [issue]
+    assert stats["bad_evidence_count"] == 0
+
+
+def test_full_closure_round_inputs_carry_no_separate_task_domain(tmp_path):
+    root, machine, flow, _implement = _machine_and_flow(tmp_path)
+    _complete_initial_full(machine, flow)
+
+    fix_baseline = ReviewScopeManager(root, flow.flow_id).capture("fix-1")
+    flow.state.context["review_scope"]["latest_fix_baseline"] = fix_baseline.to_dict()
+    flow.state.fix_iterations = 1
+    (root / "other.py").write_text("helper = 1\n", encoding="utf-8")
+    flow.state.current_step_index = flow.state.selected_steps.index(StepType.SELF_CHECK)
+
+    incremental = _add_current(
+        flow, machine._build_step_inputs(flow, StepType.SELF_CHECK)
+    )
+    assert incremental.inputs["scope_mode"] == "incremental"
+
+    closure = machine.transition_to_next(flow)
+    assert closure is not None
+    assert closure.inputs["scope_mode"] == "full"
+    # The closure round diffs from the implementation baseline itself, so its
+    # own anchors already are the whole-task anchors.
+    assert closure.inputs["scope_task_available"] is False
+    assert closure.inputs["scope_task_changed_paths"] == []
+    assert closure.inputs["scope_task_causal_anchors"] == {}
+    assert set(closure.inputs["scope_changed_paths"]) == {"app.py", "other.py"}

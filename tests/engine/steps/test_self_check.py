@@ -1603,3 +1603,209 @@ class TestNoOutOfScopeExemption:
         hint = mock_caller.call.call_args.kwargs["json_schema_hint"]
         assert "out_of_scope" not in prompt
         assert "out_of_scope" not in hint
+
+
+class TestWholeTaskEvidenceDomain:
+    """An incremental round grounds evidence on the union of two diff domains.
+
+    Its attention is the latest fix delta, but the change under review is the
+    whole flow's work: a finding anchored on a line an earlier IMPLEMENT/FIX
+    really wrote is grounded in git fact and must not be dropped as fabricated.
+    """
+
+    def _inputs(self):
+        return {
+            "task_description": "Implement feature X",
+            "task_description_base": "Implement feature X",
+            "changes_made": {"files_changed": ["src/fix.py"]},
+            # Round domain: the latest fix delta only.
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[10, 12]]},
+            # Whole-task domain: everything this flow changed.
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+            "scope_task_causal_anchors": {
+                "src/earlier.py": [[5, 8]],
+                "src/fix.py": [[3, 12]],
+            },
+        }
+
+    def test_anchor_in_earlier_flow_work_grounds_the_finding(self):
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_earlier_line_of_a_fix_touched_file_grounds_the_finding(self):
+        # Line 4 of src/fix.py is outside the fix delta but inside the flow's
+        # whole-task change to that same file.
+        issue = _valid_issue(path="src/fix.py", line=4)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_line_outside_both_domains_is_still_rejected(self):
+        # The union widens the domain; it does not abolish it. An unchanged
+        # line is still ungrounded evidence.
+        issue = _valid_issue(path="src/earlier.py", line=20)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        issue = _valid_issue(path="src/untouched.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_without_the_whole_task_domain_the_same_finding_is_dropped(self):
+        # Pins what the widening actually buys: the identical finding on the
+        # fix-delta domain alone is exactly the loss this change removes.
+        inputs = self._inputs()
+        inputs["scope_task_available"] = False
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_regression_grounds_on_the_whole_task_domain(self):
+        # ``require_changed_line`` narrows WHICH citations count, not which
+        # baseline they may come from: a regression caused by earlier flow work
+        # still points into this flow's change.
+        issue = _valid_issue(path="src/earlier.py", line=7)
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+        issue["evidence_lines"] = ["src/earlier.py:20"]
+        kept, stats = _validate_and_filter_issues([issue], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_anchor_less_fix_path_keeps_path_level_grounding(self):
+        # src/bin.dat is deletion-only/binary in the fix delta (anchor-LESS,
+        # grounds at path level) yet anchor-bearing across the whole task.
+        # Merging the two anchor dicts would flip it to anchor-BEARING and start
+        # rejecting the bare-path citation the prompt prescribes there, so the
+        # domains are OR-ed instead.
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_causal_anchors"] = {}
+        inputs["scope_task_changed_paths"] = ["src/bin.dat"]
+        inputs["scope_task_causal_anchors"] = {"src/bin.dat": [[1, 2]]}
+        issue = _valid_issue()
+        issue["evidence_lines"] = ["src/bin.dat"]
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_regression_missing_in_channel_widens_across_domains(self):
+        inputs = self._inputs()
+        inputs["scope_changed_paths"] = ["src/fix.py"]
+        inputs["scope_causal_anchors"] = {"src/fix.py": [[10, 12]]}
+        inputs["scope_task_changed_paths"] = ["src/gone.py", "src/fix.py"]
+        # src/gone.py is deletion-only across the whole task: anchor-less, so it
+        # grounds a regression at path level under ``missing_in``.
+        inputs["scope_task_causal_anchors"] = {"src/fix.py": [[3, 12]]}
+        issue = _valid_issue()
+        issue["evidence_lines"] = []
+        issue["missing_in"] = ["src/gone.py"]
+        issue["expectation_source"] = {
+            "type": "regression",
+            "verbatim_quote": "pre-existing behavior",
+        }
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["bad_evidence_count"] == 0
+
+    def test_full_round_without_task_domain_is_unchanged(self):
+        # A full round already diffs from the implementation baseline and never
+        # carries the extra keys; its grounding must behave exactly as before.
+        inputs = {
+            "task_description": "Implement feature X",
+            "task_description_base": "Implement feature X",
+            "changes_made": {"files_changed": ["src/fix.py"]},
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_causal_anchors": {"src/fix.py": [[10, 12]]},
+        }
+        kept, _ = _validate_and_filter_issues(
+            [_valid_issue(path="src/fix.py", line=11)], inputs
+        )
+        assert len(kept) == 1
+        kept, stats = _validate_and_filter_issues(
+            [_valid_issue(path="src/fix.py", line=4)], inputs
+        )
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_undecidable_scope_relaxation_is_unchanged(self):
+        # A degraded round grounds on naming any path at all, so the second
+        # domain adds nothing and must not disturb the relaxation tally.
+        inputs = self._inputs()
+        inputs["scope_undecidable"] = True
+        issue = _valid_issue(path="src/nowhere.py", line=3)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == [issue]
+        assert stats["undecidable_scope_kept_count"] == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_malformed_task_domain_is_ignored(self):
+        inputs = self._inputs()
+        inputs["scope_task_causal_anchors"] = "not-a-dict"
+        issue = _valid_issue(path="src/earlier.py", line=6)
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+        inputs = self._inputs()
+        inputs["scope_task_changed_paths"] = {"src/earlier.py": 1}
+        kept, stats = _validate_and_filter_issues([issue], inputs)
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+
+class TestWholeTaskScopeRendering:
+    def _inputs(self):
+        return {
+            "scope_mode": "incremental",
+            "baseline_id": "fix-1",
+            "scope_changed_paths": ["src/fix.py"],
+            "scope_diff": "@@ -1 +1 @@\n+fixed\n",
+            "scope_task_available": True,
+            "scope_task_changed_paths": ["src/earlier.py", "src/fix.py"],
+        }
+
+    def test_incremental_states_the_widened_evidence_rule(self):
+        rendered = _format_review_scope(self._inputs())
+        assert "task_changed_paths" in rendered
+        assert "src/earlier.py" in rendered
+        assert "not only inside the fix delta" in rendered
+        # Attention is unchanged: the fix delta is still the primary object.
+        assert "focus first on the exact delta made by this fix" in rendered
+
+    def test_no_fix_iteration_or_closed_finding_metadata_leaks(self):
+        inputs = self._inputs()
+        inputs["fix_iteration"] = 3
+        inputs["fix_history"] = [{"iteration": 1, "issues": ["closed one"]}]
+        rendered = _format_review_scope(inputs)
+        assert "fix_iteration" not in rendered
+        assert "closed one" not in rendered
+
+    def test_full_round_renders_no_second_domain(self):
+        inputs = self._inputs()
+        inputs["scope_mode"] = "full"
+        inputs["scope_task_available"] = False
+        inputs["scope_task_changed_paths"] = []
+        rendered = _format_review_scope(inputs)
+        assert "task_changed_paths" not in rendered
+        assert "not only inside the fix delta" not in rendered
+
+    def test_unavailable_task_domain_renders_no_rule(self):
+        inputs = self._inputs()
+        inputs["scope_task_available"] = False
+        rendered = _format_review_scope(inputs)
+        assert "task_changed_paths" not in rendered

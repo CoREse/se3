@@ -335,6 +335,47 @@ def _prior_finding_paths(step_inputs: dict) -> set[str]:
     return paths
 
 
+def _task_scope_domain(step_inputs: dict) -> tuple[set[str], Any] | None:
+    """The whole-task evidence domain an incremental round also grounds on.
+
+    WHY an incremental round grounds on two domains: its diff baseline is the
+    latest uncovered FIX, but the change the checker is looking at is the whole
+    flow's work. A finding whose ``evidence_lines`` land on a line an earlier
+    IMPLEMENT or FIX really wrote is grounded in git fact — dropping it as
+    fabricated evidence merely because the LATEST fix did not touch that line
+    silently loses a true finding, and left the rules inconsistent: the same
+    finding routed through ``missing_in`` landed unconditionally.
+
+    Returns ``None`` for a full round (its own baseline already spans the whole
+    task), for a degraded round (``scope_undecidable`` grounds on naming any
+    path at all, so a second domain adds nothing), and when the whole-task diff
+    could not be rebuilt — the round then keeps exactly its fix-delta domain.
+
+    The domain deliberately stays SEPARATE from the round's own rather than
+    being merged into one anchor dict: merging would turn a path that is
+    anchor-less in the fix delta (deletion-only, binary, rename-only) but
+    anchor-bearing across the whole task into an anchor-BEARING path, which
+    would start rejecting the bare-path citation the prompt prescribes there.
+    Grounding is therefore evaluated per domain and OR-ed, which can only widen
+    what lands, never narrow it.
+    """
+    if bool(step_inputs.get("scope_undecidable")):
+        return None
+    if not step_inputs.get("scope_task_available"):
+        return None
+    task_paths = step_inputs.get("scope_task_changed_paths")
+    if not isinstance(task_paths, list):
+        return None
+    changed = {
+        str(path) for path in task_paths
+        if isinstance(path, str) and path.strip()
+    }
+    anchors = step_inputs.get("scope_task_causal_anchors")
+    if not isinstance(anchors, dict):
+        return None
+    return changed, anchors
+
+
 def _validate_evidence(
     issue: dict,
     changed: set[str],
@@ -348,6 +389,11 @@ def _validate_evidence(
     ``missing_in`` entry. ``missing_in`` covers "the implementation should
     have edited X but didn't" cases that naturally cannot point at a changed
     line.
+
+    This decides grounding within ONE diff domain. A round may carry more than
+    one (an incremental round grounds on its fix delta and on the whole-task
+    diff — see ``_task_scope_domain``); ``_grounded_in_any_domain`` OR-s them,
+    so every rule below is stated per domain.
 
     INVARIANT: grounding of a citation is decided by whether its changed path
     is anchor-BEARING or anchor-LESS, and by nothing else:
@@ -449,6 +495,31 @@ def _validate_evidence(
     return False
 
 
+def _grounded_in_any_domain(
+    issue: dict,
+    domains: list[tuple[set[str], Any]],
+    *,
+    require_changed_line: bool = False,
+    scope_undecidable: bool = False,
+) -> bool:
+    """Ground an issue against the union of this round's evidence domains.
+
+    Each domain is one ``(changed_paths, causal_anchors)`` diff view; a finding
+    lands when it grounds in ANY of them. See ``_task_scope_domain`` for why an
+    incremental round carries two and why they are OR-ed rather than merged.
+    """
+    return any(
+        _validate_evidence(
+            issue,
+            changed,
+            require_changed_line=require_changed_line,
+            causal_anchors=anchors,
+            scope_undecidable=scope_undecidable,
+        )
+        for changed, anchors in domains
+    )
+
+
 def _describe_issue(issue: dict) -> str:
     """Render a kept issue as a single bullet line for fix_instructions.
 
@@ -534,7 +605,18 @@ def _validate_and_filter_issues(
     # their recorded line numbers belong to an earlier round's numbering space
     # and are never merged into ``causal_anchors`` (see
     # ``_prior_finding_paths``).
-    changed = changed | _prior_finding_paths(step_inputs)
+    prior_paths = _prior_finding_paths(step_inputs)
+    changed = changed | prior_paths
+
+    # An incremental round grounds on the union of its fix delta and the whole
+    # task's diff (``_task_scope_domain``). The prior-finding path widening
+    # applies to every domain: it is a property of the finding, not of a
+    # baseline.
+    domains: list[tuple[set[str], Any]] = [(changed, causal_anchors)]
+    task_domain = _task_scope_domain(step_inputs)
+    if task_domain is not None:
+        task_changed, task_anchors = task_domain
+        domains.append((task_changed | prior_paths, task_anchors))
 
     for issue in raw_issues:
         stats["input_count"] += 1
@@ -577,22 +659,20 @@ def _validate_and_filter_issues(
                 stats["quote_not_in_source_count"] += 1
                 continue
 
-        grounded = _validate_evidence(
+        grounded = _grounded_in_any_domain(
             issue,
-            changed,
+            domains,
             require_changed_line=(src_type == "regression"),
-            causal_anchors=causal_anchors,
         )
         if not grounded and scope_undecidable:
             # Degraded state: the changed-path hint could not be proven, so it
             # must not be the reason an evidence-bearing finding disappears.
             # Keeping it (and tallying the relaxation) is the safe direction —
             # the fix loop can judge it, a silent drop cannot.
-            grounded = _validate_evidence(
+            grounded = _grounded_in_any_domain(
                 issue,
-                changed,
+                domains,
                 require_changed_line=(src_type == "regression"),
-                causal_anchors=causal_anchors,
                 scope_undecidable=True,
             )
             if grounded:
@@ -805,6 +885,30 @@ def _format_review_scope(step_inputs: dict) -> str:
         f"- changed_paths: {', '.join(str(p) for p in changed_paths) if changed_paths else '(none)' }",
         f"- purpose: {purpose}",
     ]
+    task_paths = step_inputs.get("scope_task_changed_paths")
+    if (
+        mode == "incremental"
+        and step_inputs.get("scope_task_available")
+        and isinstance(task_paths, list)
+        and task_paths
+    ):
+        # WHY the widened evidence rule is stated to the checker: the handler
+        # now grounds a citation on the whole-task diff too, and a rule the
+        # reviewer cannot see is a rule it cannot use — it would keep
+        # suppressing real findings on earlier flow work to stay inside the
+        # delta. This states which citations GROUND; it does not move attention,
+        # which stays on the fix delta above. Only git facts appear here — no
+        # fix-iteration count, trigger type, or list of already-closed findings.
+        lines.append(
+            "- task_changed_paths (whole flow, implementation baseline → now): "
+            + ", ".join(str(p) for p in task_paths)
+        )
+        lines.append(
+            "- evidence rule: a citation grounds on ANY line this flow changed "
+            "across the whole task, not only inside the fix delta above. A real "
+            "defect you find in this flow's earlier work is a valid finding — "
+            "cite the line you actually verified it on and report it."
+        )
     if step_inputs.get("scope_fallback_from_incremental"):
         lines.append(
             "- fallback: the incremental baseline was not trustworthy, so this is "
@@ -907,6 +1011,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "scope_changed_paths",
         "scope_causal_anchors",
         "scope_deletion_anchors",
+        "scope_task_baseline_id",
+        "scope_task_changed_paths",
+        "scope_task_causal_anchors",
+        "scope_task_deletion_anchors",
+        "scope_task_diff_artifact",
+        "scope_task_available",
+        "scope_task_diagnostic",
         "scope_diff_artifact",
         "scope_undecidable",
         "scope_diagnostic",

@@ -4064,6 +4064,15 @@ class StateMachine:
         active["scope_diagnostic"] = scope.diagnostic
         active["scope_causal_anchors"] = copy.deepcopy(scope.causal_anchors)
         active["scope_deletion_anchors"] = copy.deepcopy(scope.deletion_anchors)
+        active["scope_task_changed_paths"] = list(scope.task_changed_paths)
+        active["scope_task_causal_anchors"] = copy.deepcopy(
+            scope.task_causal_anchors
+        )
+        active["scope_task_deletion_anchors"] = copy.deepcopy(
+            scope.task_deletion_anchors
+        )
+        active["scope_task_available"] = scope.task_scope_available
+        active["scope_task_diagnostic"] = scope.task_scope_diagnostic
 
         inputs.update({
             "self_check_round_id": active.get("round_id", ""),
@@ -4077,6 +4086,17 @@ class StateMachine:
             "scope_changed_paths": list(scope.changed_paths),
             "scope_causal_anchors": copy.deepcopy(scope.causal_anchors),
             "scope_deletion_anchors": copy.deepcopy(scope.deletion_anchors),
+            # The whole-task evidence domain of an incremental round. Empty on a
+            # full round, where the round baseline already spans the whole task.
+            "scope_task_baseline_id": scope.task_baseline_id,
+            "scope_task_changed_paths": list(scope.task_changed_paths),
+            "scope_task_causal_anchors": copy.deepcopy(scope.task_causal_anchors),
+            "scope_task_deletion_anchors": copy.deepcopy(
+                scope.task_deletion_anchors
+            ),
+            "scope_task_diff_artifact": scope.task_artifact_path,
+            "scope_task_available": scope.task_scope_available,
+            "scope_task_diagnostic": scope.task_scope_diagnostic,
             "scope_diff": scope.unified_diff,
             "scope_diff_artifact": scope.artifact_path,
             "scope_undecidable": scope.undecidable,
