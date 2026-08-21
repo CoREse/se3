@@ -47,6 +47,8 @@ STEP_TITLE_KEYS: Dict[StepType, str] = {
     StepType.TEST: "cli.steprender.title.test",
     StepType.E2E: "cli.steprender.title.e2e",
     StepType.SELF_CHECK: "cli.steprender.title.self_check",
+    StepType.INVARIANT_CHECK: "cli.steprender.title.invariant_check",
+    StepType.ADJUDICATE: "cli.steprender.title.adjudicate",
     StepType.VERIFY_SPEC: "cli.steprender.title.verify_spec",
     StepType.UPDATE_SPEC: "cli.steprender.title.update_spec",
     StepType.SPEC_GATE: "cli.steprender.title.spec_gate",
@@ -71,6 +73,19 @@ def step_display_title(step_type: StepType) -> str:
 
 # Internal alias kept for the renderers below, which all read as `_title_for`.
 _title_for = step_display_title
+
+
+# ---------------------------------------------------------------------------
+# Usage metadata excluded from every generic key/value dump
+# ---------------------------------------------------------------------------
+
+# ``render_step_usage`` already prints these as their own compact block right
+# after each step's report, so repeating them field-by-field in the generic
+# dump buries the step's actual result under accounting rows. Held as one
+# constant referenced by both generic paths (_default_render / _render_remaining)
+# and kept in parity with the WebUI's ``app.js:USAGE_META_KEYS`` so a step reads
+# the same on the CLI and in the web console.
+USAGE_META_KEYS = frozenset({"token_usage", "usage_records", "usage_summary"})
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +200,8 @@ def _default_render(step: Step, title: str) -> None:
 
     if step.outputs:
         for key, value in step.outputs.items():
+            if key in USAGE_META_KEYS:
+                continue
             formatted = _format_value(value)
             # For long text values show a preview + length
             if isinstance(value, str) and len(value) > 300:
@@ -208,7 +225,11 @@ def _default_render(step: Step, title: str) -> None:
 def _render_remaining(step: Step, title: str, skip_keys: set[str]) -> None:
     """Render any step.outputs keys not in *skip_keys* using generic formatting."""
     outputs = step.outputs or {}
-    remaining = {k: v for k, v in outputs.items() if k not in skip_keys and v}
+    remaining = {
+        k: v
+        for k, v in outputs.items()
+        if k not in skip_keys and k not in USAGE_META_KEYS and v
+    }
     if not remaining:
         return
     lines: list[str] = []
@@ -1092,6 +1113,156 @@ def _render_self_check(step: Step) -> None:
         lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
 
     render_full("\n".join(lines), title=t("cli.steprender.title.self_check"))
+
+
+@register_renderer(StepType.INVARIANT_CHECK)
+def _render_invariant_check(step: Step) -> None:
+    """Report card for the anchored invariant check.
+
+    Deliberately narrower than ``step.outputs``: ``raw_issues`` /
+    ``validation_stats`` / ``why_comment_hard_violations`` /
+    ``why_comment_losses`` / ``skipped_reason`` are post-hoc audit payloads, and
+    dumping them (which the generic renderer did, this step having had no
+    renderer at all) buried the verdict under thousands of characters of JSON.
+    They remain readable in the recorded step outputs. Layout mirrors
+    ``_render_self_check`` so the two check steps read identically.
+    """
+    outputs = step.outputs or {}
+
+    lines: list[str] = []
+
+    # ── Status line ───────────────────────────────────────────────
+    issues = outputs.get("issues") or []
+    if not isinstance(issues, list):
+        issues = []
+    # actionable_count is written by the handler after validation; fall back to
+    # the raw issue count so a partial/legacy record never reads "✓ PASSED"
+    # above a list of issues.
+    actionable_count = outputs.get("actionable_count")
+    if actionable_count is None:
+        actionable_count = len(issues)
+    if step.status == StepStatus.FAILED:
+        lines.append(t("cli.steprender.status.failed"))
+    elif actionable_count == 0:
+        lines.append(t("cli.steprender.status.passed"))
+    else:
+        lines.append(t("cli.steprender.self_check.actionable", count=actionable_count))
+
+    # ── Summary ───────────────────────────────────────────────────
+    result = outputs.get("invariant_check_result", {})
+    summary = result.get("summary", "") if isinstance(result, dict) else ""
+    if summary:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"  {summary}")
+
+    # ── Issues by severity ────────────────────────────────────────
+    if issues:
+        severity_colors = {
+            "critical": "[red]",
+            "high": "[red]",
+            "medium": "[yellow]",
+            "low": "[dim]",
+        }
+
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+
+        from .steps._fix_context import extract_issue_display_fields
+
+        for severity in ("critical", "high", "medium", "low"):
+            group = [
+                i for i in issues
+                if isinstance(i, dict) and (i.get("severity") or "high") == severity
+            ]
+            if not group:
+                continue
+            color = severity_colors.get(severity, "[dim]")
+            sev_label = t(f"cli.steprender.severity.{severity}")
+            lines.append(f"{color}{sev_label}[/{color[1:-1]}]  [dim]({len(group)})[/dim]")
+            for issue in group:
+                _sev, desc, location = extract_issue_display_fields(issue)
+                loc_suffix = f" [dim]@ {location}[/dim]" if location else ""
+                lines.append(f"  {color}•[/{color[1:-1]}] {desc}{loc_suffix}")
+            lines.append("")
+
+    # ── Warning ───────────────────────────────────────────────────
+    warning = outputs.get("warning", "")
+    if warning:
+        lines.append(f"[bold yellow]⚠ {warning}[/bold yellow]")
+
+    # ── Error ─────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title=t("cli.steprender.title.invariant_check"))
+
+
+@register_renderer(StepType.CONFIRM)
+def _render_confirm(step: Step) -> None:
+    """Report card for a review verdict.
+
+    ``CliSink`` skips ``render_step_output`` for CONFIRM (the interactive run
+    loop owns that step's console output), so this renderer serves the other
+    callers of the registry — and, above all, keeps the CLI in field parity with
+    the WebUI's ``renderConfirmReport``, which is the reason the registry is
+    mirrored on both sides at all.
+
+    ``revision_feedback`` is a verbatim copy of the verdict's ``feedback`` on
+    every current engine path, so it is only printed when it actually differs —
+    otherwise the card showed the same paragraph twice.
+    """
+    outputs = step.outputs or {}
+    review = outputs.get("review_result")
+    if not isinstance(review, dict):
+        review = {}
+
+    lines: list[str] = []
+
+    approved = review.get("approved")
+    if approved is None:
+        lines.append(t("cli.steprender.confirm.unknown"))
+    elif approved:
+        lines.append(t("cli.steprender.confirm.approved"))
+    else:
+        lines.append(t("cli.steprender.confirm.revision_requested"))
+
+    # The human reviewer path writes no ``reviewer`` into review_result — it
+    # only ever lives on the step's own inputs.
+    reviewer = review.get("reviewer") or (step.inputs or {}).get("reviewer")
+    if reviewer:
+        lines.append(t("cli.steprender.confirm.reviewer", reviewer=reviewer))
+
+    reviewed_type = review.get("step_to_review_type") or (step.inputs or {}).get(
+        "step_to_review_type"
+    )
+    reviewed_id = review.get("step_to_review_id") or (step.inputs or {}).get(
+        "step_to_review_id"
+    )
+    if reviewed_type or reviewed_id:
+        label = f"{reviewed_type or '?'} ({reviewed_id})" if reviewed_id else str(reviewed_type)
+        lines.append(t("cli.steprender.confirm.reviewing", step=label))
+
+    feedback = review.get("feedback") or ""
+    if feedback:
+        lines.append("")
+        lines.append(f"[bold]{t('cli.steprender.confirm.feedback')}[/bold]")
+        lines.append(f"  {feedback}")
+
+    revision = outputs.get("revision_feedback") or ""
+    if revision and str(revision).strip() != str(feedback).strip():
+        lines.append("")
+        lines.append(f"[bold]{t('cli.steprender.confirm.revision_feedback')}[/bold]")
+        lines.append(f"  {revision}")
+
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]{t('cli.steprender.error')}[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title=t("cli.steprender.title.confirm"))
 
 
 @register_renderer(StepType.VERIFY_SPEC)

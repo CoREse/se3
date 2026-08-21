@@ -2778,6 +2778,22 @@ _IMPLEMENT_SUMMARY_KEYS = frozenset({
 })
 
 
+def _is_fix_round(step: Step) -> bool:
+    """Whether this implement entry is a fix-loop re-entry rather than round 1.
+
+    The state machine marks the re-used implement Step with both
+    ``is_fix_iteration`` and a 1-based ``fix_iteration``; either alone is
+    enough, so an older/partial snapshot still classifies correctly.
+    """
+    inputs = getattr(step, "inputs", None) or {}
+    if inputs.get("is_fix_iteration"):
+        return True
+    try:
+        return int(inputs.get("fix_iteration", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _run_single_llm_call(
     prompt: str,
     step: Step,
@@ -2821,8 +2837,24 @@ def _run_single_llm_call(
         if holistic and result and not _IMPLEMENT_SUMMARY_KEYS.intersection(result):
             result = None
 
+        # WHY this round's own file list is captured separately: the fix loop
+        # re-enters the SAME Step object, and `_resolve_files_changed` rewrites
+        # `files_changed` from a flow-baseline git diff after every round — so
+        # that key is always cumulative and a round's own contribution would be
+        # unrecoverable from the persisted outputs. Reset before parsing so a
+        # round whose summary failed to parse cannot leave the PREVIOUS round's
+        # list standing as if it were this round's.
+        # Only `_run_single_llm_call` is reachable from the fix branch (both the
+        # holistic and the planned fix path call it); the grouped/DAG writers of
+        # `restricted_edits_applied` never run a fix iteration, so they need no
+        # equivalent.
+        is_fix_round = _is_fix_round(step)
+        if is_fix_round:
+            step.outputs["fix_round_files_changed"] = []
+
         if result:
-            files_changed = list(result.get("files_changed", []) or [])
+            round_files_changed = list(result.get("files_changed", []) or [])
+            files_changed = list(round_files_changed)
             if preserve_existing_outputs:
                 files_changed = list(dict.fromkeys(
                     list(step.outputs.get("files_changed", []) or [])
@@ -2833,6 +2865,7 @@ def _run_single_llm_call(
             restricted_edits = result.get("restricted_edits", [])
             if restricted_edits:
                 applied, failed_edits = _apply_restricted_edits(restricted_edits, project_root)
+                round_applied = list(applied)
                 if preserve_existing_outputs:
                     applied = (
                         list(step.outputs.get("restricted_edits_applied", []) or [])
@@ -2849,12 +2882,20 @@ def _run_single_llm_call(
                     fp = edit.get("file_path", "")
                     if fp and fp not in files_changed:
                         files_changed.append(fp)
+                for edit in round_applied:
+                    fp = edit.get("file_path", "")
+                    if fp and fp not in round_files_changed:
+                        round_files_changed.append(fp)
                 if applied:
                     logger.info("Applied %d restricted edits", len(applied))
                 if failed_edits:
                     logger.warning("Failed %d restricted edits", len(failed_edits))
 
             step.outputs["files_changed"] = files_changed
+            if is_fix_round:
+                step.outputs["fix_round_files_changed"] = list(dict.fromkeys(
+                    str(f) for f in round_files_changed if f
+                ))
             tests_added = list(result.get("tests_added", []) or [])
             test_mapping = dict(result.get("test_mapping", {}) or {})
             if preserve_existing_outputs:

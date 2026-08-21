@@ -8131,6 +8131,14 @@ function normalizeRecord(rec) {
         || data.outputs
         || pick("outputs")
         || {},
+      // WHY `inputs` rides along: the fix loop re-enters the SAME implement
+      // Step object, appending one step_completed record per round, so this
+      // snapshot's `fix_iteration` / `is_fix_iteration` is the ONLY thing that
+      // tells a fix round's card apart from round one's.
+      inputs: (innerStep && innerStep.inputs)
+        || data.inputs
+        || pick("inputs")
+        || {},
       error_message: (innerStep && innerStep.error_message)
         || data.error_message
         || pick("error_message")
@@ -10069,6 +10077,11 @@ function addConversationRecords(container, st, records, startIndex) {
   // sliced. Attached to each norm below so the interactive assistant renderers
   // can show『本轮 … · 累计 …』without re-walking the records.
   const roundCumulative = accumulateRoundUsageByStep(records);
+  // Per-record predecessor file list (G3), likewise computed over the FULL
+  // ordered array: the implement card's fix-round block falls back to the set
+  // difference against the step's previous completion for history written
+  // before `fix_round_files_changed` existed.
+  const priorFilesChanged = accumulatePriorFilesChangedByStep(records);
   for (let i = startIndex; i < records.length; i++) {
     const segKey = segments[i];
 
@@ -10116,6 +10129,8 @@ function addConversationRecords(container, st, records, startIndex) {
       norm = normalizeRecord(records[i]);
       // Per-step running cumulative for the per-round usage footnote (G5).
       if (norm) norm.cumulativeUsage = roundCumulative[i];
+      // Predecessor completion's files, for the implement fix-round difference.
+      if (norm) norm.priorFilesChanged = priorFilesChanged[i];
       bubble = renderConversationRecord(norm);
     } catch (err) {
       try { console.warn("conversation record render failed", i, err); }
@@ -13413,9 +13428,19 @@ function renderConversationRecord(norm) {
       if (badge) bubble.appendChild(badge);
     }
     if (!content) {
-      bubble.appendChild(
-        el("p", "md-p conv-empty",
-          tf("conv.recordEmpty", "(no readable content for this record)")));
+      // A test round's synthetic result record carries its whole payload in
+      // raw_json with an empty body, so it would otherwise show only
+      // "(no readable content)" — and a FAILED round never gets a
+      // `step_completed` card either (REVISION_NEEDED is non-terminal). Render
+      // the round in place; the record's 查看原始 toggle below is untouched.
+      const testRound = renderTestRoundCard(norm);
+      if (testRound) {
+        bubble.appendChild(testRound);
+      } else {
+        bubble.appendChild(
+          el("p", "md-p conv-empty",
+            tf("conv.recordEmpty", "(no readable content for this record)")));
+      }
     } else if (role === "assistant") {
       // assistant: two-layer progressive disclosure. The default view is the
       // narrative + clean structured result (via STEP_ASSISTANT_RENDERERS); the
@@ -13672,9 +13697,10 @@ function renderStepEventRecord(norm) {
     step_type: norm.stepReport.step_type,
     step_id: norm.stepReport.step_id,
     status: norm.stepReport.status,
+    inputs: norm.stepReport.inputs || {},
     outputs: norm.stepReport.outputs || {},
     error_message: norm.stepReport.error_message || "",
-  }) : null;
+  }, { priorFilesChanged: norm.priorFilesChanged }) : null;
   if (card) row.appendChild(card);
 
   return row;
@@ -13881,7 +13907,10 @@ const STEP_REPORT_TITLES = {
   confirm: "Confirmation",
   implement: "Implementation",
   test: "Testing",
+  e2e: "E2E Scenarios",
   self_check: "Self Check",
+  invariant_check: "Invariant Check",
+  adjudicate: "Adjudication",
   verify_spec: "Spec Verification",
   update_spec: "Spec Update",
   spec_gate: "Spec Gate",
@@ -14967,13 +14996,16 @@ function makeReportCard(stepType, titleText, buildBody) {
 // Public dispatch entry point: returns a default-expanded report card for the
 // step, dispatching by `step_type` and falling back to a generic renderer for
 // unregistered types (parity with `step_renderers.py:_default_render`).
-function renderStepReport(step) {
+// `context` carries the record-level facts a renderer cannot read off the step
+// snapshot alone (currently only `priorFilesChanged`, the previous
+// step_completed record's file list, for the fix-round difference).
+function renderStepReport(step, context) {
   if (!step || typeof step !== "object") return null;
   const stepType = String(step.step_type || "").toLowerCase();
   const renderer = STEP_REPORT_RENDERERS[stepType] || renderDefaultReport;
   const title = reportCardTitle(stepType);
   return makeReportCard(stepType || "unknown", title, () => {
-    const body = renderer(step, step.outputs || {});
+    const body = renderer(step, step.outputs || {}, context || null);
     const frag = document.createDocumentFragment();
     if (body instanceof Node) frag.appendChild(body);
     if (step.error_message) {
@@ -14985,7 +15017,16 @@ function renderStepReport(step) {
     // `token_usage` get no extra row, so their card structure is unchanged.
     const usageFoot = buildStepUsageFootnote(
       (step.outputs || {}).token_usage, (step.outputs || {}).usage_summary);
-    if (usageFoot) frag.appendChild(usageFoot);
+    if (usageFoot) {
+      // A fix round re-enters the same step and the engine publishes
+      // `token_usage` as the CARRIED total, so the bare number would read as
+      // this round's spend. Non-fix cards are left byte-identical.
+      if (implementFixIteration(step) > 0) {
+        usageFoot.appendChild(el("span", "step-report__muted",
+          tf("stepReport.usageCumulative", "(cumulative)")));
+      }
+      frag.appendChild(usageFoot);
+    }
     return frag;
   });
 }
@@ -15031,6 +15072,17 @@ function reportList(items, formatItem) {
   return ul;
 }
 
+// Usage metadata that `renderStepReport` already surfaces as the card's compact
+// `buildStepUsageFootnote` line. Dumping the same dicts again as kv rows buries
+// the step's actual result under a wall of accounting fields, so every generic
+// key/value path skips them. Kept in parity with the CLI's
+// `step_renderers.USAGE_META_KEYS` so a step reads the same on both surfaces.
+const USAGE_META_KEYS = new Set([
+  "token_usage",
+  "usage_records",
+  "usage_summary",
+]);
+
 // -- generic outputs renderer (parity with step_renderers.py:_default_render) -
 //
 // Render an arbitrary `step.outputs` dict as field-by-field key/value rows:
@@ -15049,7 +15101,7 @@ function reportList(items, formatItem) {
 function renderGenericOutputs(outputs) {
   const frag = document.createDocumentFragment();
   if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return frag;
-  const entries = Object.entries(outputs);
+  const entries = Object.entries(outputs).filter(([k]) => !USAGE_META_KEYS.has(k));
   if (!entries.length) return frag;
   const kv = el("div", "step-report__kv");
   for (const [k, v] of entries) {
@@ -15095,8 +15147,12 @@ function renderGenericKvRow(k, v) {
 
 function renderDefaultReport(step, outputs) {
   const frag = document.createDocumentFragment();
+  // "Has fields" is decided AFTER the usage-metadata exclusion: an outputs dict
+  // whose only keys are usage metadata renders nothing in the kv block, so it
+  // must take the same empty-state path rather than showing an empty kv frame.
   const hasFields = outputs && typeof outputs === "object" &&
-    !Array.isArray(outputs) && Object.keys(outputs).length > 0;
+    !Array.isArray(outputs) &&
+    Object.keys(outputs).some((k) => !USAGE_META_KEYS.has(k));
   if (!hasFields) {
     frag.appendChild(reportEmpty(
       tf("stepReport.empty.noOutputs", "(step produced no outputs)")));
@@ -15391,7 +15447,190 @@ function renderStructured(data) {
 
 // -- implement (parity with step_renderers.py:_render_implement) ------------
 
-function renderImplementReport(step, outputs) {
+// ---------------------------------------------------------------------------
+// Fix-loop round awareness (G3)
+// ---------------------------------------------------------------------------
+//
+// `state_machine._transition_to_fix` re-uses the SAME implement Step object for
+// every fix round, so the step's jsonl accumulates one `step_completed` record
+// per round. Everything the card reads is cumulative by construction:
+// `outputs.files_changed` is recomputed from a flow-baseline git diff after
+// every round (`implement._resolve_files_changed`) and `outputs.token_usage` is
+// published as the carried total. Only `outputs.summary` is genuinely
+// this-round (the round's LLM call overwrites it), and — since 12.x — the
+// engine also persists this round's own self-reported file list under
+// `fix_round_files_changed`. These helpers are pure so the round arithmetic can
+// be unit-tested headlessly.
+
+// This record's 1-based fix-round number, or 0 for round one / a non-implement
+// step. Reads the step snapshot's `inputs`, which normalizeRecord carries over
+// from the event's `data.step`.
+function implementFixIteration(step) {
+  if (!step || typeof step !== "object") return 0;
+  if (String(step.step_type || "").toLowerCase() !== "implement") return 0;
+  const inputs = step.inputs;
+  if (!inputs || typeof inputs !== "object") return 0;
+  const n = Number(inputs.fix_iteration);
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  // A snapshot may carry the boolean alone (older records, partial payloads);
+  // treat it as "at least round one of the fix loop" rather than round zero.
+  return inputs.is_fix_iteration ? 1 : 0;
+}
+
+// Normalize a files list to deduped, forward-slash strings. Both sides of the
+// set difference below must agree on separators, or a Windows-style path in one
+// record would read as a brand-new file in the next.
+function normalizeFileList(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  const seen = new Set();
+  for (const item of value) {
+    if (item == null) continue;
+    const s = String(item).replace(/\\/g, "/").trim();
+    if (!s || seen.has(s)) continue;
+    seen.add(s);
+    out.push(s);
+  }
+  return out;
+}
+
+// What "this round" changed, and how confidently we know it.
+//   reported    — the engine persisted the round's own list (`fix_round_files_changed`)
+//   diff        — derived as (this record's cumulative) minus (the previous record's)
+//   empty       — the difference is real and empty: only already-touched files
+//   unavailable — old history with no previous record to diff against
+function fixRoundChangedFiles(outputs, priorFilesChanged) {
+  const reported = normalizeFileList(outputs && outputs.fix_round_files_changed);
+  if (reported.length) return { files: reported, source: "reported" };
+  if (!Array.isArray(priorFilesChanged)) {
+    return { files: [], source: "unavailable" };
+  }
+  const prior = new Set(normalizeFileList(priorFilesChanged));
+  const files = normalizeFileList(outputs && outputs.files_changed)
+    .filter((f) => !prior.has(f));
+  return { files, source: files.length ? "diff" : "empty" };
+}
+
+// Cheap shape probe used to skip the vast majority of records without paying
+// for a full normalizeRecord — this pass runs over the WHOLE ordered array on
+// every conversation render, and a long history is exactly where the console
+// cannot afford another normalize sweep.
+function isStepCompletedRecord(rec) {
+  if (!rec || typeof rec !== "object") return false;
+  // Reading the fields of an untrusted record can itself throw (a hostile
+  // getter); this probe sits on the ws render path, where an escaping throw
+  // freezes the whole chat view.
+  try {
+    const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
+    const type = msg.type != null ? msg.type : rec.type;
+    return String(type || "").toLowerCase() === "step_completed";
+  } catch (_) {
+    return false;
+  }
+}
+
+// Pure: given the full ordered records array, return an array (same length)
+// where element [i] is the `files_changed` list of the nearest EARLIER
+// `step_completed` record sharing record i's `step_id` — the old-history
+// fallback for `fix_round_files_changed` — or null when record i is that
+// step's first completion (or is not a completion at all).
+//
+// De-dups by `recordKey` exactly as accumulateRoundUsageByStep does: a record
+// re-delivered across snapshots / reconnects must resolve to the SAME
+// predecessor it had the first time, never to itself. O(n), DOM-free.
+function accumulatePriorFilesChangedByStep(records) {
+  const n = Array.isArray(records) ? records.length : 0;
+  const result = new Array(n).fill(null);
+  if (!n) return result;
+  const lastByStep = Object.create(null); // step_id -> last distinct completion's files
+  const priorByKey = new Map();           // recordKey -> that record's predecessor
+  for (let i = 0; i < n; i++) {
+    if (!isStepCompletedRecord(records[i])) continue;
+    let norm;
+    let key;
+    try {
+      norm = normalizeRecord(records[i]);
+      key = recordKey(records[i]);
+    } catch (_) {
+      continue; // a malformed record must never break the walk
+    }
+    if (!norm || norm.kind !== "step_completed" || !norm.stepReport) continue;
+    const stepId = String(norm.stepId || "");
+    if (!stepId) continue;
+    if (priorByKey.has(key)) {
+      result[i] = priorByKey.get(key);
+      continue;
+    }
+    const prior = lastByStep[stepId] !== undefined ? lastByStep[stepId] : null;
+    priorByKey.set(key, prior);
+    result[i] = prior;
+    lastByStep[stepId] = normalizeFileList(
+      (norm.stepReport.outputs || {}).files_changed);
+  }
+  return result;
+}
+
+// Group a flat path list into the per-top-level-directory blocks the implement
+// card has always used. Shared by the cumulative "Files Changed" section and
+// the fix round's "This Round" block so the two never drift apart.
+function renderChangedFileTree(files) {
+  const grouped = {};
+  for (const fp of files) {
+    const norm = String(fp).replace(/\\/g, "/");
+    const parts = norm.split("/");
+    const dir = parts.length > 1 ? parts[0] + "/" : "./";
+    (grouped[dir] = grouped[dir] || []).push(norm);
+  }
+  const sortedDirs = Object.keys(grouped).sort((a, b) => {
+    if (a === b) return 0;
+    if (a === "./") return 1;
+    if (b === "./") return -1;
+    return a.localeCompare(b);
+  });
+  const wrap = el("div", "step-report__files");
+  for (const dir of sortedDirs) {
+    const list = grouped[dir].slice().sort();
+    const dirEl = el("div", "step-report__file-group");
+    dirEl.appendChild(el("div", "step-report__file-dir", `${dir} (${list.length})`));
+    for (const f of list) {
+      dirEl.appendChild(el("div", "step-report__file-row", f));
+    }
+    wrap.appendChild(dirEl);
+  }
+  return wrap;
+}
+
+// The card's top block for a fix round: what THIS round did, above the
+// cumulative body. Built from the same section/list/file primitives as the rest
+// of the card (no new visual vocabulary, per the F style constraint).
+function renderFixRoundSection(outputs, fixIteration, priorFilesChanged) {
+  const body = el("div");
+  const summary = String((outputs && outputs.summary) || "").trim();
+  if (summary) body.appendChild(el("p", "step-report__text", summary));
+
+  const round = fixRoundChangedFiles(outputs, priorFilesChanged);
+  if (round.files.length) {
+    body.appendChild(el("div", "step-report__muted",
+      tf("stepReport.implement.roundFiles",
+        `Changed this round (${round.files.length})`, { n: round.files.length })));
+    body.appendChild(renderChangedFileTree(round.files));
+  } else if (round.source === "empty") {
+    body.appendChild(el("div", "step-report__muted",
+      tf("stepReport.implement.roundNoNewFiles",
+        "No new files this round (existing files may have been edited again)")));
+  } else {
+    body.appendChild(el("div", "step-report__muted",
+      tf("stepReport.implement.roundFilesUnknown",
+        "This round's file list was not recorded")));
+  }
+
+  return reportSection(
+    tf("stepReport.implement.thisRound",
+      `This Round (fix iteration ${fixIteration})`, { n: fixIteration }),
+    body);
+}
+
+function renderImplementReport(step, outputs, context) {
   const frag = document.createDocumentFragment();
   const status = String(outputs.completion_status || "unknown");
   const filesChanged = Array.isArray(outputs.files_changed) ? outputs.files_changed : [];
@@ -15427,7 +15666,30 @@ function renderImplementReport(step, outputs) {
       el("span", null, tf("stepReport.implement.tests",
         `${testsAdded.length} tests`, { n: testsAdded.length })));
   }
+  // Every count on this bar is cumulative across the fix loop (files_changed is
+  // re-derived from the flow baseline each round), so a fix-round card says so
+  // rather than letting the reader take "23 files" for this round's work.
+  const fixIteration = implementFixIteration(step);
+  if (fixIteration > 0) {
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", "step-report__muted",
+        tf("stepReport.implement.cumulative",
+          `cumulative · incl. ${fixIteration} fix iteration(s)`,
+          { n: fixIteration })));
+  }
   frag.appendChild(bar);
+
+  // `outputs.summary` on a fix round is THIS round's text (implement.py replaces
+  // it every round), so the block above already showed it — and the engine
+  // derives `group_summaries` from that same string. Remember what the block
+  // printed so the cumulative body below does not repeat it verbatim.
+  let roundSummaryShown = "";
+  if (fixIteration > 0) {
+    frag.appendChild(renderFixRoundSection(
+      outputs, fixIteration,
+      context && context.priorFilesChanged));
+    roundSummaryShown = String(outputs.summary || "").trim();
+  }
 
   // Parity with step_renderers.py:_render_implement. A group summary is free
   // text and may contain semicolons, so the aggregate `summary` string cannot
@@ -15436,11 +15698,14 @@ function renderImplementReport(step, outputs) {
   // structured per-group list; pre-`group_summaries` flows show the whole
   // string verbatim, unsplit and unnumbered.
   const groupSummaries = (Array.isArray(outputs.group_summaries) ? outputs.group_summaries : [])
-    .filter((e) => e && typeof e === "object" && String(e.summary || "").trim());
-  if (groupSummaries.length || summary) {
+    .filter((e) => e && typeof e === "object" && String(e.summary || "").trim())
+    .filter((e) => !roundSummaryShown || String(e.summary).trim() !== roundSummaryShown);
+  const plainSummary =
+    roundSummaryShown && String(summary).trim() === roundSummaryShown ? "" : summary;
+  if (groupSummaries.length || plainSummary) {
     const title = tf("stepReport.section.summary", "Summary");
     if (!groupSummaries.length) {
-      frag.appendChild(reportSection(title, String(summary)));
+      frag.appendChild(reportSection(title, String(plainSummary)));
     } else if (groupSummaries.length === 1) {
       frag.appendChild(reportSection(title, String(groupSummaries[0].summary).trim()));
     } else {
@@ -15459,33 +15724,10 @@ function renderImplementReport(step, outputs) {
   }
 
   if (filesChanged.length) {
-    const grouped = {};
-    for (const fp of filesChanged) {
-      const norm = String(fp).replace(/\\/g, "/");
-      const parts = norm.split("/");
-      const dir = parts.length > 1 ? parts[0] + "/" : "./";
-      (grouped[dir] = grouped[dir] || []).push(norm);
-    }
-    const sortedDirs = Object.keys(grouped).sort((a, b) => {
-      if (a === b) return 0;
-      if (a === "./") return 1;
-      if (b === "./") return -1;
-      return a.localeCompare(b);
-    });
-    const wrap = el("div", "step-report__files");
-    for (const dir of sortedDirs) {
-      const list = grouped[dir].slice().sort();
-      const dirEl = el("div", "step-report__file-group");
-      dirEl.appendChild(el("div", "step-report__file-dir",
-        `${dir} (${list.length})`));
-      for (const f of list) {
-        dirEl.appendChild(el("div", "step-report__file-row", f));
-      }
-      wrap.appendChild(dirEl);
-    }
     frag.appendChild(reportSection(
       tf("stepReport.count.filesChanged",
-        `Files Changed (${filesChanged.length})`, { n: filesChanged.length }), wrap));
+        `Files Changed (${filesChanged.length})`, { n: filesChanged.length }),
+      renderChangedFileTree(filesChanged)));
   }
 
   if (testsAdded.length) {
@@ -15538,6 +15780,207 @@ function renderImplementReport(step, outputs) {
 
 // -- test (parity with step_renderers.py:_render_test) ----------------------
 
+// How much of a phase's captured output the failure-summary extractor scans.
+// The interesting lines (pytest's short-summary block and its final banner) are
+// always at the very end, and `step.outputs.test_results` keeps a FAILED phase's
+// stdout in full — so bounding the scan keeps a multi-megabyte capture from
+// being split line-by-line just to find the last few rows.
+const TEST_FAILURE_SCAN_CHARS = 8000;
+// Cap on the lines shown as the always-visible failure headline. Everything
+// else stays one click away in the folded full tail.
+const TEST_FAILURE_SUMMARY_MAX_LINES = 6;
+// How many trailing lines stand in for the headline when nothing in the tail
+// matches a known runner's summary shape (a raw traceback, an npm/cargo error).
+const TEST_FAILURE_FALLBACK_LINES = 3;
+
+// pytest's closing banner: `=== 3 failed, 20 passed in 4.51s ===`.
+function isTestSummaryBanner(line) {
+  return /^=+.*=+$/.test(line)
+    && /\d+\s*(failed|error|passed|skipped)/i.test(line);
+}
+
+// One test-runner line that names a failure. Covers pytest's short-summary
+// rows (`FAILED tests/test_x.py::test_y`), unittest's verdict
+// (`FAILED (failures=1)`), go test's `--- FAIL:`, jest's `Tests: 1 failed, …`
+// and cargo's `test result: FAILED`.
+function isTestFailureLine(line) {
+  return /^(FAILED|ERROR)\b/.test(line)
+    || /^(--- )?FAIL[:\s]/.test(line)
+    || /^Tests?:\s.*\d+\s+failed/i.test(line)
+    || /^test result:\s*FAILED/i.test(line);
+}
+
+// Pull the few lines a reader actually needs out of a captured stdout/stderr
+// tail: the runner's summary banner first, then the individual failure rows.
+// Pure — no DOM — so the headless suite can pin its behaviour on every tail
+// shape. Returns `[]` only for an empty tail; an unrecognized one still yields
+// its last few non-empty lines rather than nothing, because a raw traceback's
+// final line is the useful part.
+function extractTestFailureSummary(tail, maxLines) {
+  const limit = Number(maxLines) > 0
+    ? Number(maxLines) : TEST_FAILURE_SUMMARY_MAX_LINES;
+  const text = String(tail == null ? "" : tail).slice(-TEST_FAILURE_SCAN_CHARS);
+  const lines = text.split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  if (!lines.length) return [];
+
+  const picked = [];
+  const seen = new Set();
+  const push = (line) => {
+    if (!line || seen.has(line) || picked.length >= limit) return;
+    seen.add(line);
+    picked.push(line);
+  };
+  // The banner is the headline verdict; when a tail carries several (a
+  // multi-section run) the LAST one is the one that concluded the phase.
+  const banners = lines.filter(isTestSummaryBanner);
+  if (banners.length) push(banners[banners.length - 1]);
+  for (const line of lines) {
+    if (isTestFailureLine(line)) push(line);
+  }
+  if (picked.length) return picked;
+  return lines.slice(-Math.min(limit, TEST_FAILURE_FALLBACK_LINES));
+}
+
+// A failed phase's captured output, whichever spelling the source used:
+// `stdout_tail`/`stderr_tail` on the synthetic per-round history record
+// (test.py:_record_test_history truncates them), plain `stdout`/`stderr` on
+// `step.outputs.test_results` (a FAILED phase keeps its full capture there).
+function testPhaseOutputTails(phase) {
+  const readable = (a, b) => {
+    if (typeof a === "string" && a) return a;
+    return typeof b === "string" ? b : "";
+  };
+  return {
+    stdout: readable(phase.stdout_tail, phase.stdout),
+    stderr: readable(phase.stderr_tail, phase.stderr),
+  };
+}
+
+// The failure block under a failed phase: the extracted headline lines, then
+// the full captures behind `makeFoldable`. Shared by the per-round streaming
+// card and the terminal step_completed card so the two never drift. Returns
+// null when the phase carried no output at all.
+function renderTestPhaseFailureDetail(phase) {
+  if (!phase || typeof phase !== "object") return null;
+  const { stdout, stderr } = testPhaseOutputTails(phase);
+  if (!stdout && !stderr) return null;
+
+  const frag = document.createDocumentFragment();
+  const summary = extractTestFailureSummary(stdout || stderr);
+  if (summary.length) {
+    frag.appendChild(reportSection(
+      tf("stepReport.test.failureSummary", "Failure summary"),
+      reportList(summary)));
+  }
+  if (stdout) {
+    frag.appendChild(reportSection(
+      tf("stepReport.test.stdoutTail", "stdout (tail)"),
+      makeFoldable(() => el("pre", "step-report__json", stdout), stdout)));
+  }
+  if (stderr) {
+    frag.appendChild(reportSection(
+      tf("stepReport.test.stderrTail", "stderr (tail)"),
+      makeFoldable(() => el("pre", "step-report__json", stderr), stderr)));
+  }
+  return frag;
+}
+
+// One phase row: ✓/✗ + name, and for a failed phase its exit code plus the
+// shared failure block.
+function renderTestPhaseItem(phase) {
+  const p = phase && typeof phase === "object" ? phase : {};
+  const ok = !!p.passed;
+  const wrap = el("div");
+  const row = el("div");
+  row.appendChild(el("span", "step-report__icon " + (ok ? "ok" : "fail"),
+    ok ? "✓" : "✗"));
+  row.appendChild(document.createTextNode(" " + (p.name || "?")));
+  const rc = p.returncode;
+  if (!ok && rc != null && rc !== 0) {
+    row.appendChild(el("span", "step-report__muted",
+      " " + tf("stepReport.test.returncode", `exit ${rc}`, { code: rc })));
+  }
+  wrap.appendChild(row);
+  if (!ok) {
+    const detail = renderTestPhaseFailureDetail(p);
+    if (detail) wrap.appendChild(detail);
+  }
+  return wrap;
+}
+
+// The synthetic per-round test payload carried by a history record, or null.
+//
+// The test step writes one of these per fix round (test.py:_record_test_history
+// → record_response), and because the payload is not a Claude stream line its
+// `content` extracts to "" — so before this renderer existed every round landed
+// on the "(no readable content for this record)" empty state. Worse, a FAILED
+// round returns REVISION_NEEDED, which is non-terminal: no `step_completed`
+// card is ever emitted for it, so the round the reader most needs to see was
+// the one with nothing to show.
+//
+// The payload shape is the discriminator (assistant role, empty body, a
+// raw_json entry carrying both `overall_passed` and a `phases` array) rather
+// than the step type, so a record replayed without its envelope step_type still
+// renders. Pure — no DOM — so the headless suite can pin both the positive and
+// the negative case.
+function testRoundResultPayload(norm) {
+  if (!norm || typeof norm !== "object") return null;
+  if (String(norm.role || "").toLowerCase() !== "assistant") return null;
+  if (norm.partial) return null;
+  const content = typeof norm.content === "string" ? norm.content : "";
+  if (content.trim()) return null;
+
+  const rawJson = norm.raw && norm.raw.raw_json;
+  const items = Array.isArray(rawJson)
+    ? rawJson
+    : (rawJson && typeof rawJson === "object" ? [rawJson] : []);
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    if (typeof item.overall_passed !== "boolean") continue;
+    if (!Array.isArray(item.phases)) continue;
+    return item;
+  }
+  return null;
+}
+
+function renderTestRoundBody(payload) {
+  const frag = document.createDocumentFragment();
+  const phases = Array.isArray(payload.phases) ? payload.phases : [];
+  const overall = !!payload.overall_passed;
+
+  const parts = [el("span", "step-report__label " + (overall ? "ok" : "fail"),
+    overall ? tf("stepReport.status.passed", "PASSED")
+            : tf("stepReport.status.failed", "FAILED"))];
+  if (phases.length) {
+    const passed = phases.filter((p) => p && p.passed).length;
+    parts.push(tf("stepReport.test.phaseCount",
+      `${passed} / ${phases.length} phases`,
+      { passed, total: phases.length }));
+  }
+  frag.appendChild(reportStatusBar(parts));
+
+  if (phases.length) {
+    frag.appendChild(reportSection(
+      tf("stepReport.section.phases", "Phases"),
+      reportList(phases, renderTestPhaseItem)));
+  }
+  return frag;
+}
+
+// The streaming-position card for one test round. Built with the same
+// `makeReportCard` shell the terminal cards use, so a round reads like the
+// step's own result rather than like a chat turn. Returns null for any record
+// that is not a synthetic test payload, leaving the caller's empty state alone.
+function renderTestRoundCard(norm) {
+  const payload = testRoundResultPayload(norm);
+  if (!payload) return null;
+  return makeReportCard("test",
+    tf("stepReport.test.roundTitle", "Test Run Result"),
+    () => renderTestRoundBody(payload));
+}
+
 function renderTestReport(step, outputs) {
   const results = outputs.test_results;
   if (!results || typeof results !== "object") {
@@ -15561,15 +16004,13 @@ function renderTestReport(step, outputs) {
   }
   frag.appendChild(bar);
 
+  // Phase rows go through the SAME builder as the per-round streaming card, so
+  // a failed phase's exit code and failure headline read identically in both
+  // places — the terminal card is just the last round with a title on it.
   if (phases.length) {
-    frag.appendChild(reportSection(tf("stepReport.section.phases", "Phases"), reportList(phases, (p) => {
-      const ok = !!(p && p.passed);
-      const row = el("span");
-      row.appendChild(el("span", "step-report__icon " + (ok ? "ok" : "fail"),
-        ok ? "✓" : "✗"));
-      row.appendChild(document.createTextNode(" " + (p && p.name || "?")));
-      return row;
-    })));
+    frag.appendChild(reportSection(
+      tf("stepReport.section.phases", "Phases"),
+      reportList(phases, renderTestPhaseItem)));
   }
   if (results.command) {
     frag.appendChild(reportSection(tf("stepReport.section.command", "Command"), String(results.command)));
@@ -15982,12 +16423,226 @@ function renderCharterFreshnessReport(step, outputs) {
   return frag;
 }
 
+// -- confirm (parity with step_renderers.py:_render_confirm) ----------------
+//
+// Both reviewer paths (`confirm.py:_llm_review` and the human response) write
+// the verdict as the `review_result` dict; the synthetic-assistant path instead
+// hands the raw review JSON in as `outputs` itself, so the flat dict is the
+// fallback read. `revision_feedback` is a verbatim COPY of that verdict's
+// `feedback` on every current engine path — rendering both unconditionally
+// printed the same paragraph twice, so it only gets its own section when it
+// actually diverges (an older record, or a hand-edited call file).
+function renderConfirmReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const rr = outputs.review_result;
+  const result = (rr && typeof rr === "object" && !Array.isArray(rr)) ? rr : outputs;
+  const inputs = (step && step.inputs && typeof step.inputs === "object" &&
+    !Array.isArray(step.inputs)) ? step.inputs : {};
+
+  const parts = [];
+  const approved = result.approved != null ? !!result.approved : null;
+  if (approved === true) {
+    parts.push(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.confirm.approved", "Approved")));
+  } else if (approved === false) {
+    parts.push(el("span", "step-report__label fail",
+      "✗ " + tf("stepReport.confirm.revisionRequested", "Revision requested")));
+  } else {
+    parts.push(el("span", "step-report__label muted",
+      tf("stepReport.status.unknown", "?")));
+  }
+  // The human path writes no `reviewer` into review_result — it is only ever on
+  // the step's own inputs — so both are read before giving up on the field.
+  const reviewer = result.reviewer || inputs.reviewer || "";
+  if (reviewer) {
+    parts.push(tf("stepReport.confirm.reviewer", "reviewer: " + reviewer,
+      { reviewer: String(reviewer) }));
+  }
+  const reviewedType = result.step_to_review_type || inputs.step_to_review_type || "";
+  const reviewedId = result.step_to_review_id || inputs.step_to_review_id || "";
+  if (reviewedType || reviewedId) {
+    const label = reviewedId
+      ? String(reviewedType || "?") + " (" + String(reviewedId) + ")"
+      : String(reviewedType);
+    parts.push(tf("stepReport.confirm.reviewing", "reviewing: " + label,
+      { step: label }));
+  }
+  frag.appendChild(reportStatusBar(parts));
+
+  const feedback = typeof result.feedback === "string" ? result.feedback : "";
+  if (feedback) {
+    frag.appendChild(reportSection(
+      tf("stepReport.section.feedback", "Feedback"),
+      makeFoldable(() => el("p", "step-report__text", feedback), feedback)));
+  }
+  const revision = typeof outputs.revision_feedback === "string"
+    ? outputs.revision_feedback : "";
+  if (revision && revision.trim() !== feedback.trim()) {
+    frag.appendChild(reportSection(
+      tf("stepReport.section.revisionFeedback", "Revision Feedback"),
+      makeFoldable(() => el("p", "step-report__text", revision), revision)));
+  }
+  return frag;
+}
+
+// -- invariant_check (parity with step_renderers.py:_render_invariant_check) -
+
+// Mirror of `_fix_context.extract_issue_display_fields`: invariant_check issues
+// carry the anchored schema (actual_behavior / divergence / evidence_lines),
+// not self_check's legacy description/location pair, so reading `description`
+// alone would render every row as a raw JSON dump.
+function reportIssueFields(issue) {
+  if (!issue || typeof issue !== "object" || Array.isArray(issue)) {
+    return {
+      severity: "high",
+      description: String(issue == null ? "" : issue),
+      location: "",
+    };
+  }
+  const severity = String(issue.severity || "high");
+  const actual = String(issue.actual_behavior || "").trim();
+  const divergence = String(issue.divergence || "").trim();
+  const description = [actual, divergence].filter(Boolean).join(" — ")
+    || String(issue.description || "")
+    || String(issue.message || "")
+    || safeStringify(issue);
+  let location = "";
+  const evidence = issue.evidence_lines;
+  if (Array.isArray(evidence)) {
+    for (const ev of evidence) {
+      if (typeof ev === "string" && ev.trim()) { location = ev.trim(); break; }
+    }
+  }
+  if (!location && Array.isArray(issue.missing_in)) {
+    for (const m of issue.missing_in) {
+      if (typeof m === "string" && m.trim()) {
+        location = "missing_in: " + m.trim();
+        break;
+      }
+    }
+  }
+  if (!location && issue.location) location = String(issue.location);
+  return { severity, description, location };
+}
+
+// Group issues by severity into the critical/high/medium/low sections both
+// check-step cards share, so self_check and invariant_check read identically.
+function appendIssueSeveritySections(frag, issues) {
+  const bySev = { critical: [], high: [], medium: [], low: [] };
+  for (const i of issues) {
+    const fields = reportIssueFields(i);
+    const sev = fields.severity.toLowerCase();
+    (bySev[sev] || bySev.medium).push(fields);
+  }
+  for (const sev of ["critical", "high", "medium", "low"]) {
+    const grp = bySev[sev];
+    if (!grp || !grp.length) continue;
+    const sevLabel = tf("stepReport.severity." + sev, sev);
+    frag.appendChild(reportSection(
+      tf("stepReport.groupHeader",
+        `${sevLabel} (${grp.length})`, { label: sevLabel, n: grp.length }),
+      reportList(grp, (f) => {
+        const row = el("span");
+        row.appendChild(document.createTextNode(f.description));
+        if (f.location) {
+          row.appendChild(el("span", "step-report__muted", " @ " + f.location));
+        }
+        return row;
+      })));
+  }
+}
+
+// Deliberately narrower than `step.outputs`: the diagnostic payloads
+// (raw_issues / validation_stats / why_comment_* / skipped_reason) exist for
+// post-hoc auditing, not for the reader of a result card — they stay reachable
+// through the record's raw-JSON toggle. `actionable_count` is written by
+// invariant_check_handler after validation; the synthetic-assistant path has
+// only the LLM's raw JSON, so the count falls back to issues.length there —
+// the same fallback (and the same reason) as renderSelfCheckReport.
+function renderInvariantCheckReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const issues = Array.isArray(outputs.issues) ? outputs.issues : [];
+  const hasCount = outputs.actionable_count != null;
+  const actionable = hasCount ? Number(outputs.actionable_count) : issues.length;
+  const status = String((step && step.status) || "").toLowerCase();
+
+  const bar = el("div", "step-report__status-bar");
+  if (status === "failed") {
+    bar.appendChild(el("span", "step-report__label fail",
+      "✗ " + tf("stepReport.status.failed", "FAILED")));
+  } else if (actionable === 0) {
+    bar.appendChild(el("span", "step-report__label ok",
+      "✓ " + tf("stepReport.status.passed", "PASSED")));
+  } else {
+    // Same two wordings as self_check (and the same i18n keys): a validated
+    // count is "actionable", an issues.length fallback is not.
+    bar.appendChild(el("span", "step-report__label fail", hasCount
+      ? tf("stepReport.selfCheck.actionableIssues",
+        `✗ ${actionable} actionable issue(s)`, { n: actionable })
+      : tf("stepReport.selfCheck.issues",
+        `✗ ${actionable} issue(s)`, { n: actionable })));
+  }
+  frag.appendChild(bar);
+
+  const result = outputs.invariant_check_result;
+  const summary = result && typeof result === "object" ? result.summary : "";
+  if (summary) {
+    frag.appendChild(reportSection(
+      tf("stepReport.section.summary", "Summary"), String(summary)));
+  }
+  if (issues.length) appendIssueSeveritySections(frag, issues);
+  if (outputs.warning) {
+    frag.appendChild(el("div", "step-report__warn", "⚠ " + outputs.warning));
+  }
+  return frag;
+}
+
+// -- adjudicate (web only — the CLI keeps the generic renderer) --------------
+//
+// adjudicate's outputs are dominated by audit structures (candidate_verdicts /
+// rejected_candidates / rejected_positions / superseded_fix_instructions /
+// candidates_considered) that the generic renderer dumped in full, burying the
+// ruling itself. The card shows only the ruling: what was ruled, on what
+// grounds, and — for a real (non-no-op) ruling — the description it installed.
+// Everything else stays in the record's raw-JSON toggle.
+function renderAdjudicateReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const noop = !!outputs.adjudication_noop;
+  const parts = [];
+  parts.push(el("span", "step-report__label " + (noop ? "muted" : "highlight"),
+    noop ? tf("stepReport.adjudicate.noop", "no-op (no contradiction ruled)")
+         : tf("stepReport.adjudicate.ruled", "contradiction ruled")));
+  const ctype = outputs.contradiction_type;
+  if (ctype) {
+    parts.push(tf("stepReport.adjudicate.contradictionType",
+      "type: " + String(ctype), { type: String(ctype) }));
+  }
+  frag.appendChild(reportStatusBar(parts));
+
+  const rationale = outputs.adjudication_rationale;
+  if (rationale) {
+    frag.appendChild(reportSection(
+      tf("stepReport.section.rationale", "Rationale"), String(rationale)));
+  }
+  const desc = outputs.adjudicated_description;
+  if (desc) {
+    const text = String(desc);
+    frag.appendChild(reportSection(
+      tf("stepReport.section.adjudicatedDescription", "Adjudicated Description"),
+      makeFoldable(() => el("p", "step-report__text", text), text)));
+  }
+  return frag;
+}
+
 const STEP_REPORT_RENDERERS = {
   analyze: renderAnalyzeReport,
   plan: renderPlanReport,
   implement: renderImplementReport,
   test: renderTestReport,
+  confirm: renderConfirmReport,
   self_check: renderSelfCheckReport,
+  invariant_check: renderInvariantCheckReport,
+  adjudicate: renderAdjudicateReport,
   verify_spec: renderVerifySpecReport,
   update_spec: renderUpdateSpecReport,
   commit: renderCommitReport,
@@ -17508,6 +18163,16 @@ if (typeof module !== "undefined" && module.exports) {
     // tests/frontend/round_usage.test.mjs.
     buildRoundUsageFootnote,
     accumulateRoundUsageByStep,
+    // Implement fix-round "This Round" block (G3) — exposed for the DOM-free /
+    // DOM-stub tests in tests/frontend/implement_fix_round.test.mjs.
+    implementFixIteration,
+    normalizeFileList,
+    fixRoundChangedFiles,
+    isStepCompletedRecord,
+    accumulatePriorFilesChangedByStep,
+    renderChangedFileTree,
+    renderFixRoundSection,
+    renderImplementReport,
     renderProposalFields,
     renderDesignFields,
     renderPlanReport,
@@ -17520,6 +18185,19 @@ if (typeof module !== "undefined" && module.exports) {
     renderAssistantBubble,
     renderGenericOutputs,
     renderDefaultReport,
+    // Usage-metadata exclusion + the shared check-step issue projection —
+    // exposed for tests/frontend/step_report_renderers.test.mjs.
+    USAGE_META_KEYS,
+    reportIssueFields,
+    // Per-round test rendering (G2) — exposed for the DOM-free / DOM-stub tests
+    // in tests/frontend/test_round_render.test.mjs.
+    extractTestFailureSummary,
+    testPhaseOutputTails,
+    testRoundResultPayload,
+    renderTestPhaseItem,
+    renderTestPhaseFailureDetail,
+    renderTestRoundCard,
+    renderTestReport,
     isPlainOutputsDict,
     extractStructuredJson,
     extractResultJson,

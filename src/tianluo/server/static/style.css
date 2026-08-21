@@ -2879,6 +2879,12 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   font-variant-numeric: tabular-nums;
   word-break: break-word;
 }
+/* The fix-loop "(cumulative)" marker rides this same footnote line, so it takes
+ * the footnote's smaller scale rather than the card-body muted size — colour
+ * already matches (both var(--fg-dim)), which keeps it legible in both themes. */
+.step-report__usage .step-report__muted {
+  font-size: inherit;
+}
 
 /* Per-round token-usage footnote (G5): a discreet small-print line at the tail
  * of an interactive assistant bubble (discovery / confirm / …) reporting this

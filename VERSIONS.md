@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.12.0 - 2026-08-21
+
+- Add dedicated WebUI result cards for `confirm`, `invariant_check`, and `adjudicate` steps, replacing the raw key/value dump with status bars, summaries, severity-grouped issues, and foldable long text.
+- Add matching CLI renderers for `confirm` and `invariant_check` steps so terminal output matches the WebUI instead of dumping every output field.
+- Stop leaking `token_usage`, `usage_records`, and `usage_summary` into the key/value area of generic step result cards in both the WebUI and the CLI — usage is already shown as a compact footnote.
+- Render each test round in the chat stream as a readable pass/fail card with per-phase status, return codes, and an extracted pytest failure summary; previously these records showed only "no readable content". Applies retroactively to existing history.
+- Show a "this round's changes" section at the top of the implement summary card during fix iterations, and label the cumulative sections and usage footnote as cumulative, so per-round work is no longer indistinguishable from the running total.
+- Persist a new `fix_round_files_changed` output on fix-iteration implement steps recording the files touched in that round; older history falls back to a set difference against the previous round.
+- Fix result card titles for `invariant_check`, `adjudicate`, and `e2e` steps, which previously degraded to the bare step key.
+- Add localized (en-US / zh-CN) strings for all new WebUI and CLI step-rendering text.
 ## 12.11.1 - 2026-08-21
 
 - Fix tianluo-server being oom-killed after long uptime by putting a memory budget on the in-RAM history relay cache, which previously mirrored every active flow's whole conversation with no ceiling

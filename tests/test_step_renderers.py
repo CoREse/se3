@@ -1106,3 +1106,310 @@ class TestRenderImplementLeftoverNotes:
             data = json.loads((locales / name).read_text(encoding="utf-8"))
             assert key in data, f"{key} missing from {name}"
             assert "{count}" in data[key]
+
+
+# ---------------------------------------------------------------------------
+# Usage-metadata exclusion from the generic key/value paths (G1-A)
+# ---------------------------------------------------------------------------
+
+
+class TestUsageMetadataExcludedFromGenericDump:
+    """``render_step_usage`` already prints these keys as their own block, so
+    the generic dumps must not repeat them field-by-field. The same three keys
+    are excluded on the WebUI side (``app.js:USAGE_META_KEYS``)."""
+
+    USAGE = {
+        "token_usage": {"input_tokens": 11, "output_tokens": 22, "total_cost_usd": 0.5},
+        "usage_records": [{"agent": "claude", "input_tokens": 11}],
+        "usage_summary": {"total": {"input_tokens": 11}},
+    }
+
+    def test_key_set_is_exactly_the_three_usage_keys(self):
+        from tianluo.engine.step_renderers import USAGE_META_KEYS
+
+        assert set(USAGE_META_KEYS) == {"token_usage", "usage_records", "usage_summary"}
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_default_render_skips_usage_keys_but_keeps_real_fields(self, mock_render_full):
+        from tianluo.engine.step_renderers import _default_render
+
+        outputs = dict(self.USAGE)
+        outputs["reconciled"] = True
+        _default_render(_make_step(StepType.VERSION_RECONCILE, outputs), "Version Reconcile")
+
+        content = mock_render_full.call_args[0][0]
+        assert "reconciled" in content
+        for key in self.USAGE:
+            assert key not in content
+        assert "total_cost_usd" not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_default_render_renders_nothing_when_only_usage_keys_remain(self, mock_render_full):
+        """A completed step whose outputs are nothing but usage metadata must
+        take the same 'no lines' path as a step with no outputs at all — never
+        an otherwise-empty panel of accounting rows."""
+        from tianluo.engine.step_renderers import _default_render
+
+        _default_render(_make_step(StepType.MERGE_INTEGRATE, dict(self.USAGE)), "Merge")
+
+        mock_render_full.assert_not_called()
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_render_remaining_skips_usage_keys_on_top_of_its_own_skip_set(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_remaining
+
+        outputs = dict(self.USAGE)
+        outputs["already_rendered"] = "x"
+        outputs["leftover"] = "y"
+        _render_remaining(
+            _make_step(StepType.INVESTIGATE, outputs), "Investigate", {"already_rendered"}
+        )
+
+        content = mock_render_full.call_args[0][0]
+        assert "leftover" in content
+        assert "already_rendered" not in content
+        for key in self.USAGE:
+            assert key not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_render_remaining_renders_nothing_when_only_usage_keys_remain(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_remaining
+
+        _render_remaining(_make_step(StepType.INVESTIGATE, dict(self.USAGE)), "Investigate", set())
+
+        mock_render_full.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _render_invariant_check (G1-C)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderInvariantCheck:
+    def _content(self, mock_render_full):
+        return mock_render_full.call_args[0][0]
+
+    def test_renderer_is_registered(self):
+        from tianluo.engine.step_renderers import STEP_RENDERERS
+
+        assert StepType.INVARIANT_CHECK in STEP_RENDERERS
+
+    def test_step_has_a_localized_title_instead_of_the_raw_key(self):
+        from tianluo.engine.step_renderers import step_display_title
+
+        assert step_display_title(StepType.INVARIANT_CHECK) == "Invariant Check"
+        assert step_display_title(StepType.ADJUDICATE) == "Adjudication"
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_zero_actionable_shows_passed_with_summary(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_invariant_check
+
+        _render_invariant_check(_make_step(StepType.INVARIANT_CHECK, {
+            "issues": [],
+            "actionable_count": 0,
+            "invariant_check_result": {"summary": "No recorded invariant is violated."},
+        }))
+
+        content = self._content(mock_render_full)
+        assert "PASSED" in content
+        assert "FAILED" not in content
+        assert "No recorded invariant is violated." in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_issues_render_grouped_by_severity_with_the_anchored_schema(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_invariant_check
+
+        _render_invariant_check(_make_step(StepType.INVARIANT_CHECK, {
+            "actionable_count": 2,
+            "issues": [
+                {
+                    "severity": "critical",
+                    "actual_behavior": "cache is stat-keyed",
+                    "divergence": "charter requires content-keyed",
+                    "evidence_lines": ["src/tianluo/engine/persistence.py:88"],
+                },
+                {"severity": "low", "description": "legacy schema row"},
+            ],
+            "invariant_check_result": {"summary": "Two violations."},
+        }))
+
+        content = self._content(mock_render_full)
+        assert "2 actionable issue(s)" in content
+        assert "critical" in content and "low" in content
+        assert "cache is stat-keyed — charter requires content-keyed" in content
+        assert "src/tianluo/engine/persistence.py:88" in content
+        assert "legacy schema row" in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_missing_actionable_count_falls_back_to_issue_count(self, mock_render_full):
+        """A partial/legacy record must never read PASSED above a list of issues."""
+        from tianluo.engine.step_renderers import _render_invariant_check
+
+        _render_invariant_check(_make_step(StepType.INVARIANT_CHECK, {
+            "issues": [{"severity": "high", "actual_behavior": "a", "divergence": "b"}],
+        }))
+
+        content = self._content(mock_render_full)
+        assert "PASSED" not in content
+        assert "1 actionable issue(s)" in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_failed_status_wins_over_the_outputs_derived_branch(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_invariant_check
+
+        _render_invariant_check(_make_step(
+            StepType.INVARIANT_CHECK,
+            {"issues": [], "actionable_count": 0},
+            status=StepStatus.FAILED,
+            error_message="LLM call error",
+        ))
+
+        content = self._content(mock_render_full)
+        assert "FAILED" in content
+        assert "PASSED" not in content
+        assert "LLM call error" in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_diagnostic_payloads_stay_out_of_the_card(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_invariant_check
+
+        _render_invariant_check(_make_step(StepType.INVARIANT_CHECK, {
+            "issues": [],
+            "actionable_count": 0,
+            "invariant_check_result": {"summary": "clean"},
+            "raw_issues": [{"actual_behavior": "DROPPED_BY_VALIDATION"}],
+            "validation_stats": {"input_count": 4, "kept_count": 0},
+            "why_comment_hard_violations": [{"description": "DELETED_MARKED_COMMENT"}],
+            "why_comment_losses": [{"body": "LOST_COMMENT_BODY"}],
+            "skipped_reason": "no_diff",
+        }))
+
+        content = self._content(mock_render_full)
+        for needle in ("DROPPED_BY_VALIDATION", "input_count", "DELETED_MARKED_COMMENT",
+                       "LOST_COMMENT_BODY", "no_diff"):
+            assert needle not in content, f"{needle} must stay out of the report card"
+
+
+# ---------------------------------------------------------------------------
+# _render_confirm (G1-B)
+# ---------------------------------------------------------------------------
+
+
+class TestRenderConfirm:
+    def _content(self, mock_render_full):
+        return mock_render_full.call_args[0][0]
+
+    def test_renderer_is_registered(self):
+        from tianluo.engine.step_renderers import STEP_RENDERERS
+
+        assert StepType.CONFIRM in STEP_RENDERERS
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_approved_verdict_renders_reviewer_and_reviewed_step(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_confirm
+
+        _render_confirm(_make_step(StepType.CONFIRM, {
+            "review_result": {
+                "approved": True,
+                "feedback": "Grouping matches the doctrine.",
+                "reviewer": "llm",
+                "step_to_review_type": "plan",
+                "step_to_review_id": "plan_1",
+            },
+            "revision_feedback": "Grouping matches the doctrine.",
+        }))
+
+        content = self._content(mock_render_full)
+        assert "Approved" in content
+        assert "reviewer: llm" in content
+        assert "plan (plan_1)" in content
+        assert "Grouping matches the doctrine." in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_rejected_verdict_reads_as_revision_requested(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_confirm
+
+        _render_confirm(_make_step(StepType.CONFIRM, {
+            "review_result": {"approved": False, "feedback": "G2 must not run in parallel."},
+        }))
+
+        content = self._content(mock_render_full)
+        assert "Revision requested" in content
+        assert "G2 must not run in parallel." in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_reviewer_falls_back_to_step_inputs(self, mock_render_full):
+        """The human reviewer path writes no ``reviewer`` into review_result."""
+        from tianluo.engine.step_renderers import _render_confirm
+
+        step = _make_step(StepType.CONFIRM, {
+            "review_result": {"approved": True, "step_to_review_type": "implement"},
+        })
+        step.inputs = {"reviewer": "human", "step_to_review_id": "implement_2"}
+        _render_confirm(step)
+
+        content = self._content(mock_render_full)
+        assert "reviewer: human" in content
+        assert "implement (implement_2)" in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_identical_revision_feedback_is_not_printed_twice(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_confirm
+
+        feedback = "Rework the grouping."
+        _render_confirm(_make_step(StepType.CONFIRM, {
+            "review_result": {"approved": False, "feedback": feedback},
+            "revision_feedback": feedback,
+        }))
+
+        content = self._content(mock_render_full)
+        assert content.count(feedback) == 1
+        assert "Revision Feedback" not in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_diverging_revision_feedback_gets_its_own_section(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_confirm
+
+        _render_confirm(_make_step(StepType.CONFIRM, {
+            "review_result": {"approved": False, "feedback": "Rework the grouping."},
+            "revision_feedback": "Split G2 out first.",
+        }))
+
+        content = self._content(mock_render_full)
+        assert "Revision Feedback" in content
+        assert "Split G2 out first." in content
+
+    @patch("tianluo.engine.step_renderers.render_full")
+    def test_usage_metadata_never_reaches_the_confirm_card(self, mock_render_full):
+        from tianluo.engine.step_renderers import _render_confirm
+
+        _render_confirm(_make_step(StepType.CONFIRM, {
+            "review_result": {"approved": True, "feedback": "ok"},
+            "token_usage": {"input_tokens": 5, "total_cost_usd": 0.1},
+        }))
+
+        content = self._content(mock_render_full)
+        assert "total_cost_usd" not in content
+
+    def test_new_i18n_keys_present_in_both_locales(self):
+        import json
+        from pathlib import Path
+
+        import tianluo.i18n as _i18n
+
+        locales = Path(_i18n.__file__).parent / "locales"
+        keys = [
+            "cli.steprender.title.invariant_check",
+            "cli.steprender.title.adjudicate",
+            "cli.steprender.confirm.approved",
+            "cli.steprender.confirm.revision_requested",
+            "cli.steprender.confirm.unknown",
+            "cli.steprender.confirm.reviewer",
+            "cli.steprender.confirm.reviewing",
+            "cli.steprender.confirm.feedback",
+            "cli.steprender.confirm.revision_feedback",
+        ]
+        for name in ("en-US.json", "zh-CN.json"):
+            data = json.loads((locales / name).read_text(encoding="utf-8"))
+            for key in keys:
+                assert key in data, f"{key} missing from {name}"

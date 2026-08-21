@@ -660,11 +660,11 @@ check("normalizeRecord on real jsonl sample yields authoritative step types", ()
 });
 
 // -- step report renderer registry -----------------------------------------
-check("STEP_REPORT_RENDERERS covers the 13 named step types", () => {
+check("STEP_REPORT_RENDERERS covers the 16 named step types", () => {
   const expected = [
-    "analyze", "plan", "implement", "test", "self_check", "verify_spec",
-    "update_spec", "spec_gate", "commit", "version_analyze", "summarize",
-    "discovery", "charter_freshness",
+    "analyze", "plan", "implement", "test", "confirm", "self_check",
+    "invariant_check", "adjudicate", "verify_spec", "update_spec", "spec_gate",
+    "commit", "version_analyze", "summarize", "discovery", "charter_freshness",
   ];
   for (const t of expected) {
     assert.equal(
@@ -672,15 +672,17 @@ check("STEP_REPORT_RENDERERS covers the 13 named step types", () => {
       "missing renderer for " + t,
     );
   }
-  // Exactly 13 — the prior 12 plus the charter_freshness report renderer
-  // (PROPOSE/DESIGN are deprecated and intentionally excluded).
+  // Exactly 16 — the prior 13 plus G1's confirm / invariant_check / adjudicate
+  // cards (PROPOSE/DESIGN are deprecated and intentionally excluded; the
+  // remaining unregistered types ride the generic renderer on purpose).
   assert.equal(Object.keys(app.STEP_REPORT_RENDERERS).length, expected.length);
 });
 check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
   const expected = [
     "discovery", "analyze", "project_summary", "propose", "design", "plan",
-    "plan_tasks", "confirm", "implement", "test", "self_check", "verify_spec",
-    "update_spec", "version_analyze", "commit", "summarize",
+    "plan_tasks", "confirm", "implement", "test", "e2e", "self_check",
+    "invariant_check", "adjudicate", "verify_spec", "update_spec",
+    "version_analyze", "commit", "summarize",
   ];
   for (const t of expected) assert.ok(app.STEP_REPORT_TITLES[t], "missing title " + t);
 });
@@ -3977,6 +3979,14 @@ await adjudicateReviewMod.registerAdjudicateReviewTests({ app, check, checkAsync
 // a green ✓ PASSED above the very issues it lists.
 const selfCheckFallbackMod = await import("./self_check_passed_fallback.test.mjs");
 await selfCheckFallbackMod.registerSelfCheckPassedFallbackTests({ app, check, findOne, findAll });
+
+// Register the G1 step-report renderer-family tests: usage metadata must never
+// reach a generic kv block (renderStepReport already shows it as the compact
+// footnote), confirm / invariant_check / adjudicate now have dedicated cards
+// instead of a full outputs dump, and invariant_check / adjudicate / e2e carry
+// STEP_REPORT_TITLES entries so their card title is not a raw step key.
+const stepReportRenderersMod = await import("./step_report_renderers.test.mjs");
+await stepReportRenderersMod.registerStepReportRendererTests({ app, check, checkAsync, findOne, findAll });
 
 // Register the G3 live-append-after-respond tests (symptom A/B alignment).
 // These lock the #193 leftover "消息不显示" half: after a respond/interject the
@@ -7537,5 +7547,32 @@ inlineUploadImagesMod.registerInlineUploadImagesTests({ app, check, findOne, fin
 // truncation marker so it cannot be mistaken for the whole payload.
 const compactedChipsMod = await import("./compacted_record_chips.test.mjs");
 compactedChipsMod.registerCompactedRecordChipTests({ app, check, findOne, findAll });
+
+// ---------------------------------------------------------------------------
+// Per-round test results in the chat stream (G2)
+// ---------------------------------------------------------------------------
+//
+// The test step writes one synthetic result record per fix round, with an empty
+// body and the whole payload in raw_json — so every round used to render as
+// "(no readable content)", and a FAILED round (REVISION_NEEDED, non-terminal)
+// never got a step_completed card either. These checks hold the round card, the
+// pure tail-summary extractor, and the terminal card's reuse of the same
+// phase builder.
+const testRoundRenderMod = await import("./test_round_render.test.mjs");
+testRoundRenderMod.registerTestRoundRenderTests({ app, check, findOne, findAll });
+
+// ---------------------------------------------------------------------------
+// The implement card's fix-round "This Round" block (G3)
+// ---------------------------------------------------------------------------
+//
+// The fix loop re-enters the SAME implement step, so every number on its card
+// is cumulative: `files_changed` is re-derived from a flow-baseline git diff
+// each round and `token_usage` is the carried total. These checks hold the one
+// thing that is genuinely this-round — the engine's new
+// `fix_round_files_changed`, with the previous record's set difference as the
+// fallback for history written before it existed — plus the cumulative
+// labelling, and that a NON-fix card is unchanged.
+const implementFixRoundMod = await import("./implement_fix_round.test.mjs");
+implementFixRoundMod.registerImplementFixRoundTests({ app, check, findOne, findAll });
 
 console.log(`\n${passed} checks passed.`);
