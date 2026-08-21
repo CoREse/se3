@@ -21,6 +21,7 @@ import hmac
 import json
 import secrets
 import logging
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -28,6 +29,157 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from tianluo.daemon import protocol
 
 logger = logging.getLogger(__name__)
+
+
+#: Flat per-record surcharge added to a record's own estimated JSON footprint.
+#: WHY it exists: a cached record does not cost only its own containers — the
+#: bundle also carries an entry for it in ``_key_index`` (a ``(step_id, ordinal)``
+#: tuple keyed dict slot) and, for usage-bearing records, a ``UsageRecord`` in
+#: ``_usage_sources``. Those side caches scale with the record count, so folding
+#: a flat surcharge into the per-record estimate keeps the accounting honest
+#: without walking two more structures on every append.
+_RECORD_OVERHEAD_BYTES = 200
+
+#: Depth beyond which :func:`_estimate_json_bytes` stops descending. History
+#: records are shallow (envelope → message → content), so anything deeper is
+#: either malformed or a cycle; charging a flat cost is safer than recursing.
+_ESTIMATE_MAX_DEPTH = 12
+
+
+def _estimate_str_bytes(value: str) -> int:
+    """Upper-bound a string's cost, in bytes, in O(1).
+
+    WHY it must bound TWO different costs: the same estimator feeds the cache
+    budget (which cares about RESIDENT bytes) and the render-offload gates
+    (which care about the ``ensure_ascii=False`` WIRE bytes those payloads
+    serialize to). A single per-char weight of 1 byte is wrong for both once
+    the text is not ASCII: this project's own configured language is zh-CN, so
+    CJK-dominant records are the normal content, and there PEP 393 stores 2
+    bytes/char resident while UTF-8 puts 3 bytes/char on the wire. Charging
+    1 byte/char under-counted a real bundle by up to 3x, which let a ~2.7 MB
+    CJK response estimate under the 1 MiB gate and take the inline render +
+    on-loop gzip path the gate exists to keep it off.
+
+    ``sys.getsizeof`` is O(1) on ``str`` (header + kind x length, no walk) and
+    gives the exact resident size; the extra 1 B/char lifts the answer above
+    the widest UTF-8 expansion for that kind (latin-1 <=2, BMP <=3, astral <=4
+    bytes/char against 1/2/4 stored), so the result bounds the wire size too.
+    ASCII is kept on the exact ``49 + len`` form because there both costs
+    coincide and it is the hot case for machine/step/flow identifiers.
+    """
+    if value.isascii():
+        return 49 + len(value)
+    return sys.getsizeof(value) + len(value)
+
+
+def _estimate_json_bytes(value: Any, _depth: int = 0) -> int:
+    """Approximate the RETAINED memory of a JSON-shaped *value*, in bytes.
+
+    WHY an estimator rather than ``len(json.dumps(value))``: this runs inside
+    ``ServerState._lock`` on the append path, and re-serialising the frame there
+    would put an O(frame) allocation-heavy step back on the event loop — the
+    very stall the cache budget work exists to remove. The walk below allocates
+    nothing and answers within a small constant factor, which is all a budget
+    needs: the number decides WHEN to evict, never what is served.
+
+    The constants approximate CPython object headers (a dict slot per entry, a
+    pointer per list element, see :func:`_estimate_str_bytes` for strings)
+    rather than wire bytes, because it is resident memory — not transfer size —
+    that gets the process oom-killed. They stay at or above the corresponding
+    JSON wire cost (a dict entry is ~4 wire bytes against 100 charged here, an
+    int <=20 against 28), so the render-offload gates that reuse this walk read
+    an over-estimate of the serialized payload rather than an under-estimate.
+    """
+    if _depth > _ESTIMATE_MAX_DEPTH:
+        return 64
+    if value is None or isinstance(value, bool):
+        return 16
+    if isinstance(value, int):
+        return 28
+    if isinstance(value, float):
+        return 24
+    if isinstance(value, str):
+        return _estimate_str_bytes(value)
+    if isinstance(value, dict):
+        total = 64 + 100 * len(value)
+        for key, item in value.items():
+            total += _estimate_json_bytes(key, _depth + 1)
+            total += _estimate_json_bytes(item, _depth + 1)
+        return total
+    if isinstance(value, (list, tuple)):
+        total = 56 + 8 * len(value)
+        for item in value:
+            total += _estimate_json_bytes(item, _depth + 1)
+        return total
+    return 64
+
+
+def _estimate_record_bytes(record: Any) -> int:
+    """A single cached history record's estimated resident cost."""
+    return _estimate_json_bytes(record) + _RECORD_OVERHEAD_BYTES
+
+
+def records_reach_bytes(records: Any, threshold: int) -> bool:
+    """Whether *records* estimate to at least *threshold* bytes.
+
+    WHY a threshold PREDICATE rather than a total: its callers are the
+    server's render-offload gates, which only need to know which side of a line
+    a payload falls on, and stopping the walk at the line keeps the check
+    O(records up to the line) instead of O(whole bundle). The estimator costs a
+    few microseconds per record, which is real money once a bundle runs to
+    thousands of them — so the gates short-circuit on a record COUNT first and
+    only measure BYTES for payloads too short to have tripped it.
+
+    WHY it exists at all: a record count is not a proxy for payload size. Real
+    history records are heavy-tailed (sampled over this repo's own
+    ``tianluo/history/``: mean 40.7 KB, p90 12.3 KB, p99 1.1 MB), so a bundle of
+    ten records can be 11 MiB and freeze the loop for ~110 ms while a bundle of
+    a hundred small ones costs nothing.
+
+    Over-estimating is the safe direction here — it can only route a borderline
+    payload onto the loop-friendly path, never off it — and the estimator holds
+    that direction for EVERY payload, not just ASCII ones: its per-element
+    constants sit above JSON's punctuation cost and its string weight bounds the
+    ``ensure_ascii=False`` expansion of non-ASCII text (see
+    :func:`_estimate_str_bytes`, which exists because charging 1 B/char let CJK
+    bundles under-estimate by 3x and slip past this gate).
+    """
+    if not isinstance(records, list):
+        return False
+    if threshold <= 0:
+        return True
+    total = 0
+    for record in records:
+        total += _estimate_record_bytes(record)
+        if total >= threshold:
+            return True
+    return False
+
+
+def _process_rss_bytes() -> Optional[int]:
+    """Current process RSS in bytes, or ``None`` where it cannot be read.
+
+    Best-effort and dependency-free (``/proc`` on Linux, ``getrusage`` peak
+    elsewhere): the memory-attribution log is a diagnostic, so an unavailable
+    reading must degrade to "not reported" rather than raise on a platform the
+    server was never deployed to.
+    """
+    try:
+        with open("/proc/self/statm", "r", encoding="ascii") as handle:
+            fields = handle.read().split()
+        import os as _os
+
+        return int(fields[1]) * _os.sysconf("SC_PAGE_SIZE")
+    except Exception:
+        pass
+    try:
+        import resource
+
+        # ru_maxrss is KiB on Linux and bytes on macOS; the peak is only ever
+        # shown as a coarse water mark, so the Linux unit is the useful one.
+        return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024
+    except Exception:
+        return None
 
 
 def _display_step_id(filename: str) -> str:
@@ -462,6 +614,21 @@ class HistoryWriteOutcome:
     #: :meth:`apply_history_frame`.
     rejected_full: bool = False
 
+    #: The frame was dropped because the budget had evicted this flow and no UI
+    #: client had read it since (see ``ServerState._history_cold``). The records
+    #: went nowhere and no recovery was armed, so a console DISPLAYING this flow
+    #: would otherwise be told nothing at all — its own self-check only runs on
+    #: an incoming frame. The fan-out layer answers this flag with a records-less
+    #: cursor advisory built from the dropped frame's own cursor, which is what
+    #: lets such a console notice it is short of records and re-pull over REST —
+    #: and that read is exactly what re-admits the flow to the cache.
+    cold_suppressed: bool = False
+
+    #: The cursor the suppressed frame declared, carried out so the fan-out can
+    #: build that advisory without the caller re-parsing the frame. ``None``
+    #: whenever *cold_suppressed* is ``False``.
+    suppressed_cursor: Optional[Dict[str, Any]] = None
+
 
 class ServerState:
     """Thread-safe (asyncio-safe) in-memory store of all machine state."""
@@ -483,7 +650,52 @@ class ServerState:
     #: repeated-miss storm collapses onto one in-flight pull.
     _HISTORY_FULL_PULL_MIN_INTERVAL: float = 5.0
 
-    def __init__(self) -> None:
+    #: Default total budget for all cached history bundles (bytes). Mirrors
+    #: ``tianluo.config.DEFAULT_HISTORY_CACHE_BUDGET_MB``; duplicated as a plain
+    #: constant so a bare ``ServerState()`` (unit tests, tooling) is bounded too
+    #: without importing the config layer.
+    _HISTORY_CACHE_BUDGET_BYTES: int = 256 * 1024 * 1024
+
+    #: How recently a flow must have been READ BY A UI CLIENT to count as
+    #: "someone is looking at it". Two things hang off it, and both are the
+    #: point of the whole eviction design:
+    #:
+    #: * a hot flow is never evicted, so an open chat pane keeps being served
+    #:   from cache and the ``/ws/ui`` fan-out keeps finding its bundle meta;
+    #: * a hot flow is never suppressed, so the ``full`` frame answering its
+    #:   cache-miss pull is admitted even if the budget is exhausted.
+    #:
+    #: WHY recency of a UI READ and not of a daemon PUSH: the daemon pushes
+    #: history for EVERY active flow whether or not anyone is watching (see
+    #: ``DaemonClient._push_history`` / ``read_active_flows``). Keying recency
+    #: off the push would refresh every active flow as hot on every tick, the
+    #: LRU would degenerate into never evicting, and the unbounded growth this
+    #: budget exists to stop would survive intact. The WebUI polls
+    #: ``GET /api/history/{flow_id}`` every few seconds for the flow it is
+    #: showing, so a UI read IS the per-flow "someone is watching" signal —
+    #: ``UiHub`` itself only knows the global 0↔non-0 browser-presence bit and
+    #: carries no per-flow subscription state to ask instead.
+    #: Sized well above the frontend poll interval (~3 s) so a slow poll or a
+    #: momentary stall cannot make a watched flow look abandoned.
+    _HISTORY_VIEW_HOT_WINDOW: float = 30.0
+
+    #: Minimum seconds between two cold-flow cursor advisories for the SAME
+    #: flow. Well under :attr:`_HISTORY_VIEW_HOT_WINDOW` so a console displaying
+    #: an evicted flow learns it moved — and re-pulls, which re-admits it —
+    #: long before the flow could be considered abandoned again.
+    _HISTORY_COLD_ADVISORY_INTERVAL: float = 5.0
+
+    #: Minimum seconds between two over-threshold occupancy WARNINGs. The check
+    #: runs on every cache write, so without a floor a server parked just above
+    #: the threshold would emit one line per history frame.
+    _HISTORY_REPORT_DEBOUNCE: float = 60.0
+
+    def __init__(
+        self,
+        *,
+        history_cache_budget_bytes: Optional[int] = None,
+        history_cache_report_threshold_percent: Optional[int] = None,
+    ) -> None:
         self._machines: Dict[str, MachineRecord] = {}
         # History relay caches. The server is a pure in-memory relay for
         # history data — neither of these is ever written to disk.
@@ -541,6 +753,52 @@ class ServerState:
         #: ``None`` in bare/unit use, where ``MachineRecord.online`` is the only
         #: available truth.
         self._connectivity_probe: Optional[Callable[[str], bool]] = None
+        #: Total byte budget for every cached history bundle taken together.
+        #: The server mirrors each active flow's WHOLE conversation in RAM and
+        #: nothing used to bound that mirror, so a long-lived server in a
+        #: memory-capped container was eventually oom-killed. ``0`` is a valid
+        #: (degenerate) setting: only flows a UI client is actively reading stay
+        #: resident.
+        self._history_cache_budget_bytes: int = (
+            self._HISTORY_CACHE_BUDGET_BYTES
+            if history_cache_budget_bytes is None
+            else max(0, int(history_cache_budget_bytes))
+        )
+        #: Percentage of the budget above which an occupancy report is emitted
+        #: at WARNING regardless of the periodic cadence.
+        self._history_report_threshold_percent: int = (
+            80
+            if history_cache_report_threshold_percent is None
+            else max(0, int(history_cache_report_threshold_percent))
+        )
+        #: flow_id -> monotonic time of the last UI-driven read (a REST history
+        #: snapshot / bundle read). The eviction recency key — see
+        #: :attr:`_HISTORY_VIEW_HOT_WINDOW` for why it is a READ and never a push.
+        self._history_read_at: Dict[str, float] = {}
+        #: flow_id -> monotonic eviction time of a bundle the budget dropped.
+        #: WHY a flow must be REMEMBERED as evicted rather than simply deleted:
+        #: the daemon keeps pushing that flow's appends regardless of viewers, and
+        #: on the bare-delete path the very next append is a "first sighting",
+        #: which arms ``_history_requires_full`` and makes the receive loop pull a
+        #: fresh multi-MB full snapshot — which is then evicted again one frame
+        #: later. That is an eviction⇄回拉 storm, not a bound. While a flow sits
+        #: here, frames that would (re)CREATE its bundle are dropped without
+        #: arming any recovery, so an unwatched flow converges to costing nothing.
+        #: Re-admission is UI-driven only: a REST read (see
+        #: :meth:`_note_history_view`) clears the marker, and the resulting cache
+        #: miss rebuilds the bundle through the ordinary cursorless full pull.
+        self._history_cold: Dict[str, float] = {}
+        #: flow_id -> monotonic time of the last cold-flow cursor advisory, so a
+        #: backlog drain against an evicted flow cannot turn one advisory per
+        #: bounded chunk into a fan-out storm (see :meth:`_claim_cold_advisory`).
+        self._history_cold_advised_at: Dict[str, float] = {}
+        #: Lifetime eviction counters, surfaced in the diagnostic report so an
+        #: operator can tell "the budget is doing its job" from "the budget was
+        #: never reached".
+        self._history_evictions: int = 0
+        self._history_evicted_bytes: int = 0
+        #: Monotonic time of the last over-threshold occupancy WARNING.
+        self._history_report_at: float = 0.0
         self._lock = asyncio.Lock()
 
     def set_connectivity_probe(
@@ -652,12 +910,35 @@ class ServerState:
         or issues. ``record.flows`` is cleared by the caller (it owns the
         record).
         """
-        self._history_index.pop(machine_id, None)
-        self._history_data = {
-            flow_id: bundle
+        # Read (then drop) the machine's index BEFORE popping it: the flow ids it
+        # names are part of the per-flow view state cleared below.
+        indexed = [
+            str(session.get("flow_id") or "")
+            for session in self._history_index.pop(machine_id, [])
+        ]
+        dropped = [
+            flow_id
             for flow_id, bundle in self._history_data.items()
-            if str(bundle.get("machine_id") or "") != machine_id
-        }
+            if str(bundle.get("machine_id") or "") == machine_id
+        ]
+        for flow_id in dropped:
+            del self._history_data[flow_id]
+        # A takeover is not a budget eviction: whatever this machine's flows were
+        # holding is gone because it belonged to the PREVIOUS owner, and the new
+        # owner must be able to populate its own bundles immediately. A leftover
+        # cold marker would suppress exactly that (see ``_history_cold``), so the
+        # per-flow view state is cleared for every flow this machine reported —
+        # including ones the budget had already evicted, which is precisely the
+        # case a bundle-only sweep would miss.
+        record = self._machines.get(machine_id)
+        stale = set(dropped)
+        if record is not None:
+            stale.update(record.flows)
+        stale.update(flow_id for flow_id in indexed if flow_id)
+        for flow_id in stale:
+            self._history_cold.pop(flow_id, None)
+            self._history_cold_advised_at.pop(flow_id, None)
+            self._history_read_at.pop(flow_id, None)
         self._issues.pop(machine_id, None)
 
     async def mark_offline(self, machine_id: str) -> None:
@@ -1272,6 +1553,365 @@ class ServerState:
         entries.sort(key=lambda e: str(e.get("updated_at") or ""), reverse=True)
         return entries
 
+    # -- history cache memory budget --------------------------------------
+
+    def _bundle_bytes(self, bundle: Dict[str, Any]) -> int:
+        """A cached bundle's accounted size, computing it once on first contact.
+
+        Stored on the bundle under the private ``_bytes`` key alongside the
+        record count it was measured for, exactly like ``_key_index`` /
+        ``_usage_sources`` (every history getter names its output fields
+        explicitly, so a private key can never leak onto the wire). The count
+        guard makes a bundle some future path mutated behind the accounting's
+        back re-measure instead of reporting a stale size.
+        """
+        records = bundle.get("records") or []
+        size = bundle.get("_bytes")
+        if isinstance(size, int) and bundle.get("_bytes_len") == len(records):
+            return size
+        size = sum(_estimate_record_bytes(record) for record in records)
+        bundle["_bytes"] = size
+        bundle["_bytes_len"] = len(records)
+        return size
+
+    def _history_cache_bytes(self) -> int:
+        """Total accounted bytes held by every cached bundle.
+
+        Summed from the per-bundle figures rather than tracked as a running
+        total: the sum is O(number of cached flows) — hundreds at most, versus
+        the millions of records the figures themselves cover — and it cannot
+        drift out of step with the bundles the way an incrementally maintained
+        counter would after any code path that adds or drops a bundle without
+        telling the counter. Caller must hold ``self._lock``.
+        """
+        return sum(
+            self._bundle_bytes(bundle) for bundle in self._history_data.values()
+        )
+
+    def _history_view_is_hot(
+        self, flow_id: str, *, now: Optional[float] = None
+    ) -> bool:
+        """Whether a UI client read *flow_id* within the hot window.
+
+        See :attr:`_HISTORY_VIEW_HOT_WINDOW` for why UI reads — not daemon
+        pushes — are what "hot" means here.
+        """
+        read_at = self._history_read_at.get(flow_id)
+        if read_at is None:
+            return False
+        current = time.monotonic() if now is None else now
+        return (current - read_at) < self._HISTORY_VIEW_HOT_WINDOW
+
+    def _note_history_view(self, flow_id: str) -> None:
+        """Record a UI-driven read of *flow_id* and lift any cold suppression.
+
+        Called from the REST-facing readers on EVERY read — hit or miss. The
+        miss case is the load-bearing one: it is what re-admits an evicted flow,
+        so the cache-miss回源 pull the endpoint is about to fire can populate a
+        bundle again. Caller must hold ``self._lock``.
+        """
+        self._history_read_at[flow_id] = time.monotonic()
+        self._history_cold.pop(flow_id, None)
+        self._history_cold_advised_at.pop(flow_id, None)
+        self._prune_history_view_markers()
+
+    def _claim_cold_advisory(self, flow_id: str) -> bool:
+        """Whether the caller may emit a cold-flow cursor advisory now.
+
+        Debounced per flow (see :attr:`_HISTORY_COLD_ADVISORY_INTERVAL`) because
+        an evicted flow whose daemon is draining a backlog produces a bounded
+        chunk many times a second, and one advisory per chunk would be a fan-out
+        storm for a signal whose whole content is "re-check your cursor". Caller
+        must hold ``self._lock``.
+        """
+        now = time.monotonic()
+        last = self._history_cold_advised_at.get(flow_id)
+        interval = self._HISTORY_COLD_ADVISORY_INTERVAL
+        if last is not None and (now - last) < interval:
+            return False
+        self._history_cold_advised_at[flow_id] = now
+        self._prune_history_view_markers()
+        return True
+
+    def _prune_history_view_markers(self) -> None:
+        """Keep the recency / cold marker maps from growing without bound.
+
+        They are keyed by flow_id and outlive the bundles they describe, so on a
+        server that sees tens of thousands of flows over a long uptime they would
+        become their own (small) leak — self-defeating in a fix whose whole point
+        is bounded memory. Trimming the OLDEST entries is safe: a dropped cold
+        marker only means one wasted re-admission for a flow nobody has looked at
+        in a very long time, and a dropped recency marker reads as "never read",
+        which is already the eviction default.
+        """
+        limit = 4096
+        for markers in (
+            self._history_read_at,
+            self._history_cold,
+            self._history_cold_advised_at,
+        ):
+            excess = len(markers) - limit
+            if excess <= 0:
+                continue
+            for flow_id in sorted(markers, key=markers.get)[:excess]:
+                markers.pop(flow_id, None)
+
+    def _history_admission_suppressed(self, flow_id: str) -> bool:
+        """Whether a frame must NOT be allowed to (re)create *flow_id*'s bundle.
+
+        True only for a flow the budget evicted that no UI client has read
+        since. See ``_history_cold`` for why silent suppression — rather than
+        the ordinary ``requires_full`` self-heal — is the correct answer for an
+        unwatched flow: the self-heal would re-pull the whole conversation the
+        budget just decided it cannot afford, forever.
+        """
+        if flow_id not in self._history_cold:
+            return False
+        return not self._history_view_is_hot(flow_id)
+
+    def _evict_history_bundle(self, flow_id: str) -> int:
+        """Drop *flow_id*'s bundle and mark it cold. Returns the bytes freed.
+
+        Every piece of per-flow relay state that only makes sense WITH a bundle
+        goes with it: a ``requires_full`` flag would make the next append arm a
+        recovery pull, and an in-flight recovery marker would suppress a genuine
+        later one. Caller must hold ``self._lock``.
+        """
+        bundle = self._history_data.pop(flow_id, None)
+        if bundle is None:
+            return 0
+        freed = self._bundle_bytes(bundle)
+        self._history_cold[flow_id] = time.monotonic()
+        # Re-arm the advisory debounce: the FIRST frame after an eviction is the
+        # one a console displaying this flow most needs, and an advisory sent
+        # before the eviction says nothing about it.
+        self._history_cold_advised_at.pop(flow_id, None)
+        self._history_requires_full.discard(flow_id)
+        self._history_recovery_inflight.pop(flow_id, None)
+        self._history_evictions += 1
+        self._history_evicted_bytes += freed
+        logger.info(
+            "history-cache EVICT flow=%s machine=%s records=%d bytes=%d "
+            "(least-recently-viewed; bundle rebuilt from a full daemon pull on "
+            "the next UI read)",
+            flow_id,
+            str(bundle.get("machine_id") or ""),
+            len(bundle.get("records") or []),
+            freed,
+        )
+        return freed
+
+    def _enforce_history_budget(self, *, protect: Optional[str] = None) -> int:
+        """Evict least-recently-VIEWED bundles until the budget is met.
+
+        Returns the number of bundles evicted. Caller must hold ``self._lock``.
+
+        *protect* is the flow whose frame is being applied right now: it is
+        exempt for this pass so a write is always observable by the caller that
+        made it (the ``/ws/ui`` fan-out reads the bundle meta straight after
+        ``apply_history_frame``, and a parked REST pull waiter re-reads the
+        snapshot). The steady-state overshoot is therefore at most one bundle,
+        which the periodic report's unprotected sweep then reclaims.
+
+        INVARIANT: a flow a UI client is currently reading is never evicted.
+        Eviction is a cache decision, and every eviction costs the next reader a
+        full回源 pull; sacrificing the handful of watched flows would trade a
+        bounded cache for an unbounded pull storm without saving the memory that
+        actually matters (the many UNWATCHED active flows the daemon pushes).
+        When only watched flows remain and the total is still above budget we
+        stop and report it rather than evicting one; the report names the flows
+        holding the memory, which is what makes the situation attributable from
+        the log instead of merely fatal.
+        """
+        budget = self._history_cache_budget_bytes
+        total = self._history_cache_bytes()
+        if total <= budget:
+            return 0
+        now = time.monotonic()
+        # Coldest first: a flow never read by a UI client sorts before every
+        # flow that ever was.
+        #
+        # WHY an active worktree flow sorts LAST within the same recency: the
+        # anti-shrink guard in :meth:`apply_history_frame` only protects such a
+        # flow from a partially-resolved daemon read while the server still HOLDS
+        # the longer bundle to compare against. Evicting it throws that
+        # comparison away, so a later rebuild that resolves only the main-repo
+        # slice would be accepted at face value. Draining every other candidate
+        # first means the guard survives for the flows it exists for in every
+        # case except "nothing but live worktree flows is cached" — where the
+        # budget must still win, and the empty-full rejection (which needs no
+        # cached bundle) remains as the floor.
+        candidates = sorted(
+            self._history_data,
+            key=lambda fid: (
+                self._is_active_worktree_flow_locked(fid),
+                self._history_read_at.get(fid, float("-inf")),
+            ),
+        )
+        evicted = 0
+        for flow_id in candidates:
+            if total <= budget:
+                break
+            if flow_id == protect:
+                continue
+            if self._history_view_is_hot(flow_id, now=now):
+                continue
+            total -= self._evict_history_bundle(flow_id)
+            evicted += 1
+        # The per-flow EVICT lines above are the attribution record and are
+        # always emitted; these SUMMARY lines are debounced because this sweep
+        # runs on every cache write, and a server parked just above its budget
+        # would otherwise emit one summary per history frame.
+        if total > budget:
+            self._report_debounced(
+                level=logging.WARNING, reason="over-budget-after-eviction"
+            )
+        elif evicted:
+            self._report_debounced(level=logging.INFO, reason="post-eviction")
+        return evicted
+
+    def _report_debounced(self, *, level: int, reason: str) -> None:
+        """Emit an occupancy report at most once per debounce window."""
+        now = time.monotonic()
+        if (now - self._history_report_at) < self._HISTORY_REPORT_DEBOUNCE:
+            return
+        self._history_report_at = now
+        self._log_history_cache_report_locked(level=level, reason=reason)
+
+    def _maybe_report_history_cache(self) -> None:
+        """Emit an occupancy WARNING when the cache crosses its report threshold.
+
+        Debounced (see :attr:`_HISTORY_REPORT_DEBOUNCE`) because this runs on
+        every cache write. Caller must hold ``self._lock``.
+        """
+        budget = self._history_cache_budget_bytes
+        threshold_pct = self._history_report_threshold_percent
+        if budget <= 0 or threshold_pct <= 0:
+            return
+        total = self._history_cache_bytes()
+        if total * 100 < budget * threshold_pct:
+            return
+        self._report_debounced(level=logging.WARNING, reason="threshold")
+
+    def _history_cache_stats_locked(
+        self, *, top: int = 8
+    ) -> Dict[str, Any]:
+        """Occupancy snapshot of the history cache. Caller must hold the lock."""
+        sizes = {
+            flow_id: self._bundle_bytes(bundle)
+            for flow_id, bundle in self._history_data.items()
+        }
+        total = sum(sizes.values())
+        now = time.monotonic()
+        ranked = sorted(sizes, key=lambda fid: sizes[fid], reverse=True)[:top]
+        budget = self._history_cache_budget_bytes
+        return {
+            "bytes": total,
+            "budget_bytes": budget,
+            "used_percent": (
+                round(total * 100.0 / budget, 1) if budget else None
+            ),
+            "flows": len(self._history_data),
+            "cold_flows": len(self._history_cold),
+            "evictions": self._history_evictions,
+            "evicted_bytes": self._history_evicted_bytes,
+            "rss_bytes": _process_rss_bytes(),
+            "top": [
+                {
+                    "flow_id": flow_id,
+                    "machine_id": str(
+                        self._history_data[flow_id].get("machine_id") or ""
+                    ),
+                    "bytes": sizes[flow_id],
+                    "records": len(
+                        self._history_data[flow_id].get("records") or []
+                    ),
+                    "idle_seconds": (
+                        None
+                        if flow_id not in self._history_read_at
+                        else round(now - self._history_read_at[flow_id], 1)
+                    ),
+                }
+                for flow_id in ranked
+            ],
+        }
+
+    def _log_history_cache_report_locked(
+        self, *, level: int, reason: str
+    ) -> Dict[str, Any]:
+        """Log one cache-occupancy report line. Caller must hold the lock.
+
+        Developer-facing diagnostics (not i18n): the line is what a journald
+        tail must be able to attribute a memory anomaly from, so it names the
+        total, the budget, the eviction counters and the biggest cached flows by
+        id — an operator reading it after an OOM can say WHICH flow was holding
+        the memory instead of only that the process died.
+        """
+        stats = self._history_cache_stats_locked()
+        top = ", ".join(
+            "%s(%s)=%.1fMiB/%d rec idle=%ss"
+            % (
+                entry["flow_id"],
+                entry["machine_id"] or "?",
+                entry["bytes"] / (1024.0 * 1024.0),
+                entry["records"],
+                entry["idle_seconds"],
+            )
+            for entry in stats["top"]
+        )
+        logger.log(
+            level,
+            "history-cache report reason=%s used=%.1fMiB/%.1fMiB (%s%%) "
+            "flows=%d cold=%d evictions=%d evicted=%.1fMiB rss=%s top=[%s]",
+            reason,
+            stats["bytes"] / (1024.0 * 1024.0),
+            stats["budget_bytes"] / (1024.0 * 1024.0),
+            "n/a" if stats["used_percent"] is None else stats["used_percent"],
+            stats["flows"],
+            stats["cold_flows"],
+            stats["evictions"],
+            stats["evicted_bytes"] / (1024.0 * 1024.0),
+            "?" if stats["rss_bytes"] is None else
+            "%.1fMiB" % (stats["rss_bytes"] / (1024.0 * 1024.0)),
+            top,
+        )
+        return stats
+
+    async def history_cache_stats(self) -> Dict[str, Any]:
+        """Public occupancy snapshot of the history cache (tests / diagnostics)."""
+        async with self._lock:
+            return self._history_cache_stats_locked()
+
+    async def sweep_history_cache(self) -> int:
+        """Run one UNPROTECTED budget sweep. Returns the bundles evicted.
+
+        WHY this is separate from :meth:`report_history_cache`: the write-path
+        sweep always exempts the flow whose frame it is applying, so it can never
+        evict THAT flow — and one actively pushed, unwatched flow growing past the
+        budget on its own is precisely the oom-kill this budget exists to stop.
+        Only a sweep with no protected flow can drop it. Enforcement therefore
+        rides its own fixed cadence (``app.HISTORY_CACHE_SWEEP_INTERVAL``) and is
+        never switched off by an operator turning the diagnostic log line off with
+        ``server.history_cache.report_interval_seconds: 0``.
+        """
+        async with self._lock:
+            return self._enforce_history_budget()
+
+    async def report_history_cache(
+        self, *, level: int = logging.INFO
+    ) -> Dict[str, Any]:
+        """Log an occupancy report and sweep the budget once.
+
+        The server's periodic maintenance task calls this on the operator's
+        report cadence; on every other tick it calls :meth:`sweep_history_cache`
+        instead, so the sweep keeps running when the report is turned off.
+        """
+        async with self._lock:
+            self._enforce_history_budget()
+            return self._log_history_cache_report_locked(
+                level=level, reason="periodic"
+            )
+
     async def append_history(
         self,
         flow_id: str,
@@ -1383,6 +2023,49 @@ class ServerState:
         """
         new_records = list(records or [])
         async with self._lock:
+            existing = self._history_data.get(flow_id)
+            if existing is None and self._history_admission_suppressed(flow_id):
+                # The budget evicted this flow and no UI client has read it
+                # since. The daemon keeps pushing it regardless of viewers, so
+                # letting the frame through would re-establish the very bundle
+                # the budget just decided it cannot afford — and, for an append,
+                # would additionally arm ``requires_full`` and have the receive
+                # loop pull the whole conversation back. Take nothing, arm
+                # nothing: ``resolves_pull=False`` also makes the ``/ws/ui``
+                # fan-out suppress the RECORDS and makes ``plan_recovery_pull``
+                # return ``None``, so this converges to costing nothing per push
+                # tick. The flow is re-admitted the moment a UI read touches it
+                # (see ``_note_history_view``), and its bundle is then rebuilt by
+                # the endpoint's cursorless FULL pull — never by a daemon-side
+                # incremental, which would bake the evicted head into a hole.
+                #
+                # WHY the frame's cursor is nevertheless carried out
+                # (``cold_suppressed``): suppressing the records is right,
+                # suppressing the FACT that the flow moved is not. The History
+                # view (``openHistorySession``) has no poll timer — it self-checks
+                # only when a frame arrives — so a console displaying this flow
+                # would freeze on what it already holds until the user re-clicked
+                # the session. The fan-out answers this flag with a records-less
+                # cursor advisory, which costs one tiny frame, rebuilds nothing
+                # here, and lets such a console re-pull over REST; that read is
+                # what re-admits the flow. A console displaying nothing ignores
+                # the advisory, so an unwatched flow still converges to zero.
+                announce = self._claim_cold_advisory(flow_id)
+                logger.debug(
+                    "history-cache SUPPRESS flow=%s mode=%s records=%d "
+                    "(evicted and unwatched; not re-admitting from a push)",
+                    flow_id, mode, len(new_records),
+                )
+                return HistoryWriteOutcome(
+                    resolves_pull=False,
+                    cold_suppressed=announce,
+                    suppressed_cursor=(
+                        (dict(cursor or {}) or None) if announce else None
+                    ),
+                )
+            # Make room BEFORE the write, exempting this flow, so the bundle the
+            # caller is about to read back is guaranteed to still be there.
+            self._enforce_history_budget(protect=flow_id)
             existing = self._history_data.get(flow_id)
             if mode == protocol.HISTORY_MODE_APPEND and existing is None:
                 # An append is only meaningful relative to an authoritative
@@ -1538,6 +2221,7 @@ class ServerState:
                     # frames, so the append-time re-aggregation below prices
                     # with the same table the stored daemon payload used.
                     existing["usage_catalog"] = dict(usage_catalog)
+                    self._invalidate_usage_rebuild(existing)
                 existing["updated_at"] = time.time()
                 if self._records_carry_usage(applied):
                     # The daemon's usage payload rides full snapshots only, so
@@ -1577,6 +2261,7 @@ class ServerState:
                         flow_id, len(new_records), added, updated, dropped,
                         len(existing["records"]),
                     )
+                self._maybe_report_history_cache()
                 return HistoryWriteOutcome(resolves_pull=True)
             else:
                 # INVARIANT: an EMPTY full frame may never be made AUTHORITATIVE
@@ -1753,6 +2438,7 @@ class ServerState:
                         # records (or change with the project config), so the
                         # same re-pull refreshes it too.
                         existing["usage_catalog"] = dict(usage_catalog)
+                        self._invalidate_usage_rebuild(existing)
                     existing["updated_at"] = time.time()
                     generation = self._ensure_generation(existing)
                     logger.debug(
@@ -1775,6 +2461,25 @@ class ServerState:
                 if usage_catalog is not None:
                     bundle["usage_catalog"] = dict(usage_catalog)
                 self._history_data[flow_id] = bundle
+                # The flow has a resident bundle again, so the eviction marker
+                # that suppressed push re-admission no longer describes it.
+                self._history_cold.pop(flow_id, None)
+                self._history_cold_advised_at.pop(flow_id, None)
+                # Measure the new bundle once, here, while its records are the
+                # only thing that has ever been in it; every later append keeps
+                # the figure current incrementally (_reconcile_append_into).
+                #
+                # WHY this O(bundle) walk stays under the lock: it was measured
+                # (scripts/measure_server_loop_stalls.py) at ~11 ms for a 3 MiB
+                # bundle and ~29 ms for a 16 MiB one — real, but paid ONCE per
+                # bundle replacement (a throttled full pull), not once per poll
+                # like the usage rebuild that is memoized. Moving it off the loop
+                # would mean sizing the records outside the critical section that
+                # decides whether they are accepted at all, splitting the
+                # accounting from the write it accounts for; the trade is not
+                # worth it for a cost that does not recur.
+                self._bundle_bytes(bundle)
+                self._maybe_report_history_cache()
                 logger.debug(
                     "hist-diag append_history APPLIED-full flow=%s records=%d "
                     "(bundle replaced, requires_full cleared)",
@@ -2114,9 +2819,20 @@ class ServerState:
             bundle["generation"] = gen
         return gen
 
-    async def get_history(self, flow_id: str) -> Optional[Dict[str, Any]]:
-        """Return a copy of cached history for *flow_id*, or ``None`` on miss."""
+    async def get_history(
+        self, flow_id: str, *, touch: bool = True
+    ) -> Optional[Dict[str, Any]]:
+        """Return a copy of cached history for *flow_id*, or ``None`` on miss.
+
+        *touch* records the read as UI interest (see :meth:`_note_history_view`).
+        The daemon receive loop passes ``touch=False``: it reads the bundle to
+        hand a REST pull waiter its records, which is the DAEMON's push arriving,
+        not a human looking — counting it would refresh every active flow as hot
+        and defeat the eviction recency (see :attr:`_HISTORY_VIEW_HOT_WINDOW`).
+        """
         async with self._lock:
+            if touch:
+                self._note_history_view(flow_id)
             cached = self._history_data.get(flow_id)
             if cached is None:
                 return None
@@ -2159,9 +2875,7 @@ class ServerState:
             generation = self._ensure_generation(cached)
             total = len(cached["records"])
             machine = str(cached.get("machine_id") or "")
-            pending = self._bundle_pending_positions(
-                cached["records"], cached.get("cursor") or {}
-            )
+            pending = self._pending_positions_for(cached)
             return {
                 "cursor": dict(cached.get("cursor") or {}),
                 "signature": bundle_signature(generation, total, machine),
@@ -2338,11 +3052,22 @@ class ServerState:
         index = cls._bundle_key_index(bundle)
         applied: List[Any] = []
         added = updated = dropped = 0
+        # WHY the byte total is maintained HERE rather than re-measured after the
+        # append: this runs inside ``ServerState._lock``, and re-walking the whole
+        # bundle to size it would put an O(bundle) term back on the critical
+        # section for every frame — the same "heavy work proportional to bundle
+        # size under the lock" the cache-budget work exists to remove. Folding
+        # the delta into the loop that already touches exactly the changed
+        # records keeps the accounting O(frame).
+        size = bundle.get("_bytes")
+        if not isinstance(size, int) or bundle.get("_bytes_len") != len(records):
+            size = sum(_estimate_record_bytes(record) for record in records)
         for record in new_records:
             key = cls._record_identity(record)
             if key is None:
                 records.append(record)
                 applied.append(record)
+                size += _estimate_record_bytes(record)
                 added += 1
                 continue
             position = index.get(key)
@@ -2350,15 +3075,21 @@ class ServerState:
                 index[key] = len(records)
                 records.append(record)
                 applied.append(record)
+                size += _estimate_record_bytes(record)
                 added += 1
                 continue
             if records[position] == record:
                 dropped += 1
                 continue
+            size += _estimate_record_bytes(record) - _estimate_record_bytes(
+                records[position]
+            )
             records[position] = record
             applied.append(record)
             updated += 1
         bundle["_key_index_len"] = len(records)
+        bundle["_bytes"] = max(0, size)
+        bundle["_bytes_len"] = len(records)
         return applied, added, updated, dropped
 
     @classmethod
@@ -2446,11 +3177,42 @@ class ServerState:
         return pending
 
     @classmethod
+    def _pending_positions_for(
+        cls, bundle: Dict[str, Any]
+    ) -> Dict[str, List[int]]:
+        """*bundle*'s pending window, memoized on the bundle.
+
+        WHY memoized: :meth:`_bundle_pending_positions` walks EVERY record, and
+        it runs inside ``ServerState._lock`` on every REST snapshot read AND on
+        every ``/ws/ui`` push-meta read — so on a multi-MB flow being polled
+        every few seconds it was a recurring O(bundle) stall on the event loop
+        for an answer that had not changed. The window is a pure function of the
+        record set and the cursor, and the append reconcile only ever grows the
+        record list at the tail or replaces a record under its EXISTING
+        ``(step_id, ordinal)`` key (which cannot move the per-step highest
+        ordinal), so ``(len(records), cursor)`` identifies it exactly. Cached
+        under a private key, in memory only, like ``_key_index`` /
+        ``_usage_sources``.
+        """
+        records = bundle.get("records") or []
+        cursor = bundle.get("cursor") or {}
+        key = (len(records), tuple(sorted((str(k), v) for k, v in cursor.items())))
+        if bundle.get("_pending_key") == key:
+            cached = bundle.get("_pending")
+            if isinstance(cached, dict):
+                return cached
+        pending = cls._bundle_pending_positions(records, cursor)
+        bundle["_pending_key"] = key
+        bundle["_pending"] = pending
+        return pending
+
+    @classmethod
     def _locate_missing_positions(
         cls,
         records: List[Any],
         missing: Dict[str, List[int]],
         pending: Optional[Dict[str, List[int]]] = None,
+        index: Optional[Dict[Tuple[str, int], int]] = None,
     ) -> Tuple[List[int], Dict[str, List[int]], bool]:
         """Resolve a client's missing ``(step_id, ordinal)`` list against the bundle.
 
@@ -2493,7 +3255,11 @@ class ServerState:
         display step id, so a key arriving in either form is folded through
         :func:`_display_step_id` (a no-op on a bare step id).
         """
-        index = cls._index_records_by_ordinal(records)
+        # *index* lets the caller hand in the bundle's already-built
+        # ``(step_id, ordinal) -> position`` map so a backfill does not rebuild
+        # an O(bundle) index inside ``ServerState._lock``.
+        if index is None:
+            index = cls._index_records_by_ordinal(records)
         unnumbered = cls._unnumbered_steps(records)
         pending_sets: Dict[str, Set[int]] = {
             step_id: set(ordinals)
@@ -2604,6 +3370,13 @@ class ServerState:
         backfill is an extra read of the same bundle, not a new token dialect.
         """
         async with self._lock:
+            # A UI client is asking for this flow RIGHT NOW — the per-flow
+            # "someone is watching" signal the eviction recency is keyed on (see
+            # ``_HISTORY_VIEW_HOT_WINDOW``). Stamped BEFORE the cache lookup so a
+            # MISS counts too: the miss is what re-admits an evicted flow, so the
+            # cursorless full pull the endpoint is about to fire can rebuild its
+            # bundle.
+            self._note_history_view(flow_id)
             cached = self._history_data.get(flow_id)
             if cached is None:
                 return None
@@ -2678,7 +3451,19 @@ class ServerState:
             # still streaming from the daemon apart from a permanent hole WITHOUT
             # a second round trip, and so this poll and the WS push (which reads
             # the same bundle via get_history_bundle_meta) can never disagree.
-            pending = self._bundle_pending_positions(records, cached.get("cursor") or {})
+            #
+            # WHY the remaining per-snapshot work is left ON the loop, under the
+            # lock: it was measured, not assumed. With
+            # ``scripts/measure_server_loop_stalls.py`` on a 16 MiB / 4000-record
+            # bundle (CPython, this host) the whole set costs single-digit
+            # milliseconds — pending window ~1.2 ms, ``_unnumbered_steps``
+            # ~0.9 ms, the ordinal index ~1.8 ms, ``list(records)`` ~0.0 ms —
+            # against ~235 ms for the usage rebuild that IS memoized and ~184 ms
+            # for the render+gzip that IS batched / offloaded. Moving these off
+            # the loop would buy a couple of milliseconds and cost the atomicity
+            # that lets this method promise records and progress describe ONE
+            # bundle state.
+            pending = self._pending_positions_for(cached)
             backfill_positions: List[int] = []
             unfillable: Dict[str, List[int]] = {}
             served_backfill = False
@@ -2687,7 +3472,12 @@ class ServerState:
                     backfill_positions,
                     unfillable,
                     needs_full,
-                ) = self._locate_missing_positions(records, missing, pending)
+                ) = self._locate_missing_positions(
+                    records,
+                    missing,
+                    pending,
+                    index=self._bundle_key_index(cached),
+                )
                 if needs_full:
                     # A requested number landed in a step that also holds
                     # un-numbered records, so its absence from the index is not
@@ -2770,6 +3560,21 @@ class ServerState:
                 if flow_id in self._history_recovery_inflight:
                     self._history_recovery_inflight[flow_id] = time.monotonic()
 
+            # INVARIANT: the returned payload is DETACHED from the cached bundle
+            # — ``records`` is its own list (holding strong references to the
+            # record dicts), ``cursor`` / ``unfillable`` / ``pending`` are copies,
+            # and every scalar is read here under the lock.
+            #
+            # WHY that matters now: the REST route renders this payload to JSON
+            # and gzips it in a WORKER THREAD (see ``app._history_response``),
+            # which means the render runs with the lock released and the budget
+            # sweep free to evict this very flow's bundle mid-render. Detachment
+            # is what makes that a non-event: the in-flight response owns the
+            # records it was handed and completes as a whole snapshot, while the
+            # cache drops its own reference. There is no half snapshot and no
+            # ``KeyError`` — the two paths simply stop sharing after this return.
+            # The evicted bytes are genuinely reclaimed only once the response is
+            # written, which the render-concurrency gate in ``app.py`` bounds.
             return {
                 "flow_id": cached["flow_id"],
                 "machine_id": bundle_machine,
@@ -2857,6 +3662,19 @@ class ServerState:
         return PricingCatalog.builtin()
 
     @staticmethod
+    def _invalidate_usage_rebuild(bundle: Dict[str, Any]) -> None:
+        """Drop the memoized usage rebuild for *bundle*.
+
+        Called wherever the bundle's PRICING inputs change without its record
+        count changing — a later-arriving ``usage_catalog`` on a re-pull. The
+        memo below is keyed on the record count alone, so the catalog swap is
+        the one input it cannot see; forgetting to drop it here would serve a
+        summary priced with the superseded table.
+        """
+        bundle.pop("_usage_rebuild", None)
+        bundle.pop("_usage_rebuild_len", None)
+
+    @staticmethod
     def _bundle_usage(cached: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Return the bundle's usage payload, rebuilding it when absent.
 
@@ -2869,22 +3687,48 @@ class ServerState:
         (built-in fallback — never no catalog). Returns ``None`` when the
         bundle holds no usage at all, so the wire omits the field instead of a
         misleading zero summary.
+
+        WHY the rebuild is memoized on the bundle: this is the single most
+        expensive thing that ran inside ``ServerState._lock``. Measured with
+        ``scripts/measure_server_loop_stalls.py`` on history payloads of this
+        shape (CPython, this host): extraction + ``build_usage_payload`` costs
+        ~90 ms for a 3 MiB bundle and ~235 ms for a 16 MiB one — several times
+        the REST render (~53 ms, now batched onto the loop) and its gzip
+        (~131 ms, now genuinely offloaded), and unlike either of those it re-ran
+        on EVERY ~3 s
+        WebUI poll of a flow whose daemon never sent a usage payload (a
+        version-skewed daemon, or one whose own usage build failed). A quarter
+        second of frozen loop per poll, holding the state lock, is the largest
+        confirmed stall on the steady-state path.
+
+        The memo is keyed on the record count, exactly like ``_key_index`` /
+        ``_bytes``: appends only grow the tail or replace a record under its
+        existing ``(step_id, ordinal)`` key, and a usage-bearing replacement
+        goes through :meth:`_refresh_bundle_usage`, which writes the STORED
+        ``usage`` the branch above returns before this memo is ever consulted. A
+        full frame builds a whole new bundle dict, so it starts memo-free. The
+        ``None`` verdict is memoized too — "this bundle carries no usage at all"
+        costs the same full walk to establish as a real payload does.
         """
         stored = cached.get("usage")
         if isinstance(stored, dict):
             return stored
-        sources = ServerState._usage_sources_from_records(
-            cached.get("records") or []
-        )
-        if not sources:
-            return None
-        from tianluo.usage import build_usage_payload
+        records = cached.get("records") or []
+        if cached.get("_usage_rebuild_len") == len(records):
+            return cached.get("_usage_rebuild")
+        sources = ServerState._usage_sources_from_records(records)
+        payload: Optional[Dict[str, Any]] = None
+        if sources:
+            from tianluo.usage import build_usage_payload
 
-        return build_usage_payload(
-            sources,
-            ServerState._catalog_for_bundle(cached),
-            call_id=str(cached.get("flow_id") or "flow"),
-        )
+            payload = build_usage_payload(
+                sources,
+                ServerState._catalog_for_bundle(cached),
+                call_id=str(cached.get("flow_id") or "flow"),
+            )
+        cached["_usage_rebuild"] = payload
+        cached["_usage_rebuild_len"] = len(records)
+        return payload
 
     @staticmethod
     def _records_carry_usage(records: List[Any]) -> bool:
@@ -2985,6 +3829,11 @@ class ServerState:
             ).items():
                 sources.setdefault(step_id, []).extend(records)
         bundle["_usage_sources"] = sources
+        # This path owns the bundle's usage truth from here on; drop the
+        # record-count-keyed rebuild memo so an append that leaves the count
+        # untouched (an in-place replacement of a retried step's line) can never
+        # be answered from a summary computed before it.
+        cls._invalidate_usage_rebuild(bundle)
         if not any(sources.values()):
             return
         from tianluo.usage import build_usage_payload

@@ -1127,6 +1127,28 @@ tianluo 作为 worker 拉起的 Claude CLI 子进程的设置。
 |-----|------|--------|------|
 | `db_path` | string | `~/.se3/server.db` | 承载身份 / 鉴权的嵌入式 sqlite 存储路径。`~` 在使用时展开。`tianluo-server --db-path` 参数可对单次启动覆盖它。 |
 | `auth` | map | *(全部默认)* | 见下文。 |
+| `history_cache` | map | *(全部默认)* | 见下文。 |
+
+#### `server.history_cache`
+
+服务器内存中 history 中继缓存的内存上限。服务器会把每个活跃 flow 的完整对话镜像
+在进程内存里,好让 web 控制台无需绕一圈 daemon 就能读到;而 daemon 对**所有**活跃
+flow 都会推送 history,与是否有浏览器在看无关。若不设上限,长时运行在内存受限容器
+(LXC guest、配了 `MemoryMax=` 的服务)里的服务器最终会被内核 oom-kill。该预算通过
+淘汰『最近最少被查看』的 bundle 来给这份镜像封顶;被淘汰的 flow 会在下次有控制台
+打开它时经一次 full 拉取重建,因此淘汰只花一个来回,不会丢记录。
+
+| Key | 类型 | 默认值 | 含义 |
+|-----|------|--------|------|
+| `budget_mb` | int ≥ 0 | `256` | 所有缓存 history bundle 合计的总预算,单位 MiB。`0` 是合法且有意义的取值:只有控制台正在读的 flow 才常驻。负数 / 非数字会告警并回落到默认值。 |
+| `report_interval_seconds` | int ≥ 0 | `300` | 缓存占用诊断日志的输出周期(总占用、预算、淘汰计数,以及按 `flow_id` 列出的占用最大的几个 flow)。`0` 关闭周期性输出,越阈触发仍然生效。这个键**只管日志**——预算淘汰有自己固定的巡检周期,不会被它关掉。 |
+| `report_threshold_percent` | int ≥ 0 | `80` | 占用率超过该百分比时,无论周期如何都以 `WARNING` 级别输出同一份报告(去抖:每分钟至多一条)。`0` 关闭越阈触发。 |
+
+> 容量提示:该预算是对缓存 bundle 的上限,不是对整个进程的上限。控制台正在读的
+> bundle 永远不会被淘汰,因此实际下限是『同时有多少个 flow 被浏览器打开着』。请把
+> 该预算与
+> [docs/daemon-and-server.zh.md](daemon-and-server.zh.md#systemd-内存护栏)
+> 里的 systemd 护栏配合使用。
 
 #### `server.auth`
 

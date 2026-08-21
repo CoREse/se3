@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.11.1 - 2026-08-21
+
+- Fix tianluo-server being oom-killed after long uptime by putting a memory budget on the in-RAM history relay cache, which previously mirrored every active flow's whole conversation with no ceiling
+- Evict cached history bundles least-recently-VIEWED first, keyed on UI reads (REST snapshot fetches and /ws/ui watching) rather than daemon pushes, so flows nobody is watching can no longer stay resident forever just because they are active
+- Rebuild an evicted flow's bundle on next access through the existing cache-miss path with a full daemon pull, so eviction costs one round-trip and never loses records, and add debounce so eviction and the requires_full self-heal cannot oscillate
+- Add the configurable `server.history_cache` section (`budget_mb`, default 256 MiB and accepting 0; `report_interval_seconds`, default 300; `report_threshold_percent`, default 80), wired from tianluo.yaml / ~/.se3/config.yaml through to the server and documented in docs/configuration.md and docs/configuration.zh.md plus tianluo.example.yaml
+- Log a cache-occupancy diagnostic — total, budget, eviction counters and the largest cached flows by flow_id — periodically and whenever occupancy crosses the threshold, so the next memory incident can be attributed from journald
+- Move large-bundle REST snapshot serialization and large MSG_HISTORY_DATA frame decoding off the asyncio event loop and shrink the ServerState lock's critical section, removing the WebSocket heartbeat delays, REST response jitter and console stalls at steady state
+- Preserve all existing history invariants across eviction and offload: cursor watermark and gap detection, progress token and generation binding, REST delivery (not_modified/delta/full) semantics, and /ws/ui fan-out order for watching clients
+- Document systemd guardrails for the server unit (`Restart=on-failure` with a crash-loop rate limit, `MemoryHigh`/`MemoryMax`) in docs/daemon-and-server.md and docs/daemon-and-server.zh.md as a backstop beneath the code-level fix
 ## 12.11.0 - 2026-08-21
 
 - Add read-only `luo review-scope diff` command that rebuilds the exact baseline→worktree diff from persisted review-scope snapshots, with implementation/fix baseline selection, `--stat` overview and single-path filtering

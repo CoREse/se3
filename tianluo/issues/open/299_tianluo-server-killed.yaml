@@ -20,8 +20,8 @@ description: "tianluo-server killed，怎么解决？性能优化一下，感觉
   \ INFO:     192.168.1.10:58742 - \"GET /api/history/20260819-104637_fedb>\nAug 19\
   \ 15:08:15 hnas-lxc tianluo-server[4093376]: INFO:     192.168.1.10:58764 - \"GET\
   \ /api/flows/20260819-104637_fedb72>"
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-08-19T15:22:24.640100'
-updated_at: '2026-08-19T15:22:24.640100'
+updated_at: '2026-08-21T09:23:19.326894'

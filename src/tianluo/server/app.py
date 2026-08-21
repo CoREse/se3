@@ -35,10 +35,12 @@ import base64
 import json
 import logging
 import os
+import time
 import uuid
+import weakref
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, MutableMapping, Optional, Tuple
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.middleware.gzip import GZipMiddleware
@@ -65,7 +67,7 @@ from .auth.registry import (
 from .auth.session import CookieConfig, SessionStore, read_cookie
 from .identity import IdentityService
 from .persistence import IdentityAlreadyBound, Store
-from .state import ServerState
+from .state import ServerState, records_reach_bytes
 from .ws import (
     ConnectionManager,
     DetailRequestRegistry,
@@ -78,6 +80,7 @@ from .ws import (
     UiHub,
     UploadRequestRegistry,
     _PullAbandoned,
+    dump_json_chunked,
     broadcast_index_refresh,
     handle_daemon_connection,
     handle_ui_connection,
@@ -305,6 +308,176 @@ DETAIL_PULL_TIMEOUT = 10.0
 #: replies stay uncompressed so their per-response CPU cost is not paid for no
 #: win.
 GZIP_MIN_SIZE = 1024
+
+#: Record count at or above which a history response takes the loop-friendly
+#: render path (batched JSON on the loop + gzip in a worker thread) instead of a
+#: single inline ``json.dumps``. Reproduce with
+#: ``scripts/measure_server_loop_stalls.py``; on history payloads of this shape
+#: (CPython, this host) a 3 MiB bundle costs ~17 ms to serialize plus ~23 ms to
+#: gzip, and a 16 MiB one ~68 ms plus ~134 ms — over two tenths of a second of
+#: frozen loop per full bundle, during which no daemon heartbeat, no other
+#: browser poll and no history frame is processed. That is the LARGEST confirmed
+#: part of the observed server stutter; the inbound frame parse, by contrast, is
+#: bounded at the daemon side and measures sub-millisecond (see
+#: ``ws.LARGE_FRAME_WARN_BYTES``). ~200 records is roughly where the render
+#: leaves the sub-millisecond range.
+#:
+#: This is only ONE of the two gates — see
+#: :data:`HISTORY_RESPONSE_OFFLOAD_BYTES` for why a count cannot be the whole
+#: decision.
+HISTORY_RESPONSE_OFFLOAD_RECORDS = 200
+
+#: Estimated payload size at or above which a history response takes the
+#: loop-friendly path however FEW records it holds.
+#:
+#: WHY a second gate: what costs event-loop time is bytes, not records, and the
+#: two are not proportional. Real history records are heavy-tailed (sampled over
+#: this repo's own ``tianluo/history/``: mean 40.7 KB, p90 12.3 KB, p99 1.1 MB),
+#: so a 150-record / 10 MiB bundle sits under the count gate and used to be
+#: classified small — rendered inline AND, because the small path deliberately
+#: declares no ``Content-Encoding``, gzipped by ``GZipMiddleware`` on the loop
+#: too: ~87 ms of frozen loop per request, re-paid on the running-flow view's
+#: 3 s poll, versus ~34-47 ms for the same payload on the big path.
+#:
+#: 1 MiB is where the count gate already sat under its own sizing assumption
+#: (200 records x ~4 KB), so the two gates describe one line rather than two.
+#: The estimate is a resident-cost approximation and runs to at most
+#: :data:`HISTORY_RESPONSE_OFFLOAD_RECORDS` records (the count gate
+#: short-circuits first), so the check itself is well under a millisecond.
+HISTORY_RESPONSE_OFFLOAD_BYTES = 1024 * 1024
+
+#: How many big history responses may be rendered concurrently.
+#: WHY a gate at all: the render is a latency fix, but each in-flight render
+#: materialises a SECOND full copy of the bundle (the serialized bytes) plus
+#: gzip's own buffer, on top of the records the payload keeps alive — and it does
+#: so with ``ServerState._lock`` released, so the budget sweep cannot see or
+#: bound it. Batching the JSON makes that WORSE, not better, without a gate: the
+#: render now yields to the loop, so more of them genuinely overlap than when
+#: each one ran to completion in one uninterrupted pass. Without a gate a handful
+#: of browser tabs re-opening a 16 MiB conversation at once could hold well over
+#: a gigabyte of transient buffers on the same memory-capped container this
+#: whole fix exists to keep alive — trading an OOM by cache growth for an OOM by
+#: response burst. Four is comfortably above the real concurrency of a console
+#: (a page open per operator) while capping the transient at a few multiples of
+#: one bundle.
+HISTORY_RENDER_CONCURRENCY = 4
+
+#: Seconds between two UNPROTECTED history-cache budget sweeps. Deliberately
+#: independent of ``server.history_cache.report_interval_seconds``: that setting
+#: governs a diagnostic log line, and turning a log line off must never turn
+#: memory enforcement off (the write-path sweep cannot evict the flow it is
+#: writing, so this is the only thing that bounds a single hot-pushed,
+#: unwatched flow). One minute is far below the time it takes a daemon push
+#: stream to add hundreds of MiB, and the sweep is a no-op when the cache is
+#: under budget.
+HISTORY_CACHE_SWEEP_INTERVAL = 60
+
+#: Per-event-loop render gates. Keyed weakly by the running loop rather than
+#: created once at import: a module-level ``asyncio.Semaphore`` would bind to
+#: whichever loop happened to import this module, which is wrong for a test
+#: suite that runs many apps on many loops (and, on 3.9, wrong at import time
+#: full stop).
+_RENDER_GATES: "MutableMapping[Any, asyncio.Semaphore]" = weakref.WeakKeyDictionary()
+
+
+def _history_render_gate() -> asyncio.Semaphore:
+    """The current loop's history-render concurrency gate."""
+    loop = asyncio.get_running_loop()
+    gate = _RENDER_GATES.get(loop)
+    if gate is None:
+        gate = asyncio.Semaphore(HISTORY_RENDER_CONCURRENCY)
+        _RENDER_GATES[loop] = gate
+    return gate
+
+
+#: JSON encoder settings shared by every history response, so the inline and the
+#: batched render paths cannot drift into producing different bytes.
+_HISTORY_JSON_KWARGS = {
+    "ensure_ascii": False,
+    "allow_nan": False,
+    "separators": (",", ":"),
+    "default": str,
+}
+
+
+def _render_history_body(payload: dict, gzip_ok: bool) -> Tuple[bytes, bool]:
+    """Serialize (and optionally gzip) a history payload in one pass.
+
+    Returns ``(body, is_gzipped)``. Used directly for the small replies that are
+    the steady state; the big-payload path calls :func:`_gzip_history_body` on a
+    body that :func:`dump_json_chunked` already produced.
+
+    Compressing HERE rather than leaving it to :class:`GZipMiddleware` is the
+    point of the second return value: the middleware compresses on the event
+    loop, and gzip is the single most expensive step on this path. Starlette
+    passes a response through untouched when it already declares a
+    ``Content-Encoding``, which is what the caller sets.
+    """
+    body = json.dumps(payload, **_HISTORY_JSON_KWARGS).encode("utf-8")
+    if gzip_ok and len(body) >= GZIP_MIN_SIZE:
+        return _gzip_history_body(body), True
+    return body, False
+
+
+def _gzip_history_body(body: bytes) -> bytes:
+    """Compress an already-serialized history body. Genuinely runs off the loop.
+
+    WHY this half — and only this half — is worth a thread hop: ``zlib`` releases
+    the GIL around the compression, so the loop really is free while it runs.
+    Measured on this host on a 16 MiB body (idle loop, worst lateness of a 5 ms
+    timer): ~144 ms inline vs ~1 ms in a worker thread. The JSON render is the
+    opposite case — the C encoder keeps the GIL, so it is batched on the loop
+    instead of offloaded (see :func:`dump_json_chunked`).
+    """
+    import gzip as _gzip
+
+    return _gzip.compress(body, 9)
+
+
+async def _history_response(payload: dict, request: Request) -> Response:
+    """Return *payload* as a JSON response without freezing the event loop.
+
+    Small replies (the not-modified / delta / index steady state, which is the
+    overwhelming majority) render inline — the extra machinery would cost more
+    than the render. "Small" is decided on record count AND estimated bytes,
+    because neither alone identifies a payload that stalls the loop: a few
+    multi-MB records cost as much as thousands of ordinary ones. A payload big
+    enough to stall the loop is split in two:
+    the JSON render is batched on the loop (it cannot be escaped by a thread —
+    the C encoder holds the GIL), and only the gzip pass, which does release it,
+    goes to a worker thread.
+
+    A client sending ``Accept-Encoding: identity`` therefore still gets the
+    batched render and so still leaves the loop responsive; it merely skips the
+    compression step it asked not to have.
+    """
+    gzip_ok = "gzip" in request.headers.get("accept-encoding", "").lower()
+    records = payload.get("records")
+    big = isinstance(records, list) and (
+        len(records) >= HISTORY_RESPONSE_OFFLOAD_RECORDS
+        or records_reach_bytes(records, HISTORY_RESPONSE_OFFLOAD_BYTES)
+    )
+    if big:
+        # The gate bounds how many full-bundle copies exist off-lock at once
+        # (see HISTORY_RENDER_CONCURRENCY); waiting here costs latency, never
+        # correctness — the payload was detached from the cache under
+        # ``ServerState._lock``, so a bundle evicted while this request queues or
+        # renders cannot change what it will serve.
+        async with _history_render_gate():
+            body = await dump_json_chunked(payload, **_HISTORY_JSON_KWARGS)
+            gzipped = gzip_ok and len(body) >= GZIP_MIN_SIZE
+            if gzipped:
+                body = await asyncio.to_thread(_gzip_history_body, body)
+    else:
+        body, gzipped = _render_history_body(payload, False)
+    headers = {}
+    if gzipped:
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return Response(
+        content=body, media_type="application/json", headers=headers
+    )
+
 
 #: When the daemon ack does not arrive within :data:`ISSUE_COMMAND_TIMEOUT`,
 #: the server does NOT immediately report failure — a heavy daemon-side snapshot
@@ -581,6 +754,9 @@ def create_app(
     auth_config: Optional[dict] = None,
     session_store: Optional[SessionStore] = None,
     rate_limiter: Optional[LoginRateLimiter] = None,
+    history_cache_budget_bytes: Optional[int] = None,
+    history_cache_report_interval: Optional[int] = None,
+    history_cache_report_threshold_percent: Optional[int] = None,
 ) -> FastAPI:
     """Build and return the SE3 central-server FastAPI application.
 
@@ -595,13 +771,72 @@ def create_app(
     sqlite store). *auth_config* is the ``server.auth`` sub-mapping driving
     provider selection (``None`` ⇒ the built-in local provider). *session_store*
     / *rate_limiter* are injectable for tests.
+
+    ``history_cache_*`` carry ``server.history_cache`` through to
+    :class:`ServerState` (the in-RAM history relay's memory ceiling) and to the
+    periodic occupancy report started below. ``None`` keeps the built-in
+    defaults, so a bare ``create_app()`` is still bounded.
     """
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
+        # Background history-cache maintenance: an UNPROTECTED budget sweep on a
+        # fixed cadence, plus an occupancy report on the operator-configured one.
+        #
+        # WHY the sweep is a background task and not only a write-path trigger:
+        # the write-path sweep always exempts the flow whose frame it is applying
+        # (``_enforce_history_budget(protect=...)``), so it can never evict that
+        # flow — and a single actively pushed flow nobody is watching IS the
+        # oom-kill scenario this budget exists to stop. Only a sweep with no
+        # protected flow can drop it. The occupancy report has the same
+        # background-only property for a different reason: a server sitting on a
+        # large resident cache with the daemons quiet emits nothing on the write
+        # path, which is exactly the state an operator most needs attributed.
+        #
+        # WHY the two cadences are separate: ``report_interval_seconds: 0`` means
+        # "stop logging the periodic line", and an operator setting it must not
+        # thereby switch memory enforcement off. The sweep keeps its own fixed
+        # cadence regardless.
+        report_interval = (
+            300
+            if history_cache_report_interval is None
+            else int(history_cache_report_interval)
+        )
+        sweep_interval = (
+            HISTORY_CACHE_SWEEP_INTERVAL
+            if report_interval <= 0
+            else min(HISTORY_CACHE_SWEEP_INTERVAL, report_interval)
+        )
+
+        async def _report_loop() -> None:
+            next_report = (
+                time.monotonic() + report_interval
+                if report_interval > 0
+                else None
+            )
+            while True:
+                await asyncio.sleep(sweep_interval)
+                try:
+                    if next_report is not None and time.monotonic() >= next_report:
+                        next_report = time.monotonic() + report_interval
+                        # Reports AND sweeps — one pass, one log line.
+                        await state.report_history_cache()
+                    else:
+                        await state.sweep_history_cache()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # pragma: no cover - defensive
+                    logger.warning(
+                        "history-cache maintenance failed", exc_info=True
+                    )
+
+        report_task: Optional[asyncio.Task] = asyncio.create_task(_report_loop())
+        app.state.history_cache_report_task = report_task
         yield
         # Teardown: cancel any in-flight presence offline-grace tasks so
         # server shutdown leaves no dangling asyncio task and no pending
         # mark_offline fires against a torn-down state.
+        if report_task is not None:
+            report_task.cancel()
         debouncer = getattr(app.state, "presence_debouncer", None)
         if debouncer is not None:
             debouncer.shutdown()
@@ -622,7 +857,12 @@ def create_app(
     # downlink (ConnectionManager) and the server→browser fan-out (UiHub), so a
     # single snapshot attributes traffic by message type across both legs.
     wire_metrics = WireMetrics()
-    state = ServerState()
+    state = ServerState(
+        history_cache_budget_bytes=history_cache_budget_bytes,
+        history_cache_report_threshold_percent=(
+            history_cache_report_threshold_percent
+        ),
+    )
     manager = ConnectionManager(metrics=wire_metrics)
     # Flow→machine resolution must ask the connection pool, not the machine
     # record's ``online`` flag: that flag is debounced by 60 s (below) for the
@@ -2873,12 +3113,13 @@ def create_app(
 
     @app.get("/api/history/{flow_id}")
     async def history_detail(
+        request: Request,
         flow_id: str,
         identity_: OwnerIdentity = Depends(require_owner),
         after: Optional[str] = None,
         sig: Optional[str] = None,
         missing: Optional[str] = None,
-    ) -> dict:
+    ) -> Response:
         # ``missing`` names the records the client's own cursor self-check found
         # it does not hold (``stepId:ord,ord;…``). Any unparseable value degrades
         # to "no missing list" — the client then falls back to a full rebuild,
@@ -3113,8 +3354,13 @@ def create_app(
                         and len(reconciled.get("records") or [])
                         < cached_record_count
                     ):
-                        return {"flow_id": flow_id, "cached": True, **reconciled}
-            return {"flow_id": flow_id, "cached": True, **snapshot}
+                        return await _history_response(
+                            {"flow_id": flow_id, "cached": True, **reconciled},
+                            request,
+                        )
+            return await _history_response(
+                {"flow_id": flow_id, "cached": True, **snapshot}, request
+            )
         # Cache miss (no bundle, or the bundle's machine no longer matches the
         # owning daemon): pull on demand from the daemon owning this flow. Any
         # ``after`` token is ignored — the freshly pulled records are always
@@ -3153,7 +3399,9 @@ def create_app(
                 known_signature=sig,
             )
             if throttled is not None:
-                return {"flow_id": flow_id, "cached": True, **throttled}
+                return await _history_response(
+                    {"flow_id": flow_id, "cached": True, **throttled}, request
+                )
         await state.mark_full_pull(flow_id)
         # Concurrent cache-miss requests for the same flow/machine (e.g. the
         # running-flow view and the history-detail view reconnecting at once)
@@ -3183,7 +3431,9 @@ def create_app(
             expected_owner=target_owner,
         )
         if full is not None:
-            return {"flow_id": flow_id, "cached": False, **full}
+            return await _history_response(
+                {"flow_id": flow_id, "cached": False, **full}, request
+            )
         raise HTTPException(
             status_code=409,
             detail=f"history ownership changed while pulling flow '{flow_id}'",
@@ -3277,12 +3527,26 @@ def _create_app_kwargs_from_server_config(server_cfg: Any) -> dict:
             window_seconds=float(auth.local.ratelimit_window_seconds),
         )
     )
-    return {
+    history_cache = getattr(server_cfg, "history_cache", None)
+    kwargs = {
         "db_path": str(server_cfg.db_path),
         "auth_config": {"providers": provider_entries},
         "session_store": session_store,
         "rate_limiter": rate_limiter,
     }
+    if history_cache is not None:
+        # ``server.history_cache`` is what makes the in-RAM history relay's
+        # ceiling a deployment decision (a 1 GB LXC container and a workstation
+        # need different numbers); without this leg the dataclass would parse and
+        # be silently ignored, exactly the drift this helper exists to prevent.
+        kwargs["history_cache_budget_bytes"] = history_cache.budget_bytes()
+        kwargs["history_cache_report_interval"] = (
+            history_cache.report_interval_seconds
+        )
+        kwargs["history_cache_report_threshold_percent"] = (
+            history_cache.report_threshold_percent
+        )
+    return kwargs
 
 
 def run(
@@ -3293,6 +3557,9 @@ def run(
     auth_config: Optional[dict] = None,
     session_store: Optional[SessionStore] = None,
     rate_limiter: Optional[LoginRateLimiter] = None,
+    history_cache_budget_bytes: Optional[int] = None,
+    history_cache_report_interval: Optional[int] = None,
+    history_cache_report_threshold_percent: Optional[int] = None,
     log_level: str = "info",
 ) -> None:
     """Start the SE3 central server with uvicorn (blocking).
@@ -3302,7 +3569,8 @@ def run(
     minted via ``tianluo-server bootstrap-token`` is consumable by the live server;
     ``None`` falls back to an in-memory store (used by tests). *auth_config* /
     *session_store* / *rate_limiter* carry the resolved ``server.auth.*``
-    configuration through to :func:`create_app`.
+    configuration through to :func:`create_app`, and ``history_cache_*`` the
+    resolved ``server.history_cache.*``.
     """
     import uvicorn
 
@@ -3311,6 +3579,11 @@ def run(
         auth_config=auth_config,
         session_store=session_store,
         rate_limiter=rate_limiter,
+        history_cache_budget_bytes=history_cache_budget_bytes,
+        history_cache_report_interval=history_cache_report_interval,
+        history_cache_report_threshold_percent=(
+            history_cache_report_threshold_percent
+        ),
     )
     # Explicitly assert permessage-deflate on the server↔(daemon|browser) WS
     # legs. uvicorn's ``websockets`` protocol negotiates it by default, but the

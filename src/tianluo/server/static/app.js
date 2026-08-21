@@ -6165,6 +6165,16 @@ function appendLocalReply(flowId, target, text) {
 // step-by-step conversation records (pulled on demand for historical flows).
 // Active flows additionally stream incremental `history_data` deltas over
 // `/ws/ui`, which we append live and scroll into view.
+//
+// A flow whose bundle the server's history-cache budget has evicted streams a
+// records-less `history_cursor` advisory instead of `history_data` (the server
+// deliberately refuses to re-establish a bundle it just dropped from a daemon
+// push). `applyHistoryCursor` -> `reconcileCursorCompleteness` is therefore the
+// only thing that keeps this view live across an eviction: it notices the held
+// records are short of the advertised cursor and re-pulls over REST — and that
+// read is what re-admits the flow to the server cache. This view has no poll
+// timer of its own, so removing that path would freeze it on stale records
+// until the user re-clicked the session.
 
 function isHistoryOpen() {
   return !$("history-view").classList.contains("hidden");

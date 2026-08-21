@@ -302,6 +302,34 @@ investigation:
   # 的哨兵约定一致；负数会在加载时直接报错。默认：3。
   max_iterations: 3
 
+# Central Server (`tianluo[server]` only)
+# Read exclusively by the `tianluo-server` entry point; a core-only install
+# never touches it. `server:` is a normal top-level key, so a project block
+# WHOLLY REPLACES the global one (no deep merge) — copy every field you rely on.
+# Full reference: docs/configuration.md#server
+server:
+  # Memory ceiling for the in-RAM history relay cache. The server mirrors each
+  # active flow's whole conversation so the web console reads without a daemon
+  # round-trip, and daemons push history for EVERY active flow regardless of
+  # whether a browser is watching — so without a ceiling a long-running server
+  # in a memory-capped container is eventually oom-killed. Bundles are evicted
+  # least-recently-VIEWED first and rebuilt from a full daemon pull the next
+  # time a console opens them, so eviction costs a round-trip, never records.
+  # See also the systemd MemoryMax/MemoryHigh backstop in
+  # docs/daemon-and-server.md#systemd-memory-guardrails.
+  history_cache:
+    # Total budget for all cached bundles, in MiB. 0 is valid: only flows a
+    # console is actively reading stay resident. Default: 256.
+    budget_mb: 256
+    # Cadence (seconds) of the cache-occupancy diagnostic log line — total,
+    # budget, eviction counters, biggest cached flows by flow_id. 0 disables
+    # the periodic line; the over-threshold one still fires. Logging only:
+    # budget eviction runs on its own fixed cadence either way. Default: 300.
+    report_interval_seconds: 300
+    # Occupancy percent above which that report is emitted at WARNING
+    # regardless of the cadence (debounced to one per minute). Default: 80.
+    report_threshold_percent: 80
+
 # Preset Prompts (common-task library)
 # Project-level presets override the built-in presets shipped with tianluo
 # (read at runtime from the package, never copied by `luo init`). Each

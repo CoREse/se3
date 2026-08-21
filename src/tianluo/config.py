@@ -4347,6 +4347,15 @@ _VALID_COOKIE_SAMESITE = ("lax", "strict", "none")
 # Default OIDC scopes when the (disabled) seam is configured.
 _DEFAULT_OIDC_SCOPES = ("openid", "email", "profile")
 
+# History-relay cache defaults. The server mirrors every active flow's whole
+# conversation in RAM (``ServerState._history_data``); before a budget existed
+# that mirror was unbounded, so a long-lived server in a memory-capped LXC
+# container was eventually oom-killed. 256 MiB comfortably holds the handful of
+# bundles a console actually reads while capping the total.
+DEFAULT_HISTORY_CACHE_BUDGET_MB = 256
+DEFAULT_HISTORY_CACHE_REPORT_INTERVAL = 300
+DEFAULT_HISTORY_CACHE_REPORT_THRESHOLD = 80
+
 
 def _coerce_positive_int(value: Any, default: int, label: str) -> int:
     """Coerce ``value`` to a positive int, warning + falling back on failure.
@@ -4370,6 +4379,34 @@ def _coerce_positive_int(value: Any, default: int, label: str) -> int:
     if coerced <= 0:
         logger.warning(
             "%s=%d must be positive; using default %d", label, coerced, default,
+        )
+        return default
+    return coerced
+
+
+def _coerce_non_negative_int(value: Any, default: int, label: str) -> int:
+    """Coerce ``value`` to a ``>= 0`` int, warning + falling back on failure.
+
+    Distinct from :func:`_coerce_positive_int` because ``0`` is a MEANINGFUL
+    setting for the history-cache budget: it disables caching of any flow no UI
+    client is currently reading, which is the degenerate end of the same knob
+    rather than a typo to be corrected away.
+    """
+    if isinstance(value, bool):
+        logger.warning(
+            "%s=%r is not a valid integer; using default %d", label, value, default,
+        )
+        return default
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        logger.warning(
+            "%s=%r is not a valid integer; using default %d", label, value, default,
+        )
+        return default
+    if coerced < 0:
+        logger.warning(
+            "%s=%d must not be negative; using default %d", label, coerced, default,
         )
         return default
     return coerced
@@ -4639,17 +4676,78 @@ class AuthConfig:
 
 
 @dataclass
-class ServerConfig:
-    """Central-server auth / identity configuration (``server:`` YAML section).
+class HistoryCacheConfig:
+    """Memory budget + diagnostics for the server's in-RAM history relay cache.
 
-    Loaded with global→project top-level-key override (no deep merge), matching
-    the documented config precedence. All fields default so an absent
-    ``server:`` section yields ``db_path='~/.se3/server.db'`` and
-    ``auth.providers=['local']``.
+    ``server.history_cache`` in ``tianluo.yaml`` / ``~/.se3/config.yaml``.
+    WHY it is configurable at all: the right ceiling is a property of the
+    DEPLOYMENT, not of the code — the same server binary runs on a workstation
+    with 64 GB and in a 1 GB LXC container, and it is the container that gets
+    oom-killed. Operators need to be able to state their ceiling without
+    patching the package.
+    """
+
+    #: Total budget for all cached history bundles, in MiB. ``0`` is a valid
+    #: (degenerate) setting: only bundles a UI client is actively reading stay
+    #: resident. See :class:`~tianluo.server.state.ServerState`.
+    budget_mb: int = DEFAULT_HISTORY_CACHE_BUDGET_MB
+    #: Seconds between the periodic cache-occupancy diagnostic log lines.
+    #: ``0`` disables the periodic report (the over-threshold trigger stays).
+    #: It governs LOGGING only — the unprotected budget sweep keeps its own
+    #: fixed cadence (``server.app.HISTORY_CACHE_SWEEP_INTERVAL``), so turning
+    #: the diagnostic line off can never turn memory enforcement off.
+    report_interval_seconds: int = DEFAULT_HISTORY_CACHE_REPORT_INTERVAL
+    #: Percentage of the budget above which an occupancy report is emitted at
+    #: WARNING regardless of the periodic cadence.
+    report_threshold_percent: int = DEFAULT_HISTORY_CACHE_REPORT_THRESHOLD
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "HistoryCacheConfig":
+        if not isinstance(data, dict) or not data:
+            return cls()
+        return cls(
+            budget_mb=_coerce_non_negative_int(
+                data.get("budget_mb", DEFAULT_HISTORY_CACHE_BUDGET_MB),
+                DEFAULT_HISTORY_CACHE_BUDGET_MB,
+                "server.history_cache.budget_mb",
+            ),
+            report_interval_seconds=_coerce_non_negative_int(
+                data.get(
+                    "report_interval_seconds",
+                    DEFAULT_HISTORY_CACHE_REPORT_INTERVAL,
+                ),
+                DEFAULT_HISTORY_CACHE_REPORT_INTERVAL,
+                "server.history_cache.report_interval_seconds",
+            ),
+            report_threshold_percent=_coerce_non_negative_int(
+                data.get(
+                    "report_threshold_percent",
+                    DEFAULT_HISTORY_CACHE_REPORT_THRESHOLD,
+                ),
+                DEFAULT_HISTORY_CACHE_REPORT_THRESHOLD,
+                "server.history_cache.report_threshold_percent",
+            ),
+        )
+
+    def budget_bytes(self) -> int:
+        """The budget in bytes (what :class:`ServerState` actually accounts in)."""
+        return int(self.budget_mb) * 1024 * 1024
+
+
+@dataclass
+class ServerConfig:
+    """Central-server configuration (``server:`` YAML section).
+
+    Covers auth / identity plus the in-RAM history relay's memory budget
+    (``history_cache``). Loaded with global→project top-level-key override (no
+    deep merge), matching the documented config precedence. All fields default
+    so an absent ``server:`` section yields ``db_path='~/.se3/server.db'``,
+    ``auth.providers=['local']`` and a 256 MiB history-cache budget.
     """
 
     db_path: str = DEFAULT_SERVER_DB_PATH
     auth: AuthConfig = field(default_factory=AuthConfig)
+    history_cache: HistoryCacheConfig = field(default_factory=HistoryCacheConfig)
 
     @classmethod
     def from_dict(cls, data: Any) -> "ServerConfig":
@@ -4662,6 +4760,9 @@ class ServerConfig:
         return cls(
             db_path=db_path,
             auth=AuthConfig.from_dict(data.get("auth", {})),
+            history_cache=HistoryCacheConfig.from_dict(
+                data.get("history_cache", {})
+            ),
         )
 
     @classmethod

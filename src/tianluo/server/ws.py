@@ -17,6 +17,7 @@ package, so the wire schema has a single source of truth shared by both ends.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from typing import (
@@ -32,7 +33,7 @@ from typing import (
 from tianluo.daemon import protocol
 from tianluo.daemon.wire_metrics import WireMetrics
 
-from .state import ServerState
+from .state import ServerState, records_reach_bytes
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from .identity import IdentityService
@@ -71,6 +72,223 @@ logger = logging.getLogger(__name__)
 PING_INTERVAL = 20.0
 #: A daemon is dropped if no PONG (or any frame) arrives within this window.
 HEARTBEAT_TIMEOUT = 90.0
+
+#: Inbound-frame size above which the receive loop logs that the daemon-side
+#: chunk bound was exceeded. It is a TRIPWIRE, not a cap: the frame is still
+#: decoded and applied, because dropping history the daemon has already
+#: committed its cursor past would punch a permanent hole in the bundle.
+#:
+#: WHY a tripwire is the right shape here: the inbound parse is bounded AT THE
+#: SOURCE, not on this side. ``daemon.history.MAX_BYTES_PER_REPORT`` caps every
+#: ``MSG_HISTORY_DATA`` at 256 KiB (a full pull of a large flow drains as a
+#: bounded ``full`` head plus bounded ``append`` tails), and a single oversized
+#: record is compacted by the daemon before it is billed against that cap — so
+#: the frames this loop actually parses cost well under a millisecond. If that
+#: source-side bound ever regresses, a silent 40 ms loop freeze per frame is
+#: exactly the kind of stall that is impossible to attribute after the fact;
+#: this line names the machine and the size instead.
+LARGE_FRAME_WARN_BYTES = 4 * 1024 * 1024
+
+#: Rendered-JSON bytes one batch of :func:`dump_json_chunked` aims to produce
+#: before it yields to the event loop. ~0.5 MiB renders in single-digit
+#: milliseconds on this host; a smaller budget would cap the gap tighter but pay
+#: more scheduler round-trips over the whole render.
+#:
+#: WHY the budget is in BYTES and not in records: history records are
+#: heavy-tailed. Sampling every record under this repo's own ``tianluo/history/``
+#: gives mean 40.7 KB, p90 12.3 KB, p99 1.1 MB, max 161 MB — so a record count
+#: sized on an assumed "~4 KB/record" is not a size bound at all. A real bundle
+#: here (``02097bb3-73e/58f7f446.jsonl``, 10 records / 11.0 MiB) fits inside any
+#: three-digit record batch: the render would reach no ``await`` and freeze the
+#: loop for the full ~110 ms, exactly like the inline ``json.dumps`` this
+#: function exists to replace.
+JSON_RENDER_BATCH_BYTES = 512 * 1024
+
+#: Ceiling on records per batch. The byte budget is what bounds a batch's cost;
+#: this only keeps a stream of very small records from growing one batch's slice
+#: (and its transient list copy) without limit when the budget alone would allow
+#: tens of thousands.
+JSON_RENDER_MAX_BATCH_RECORDS = 1024
+
+#: How fast the adaptive batch size may GROW per step (it may shrink to the
+#: budget in one). WHY asymmetric: the size for the next batch is predicted from
+#: what the previous ones actually rendered, and the tail is on the heavy side —
+#: overshooting is a loop stall, undershooting is one extra scheduler
+#: round-trip. Capped growth reaches the steady-state size in a handful of
+#: batches (1, 4, 16, 64 …) while keeping a run of small records from launching
+#: the size straight past the next heavy one.
+JSON_RENDER_BATCH_GROWTH = 4
+
+#: Record count at or above which a ``/ws/ui`` fan-out frame is serialized in
+#: record batches (see :func:`dump_json_chunked`) rather than in one call.
+#: Aligned with ``app.HISTORY_RESPONSE_OFFLOAD_RECORDS``: the two render the same
+#: records, so the point where the render outgrows a single uninterrupted pass is
+#: the same for both.
+UI_FRAME_CHUNKED_RECORDS = 200
+
+#: Estimated payload size at or above which a ``/ws/ui`` fan-out frame takes the
+#: batched render however FEW records it holds. Aligned with
+#: ``app.HISTORY_RESPONSE_OFFLOAD_BYTES`` for the same reason the record gate is
+#: aligned: it is the same bundle, relayed rather than served.
+UI_FRAME_CHUNKED_BYTES = 1024 * 1024
+
+
+async def dump_json_chunked(payload: Dict[str, Any], **dumps_kwargs: Any) -> bytes:
+    """Serialize *payload* to JSON bytes, yielding to the loop between batches.
+
+    WHY this exists rather than ``await asyncio.to_thread(json.dumps, ...)``:
+    a thread hop does NOT free the event loop here. CPython's C JSON encoder
+    holds the GIL for nearly its whole run, so the loop thread wakes on a socket
+    event and then blocks on the GIL until the worker finishes. Measured on this
+    host on a 16 MiB history payload (idle loop, worst lateness of a 5 ms timer):
+    inline ``json.dumps`` ~77 ms, the same call in a worker thread ~99 ms — the
+    hop buys nothing and costs a round-trip. Rendering the records in batches and
+    awaiting between them actually removes the stall: ~15 ms worst lateness for
+    the same payload, at a few percent more total render time. Reproduce with
+    ``scripts/measure_server_loop_stalls.py`` (its ``loop lateness`` table).
+
+    Only the ``records`` list is batched — it is the only key whose size scales
+    with the conversation. Batches are cut to a BYTE budget
+    (:data:`JSON_RENDER_BATCH_BYTES`), not to a record count: a fixed count is
+    not a size bound on records whose sizes span five orders of magnitude, and a
+    batch that swallows the whole payload reaches no ``await`` and leaves the
+    stall exactly where it was.
+
+    INVARIANT: the bytes are identical to ``json.dumps(payload, **dumps_kwargs)``
+    — key order included. This is a SCHEDULING change and must never become a
+    content change: the same payload is served by the inline path for small
+    replies and by this one for big ones, and a client (or a test) must not be
+    able to tell which ran. That is why the surrounding keys are split at
+    ``records``' own position instead of being emitted around it.
+    """
+    records = payload.get("records") if isinstance(payload, dict) else None
+    if not isinstance(records, list):
+        return json.dumps(payload, **dumps_kwargs).encode("utf-8")
+    item_sep, key_sep = dumps_kwargs.get("separators") or (", ", ": ")
+    item_sep_b = item_sep.encode("utf-8")
+    keys = list(payload)
+    split = keys.index("records")
+    head_keys, tail_keys = keys[:split], keys[split + 1:]
+
+    def _dump(value: Any) -> bytes:
+        return json.dumps(value, **dumps_kwargs).encode("utf-8")
+
+    # Chunks are collected and joined once at the end rather than appended into
+    # a growing ``bytearray``: on a large bundle the incremental reallocs plus
+    # the final ``bytes()`` copy are themselves an uninterruptible cost paid ON
+    # the loop, and they land in the middle of the render where nothing can
+    # yield around them. Measured on a 112 MiB payload (worst lateness of a 5 ms
+    # timer): ~139 ms accumulating into a bytearray vs ~97 ms joining once.
+    parts = []
+    # ``{k:v,`` — the object opened, its pre-``records`` members already in it.
+    parts.append(_dump({key: payload[key] for key in head_keys})[:-1])
+    if head_keys:
+        parts.append(item_sep_b)
+    parts.append(_dump("records") + key_sep.encode("utf-8") + b"[")
+    # Batch size is PREDICTED from what the previous batches actually rendered,
+    # because the only way to know a record's serialized size is to serialize
+    # it, and doing that one record at a time costs ~5x the bulk encode on a
+    # small-record bundle. Starting at one record makes the first batch — the
+    # one no measurement covers yet — the smallest slice this can yield on, so
+    # a bundle that is entirely multi-MB records still releases the loop between
+    # every record instead of rendering in a single frozen pass.
+    #
+    # The residual overshoot is a batch sized on light records that then hits a
+    # heavy one; the growth cap bounds it, and one record is the floor no
+    # predictor can go below (a single 161 MB record is one ``json.dumps``
+    # whatever the budget says).
+    size = 1
+    index = 0
+    while index < len(records):
+        batch_records = records[index:index + size]
+        batch = _dump(batch_records)
+        if index:
+            parts.append(item_sep_b)
+        # Strip the batch's own ``[``/``]`` so the batches concatenate into one
+        # array rather than nesting.
+        parts.append(batch[1:-1])
+        index += len(batch_records)
+        per_record = max(1, (len(batch) - 2) // len(batch_records))
+        size = max(
+            1,
+            min(
+                JSON_RENDER_BATCH_BYTES // per_record,
+                JSON_RENDER_MAX_BATCH_RECORDS,
+                size * JSON_RENDER_BATCH_GROWTH,
+            ),
+        )
+        await asyncio.sleep(0)
+    parts.append(b"]")
+    tail = _dump({key: payload[key] for key in tail_keys})
+    # ``tail`` is ``{...}``; splicing off its leading brace appends its members
+    # to the object already open. An empty tail just closes it.
+    parts.append((item_sep_b + tail[1:]) if tail_keys else b"}")
+    return b"".join(parts)
+
+
+async def _decode_frame(raw: str) -> "protocol.Message":
+    """Decode one inbound daemon frame on the event loop.
+
+    WHY the parse is NOT handed to a worker thread: it would not help. CPython's
+    C JSON scanner holds the GIL for its whole run, so the loop thread is blocked
+    on the GIL for as long as the parse takes wherever the call runs. Measured on
+    this host on a 16 MiB frame (idle loop, worst lateness of a 5 ms timer):
+    ~48 ms inline vs ~42 ms in a worker thread — the hop adds latency and leaves
+    the stall. And unlike the outbound render, an inbound parse cannot be batched
+    into an incremental pass without replacing the C scanner with a pure-Python
+    one that is an order of magnitude slower overall.
+
+    What actually bounds this cost is the daemon side: history frames are
+    byte-chunked at ``daemon.history.MAX_BYTES_PER_REPORT`` (256 KiB), which is a
+    sub-millisecond parse. :data:`LARGE_FRAME_WARN_BYTES` is the tripwire that
+    makes a regression of that bound visible instead of silent.
+
+    Its own function so the receive loop's decode has a seam a test can assert
+    on directly instead of only through timing.
+    """
+    if len(raw) >= LARGE_FRAME_WARN_BYTES:
+        logger.warning(
+            "Inbound frame of %d bytes exceeds the %d-byte daemon chunk bound; "
+            "its parse blocks the event loop (see daemon.history."
+            "MAX_BYTES_PER_REPORT)",
+            len(raw),
+            LARGE_FRAME_WARN_BYTES,
+        )
+    return protocol.decode(raw)
+
+
+def _render_ui_frame(payload: Dict[str, Any]) -> str:
+    """Serialize one ``/ws/ui`` frame in a single pass."""
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+async def _dump_ui_frame(payload: Dict[str, Any]) -> str:
+    """Serialize a ``/ws/ui`` frame, keeping a big one from freezing the loop.
+
+    A relayed ``history_data`` frame carries records, and the fan-out used to
+    render it once PER CLIENT — so a large relay multiplied one bundle's render
+    into a fan-out-wide loop stall. The caller now renders each distinct payload
+    once (see :meth:`UiHub._fan_out`), and a big one is rendered in record
+    batches that yield to the loop (see :func:`dump_json_chunked`), which is what
+    actually removes the stall — a worker thread would not, because the C JSON
+    encoder holds the GIL. Every other frame the hub sends — machine lists, index
+    deltas, cursor advisories — renders inline, as it always did.
+    """
+    records = payload.get("records") if isinstance(payload, dict) else None
+    # Either gate trips. A record count alone would classify a 10-record /
+    # 11 MiB relay as small and render it inline; the byte estimate is only
+    # walked for frames whose count did NOT trip, so it stays bounded (see
+    # ``state.records_reach_bytes``).
+    if isinstance(records, list) and (
+        len(records) >= UI_FRAME_CHUNKED_RECORDS
+        or records_reach_bytes(records, UI_FRAME_CHUNKED_BYTES)
+    ):
+        rendered = await dump_json_chunked(
+            payload, ensure_ascii=False, default=str
+        )
+        return rendered.decode("utf-8")
+    return _render_ui_frame(payload)
+
 
 # Server identity advertised in WELCOME.
 try:  # pragma: no cover - import guard
@@ -1060,11 +1278,29 @@ class UiHub:
     async def _fan_out(self, targets: list) -> None:
         if not targets:
             return
-        import json
+
+        # Serialize each DISTINCT payload once, up front, instead of once per
+        # client inside the send loop.
+        #
+        # WHY: the owner-scoped helpers hand every client of one owner the SAME
+        # payload object, and a ``history_data`` frame carries a whole relayed
+        # bundle — ~11 ms of ``json.dumps`` at 3 MiB, ~53 ms at 16 MiB (measured;
+        # see UI_FRAME_CHUNKED_RECORDS). Re-rendering that per client multiplied
+        # one relayed frame into a fan-out-wide loop stall for byte-identical
+        # output. Keying by object identity is exact here (the helpers build one
+        # dict per owner and never mutate it afterwards) and degrades to the old
+        # per-payload cost if some future caller passes distinct dicts.
+        #
+        # Fan-out ORDER is unchanged: rendering is a separate pass, and the send
+        # loop below still walks *targets* in the order it was given.
+        rendered: Dict[int, str] = {}
+        for _client, payload in targets:
+            if id(payload) not in rendered:
+                rendered[id(payload)] = await _dump_ui_frame(payload)
 
         dead = []
         for client, payload in targets:
-            text = json.dumps(payload, ensure_ascii=False, default=str)
+            text = rendered[id(payload)]
             try:
                 await client.send_text(text)
                 if self._metrics is not None:
@@ -1264,6 +1500,41 @@ async def _push_history_cursor(
             # so an advisory-triggered self-check draws the pending/unfillable line
             # identically (see get_history_bundle_meta).
             "pending": meta["pending"],
+        },
+        owner,
+    )
+
+
+async def _push_history_cursor_advisory(
+    hub: Optional["UiHub"],
+    state: ServerState,
+    machine_id: str,
+    flow_id: str,
+    cursor: Dict[str, Any],
+) -> None:
+    """Broadcast a bundle-state advisory for a flow the cache no longer holds.
+
+    The twin of :func:`_push_history_cursor` for the one case where there IS no
+    bundle to read meta from: a budget-evicted flow whose daemon frames are
+    being suppressed. *cursor* is the suppressed frame's own declaration of what
+    the DAEMON holds, which is exactly the fact a console displaying the flow
+    needs in order to notice it is short of records and re-pull.
+
+    ``pending`` is sent empty on purpose: it means "records the server knows are
+    still streaming", and an evicted flow has no bundle for anything to be
+    pending against. Declaring an empty window makes the client treat a gap as a
+    real hole and repair it — which is the intended outcome here, since the
+    repair read re-admits the flow.
+    """
+    if hub is None or hub.client_count == 0 or not cursor:
+        return
+    owner = await state.get_machine_owner(machine_id)
+    await hub.broadcast_owned(
+        {
+            "type": "history_cursor",
+            "flow_id": flow_id,
+            "cursor": cursor,
+            "pending": {},
         },
         owner,
     )
@@ -1566,7 +1837,7 @@ async def _serve_loop(
             raw = await websocket.receive_text()
             last_seen["ts"] = time.time()
             try:
-                message = protocol.decode(raw)
+                message = await _decode_frame(raw)
             except protocol.ProtocolError as exc:
                 logger.warning("Dropping malformed frame from %s: %s", machine_id, exc)
                 continue
@@ -1776,7 +2047,12 @@ async def _handle_message(
             if registry is not None and applied:
                 resolved_pull = registry.resolve(
                     flow_id,
-                    await state.get_history(flow_id),
+                    # ``touch=False``: this read serves the DAEMON's frame back
+                    # to a parked pull waiter, it is not a human opening the
+                    # flow. Counting it as UI interest would mark every actively
+                    # pushed flow hot and neuter the history-cache eviction
+                    # recency (see ServerState._HISTORY_VIEW_HOT_WINDOW).
+                    await state.get_history(flow_id, touch=False),
                     machine_id=machine_id,
                 )
             # Decide whether to broadcast this frame to ``/ws/ui``. The only
@@ -1950,6 +2226,24 @@ async def _handle_message(
                 # alone: it costs nothing, rebuilds nothing, resets no token, and
                 # lets a client that is short of records ask for exactly those.
                 await _push_history_cursor(hub, state, machine_id, flow_id)
+            elif outcome.cold_suppressed and outcome.suppressed_cursor:
+                # The budget had evicted this flow and nobody had read it since,
+                # so the cache took nothing and armed no recovery (see
+                # ``ServerState._history_cold``). Relaying the RECORDS would
+                # re-establish exactly the bundle the budget refused; saying
+                # nothing at all would freeze a console that is DISPLAYING the
+                # flow, because the History view self-checks only when a frame
+                # arrives. So relay the frame's own cursor and nothing else: a
+                # console holding fewer records than it declares re-pulls over
+                # REST, and that read is what re-admits the flow to the cache.
+                # No bundle meta exists to sign, so no ``signature`` /
+                # ``generation`` is claimed — the client's repair budget then
+                # keys the flow-scoped null bucket, which is bounded, and the
+                # rebuilt bundle's real generation re-arms it.
+                await _push_history_cursor_advisory(
+                    hub, state, machine_id, flow_id,
+                    outcome.suppressed_cursor,
+                )
     elif message.type == protocol.MSG_SPAWN_FAILED:
         # The daemon could not carry out a server-dispatched spawn / resume /
         # project-init *after* the REST handler already answered 202. Relay the

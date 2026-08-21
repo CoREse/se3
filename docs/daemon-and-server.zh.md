@@ -24,6 +24,7 @@ tianluo 的核心（`luo run`、`luo sync` ……）是一次性的 CLI：每个
    - [前台模式 vs 后台(detached)模式](#前台模式-vs-后台detached模式)
    - [运行时文件:pidfile 与状态文件](#运行时文件pidfile-与状态文件)
    - [流程的发现与监管](#流程的发现与监管)
+   - [systemd 内存护栏](#systemd-内存护栏)
 3. [架构与工作原理](#架构与工作原理)
    - [daemon 内部](#daemon-内部)
    - [中心服务器内部](#中心服务器内部)
@@ -253,6 +254,65 @@ daemon 在本机上跟踪两类 `luo run` 流程:
 它以固定间隔(默认每 2 秒)轮询存活状态,清除已退出进程的记录,并在关停时优雅
 终止它自己 spawn 的所有流程(先 `SIGTERM`,宽限期后再 `SIGKILL`)。发现到的
 流程*不会*被杀死:daemon 只监管它自己拥有的进程的生命周期。
+
+---
+
+### systemd 内存护栏
+
+服务器把每个被查看的 flow 的完整对话保存在内存中,而
+`server.history_cache.budget_mb`(见
+[docs/configuration.zh.md](configuration.zh.md#serverhistory_cache))就是这份内存
+在代码层面的上限。**先配它**——真正给增长封顶的是它。
+
+下面这些 unit 级设置是**兜底**,不是修复本身:它们给进程最终用掉的内存封一道硬顶,
+并让一次被杀之后能自动恢复,从而把『预算配小了 / 内存 bug / 与本功能无关的分配』
+降级成一次重启,而不是一个没人发现就一直躺着的控制面。
+
+```ini
+# /etc/systemd/system/tianluo-server.service
+[Unit]
+Description=tianluo central control-plane server
+After=network-online.target
+Wants=network-online.target
+# 别让崩溃循环把宿主机拖死:超出下面的阈值 systemd 就放弃重启,unit 进入 failed
+# 状态——那正是监控应该告警的信号。这两个键属于 [Unit] 段(见 systemd.unit(5);
+# systemd.service(5) 只是交叉引用它们),写在 [Service] 里会被 systemd 忽略。
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tianluo
+ExecStart=/opt/tianluo/venv/bin/tianluo-server --host 127.0.0.1 --port 8080
+
+# 兜底 1 —— 总能爬起来。没有它的话,一次 OOM kill(或任何未处理的崩溃)会让所有
+# daemon 掉线、控制台一片黑,直到有人手动介入。给它封顶的崩溃循环限速在上面的
+# [Unit] 段里。
+Restart=on-failure
+RestartSec=5s
+
+# 兜底 2 —— 给进程封顶。MemoryHigh 是软膝点:超过它 cgroup 会被节流并回收,通常
+# 足以给 history 缓存的淘汰争取到时间。MemoryMax 是硬墙:由该 cgroup 自己的 OOM
+# killer 干掉服务器,而不是让内核在整台宿主机上另选一个受害者。MemoryHigh 要显著
+# 高于 server.history_cache.budget_mb(预算只覆盖缓存的 bundle,不含解释器、
+# sqlite 存储与请求处理中的临时缓冲)。
+MemoryAccounting=yes
+MemoryHigh=768M
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
+```
+
+事后归因靠的是缓存占用报告——服务器会周期性地、以及在占用越过报告阈值时,输出总
+占用、预算、淘汰计数,以及按 `flow_id` 列出的占用最大的几个 flow:
+
+```bash
+journalctl -u tianluo-server | grep history-cache
+```
+
+daemon 的 unit 同样建议加 `Restart=on-failure`;daemon 轻得多(它只是流式推送
+history,并不缓存),内存限制在那边是可选的。
 
 ---
 

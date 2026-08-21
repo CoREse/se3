@@ -481,3 +481,99 @@ def test_head_loss_shape_end_to_end_the_head_is_announced():
     assert frames[0]["mode"] == protocol.HISTORY_MODE_FULL
     assert frames[0]["records"] == [HEAD, TAIL]
     assert frames[0]["cursor"] == {CURSOR_KEY: 2}
+
+
+# --------------------------------------------------------------------------
+# a budget-evicted flow still tells the console its bundle moved
+# --------------------------------------------------------------------------
+
+
+def test_evicted_flow_pushes_a_cursor_advisory_instead_of_records():
+    """Silence would freeze a console that is DISPLAYING an evicted flow.
+
+    The history-cache budget may evict a flow whose bundle is large and whose
+    last UI read is old, and the cold marker then makes every later daemon frame
+    a no-op so a push cannot re-establish what the budget refused. Relaying the
+    RECORDS would defeat that; relaying nothing defeats the console. The WebUI
+    History view has no poll timer — it self-checks only when a frame arrives —
+    so the frame's own cursor is the only thing that can tell it to re-pull, and
+    that pull is what re-admits the flow to the cache.
+    """
+
+    async def scenario():
+        state = ServerState(history_cache_budget_bytes=1)
+        await state.register_machine("m1", "host", "9.9.9", owner_id="owner-A")
+        hub = UiHub()
+        ui = _UiWS()
+        await hub.register(ui, "owner-A")
+        registry = HistoryRequestRegistry()
+
+        await _handle_message(
+            _msg(protocol.HISTORY_MODE_FULL, [HEAD], {CURSOR_KEY: 1}),
+            state, "m1", hub, registry,
+        )
+        # The budget drops it while nobody is reading it.
+        await state.report_history_cache()
+        assert await state.get_history("f1", touch=False) is None
+        ui.sent.clear()
+
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_APPEND,
+                [TAIL],
+                {CURSOR_KEY: 2},
+                cursor_base={CURSOR_KEY: 1},
+            ),
+            state, "m1", hub, registry,
+        )
+        return ui, state
+
+    ui, state = asyncio.run(scenario())
+    # The records the cache refused reach nobody …
+    assert ui.frames("history_data") == []
+    # … but the console is told what the daemon holds, so its cursor self-check
+    # can re-pull the flow and re-admit it.
+    advisories = ui.frames("history_cursor")
+    assert len(advisories) == 1
+    assert advisories[0]["flow_id"] == "f1"
+    assert advisories[0]["cursor"] == {CURSOR_KEY: 2}
+    # No bundle exists to sign, so no generation/signature is claimed.
+    assert "signature" not in advisories[0]
+    assert advisories[0]["pending"] == {}
+
+
+def test_the_cold_advisory_is_scoped_to_the_owning_console():
+    """An advisory is bundle state; it must not cross an owner boundary."""
+
+    async def scenario():
+        state = ServerState(history_cache_budget_bytes=1)
+        await state.register_machine("m1", "host", "9.9.9", owner_id="owner-A")
+        hub = UiHub()
+        mine, other, admin = _UiWS(), _UiWS(), _UiWS()
+        await hub.register(mine, "owner-A")
+        await hub.register(other, "owner-B")
+        await hub.register(admin, None)
+        registry = HistoryRequestRegistry()
+
+        await _handle_message(
+            _msg(protocol.HISTORY_MODE_FULL, [HEAD], {CURSOR_KEY: 1}),
+            state, "m1", hub, registry,
+        )
+        await state.report_history_cache()
+        for client in (mine, other, admin):
+            client.sent.clear()
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_APPEND,
+                [TAIL],
+                {CURSOR_KEY: 2},
+                cursor_base={CURSOR_KEY: 1},
+            ),
+            state, "m1", hub, registry,
+        )
+        return mine, other, admin
+
+    mine, other, admin = asyncio.run(scenario())
+    assert len(mine.frames("history_cursor")) == 1
+    assert len(admin.frames("history_cursor")) == 1
+    assert other.frames("history_cursor") == []

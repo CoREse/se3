@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tianluo"
-version = "12.11.0"
+version = "12.11.1"
 description = "tianluo (田螺) - autonomous SE 3.0 flow engine: prompt once, walk away, come back to a finished deliverable"
 readme = "README.md"
 license = "Apache-2.0"
@@ -165,6 +165,16 @@ pythonpath = ["src"]
 # which are not available in this environment. The node-stub sibling
 # covers the same rendering logic.
 addopts = "--deselect=tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
+# Delete a passing test's ``tmp_path`` immediately instead of retaining it for the
+# whole session (pytest's "all" default). One full run of this suite creates
+# ~100k files under /tmp (many tests ``git init`` a real repo per test), and a
+# session killed by a step timeout leaves its basetemp ``.lock`` behind, which
+# blocks pytest's own numbered-dir pruning for 3 hours. Repeated runs therefore
+# exhausted the /tmp tmpfs *inode* table, and every subsequent run failed at
+# fixture setup with unrelated-looking errors across hundreds of tests. Keeping
+# only failed tests' dirs preserves post-mortem debugging while dropping the
+# per-run footprint to near zero.
+tmp_path_retention_policy = "failed"
 # Declare the xdist_group marker locally so it is a *known* marker even in an
 # environment where pytest-xdist is not installed. xdist_group is pure metadata
 # (it only means anything to xdist's loadgroup scheduler), so a serial run would

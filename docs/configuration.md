@@ -1327,6 +1327,31 @@ server with no `server:` section still comes up usable.
 |-----|------|---------|---------|
 | `db_path` | string | `~/.se3/server.db` | Path of the embedded sqlite store backing identity / auth. `~` is expanded at use. The `tianluo-server --db-path` flag overrides it for a single launch. |
 | `auth` | map | *(all defaults)* | See below. |
+| `history_cache` | map | *(all defaults)* | See below. |
+
+#### `server.history_cache`
+
+Memory ceiling for the server's in-RAM history relay. The server mirrors each
+active flow's whole conversation in process memory so the web console can be
+served without a daemon round-trip, and daemons push that history for **every**
+active flow whether or not a browser is watching it. Left unbounded, a long-lived
+server in a memory-capped container (an LXC guest, a `MemoryMax=`-limited
+service) is eventually OOM-killed. The budget bounds the mirror by evicting the
+least-recently *viewed* bundle; an evicted flow is rebuilt from a full daemon
+pull the next time a console opens it, so eviction costs one round-trip and never
+loses records.
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `budget_mb` | int ≥ 0 | `256` | Total budget, in MiB, for all cached history bundles together. `0` is valid and meaningful: only flows a console is actively reading stay resident. Negative / non-numeric values warn and fall back to the default. |
+| `report_interval_seconds` | int ≥ 0 | `300` | Cadence of the cache-occupancy diagnostic log line (total, budget, eviction counters, and the biggest cached flows by `flow_id`). `0` disables the periodic line; the over-threshold one still fires. This is a **logging** setting only — budget enforcement runs on its own fixed cadence and is never switched off by it. |
+| `report_threshold_percent` | int ≥ 0 | `80` | Occupancy percentage above which the same report is emitted at `WARNING` regardless of the cadence (debounced to at most one per minute). `0` disables the threshold trigger. |
+
+> Sizing note: the budget is a ceiling on cached bundles, not on the process. A
+> bundle a console is actively reading is never evicted, so the real floor is
+> "however many flows are open in browsers at once". Pair the budget with the
+> systemd guardrails in
+> [docs/daemon-and-server.md](daemon-and-server.md#systemd-memory-guardrails).
 
 #### `server.auth`
 

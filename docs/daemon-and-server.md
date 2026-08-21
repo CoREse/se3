@@ -28,6 +28,7 @@ neither.
    - [Foreground vs. background (detached) mode](#foreground-vs-background-detached-mode)
    - [Runtime files: pidfile and status file](#runtime-files-pidfile-and-status-file)
    - [Flow discovery and supervision](#flow-discovery-and-supervision)
+   - [systemd memory guardrails](#systemd-memory-guardrails)
 3. [Architecture & How It Works](#architecture--how-it-works)
    - [Inside the daemon](#inside-the-daemon)
    - [Inside the central server](#inside-the-central-server)
@@ -284,6 +285,71 @@ For every tracked flow the daemon resolves the `flow_id` from that project's
 gracefully terminates any flows it spawned itself (`SIGTERM`, then `SIGKILL`
 after a grace period). Discovered flows are *not* killed: the daemon only
 supervises the lifecycle of processes it owns.
+
+---
+
+### systemd memory guardrails
+
+The server keeps every watched flow's conversation in RAM, and the
+`server.history_cache.budget_mb` setting (see
+[docs/configuration.md](configuration.md#serverhistory_cache)) is the code-level
+ceiling on that. Configure it first — it is what actually bounds the growth.
+
+The unit-level settings below are the **backstop**, not the fix: they cap
+whatever the process ends up using and make a kill recoverable, so a
+mis-sized budget, a memory bug, or an unrelated allocation degrades into a
+restart instead of a control plane that stays down until someone notices.
+
+```ini
+# /etc/systemd/system/tianluo-server.service
+[Unit]
+Description=tianluo central control-plane server
+After=network-online.target
+Wants=network-online.target
+# Do not let a crash-loop hammer the host; systemd gives up after this and the
+# unit shows as failed, which is what monitoring should alert on. These two keys
+# belong to the UNIT section (systemd.unit(5)) — systemd.service(5) only
+# cross-references them, and systemd silently ignores them under [Service].
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=tianluo
+ExecStart=/opt/tianluo/venv/bin/tianluo-server --host 127.0.0.1 --port 8080
+
+# Backstop 1 — always come back. Without this a single OOM kill (or any
+# unhandled crash) leaves every daemon disconnected and the console dark until
+# an operator intervenes. The crash-loop rate limit that bounds it lives in
+# [Unit] above.
+Restart=on-failure
+RestartSec=5s
+
+# Backstop 2 — bound the process. MemoryHigh is the soft knee: the cgroup is
+# throttled and reclaimed above it, which usually buys enough time for the
+# history-cache eviction to catch up. MemoryMax is the hard wall: the cgroup's
+# own OOM killer takes the server rather than letting the kernel pick a victim
+# elsewhere on the host. Size MemoryHigh comfortably above
+# server.history_cache.budget_mb (the budget covers cached bundles, not the
+# interpreter, the sqlite store, or in-flight request buffers).
+MemoryAccounting=yes
+MemoryHigh=768M
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target
+```
+
+After an incident, the cache-occupancy report is what attributes it — the server
+logs the total, the budget, the eviction counters and the largest cached flows by
+`flow_id` periodically and whenever occupancy crosses the report threshold:
+
+```bash
+journalctl -u tianluo-server | grep history-cache
+```
+
+A daemon unit wants the same `Restart=on-failure`; daemons are far lighter (they
+stream history rather than cache it), so memory limits there are optional.
 
 ---
 
