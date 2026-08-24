@@ -475,6 +475,288 @@ export function registerMobileResponsiveTests(ctx) {
       "an implement record must carry the step-type-implement class");
   });
 
+  // -- step-result report cards: mobile overflow hardening ------------------
+  //
+  // The report cards (12.12.0) postdate the mobile pass, so every
+  // `.step-report__*` rule was authored at the top level with no wrapping
+  // declaration, and none of them appeared inside the 600px breakpoint. A
+  // no-space token in a rendered field (a real analyze `outputs.scope` in this
+  // repo's archive carries an 83-character run) then blew the column open, and
+  // because `.flow-conversation` is its own scroll container (`overflow-y: auto`
+  // forces computed `overflow-x: auto`) the user could swipe the running console
+  // sideways — the mobile `html, body { overflow-x: hidden }` backstop never saw
+  // it. These guards lock the three layers of the fix at the correct scope; the
+  // real geometry (scrollWidth === clientWidth at 390px) is asserted by the
+  // Chromium path in tests/test_frontend_mobile_overflow.py.
+
+  check("G7 conversation wrapping rule lives inside the 600px breakpoint", () => {
+    const sel = "#flow-view .flow-conversation .conv-record,\n"
+      + "  #flow-view .flow-conversation .history-step-header,";
+    const idx = CSS.indexOf(sel);
+    assert.notEqual(idx, -1, "missing the conversation wrapping rule");
+    assert.ok(insideMobile(idx),
+      "the conversation wrapping rule must live INSIDE @media (max-width: 600px)");
+    const body = CSS.slice(idx, CSS.indexOf("}", idx));
+    // overflow-wrap/word-break INHERIT, so declaring them on the record reaches
+    // every step-report construct, markdown node and anonymous inline box.
+    assert.ok(body.includes("overflow-wrap: anywhere"),
+      "must use `anywhere` — `break-word` alone does not reduce the min-content "
+      + "contribution, so a flex item such as .step-report__stat stays wider "
+      + "than the column");
+    assert.ok(body.includes("word-break: break-word"),
+      "keep word-break: break-word for legacy-WebKit parity");
+    // Both views that share the renderers must be covered.
+    for (const view of ["#flow-view .flow-conversation", "#history-view .history-detail"]) {
+      assert.ok(body.includes(`${view} .conv-record`),
+        `${view} .conv-record must share the wrapping rule`);
+    }
+  });
+
+  check("G7 report-card flex chain carries shrink protection inside the breakpoint", () => {
+    const sel = "#flow-view .flow-conversation .step-report,";
+    const idx = CSS.indexOf(sel);
+    assert.notEqual(idx, -1, `missing report-card shrink rule ${sel}`);
+    assert.ok(insideMobile(idx), "the shrink rule must live inside the breakpoint");
+    const body = CSS.slice(idx, CSS.indexOf("}", idx));
+    for (const construct of [
+      "step-report__head", "step-report__body", "step-report__status-bar",
+      "step-report__section", "step-report__list", "step-report__kv-row",
+      "step-report__kv-nested", "step-report__conv-turn", "step-report__markdown",
+    ]) {
+      for (const view of ["#flow-view .flow-conversation", "#history-view .history-detail"]) {
+        assert.ok(body.includes(`${view} .${construct}`),
+          `${view} .${construct} must be in the shrink-protection rule`);
+      }
+    }
+    assert.ok(body.includes("min-width: 0") && body.includes("max-width: 100%"),
+      "shrink protection is min-width: 0 + max-width: 100%");
+  });
+
+  check("G7 the conversation scroll container cannot scroll horizontally on mobile", () => {
+    const sel = "#flow-view .flow-conversation {";
+    const idx = CSS.indexOf(sel);
+    assert.notEqual(idx, -1, `missing ${sel} containment rule`);
+    assert.ok(insideMobile(idx), "the containment rule must live inside the breakpoint");
+    const body = CSS.slice(idx, CSS.indexOf("}", idx));
+    assert.ok(body.includes("overflow-x: hidden"),
+      ".flow-conversation must pin overflow-x: hidden — its overflow-y: auto "
+      + "otherwise computes overflow-x to auto and the console becomes swipeable");
+  });
+
+  check("G7 constructs that override the inherited wrapping are released too", () => {
+    // The sweep works by inheritance, which reaches a construct only while it
+    // does not set the competing property itself. `.agent-badge` pins
+    // `white-space: nowrap` and `.tool-marker-name` / `.tool-marker-input-key`
+    // are `flex-shrink: 0`, so a long agent/model id or a structured
+    // `mcp__<server>__<tool>` name stays one unbreakable box wider than the
+    // column — containment would only hide it, not wrap it.
+    const badgeIdx = CSS.indexOf("#flow-view .flow-conversation .agent-badge,");
+    assert.notEqual(badgeIdx, -1, "missing the mobile agent-badge release");
+    assert.ok(insideMobile(badgeIdx), "the badge release must live inside the breakpoint");
+    const badge = CSS.slice(badgeIdx, CSS.indexOf("}", badgeIdx));
+    assert.ok(badge.includes("#history-view .history-detail .agent-badge"),
+      "the History view renders the same badge and must share the release");
+    assert.ok(badge.includes("white-space: normal"),
+      "the badge's desktop nowrap must be released, or the inherited "
+      + "overflow-wrap can never take effect");
+    assert.ok(badge.includes("overflow-wrap: anywhere") && badge.includes("max-width: 100%"));
+
+    const chipIdx = CSS.indexOf("#flow-view .flow-conversation .tool-marker-name,");
+    assert.notEqual(chipIdx, -1, "missing the mobile tool-chip release");
+    assert.ok(insideMobile(chipIdx), "the chip release must live inside the breakpoint");
+    const chip = CSS.slice(chipIdx, CSS.indexOf("}", chipIdx));
+    for (const construct of ["tool-marker-name", "tool-marker-input-key",
+                             "tool-marker-glyph", "tool-marker-toggle"]) {
+      for (const view of ["#flow-view .flow-conversation", "#history-view .history-detail"]) {
+        assert.ok(chip.includes(`${view} .${construct}`),
+          `${view} .${construct} must be released on mobile`);
+      }
+    }
+    assert.ok(chip.includes("flex-shrink: 1") && chip.includes("min-width: 0")
+      && chip.includes("overflow-wrap: anywhere"));
+
+    // Desktop keeps the one-line pill and the rigid chip-head columns.
+    const dBadge = CSS.indexOf("\n.agent-badge {");
+    assert.ok(!insideMobile(dBadge + 1));
+    assert.ok(CSS.slice(dBadge, CSS.indexOf("}", dBadge)).includes("white-space: nowrap"));
+    const dName = CSS.indexOf("\n.tool-marker-name {");
+    assert.ok(!insideMobile(dName + 1));
+    assert.ok(CSS.slice(dName, CSS.indexOf("}", dName)).includes("flex-shrink: 0"));
+  });
+
+  check("G7 the nested-kv indent ladder is bounded inside the breakpoint", () => {
+    // `renderGenericKvRow` recurses over `step.outputs` with no depth limit and
+    // `.step-report__kv-nested` is a `flex-basis: 100%` item, so every level's
+    // 16px margin + 8px padding + 1px border SUBTRACTS from the usable column.
+    // At 320px that ladder exhausts the column around the twelfth level, and
+    // wrapping cannot rescue a column with no width left. Mobile therefore
+    // narrows one level AND stops the ladder accruing past the fourth.
+    const narrow = "#flow-view .flow-conversation .step-report__kv-nested,\n"
+      + "  #history-view .history-detail .step-report__kv-nested {";
+    const nIdx = CSS.indexOf(narrow);
+    assert.notEqual(nIdx, -1, "missing the mobile nested-kv indent rule");
+    assert.ok(insideMobile(nIdx), "the indent rule must live inside the breakpoint");
+    const nBody = CSS.slice(nIdx, CSS.indexOf("}", nIdx));
+    assert.ok(nBody.includes("margin-left: 8px") && nBody.includes("padding-left: 6px"),
+      "one nested level must be narrower on a phone than the desktop ladder");
+
+    const UNIT = ".step-report__kv-nested";
+    const capHead = `#flow-view .flow-conversation ${UNIT} ${UNIT}`;
+    const cIdx = CSS.indexOf(capHead);
+    assert.notEqual(cIdx, -1,
+      `missing the nested-kv depth cap — a selector chaining ${UNIT} onto `
+      + "itself, without which indentation grows with the data");
+    assert.ok(insideMobile(cIdx), "the depth cap must live inside the breakpoint");
+    const cBody = CSS.slice(cIdx, CSS.indexOf("}", cIdx));
+    assert.ok(cBody.includes(`#history-view .history-detail ${UNIT} ${UNIT}`),
+      "the History view renders the same card and must share the depth cap");
+    // Five chained units per view (four ancestors + the matched element), so
+    // the cap engages at the fifth level and every level below it.
+    assert.ok(cBody.split(UNIT).length - 1 >= 10,
+      "the cap must chain five " + UNIT + " per view across both views");
+    for (const decl of ["margin-left: 0", "padding-left: 0", "border-left: none"]) {
+      assert.ok(cBody.includes(decl), `the depth-cap rule must reset ${decl}`);
+    }
+
+    // Desktop keeps the full ladder — this is a breakpoint overlay only.
+    const base = CSS.indexOf("\n.step-report__kv-nested {");
+    assert.ok(!insideMobile(base + 1), "the base ladder must stay outside the breakpoints");
+    const bBody = CSS.slice(base, CSS.indexOf("}", base));
+    assert.ok(bBody.includes("margin-left: 16px") && bBody.includes("padding-left: 8px"),
+      "desktop indentation must be unchanged by this pass");
+  });
+
+  check("G7 DOM: deeply nested generic outputs stay one nesting chain", () => {
+    // The CSS cap is expressed as a self-descendant chain, so it only works
+    // while app.js keeps nesting `.step-report__kv-nested` inside itself for
+    // each level. Assert the recursion still produces that shape (and still has
+    // no depth limit of its own, which is what makes the CSS cap load-bearing).
+    const LEVELS = 14;
+    let value = {leaf: "a".repeat(120)};
+    for (let i = LEVELS; i >= 1; i--) value = {[`level_${i}`]: value};
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "01_generic_probe_aa",
+      step_type: "generic_probe",
+      message: {
+        type: "step_completed", timestamp: 1,
+        data: {step_type: "generic_probe", status: "completed", outputs: {deep: value}},
+      },
+    }], false);
+    // Each level contributes exactly one wrapper, nested inside the previous
+    // one — which is precisely the shape the CSS self-descendant cap matches.
+    const wrappers = findAllG7(container, "step-report__kv-nested");
+    assert.equal(wrappers.length, LEVELS + 1,
+      `renderGenericKvRow must recurse once per level (got ${wrappers.length} `
+      + `wrappers for ${LEVELS} nested dicts + the leaf holder); if it ever `
+      + "gains its own depth limit, revisit the CSS indent cap");
+    const ancestorDepth = (node) => {
+      let d = 0;
+      for (let p = node.parentNode; p; p = p.parentNode) {
+        if (p.classList && p.classList.contains("step-report__kv-nested")) d += 1;
+      }
+      return d;
+    };
+    const depths = wrappers.map(ancestorDepth).sort((a, b) => a - b);
+    assert.deepEqual(depths, wrappers.map((_, i) => i),
+      "the wrappers must form ONE chain, each inside the previous — the mobile "
+      + "indent cap is a self-descendant selector and only bounds that shape");
+  });
+
+  check("G7 DOM: an assistant turn renders the badge and a structured tool chip", () => {
+    // The CSS release only matters while app.js still emits these constructs
+    // inside the conversation. `raw_json` drives the rich chip path, which —
+    // unlike the legacy bracket parser — renders ANY tool name, so an MCP tool
+    // name reaches `.tool-marker-name` verbatim.
+    const container = document.createElement("div");
+    const TOOL = "mcp__tianluo_flow_control_plane__inspect_running_flow_conversation";
+    app.renderConversation(container, [{
+      step_id: "01_implement_aa",
+      step_type: "implement",
+      message: {
+        role: "assistant", timestamp: 1,
+        agent_name: "oclaude-worktree-implementer-with-a-very-long-configured-name",
+        model_name: "claude-opus-5-20260514-extended-thinking[1m]",
+        content: `Calling [Tool: ${TOOL}] now.`,
+        raw_json: [
+          {type: "text", text: `Calling [Tool: ${TOOL}] now.`},
+          {type: "tool_use", id: "tu_1", name: TOOL, input: {path: "src/app.js"}},
+        ],
+      },
+    }], false);
+    const badge = findOneG7(container, "agent-badge");
+    assert.ok(badge, "the agent/model badge must render inside the conversation");
+    assert.ok(badge.textContent.includes("·"),
+      "the badge shows `agent · model`, which is the long-token case");
+    const name = findOneG7(container, "tool-marker-name");
+    assert.ok(name, "the structured chip must render a .tool-marker-name");
+    assert.equal(name.textContent, TOOL,
+      "the full mcp__server__tool name lands in .tool-marker-name — a single "
+      + "unbreakable token, which is why it needs the mobile release");
+  });
+
+  check("G7 the desktop step-report rules keep no mobile wrapping", () => {
+    // Every top-level `.step-report*` rule must stay free of the mobile-only
+    // wrapping/containment, or desktop layout would change.
+    for (const sel of [".step-report {", ".step-report__status-bar {", ".step-report__head {"]) {
+      const idx = CSS.indexOf(sel);
+      assert.notEqual(idx, -1, `missing desktop rule ${sel}`);
+      assert.ok(!insideMobile(idx), `${sel} must remain a top-level desktop rule`);
+      const body = CSS.slice(idx, CSS.indexOf("}", idx));
+      assert.ok(!body.includes("overflow-wrap: anywhere"),
+        `${sel} must not gain mobile wrapping at the top level`);
+    }
+    // The kv key column keeps its desktop alignment floor; only mobile relaxes it.
+    const kvIdx = CSS.indexOf(".step-report__kv-k {");
+    assert.ok(!insideMobile(kvIdx));
+    assert.ok(CSS.slice(kvIdx, CSS.indexOf("}", kvIdx)).includes("min-width: 100px"),
+      "the desktop kv key column must keep min-width: 100px");
+  });
+
+  check("G7 DOM: an analyze step_completed routes its scope into .step-report__stat", () => {
+    // The CSS fix reaches the scope row only because it is rendered inside the
+    // report card. If renderAnalyzeReport stops emitting the scope as a
+    // .step-report__stat inside a .conv-record, the inherited wrapping no longer
+    // applies and this guard fails before the visual regression ships.
+    const container = document.createElement("div");
+    const SCOPE = "src/tianluo/server/static/app.js " + "a".repeat(120);
+    app.renderConversation(container, [{
+      step_id: "01_analyze_aa",
+      step_type: "analyze",
+      message: {
+        type: "step_completed",
+        timestamp: 1,
+        data: {step_type: "analyze", status: "completed",
+               outputs: {task_type: "bugfix", complexity: "medium", scope: SCOPE}},
+      },
+    }], false);
+    const record = findOneG7(container, "conv-record");
+    assert.ok(record, "the step event must render inside a .conv-record");
+    const stats = findAllG7(record, "step-report__stat");
+    assert.ok(stats.length >= 3, "analyze renders task / complexity / scope stats");
+    const scopeStat = stats.find((s) => s.textContent.includes(SCOPE));
+    assert.ok(scopeStat,
+      "the whole scope string must land in a single .step-report__stat inside "
+      + "the record, which is what the inherited wrapping rule targets");
+  });
+
+  check("G7 DOM: the step-report card is a .conv-record, not a .history-step child", () => {
+    // The fix relies on inheritance from .conv-record. No `.history-step`
+    // wrapper is ever built for the conversation (only .history-step-header
+    // separators), so nothing else would clip or wrap the card.
+    const container = document.createElement("div");
+    app.renderConversation(container, [{
+      step_id: "01_test_aa",
+      step_type: "test",
+      message: {type: "step_completed", timestamp: 1,
+                data: {step_type: "test", outputs: {overall_status: "PASSED"}}},
+    }], false);
+    assert.ok(findOneG7(container, "step-report"), "the report card must render");
+    assert.equal(findAllG7(container, "history-step").length, 0,
+      "no .history-step wrapper is built for the conversation — the card must "
+      + "own its mobile overflow hardening rather than inherit containment");
+  });
+
   // -- (G10) plan-mode controls + usage region mobile behaviour -------------
   // The plan-mode selects reuse the modal form styles (full-width controls
   // inside .modal-card), and the usage tables scroll horizontally instead of

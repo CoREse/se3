@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.12.1 - 2026-08-25
+
+- Fix the running-flow console being swipeable sideways on phones: `.flow-conversation` now pins `overflow-x: hidden` at the ≤600px breakpoint, closing the gap where its `overflow-y: auto` made it its own scroll container and bypassed the global `html, body` overflow guard.
+- Fix the ANALYZE step-result card's 『范围』(scope) row overflowing the right edge — long unbroken paths and identifiers now wrap mid-token instead of forcing the status bar wider than the screen.
+- Harden every step-result report card construct for mobile: status bars, sections, lists, key/value rows, file groups, conversation turns and markdown blocks get shrink protection (`min-width: 0` / `max-width: 100%`) plus inherited `overflow-wrap: anywhere`, so no `.step-report__*` construct can push the column open.
+- Wrap long agent/model badges and structured tool names (e.g. `mcp__<server>__<tool>`) on mobile instead of letting their `white-space: nowrap` / `flex-shrink: 0` boxes overflow — previously such text was silently clipped by the overflow backstop.
+- Bound the generic-outputs nesting ladder on phones: nested key/value blocks use a narrower indent and stop accruing offset past the fourth level, so deeply nested outputs keep a usable value column at 320px instead of being squeezed to nothing.
+- Apply the same wrapping fixes to the History session detail view, which shares the conversation renderers and was silently truncating the identical content at the pane edge.
+- Add mobile-overflow regression coverage: breakpoint-scope guards in the Node frontend harness and Python static analysis, a headless-Chromium geometry test, and new manual phone-portrait items in the frontend smoke checklist.
+- Keep desktop layout unchanged — all fixes are incremental overlays inside the existing 600px mobile breakpoint, with the desktop one-line badge, aligned kv key column and full indent ladder preserved.
 ## 12.12.0 - 2026-08-21
 
 - Add dedicated WebUI result cards for `confirm`, `invariant_check`, and `adjudicate` steps, replacing the raw key/value dump with status bars, summaries, severity-grouped issues, and foldable long text.

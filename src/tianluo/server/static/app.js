@@ -13650,8 +13650,14 @@ function renderStepStartedRecord(norm) {
 // Build the conversation-row form of a step_completed / step_failed event:
 // the raw event surfaces as a default-collapsed chip (preserving the original
 // raw payload for inspection), and the default-expanded step-report card sits
-// right below it. Both live under the same `.history-step` container as the
-// step's chat messages, so they group naturally with that step's discussion.
+// right below it. Both are flat `.conv-record` siblings of the step's chat
+// messages inside the conversation container -- there is NO `.history-step`
+// wrapper here (only `.history-step-header` separator rows, emitted by
+// rebuildStepHeaders); grouping is carried by the shared `step-type-<type>`
+// lane styling, not by a containing box. Noted because the absence of that
+// wrapper also means `.history-step { overflow: hidden }` never clips this
+// card, so the card owes its own mobile overflow hardening (style.css, the
+// 600px breakpoint) rather than inheriting containment from an ancestor.
 function renderStepEventRecord(norm) {
   const isFailed = norm.kind === "step_failed";
   const row = el(

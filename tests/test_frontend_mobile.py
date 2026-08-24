@@ -470,6 +470,343 @@ def test_mobile_block_hardens_history_overflow():
         )
 
 
+# The report-card constructs that carry no wrapping declaration of their own at
+# the top level, so they depend entirely on inheriting one from the card root.
+# Listed here so a new construct added without hardening shows up as a gap.
+STEP_REPORT_CONSTRUCTS = (
+    "step-report__status-bar",
+    "step-report__stat",
+    "step-report__title",
+    "step-report__label",
+    "step-report__section-title",
+    "step-report__kv-row",
+    "step-report__kv-nested",
+    "step-report__kv-k",
+    "step-report__warn",
+    "step-report__empty",
+    "step-report__muted",
+    "step-report__file-dir",
+    "step-report__conv-turn",
+    "step-report__markdown",
+)
+
+
+def test_mobile_block_hardens_flow_conversation_overflow():
+    """The running console's conversation must not scroll sideways on a phone.
+
+    Root cause of the reported "流程界面可以左右滑动": `.flow-conversation` declares
+    `overflow-y: auto`, which per CSS makes its computed `overflow-x` `auto` too,
+    so the conversation is its own scroll container and the mobile
+    `html, body { overflow-x: hidden }` backstop never sees the overflow.
+    Meanwhile every `.step-report__*` construct is authored at the top level with
+    no wrapping declaration, so a no-space token (a real analyze `outputs.scope`
+    in this repo's archive carries an 83-character run) cannot be broken and the
+    ANALYZE scope stat blows the column open.
+    """
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+
+    # (a) The conversation scroll container is pinned closed on the x axis.
+    sel = "#flow-view .flow-conversation {"
+    assert sel in block, (
+        "missing the mobile #flow-view .flow-conversation containment rule"
+    )
+    _, _, after = block.partition(sel)
+    rule = after.split("}", 1)[0]
+    assert "overflow-x: hidden" in rule, (
+        "the conversation scroll container must pin overflow-x: hidden — its "
+        "overflow-y: auto otherwise computes overflow-x to auto and lets the "
+        "user swipe the console sideways"
+    )
+
+    # (b) Long-content wrapping on the conversation record + step separators.
+    #     overflow-wrap/word-break inherit, so this one rule reaches every
+    #     step-report construct, markdown node, .msg-chip and anonymous inline
+    #     box inside a record.
+    # Anchored on the two-selector prefix, which is unique to this rule —
+    # `.conv-record` alone also opens the older G4 containment rule.
+    wrap_sel = (
+        "#flow-view .flow-conversation .conv-record,\n"
+        "  #flow-view .flow-conversation .history-step-header,"
+    )
+    assert wrap_sel in block, "missing the flow-view conversation wrapping rule"
+    idx = block.find(wrap_sel)
+    wrap_rule = block[idx : block.find("}", idx)]
+    for needed in (
+        "#history-view .history-detail .conv-record",
+        "#history-view .history-detail .history-step-header",
+    ):
+        assert needed in wrap_rule, (
+            f"{needed} must share the conversation wrapping rule so the History "
+            f"view (which renders the same cards) wraps instead of clipping"
+        )
+    assert "overflow-wrap: anywhere" in wrap_rule, (
+        "the wrapping rule must use overflow-wrap: anywhere — `break-word` alone "
+        "does not reduce the min-content contribution, so the flex item stays "
+        "wider than the column"
+    )
+    assert "word-break: break-word" in wrap_rule, (
+        "keep word-break: break-word alongside for legacy-WebKit parity, "
+        "matching the #history-view hardening precedent"
+    )
+
+    # (c) Shrink protection along the card's flex chain.
+    shrink_sel = "#flow-view .flow-conversation .step-report,"
+    assert shrink_sel in block, "missing the report-card shrink-protection rule"
+    idx = block.find(shrink_sel)
+    shrink_rule = block[idx : block.find("}", idx)]
+    for construct in (
+        "step-report__head",
+        "step-report__body",
+        "step-report__status-bar",
+        "step-report__section",
+        "step-report__kv-row",
+        "step-report__kv-nested",
+    ):
+        for prefix in ("#flow-view .flow-conversation", "#history-view .history-detail"):
+            assert f"{prefix} .{construct}" in shrink_rule, (
+                f"{prefix} .{construct} must carry min-width: 0 / max-width: 100%"
+            )
+    assert "min-width: 0" in shrink_rule and "max-width: 100%" in shrink_rule
+
+    # The kv key column's desktop `min-width: 100px` alignment floor is a hard
+    # shrink stop on a phone; the breakpoint relaxes it.
+    kv_sel = "#flow-view .flow-conversation .step-report__kv-k,"
+    assert kv_sel in block, "missing the mobile kv-key min-width relaxation"
+    kv_rule = block[block.find(kv_sel) : block.find("}", block.find(kv_sel))]
+    assert "min-width: 0" in kv_rule
+
+    # No horizontal-scroll escape hatch is introduced anywhere in this pass:
+    # content WRAPS (the Mobile Horizontal-Overflow contract).
+    section = block[block.find("conversation long-content / step-report card") :]
+    section = section[: section.find("idle reply placeholder")]
+    assert "overflow-x: auto" not in section, (
+        "the report-card hardening must never add a horizontal-scroll escape hatch"
+    )
+
+
+def test_mobile_block_bounds_the_nested_kv_indent_ladder():
+    """Nested generic outputs must not indent themselves out of the column.
+
+    `renderGenericKvRow` recurses over `step.outputs` with no depth limit, and a
+    desktop `.step-report__kv-nested` level costs 16px margin + 8px padding +
+    1px border. Because the wrapper is a `flex-basis: 100%` item, that indent is
+    SUBTRACTIVE — every level shrinks the usable column. Measured at 320px the
+    innermost row runs out of width around the twelfth level, and wrapping
+    cannot rescue a column with no width left: the key/value paint outside the
+    card and the overflow backstop clips them. The breakpoint therefore both
+    narrows one level and stops the ladder accruing past the fourth, so total
+    indentation is a constant at any depth the renderer can reach.
+    """
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+
+    # (a) One level is narrower on a phone than on the desktop ladder. Anchored
+    #     on the flow+history selector PAIR — `.step-report__kv-nested` alone
+    #     also opens the shrink-protection rule above.
+    narrow_sel = (
+        "#flow-view .flow-conversation .step-report__kv-nested,\n"
+        "  #history-view .history-detail .step-report__kv-nested {"
+    )
+    assert narrow_sel in block, (
+        "missing the mobile nested-kv indent rule shared by the Flow and "
+        "History views (both render the same generic-outputs card)"
+    )
+    idx = block.find(narrow_sel)
+    narrow_rule = block[idx : block.find("}", idx)]
+    for decl in ("margin-left: 8px", "padding-left: 6px"):
+        assert decl in narrow_rule, f"the mobile nested-kv rule must set {decl}"
+
+    # (b) The ladder STOPS accruing past a fixed depth. The cap is expressed as
+    #     a self-descendant chain, so it matches every deeper level too and the
+    #     total indent stays bounded rather than proportional to the data.
+    unit = ".step-report__kv-nested"
+    cap_head = f"#flow-view .flow-conversation {unit} {unit}"
+    assert cap_head in block, (
+        "missing the nested-kv depth cap — a selector chaining "
+        f"{unit} onto itself, without which indentation grows with the data"
+    )
+    idx = block.find(cap_head)
+    cap_rule = block[idx : block.find("}", idx)]
+    assert f"#history-view .history-detail {unit} {unit}" in cap_rule, (
+        "the History view must share the depth cap"
+    )
+    # Five chained units per view (four ancestors + the matched element), i.e.
+    # the cap engages at the fifth level and every level below it.
+    assert cap_rule.count(unit) >= 10, (
+        f"the depth cap must chain five {unit} per view; found "
+        f"{cap_rule.count(unit)} occurrences across both views"
+    )
+    for decl in ("margin-left: 0", "padding-left: 0", "border-left: none"):
+        assert decl in cap_rule, f"the depth-cap rule must reset {decl}"
+
+    # The cap is a mobile-only overlay: the desktop ladder keeps its full
+    # per-level offset (the base rule outside every media query).
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    ranges = _media_ranges(css)
+    base = css.find(".step-report__kv-nested {")
+    assert base != -1 and not _inside_media(base, ranges), (
+        "the base nested-kv rule must stay outside the breakpoints"
+    )
+    base_rule = css[base : css.find("}", base)]
+    assert "margin-left: 16px" in base_rule and "padding-left: 8px" in base_rule, (
+        "desktop indentation must stay unchanged by this pass"
+    )
+
+
+def test_mobile_step_report_constructs_are_covered_by_inherited_wrapping():
+    """Every unhardened `.step-report__*` construct sits under `.conv-record`.
+
+    The fix relies on inheritance: one `overflow-wrap` declaration on the
+    conversation record reaches all of them. That only holds while the report
+    card is actually rendered inside a `.conv-record`, so assert app.js still
+    builds the card that way — otherwise the CSS guard above is vacuous.
+    """
+    js = APP_JS.read_text(encoding="utf-8")
+    _, _, body = js.partition("function renderStepEventRecord(norm) {")
+    assert body, "renderStepEventRecord is missing from app.js"
+    body = body[: body.find("\nfunction ")]
+    assert '"history-record conv-record role-step-event kind-"' in body, (
+        "the step-report card's row must stay a .conv-record so the mobile "
+        "wrapping rule reaches the card by inheritance"
+    )
+    # And each construct the sweep covers must still be produced by app.js —
+    # a renamed class would silently escape the hardening.
+    for construct in STEP_REPORT_CONSTRUCTS:
+        assert construct in js, (
+            f"{construct} is no longer emitted by app.js; re-check the mobile "
+            f"overflow sweep before deleting it from STEP_REPORT_CONSTRUCTS"
+        )
+
+
+def test_mobile_block_releases_the_constructs_that_opt_out_of_wrapping():
+    """Inheritance cannot reach a construct that overrides the property itself.
+
+    The conversation-wide `overflow-wrap: anywhere` above is inherited, so it
+    covers a construct only while that construct does not set the competing
+    property locally. Three do, at the top level, and each carries exactly the
+    kind of unbreakable identifier this pass is about:
+
+      * `.agent-badge` pins `white-space: nowrap` (a long configured runner name
+        plus a long model id then keeps the whole inline-block wider than the
+        bubble — `white-space` beats any inherited `overflow-wrap`);
+      * `.tool-marker-name` is a `flex-shrink: 0` flex item, so a structured
+        `mcp__<server>__<tool>` name pins the chip open;
+      * `.tool-marker-input-key` is `flex-shrink: 0` inside the detail panel,
+        where an MCP tool's argument names are arbitrary.
+
+    Without the release below they merely vanish under the `overflow-x: hidden`
+    backstop (Flow) or the pane clip (History) — silently truncated content,
+    which is what containment is there to prevent, not to substitute for.
+    """
+    block = _block_text(STYLE_CSS.read_text(encoding="utf-8"), MOBILE_BREAKPOINT_OPEN)
+
+    badge_sel = "#flow-view .flow-conversation .agent-badge,"
+    assert badge_sel in block, "missing the mobile agent-badge wrapping release"
+    idx = block.find(badge_sel)
+    badge_rule = block[idx : block.find("}", idx)]
+    assert "#history-view .history-detail .agent-badge" in badge_rule, (
+        "the History view renders the same badge and must share the release"
+    )
+    assert "white-space: normal" in badge_rule, (
+        "the badge's desktop `white-space: nowrap` must be released, or the "
+        "inherited overflow-wrap can never take effect"
+    )
+    for decl in ("max-width: 100%", "overflow-wrap: anywhere", "word-break: break-word"):
+        assert decl in badge_rule, f"the agent-badge release must carry {decl}"
+
+    chip_sel = "#flow-view .flow-conversation .tool-marker-name,"
+    assert chip_sel in block, "missing the mobile tool-chip shrink release"
+    idx = block.find(chip_sel)
+    chip_rule = block[idx : block.find("}", idx)]
+    for construct in ("tool-marker-name", "tool-marker-input-key",
+                      "tool-marker-glyph", "tool-marker-toggle"):
+        for prefix in ("#flow-view .flow-conversation", "#history-view .history-detail"):
+            assert f"{prefix} .{construct}" in chip_rule, (
+                f"{prefix} .{construct} is a non-shrinking chip-head/detail item "
+                f"and must be released on mobile"
+            )
+    for decl in ("flex-shrink: 1", "min-width: 0",
+                 "overflow-wrap: anywhere", "word-break: break-word"):
+        assert decl in chip_rule, f"the tool-chip release must carry {decl}"
+
+    # `.tool-marker-detail` is deliberately NOT released: its mobile one-line
+    # ellipsis is the chip summary's design (the full text is one tap away in
+    # the details panel), and it is asserted by the rule further up this block.
+    assert ".flow-conversation .tool-marker-detail" in block
+    detail_idx = block.find(".flow-conversation .tool-marker-detail")
+    detail_rule = block[detail_idx : block.find("}", detail_idx)]
+    assert "white-space: nowrap" in detail_rule and "text-overflow: ellipsis" in detail_rule
+
+
+def test_desktop_keeps_the_badge_and_chip_head_rigid():
+    """The release is mobile-only: desktop keeps its one-line pill and columns."""
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    ranges = _media_ranges(css)
+
+    start = css.find("\n.agent-badge {")
+    assert start != -1, "the desktop .agent-badge rule is missing"
+    assert not _inside_media(start + 1, ranges)
+    assert "white-space: nowrap" in css[start : css.find("}", start)], (
+        "the desktop badge must stay on one line"
+    )
+    for sel in ("\n.tool-marker-name {", "\n.tool-marker-input-key {"):
+        start = css.find(sel)
+        assert start != -1, f"the desktop {sel.strip()} rule is missing"
+        assert not _inside_media(start + 1, ranges)
+        assert "flex-shrink: 0" in css[start : css.find("}", start)], (
+            f"{sel.strip()} must keep its desktop non-shrinking behaviour"
+        )
+
+    for token in (
+        "#flow-view .flow-conversation .agent-badge",
+        "#flow-view .flow-conversation .tool-marker-name",
+        "#history-view .history-detail .agent-badge",
+        "#history-view .history-detail .tool-marker-name",
+    ):
+        idx = css.find(token)
+        assert idx != -1, f"expected {token!r} in style.css"
+        while idx != -1:
+            assert _inside_media(idx, ranges), (
+                f"{token!r} at offset {idx} is OUTSIDE a media query"
+            )
+            idx = css.find(token, idx + 1)
+
+
+def test_step_report_rules_stay_out_of_the_desktop_cascade():
+    """The report-card hardening is breakpoint-local — desktop stays unchanged.
+
+    Every new selector is `#flow-view .flow-conversation` / `#history-view
+    .history-detail` prefixed AND lives inside a media query, so no wide-viewport
+    rendering can match it.
+    """
+    css = STYLE_CSS.read_text(encoding="utf-8")
+    ranges = _media_ranges(css)
+    for token in (
+        "#flow-view .flow-conversation .conv-record",
+        "#flow-view .flow-conversation .step-report,",
+        "#flow-view .flow-conversation .step-report__kv-k",
+        "#flow-view .flow-conversation {",
+        "#history-view .history-detail .step-report,",
+        "#history-view .history-detail .history-step-header",
+    ):
+        idx = css.find(token)
+        assert idx != -1, f"expected {token!r} in style.css"
+        while idx != -1:
+            assert _inside_media(idx, ranges), (
+                f"{token!r} at offset {idx} is OUTSIDE a media query — it would "
+                f"change the desktop console"
+            )
+            idx = css.find(token, idx + 1)
+
+    # The desktop `.step-report__kv-k` alignment floor must survive untouched:
+    # only the mobile overlay relaxes it.
+    start = css.find("\n.step-report__kv-k {")
+    assert start != -1, "desktop .step-report__kv-k rule is missing"
+    desktop_rule = css[start : css.find("}", start)]
+    assert "min-width: 100px" in desktop_rule, (
+        "the desktop kv key column must keep its 100px alignment floor"
+    )
+
+
 def test_mobile_block_textarea_is_auto_grow_not_fixed():
     """G3: the mobile reply textarea is a WeChat-style auto-grow box — capped at
     35vh with internal scroll, no manual resize, and the old fixed 104px min is

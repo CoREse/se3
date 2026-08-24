@@ -197,6 +197,68 @@ is what the browser paints, not just that the CSS/JS source contains a rule.
       `collectJsonRegions: …` regression cases (9 new shapes, incl. the new
       bug session fixture, plus the original 3 already-covered shapes).
 
+## Mobile portrait — horizontal overflow (≤600px)
+
+Run in a **real phone-portrait viewport** (a physical phone, or device emulation
+at 390×844 *and* the 320px worst case). Automated cover: the geometry assertions
+in `tests/test_frontend_mobile_overflow.py` (headless Chromium, skipped when no
+browser is provisioned) and the breakpoint-scope guards in
+`tests/test_frontend_mobile.py` / `tests/frontend/mobile_responsive.test.mjs`.
+The items below are the purely visual judgements no assertion can make.
+
+- [ ] **The running console cannot be swiped sideways.** Open a flow with a
+      completed ANALYZE step in `#flow-view` and try to drag the conversation
+      left/right with a finger (or shift-scroll). Nothing moves horizontally —
+      the conversation only scrolls vertically. Repeat after scrolling deep into
+      a long flow with many step-result cards.
+- [ ] **The ANALYZE card's 『范围』(scope) row wraps and stays inside the right
+      edge.** Its status bar shows `task` / `complexity` / `scope`; the scope
+      text breaks onto as many lines as it needs — including mid-token for long
+      identifiers and paths such as
+      `loadFlowConversation()/__convState/flowConversationProgress/…` — and no
+      character is cut off or pushed past the card border.
+- [ ] **No step-result card overflows.** Scroll through a flow containing
+      DISCOVERY / PLAN / IMPLEMENT / TEST / SELF_CHECK / VERIFY_SPEC / COMMIT /
+      SUMMARIZE cards. Every construct stays inside the column: status bars,
+      section titles, bullet lists, key/value rows *and their indented nested
+      blocks*, file-group directory headers, warnings, the "(no outputs)" empty
+      hint, the per-step token-usage footnote, and markdown headings /
+      paragraphs / list items / inline code.
+- [ ] **Long paths and identifiers wrap rather than widen.** A file list with a
+      deep path, or an error string containing a long unbroken identifier, wraps
+      character-by-character instead of stretching the card.
+- [ ] **The agent/model badge wraps inside the bubble.** Open a flow run by an
+      agent whose configured name is long (or one whose model id carries a
+      suffix such as `claude-opus-5-…[1m]`). The `agent · model` pill at the top
+      of the assistant bubble folds onto two or more lines and its border stays
+      inside the bubble — it must not run off the right edge or be cut in half.
+- [ ] **Structured tool names wrap instead of pushing the chip open.** Find a
+      turn that called an MCP tool (`mcp__<server>__<tool>`) or any tool with a
+      long name. The chip's uppercase name wraps across lines, the ✓/✗ glyph and
+      the "details" button stay inside the column, and expanding **details**
+      shows an argument list whose key column also wraps.
+- [ ] **Deliberate truncation / internal scrolling survives.** The tool-call chip
+      summary still truncates to a **single line with an ellipsis** (it must NOT
+      start wrapping onto several lines), and the charter-diff block still has
+      its **own internal scrollbar** capped at ~320px tall.
+- [ ] **History view shows the same content wrapped, not clipped.** Open the same
+      flow under History → session detail on the phone. The step-result cards
+      render the identical text, now wrapping — no sentence is cut off at the
+      pane's right edge (before this fix the pane's `overflow-x: hidden`
+      silently truncated it).
+- [ ] **Deeply nested generic outputs stay readable.** Find (or replay) a step
+      whose `outputs` nest dicts several levels deep — an unknown step type
+      renders them as indented key/value ladders. On a 320px screen the ladder
+      stops indenting after the fourth level: deeper rows sit at the same offset
+      instead of marching toward the right edge, and their values still have a
+      usable column to wrap into rather than being squeezed to nothing and cut
+      off. Judge readability here — the geometry itself is asserted.
+- [ ] **Desktop is unchanged.** On a >600px window the running console and
+      History detail look exactly as before: the scope row stays on one line
+      where it fits, kv key columns stay aligned at their 100px column, nested
+      key/value blocks keep the full 16px-per-level indent ladder, and no text
+      breaks mid-word.
+
 ## Regression
 
 - [ ] `pytest` (full suite, `testpaths = ["tests"]`) passes — see

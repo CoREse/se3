@@ -3871,6 +3871,200 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
     word-break: break-word;
   }
 
+  /* -- conversation long-content / step-report card overflow hardening ----- *
+   * The step-result report cards (`.step-report__*`) were introduced long after
+   * the mobile pass and never received its treatment: every one of their rules
+   * is authored at the top level and carries no wrapping declaration, so a
+   * no-space token in a rendered field (a real analyze `outputs.scope` in this
+   * repo's own archive contains an 83-character
+   * `loadFlowConversation()/__convState/...` run) cannot be broken. Two distinct
+   * manifestations follow from that single cause, and they need different
+   * remedies, so both layers below are load-bearing:
+   *
+   *   - a flex item such as `span.step-report__stat` resolves its automatic
+   *     `min-width: auto` to its min-content width — the longest unbreakable
+   *     word — so the BOX itself grows past the column and `flex-wrap: wrap` on
+   *     `.step-report__status-bar` cannot help (the item alone is wider than the
+   *     whole line);
+   *   - a block construct (`__section-title`, `__file-dir`, `__warn`, `.md-p`,
+   *     the class-less text node inside `.step-report__conv-turn`, …) keeps its
+   *     100% box but paints its inline text past the right edge.
+   *
+   * `overflow-wrap: anywhere` (NOT `break-word`) is the fix for both: only
+   * `anywhere` also reduces the min-content contribution, which is what lets the
+   * flex item shrink; `break-word` alone leaves the blowout intact. `min-width:
+   * 0` on the flex chain is necessary-but-insufficient complementary shrink
+   * protection — on its own it narrows the box while the token still paints
+   * outside it. `word-break: break-word` rides along for legacy-WebKit parity,
+   * matching the `#history-view` hardening precedent above.
+   *
+   * Both properties INHERIT, so one declaration on `.conv-record` reaches every
+   * `.step-report__*` construct, every markdown node, the `.msg-chip` step-event
+   * label, and every anonymous inline box inside them — which is what makes this
+   * a sweep rather than a per-construct patch. The two conversation-level
+   * siblings that are not inside a record (`.history-step-header` separators)
+   * are listed explicitly. Constructs that deliberately clip or scroll
+   * internally are untouched by wrapping: `.step-report__diff` keeps its own
+   * `overflow: auto` viewport, and `.flow-conversation .tool-marker-detail`
+   * keeps its `white-space: nowrap` + ellipsis truncation (neither responds to
+   * `overflow-wrap`).
+   *
+   * Scoped to `#flow-view .flow-conversation` / `#history-view .history-detail`
+   * per the breakpoint-overlay convention, so desktop and every other view stay
+   * byte-for-byte unchanged. In the History view the very same content was
+   * already overflowing — silently CLIPPED by `#history-view
+   * .history-detail-pane { overflow-x: hidden }` rather than scrollable — so the
+   * same rules turn that truncation into proper wrapping. */
+  #flow-view .flow-conversation .conv-record,
+  #flow-view .flow-conversation .history-step-header,
+  #history-view .history-detail .conv-record,
+  #history-view .history-detail .history-step-header {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  /* Shrink protection along the report card's flex chain. Every one of these is
+   * a flex container whose children default to `min-width: auto`; without the
+   * explicit `0` a single wide descendant can still pin an ancestor open even
+   * once its text wraps, and `max-width: 100%` caps the box at the column. */
+  #flow-view .flow-conversation .step-report,
+  #flow-view .flow-conversation .step-report__head,
+  #flow-view .flow-conversation .step-report__body,
+  #flow-view .flow-conversation .step-report__status-bar,
+  #flow-view .flow-conversation .step-report__section,
+  #flow-view .flow-conversation .step-report__list,
+  #flow-view .flow-conversation .step-report__kv,
+  #flow-view .flow-conversation .step-report__kv-row,
+  #flow-view .flow-conversation .step-report__kv-nested,
+  #flow-view .flow-conversation .step-report__files,
+  #flow-view .flow-conversation .step-report__file-group,
+  #flow-view .flow-conversation .step-report__conv-turn,
+  #flow-view .flow-conversation .step-report__markdown,
+  #history-view .history-detail .step-report,
+  #history-view .history-detail .step-report__head,
+  #history-view .history-detail .step-report__body,
+  #history-view .history-detail .step-report__status-bar,
+  #history-view .history-detail .step-report__section,
+  #history-view .history-detail .step-report__list,
+  #history-view .history-detail .step-report__kv,
+  #history-view .history-detail .step-report__kv-row,
+  #history-view .history-detail .step-report__kv-nested,
+  #history-view .history-detail .step-report__files,
+  #history-view .history-detail .step-report__file-group,
+  #history-view .history-detail .step-report__conv-turn,
+  #history-view .history-detail .step-report__markdown {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  /* The desktop kv key column carries `min-width: 100px` to align field names.
+   * On a phone that floor is a hard shrink stop that a nested kv block (whose
+   * per-level indent is bounded just below) can still push past the column
+   * edge, so the alignment aid is dropped here and the key simply wraps with
+   * everything else. */
+  #flow-view .flow-conversation .step-report__kv-k,
+  #history-view .history-detail .step-report__kv-k {
+    min-width: 0;
+  }
+
+  /* Bounded nesting ladder. `renderGenericKvRow` recurses over `step.outputs`
+   * with no depth limit, and one desktop level of `.step-report__kv-nested`
+   * costs 16px margin + 8px padding + 1px border. That ladder is subtractive:
+   * the wrapper is a `flex-basis: 100%` item, so every level shrinks the usable
+   * column by 25px. Measured at 320px, the innermost row bottoms out at ~9px of
+   * content around the twelfth level and its key/value then paint OUTSIDE the
+   * card, where the overflow backstop clips them instead of wrapping them —
+   * wrapping cannot rescue a column that has no width left.
+   *
+   * So the phone bounds the ladder instead of leaving it proportional to the
+   * data: one level narrows to 8px + 6px, and past the fourth level the indent
+   * stops accruing altogether (the selector matches any nested block that
+   * already has four `.step-report__kv-nested` ancestors, so total indentation
+   * is a constant ~52px at ANY depth the renderer can produce). Deeper levels
+   * lose their visual offset, which is the deliberate trade: nesting depth
+   * stays legible from the key names, while a non-zero value column does not
+   * exist at all unless it is defended. Desktop keeps the full ladder. */
+  #flow-view .flow-conversation .step-report__kv-nested,
+  #history-view .history-detail .step-report__kv-nested {
+    margin-left: 8px;
+    padding-left: 6px;
+  }
+  #flow-view .flow-conversation .step-report__kv-nested .step-report__kv-nested
+    .step-report__kv-nested .step-report__kv-nested .step-report__kv-nested,
+  #history-view .history-detail .step-report__kv-nested .step-report__kv-nested
+    .step-report__kv-nested .step-report__kv-nested .step-report__kv-nested {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: none;
+  }
+
+  /* -- constructs that opt OUT of the inherited wrapping ------------------- *
+   * The sweep above works by inheritance, which reaches a construct only while
+   * it does not override the inherited property itself. Three conversation
+   * constructs do exactly that at the top level, and all three carry precisely
+   * the kind of unbreakable identifier this pass is about, so each needs an
+   * explicit mobile release:
+   *
+   *   - `.agent-badge` pins `white-space: nowrap` so the desktop "agent · model"
+   *     pill reads as one unit. `white-space` beats any inherited
+   *     `overflow-wrap`, so a long configured runner name plus a long model id
+   *     keeps the inline-block box itself wider than the bubble.
+   *   - `.tool-marker-name` is a `flex-shrink: 0` flex item (desktop deliberately
+   *     keeps the tool name at natural width and truncates the DETAIL instead).
+   *     A structured `mcp__<server>__<tool>` name — uppercased and letter-spaced
+   *     by the desktop rule, so wider still — is one unbreakable token that then
+   *     pins the whole chip open.
+   *   - `.tool-marker-input-key` is `flex-shrink: 0` for the same reason inside
+   *     the expanded detail panel; an unregistered/MCP tool's argument names are
+   *     arbitrary, so the key column cannot be assumed short there.
+   *
+   * The chip head's two remaining `flex-shrink: 0` members — `.tool-marker-glyph`
+   * and the `.tool-marker-toggle` button — ride along. Their content is short
+   * today (a ✓/✗ glyph and one i18n word), but they are the last items that can
+   * pin the head open, and the toggle's label is translatable, so leaving them
+   * rigid would just re-open this hole in another language.
+   *
+   * Without this block those constructs merely disappear under the `overflow-x:
+   * hidden` backstop below (Flow) or the pane clip (History) — i.e. the text is
+   * silently cut off, which is what the containment guard is there to prevent,
+   * not to substitute for. On mobile they are released to wrap inside the
+   * column; `.tool-marker-detail` is NOT touched, because its one-line
+   * ellipsis is a deliberate mobile design (it is the chip's summary, and the
+   * full text is one tap away in the details panel). */
+  #flow-view .flow-conversation .agent-badge,
+  #history-view .history-detail .agent-badge {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+  #flow-view .flow-conversation .tool-marker-name,
+  #flow-view .flow-conversation .tool-marker-input-key,
+  #flow-view .flow-conversation .tool-marker-glyph,
+  #flow-view .flow-conversation .tool-marker-toggle,
+  #history-view .history-detail .tool-marker-name,
+  #history-view .history-detail .tool-marker-input-key,
+  #history-view .history-detail .tool-marker-glyph,
+  #history-view .history-detail .tool-marker-toggle {
+    flex-shrink: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  /* Scroll containment — the backstop, not the fix. `.flow-conversation`
+   * declares `overflow-y: auto`, which per CSS forces its computed `overflow-x`
+   * to `auto` as well, making the conversation its OWN scroll container. That is
+   * precisely why the mobile `html, body { overflow-x: hidden }` guard above
+   * never saw this overflow (`.flow-view` is `position: fixed; inset: 0`, so the
+   * document itself never grew) and why the console could be swiped sideways.
+   * Pinning `overflow-x: hidden` here — the same backstop
+   * `#history-view .history-detail-pane` already carries — means a future
+   * unhardened renderer can never reintroduce the swipe. */
+  #flow-view .flow-conversation {
+    overflow-x: hidden;
+  }
+
   /* -- idle reply placeholder: shrink so it fits one line (problem 2) ------ *
    * The idle "可先草拟回复,或点 ✎ 插话…" placeholder rides the 16px form-field
    * floor (the iOS-zoom guard above), which on a phone wraps to two lines in the
