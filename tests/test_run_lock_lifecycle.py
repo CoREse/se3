@@ -286,6 +286,9 @@ def test_interrupt_while_waiting_clears_flag_before_persist(project: Path) -> No
         mock_pm.load_flow_by_id.return_value = flow
         mock_pm._peek_active_flow_id.return_value = flow.flow_id
         mock_pm.save_flow.side_effect = lambda f: saved_flags.append(f.waiting_for_lock)
+        # run.pid is published through persistence.state_dir; a bare MagicMock
+        # attribute fspaths to a relative junk path the marker guard rejects.
+        mock_pm.state_dir = project / "tianluo" / "state"
 
         mock_sm_class.return_value = MagicMock()
 

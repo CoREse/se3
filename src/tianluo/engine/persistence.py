@@ -252,8 +252,18 @@ class PersistenceManager:
 
         Args:
             project_root: Root directory of the project
+
+        A relative root is absolutized against the cwd: ``state_dir`` is handed
+        to :func:`~tianluo.core.run_pidfile.acquire_run_marker`, whose ownership
+        token has to name one file every writer of the flow agrees on, and a
+        cwd-relative root would silently name a different one per working
+        directory (the guard there rejects it outright). An already-absolute
+        root — what every caller that derives it from ``Path.cwd()`` or git
+        passes — is kept byte-for-byte, so nothing is re-canonicalized behind
+        a caller's back.
         """
-        self.project_root = Path(project_root)
+        root = Path(project_root)
+        self.project_root = root if root.is_absolute() else root.resolve()
         self.state_dir = runtime_dir(self.project_root) / "state"
         self.state_file = self.state_dir / self.STATE_FILENAME
         self.context_file = self.state_dir / self.CONTEXT_FILENAME

@@ -285,9 +285,37 @@ def acquire_run_marker(
     never reclaimed here — that stays the operator's explicit act on the owning
     machine. Passing ``None`` disables reclamation entirely.
 
-    Never raises.
+    Never raises for a RUNTIME failure: an unwritable/absent state dir, EACCES,
+    EIO, ENOSPC and every other environmental error is folded into a fail-closed
+    :class:`MarkerClaim` rather than an exception, because those callers must
+    keep their "blocked" semantics. That contract does NOT cover a PROGRAMMING
+    error in the argument itself: *state_dir* is validated first and a
+    non-absolute path raises :class:`ValueError` before anything touches the
+    filesystem.
+
+    WHY the absolute-path guard: the marker's whole job is to name ONE state dir
+    that every writer agrees on, so a path interpreted against the caller's
+    current working directory can never be the right one. In practice the way a
+    relative path arrives here is a test that mocked the persistence layer away
+    — ``os.fspath`` on a bare ``MagicMock`` yields ``MagicMock/<name>/<id>``,
+    which used to be really ``mkdir``-ed under the repo root, silently, once per
+    test. Refusing loudly turns that leak into an immediate failure instead of
+    disk litter, and no legitimate caller is affected: production state dirs are
+    derived from a cwd- or git-resolved project root, and the one entry point
+    that takes a root from the operator (``luo end-session -p``) absolutizes it
+    before the claim — see :func:`~tianluo.commands.end_session_cmd._resolve_main_root`
+    and :class:`~tianluo.engine.persistence.PersistenceManager`.
+
+    Raises:
+        ValueError: if *state_dir* does not resolve to an absolute path.
     """
-    state_dir = Path(state_dir)
+    resolved = Path(os.fspath(state_dir))
+    if not resolved.is_absolute():
+        raise ValueError(
+            "acquire_run_marker requires an absolute state_dir; got "
+            f"{resolved!r} from a {type(state_dir).__name__}"
+        )
+    state_dir = resolved
     marker = state_dir / RUN_PID_FILENAME
     try:
         state_dir.mkdir(parents=True, exist_ok=True)

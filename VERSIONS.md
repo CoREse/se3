@@ -1,5 +1,13 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.12.2 - 2026-08-25
+
+- Reject a non-absolute `state_dir` in `acquire_run_marker` with `ValueError` before any filesystem write, so a mocked persistence layer can no longer create stray directories on disk
+- Document the boundary of the marker's "never raises" contract: runtime/environment failures still fail closed, argument programming errors now surface immediately
+- Absolutize a relative `project_root` in `PersistenceManager`, keeping already-absolute roots byte-for-byte so nothing is re-canonicalized behind a caller's back
+- Absolutize an operator-supplied `luo end-session -p <relative-path>` to the same canonical form `luo run` derives from the working directory
+- Give real temporary state directories to the run-command tests that mocked `PersistenceManager`, ending the per-run accumulation of empty `MagicMock/` directory trees in the repository root
+- Add guard coverage in `tests/core/test_run_pidfile.py` for rejected relative and mock state dirs, asserting no directories are created
 ## 12.12.1 - 2026-08-25
 
 - Fix the running-flow console being swipeable sideways on phones: `.flow-conversation` now pins `overflow-x: hidden` at the ≤600px breakpoint, closing the gap where its `overflow-y: auto` made it its own scroll container and bypassed the global `html, body` overflow guard.

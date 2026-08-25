@@ -497,6 +497,62 @@ class TestOwnershipClaim:
         holder = foreign_run_holder(_state_dir(tmp_path))
         assert holder is not None and holder.pid == FOREIGN_PID
 
+    def test_operator_supplied_relative_root_is_absolutized(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``-p .`` / ``-p ..`` must reach the claim as an absolute root.
+
+        ``acquire_run_marker`` refuses a cwd-relative state dir, so a root left
+        relative would blow up inside the claim instead of taking it.
+        """
+        nested = tmp_path / "repo" / "sub"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        assert end_session_cmd._resolve_main_root(Path(".")) == nested.resolve()
+        assert (
+            end_session_cmd._resolve_main_root(Path(".."))
+            == (tmp_path / "repo").resolve()
+        )
+
+    def test_relative_root_claims_and_completes_the_destructive_window(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """``luo end-session -p .`` must not abort after killing the run.
+
+        Step 3c sits outside the try/finally that releases the claim, so a
+        raising claim would leave the session un-archived with its process
+        already dead — the failure mode a relative root produced.
+        """
+        from tianluo.core.run_pidfile import read_run_holder
+
+        (tmp_path / "repo" / ".git").mkdir(parents=True)
+        root = (tmp_path / "repo").resolve()
+        monkeypatch.chdir(root)
+        monkeypatch.setattr(
+            end_session_cmd,
+            "_terminate_session_process",
+            lambda **kwargs: (True, "no process"),
+        )
+        during: list = []
+        monkeypatch.setattr(
+            end_session_cmd,
+            "_archive_main_session",
+            lambda *a, **k: during.append(read_run_holder(_state_dir(root))),
+        )
+
+        exit_code = end_session_cmd.end_session(
+            project_root=Path("."), flow_id="flow-rel"
+        )
+
+        assert exit_code == 0
+        # The claim landed in the real state dir, was held across the archive...
+        assert during and during[0] is not None
+        assert during[0].pid == os.getpid()
+        assert during[0].machine_id == stable_machine_id()
+        # ... and was released, so the flow is resumable again.
+        assert not (_state_dir(root) / "run.pid").exists()
+
     def test_release_only_unlinks_our_own_claim(self, tmp_path: Path) -> None:
         marker = end_session_cmd._claim_run_marker(tmp_path, "flow-x")
         assert marker is not None

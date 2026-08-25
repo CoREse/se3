@@ -246,6 +246,63 @@ class TestExclusivePublication:
         assert not (tmp_path / "run.pid").exists()
 
 
+class TestAbsoluteStateDirGuard:
+    """A non-absolute *state_dir* is a programming error, not a runtime failure.
+
+    The marker names ONE state dir every writer must agree on, so a path read
+    against the caller's cwd can never be it. The way such a path actually
+    reached here was a test that mocked the persistence layer away: ``os.fspath``
+    on a bare ``MagicMock`` yields a relative ``MagicMock/<name>/<id>``, which was
+    then really created under the repo root — silently, once per test, forever.
+    Raising keeps that leak impossible AND makes it fail loudly instead of
+    passing while covering nothing.
+    """
+
+    def test_a_bare_magicmock_state_dir_raises_and_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        # cwd is the directory the relative fspath would have been created under.
+        monkeypatch.chdir(tmp_path)
+        before = set(os.listdir(tmp_path))
+
+        with pytest.raises(ValueError):
+            acquire_run_marker(MagicMock().state_dir, "flow-a")
+
+        assert set(os.listdir(tmp_path)) == before
+
+    def test_a_relative_state_dir_raises_and_writes_nothing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValueError):
+            acquire_run_marker(Path("relative/state"), "flow-a")
+
+        assert not (tmp_path / "relative").exists()
+
+    def test_the_guard_precedes_the_never_raises_contract(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Runtime failures still fold into a blocked claim, not an exception.
+
+        Only the argument check raises; everything environmental keeps the
+        fail-closed ``MarkerClaim`` the destructive callers depend on.
+        """
+        real_mkdir = Path.mkdir
+
+        def _boom(self, *a, **k):
+            raise OSError(errno.EACCES, "denied")
+
+        monkeypatch.setattr(Path, "mkdir", _boom)
+        try:
+            claim = acquire_run_marker(tmp_path, "flow-a")
+        finally:
+            monkeypatch.setattr(Path, "mkdir", real_mkdir)
+        assert not claim.acquired and claim.blocked
+
+
 class TestReleaseRules:
     def test_release_only_drops_our_own_record(self, tmp_path: Path) -> None:
         assert acquire_run_marker(tmp_path, "flow-a").acquired

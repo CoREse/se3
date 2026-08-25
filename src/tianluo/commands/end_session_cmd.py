@@ -271,12 +271,23 @@ def _resolve_main_root(project_root: Optional[Path]) -> Optional[Path]:
     A worktree isolation directory (``<main>/tianluo/worktrees/<name>``) is
     normalized back to its owning ``<main>`` so the archival writes land in the
     main project, not inside the worktree we are about to delete.
+
+    WHY the root is absolutized here: an operator-supplied ``-p .`` / ``-p ..``
+    is relative, while everything downstream must name the ONE state dir every
+    other writer of this flow agrees on — the ownership claim in particular
+    (:func:`_claim_run_marker` → ``acquire_run_marker``) rejects a
+    cwd-relative state dir outright, since a path read against a working
+    directory cannot be that agreed-on file. Auto-detection already yields a
+    cwd-derived absolute path, so this only normalizes the explicit-``-p`` case,
+    to the same canonical form ``luo run`` derives from ``Path.cwd()``.
     """
     if project_root is None:
         project_root = _find_project_root()
         if project_root is None:
             return None
     project_root = Path(project_root)
+    if not project_root.is_absolute():
+        project_root = project_root.resolve()
     try:
         from ..daemon.supervisor import resolve_worktree_main_root
 

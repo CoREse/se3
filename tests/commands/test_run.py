@@ -29,6 +29,19 @@ from tianluo.engine.persistence import PersistenceManager
 from tianluo.commands.run import run_flow
 
 
+def _stub_state_dir(mock_pm: MagicMock, project_root: Path) -> None:
+    """Give a mocked ``PersistenceManager`` a REAL, absolute ``state_dir``.
+
+    WHY: ``run_flow`` hands ``persistence.state_dir`` to ``acquire_run_marker``,
+    which creates that directory to publish ``run.pid``. Left as a bare
+    ``MagicMock`` attribute it fspaths to a relative ``MagicMock/<name>/<id>``,
+    which used to be really mkdir-ed under the repo root once per test — and is
+    now refused outright by the marker's absolute-path guard.
+    """
+    mock_pm.state_dir = project_root / "tianluo" / "state"
+
+
+
 class TestResumeDetection:
     """Test resume detection logic in run_flow."""
 
@@ -115,6 +128,7 @@ class TestResumeDetection:
         # Setup mock persistence to return self.flow directly
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -148,6 +162,7 @@ class TestResumeDetection:
 
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -178,6 +193,7 @@ class TestResumeDetection:
 
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         # engine.json no longer holds this flow (overwritten by a later run).
         mock_pm.load_flow.return_value = None
         mock_pm._peek_active_flow_id.return_value = None
@@ -212,6 +228,7 @@ class TestResumeDetection:
         # Setup mock persistence to return self.flow directly
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -288,6 +305,7 @@ class TestResumeDetection:
         # Setup mock persistence to return self.flow directly
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -327,6 +345,7 @@ class TestResumeDetection:
         # Setup mock persistence to return self.flow directly
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -365,6 +384,7 @@ class TestResumeDetection:
         # Setup mock persistence to return self.flow directly
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -456,6 +476,7 @@ class TestResumeFailedFlow:
         """Test that resuming a FAILED step transitions it to PENDING."""
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -484,6 +505,7 @@ class TestResumeFailedFlow:
         """Test that resuming a FAILED flow resets flow status to RUNNING."""
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -520,6 +542,7 @@ class TestResumeFailedFlow:
         """Test that resuming a FAILED step resets retry_count to 0."""
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -549,6 +572,7 @@ class TestResumeFailedFlow:
         """Test that resuming a FAILED step increments input retry_count for conversation history."""
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -582,6 +606,7 @@ class TestResumeFailedFlow:
 
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.
@@ -903,6 +928,7 @@ class TestOutputFormatEventStream:
     def _run(self, mock_sm_class, mock_pm_class, output_format):
         mock_pm = MagicMock()
         mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
         mock_pm.load_flow.return_value = self.flow
         # Resume now loads header-first via load_flow_by_id (issue #244 B4); the
         # legacy load_flow stub is retained for any non-resume caller.

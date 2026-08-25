@@ -56,8 +56,12 @@ class TestRunFlowMainLock:
     @patch("tianluo.commands.run.PersistenceManager")
     @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_sync_run_defers_acquire_and_releases_lock(
-        self, MockLock, _MockPersist, _MockSM, mock_impl, mock_resolve
+        self, MockLock, _MockPersist, _MockSM, mock_impl, mock_resolve, tmp_path
     ):
+        # The project roots here are fictitious, so the mocked persistence gets a
+        # real per-test state dir: run_flow publishes run.pid through it, and a
+        # bare MagicMock attribute would fspath to a relative junk path.
+        _MockPersist.return_value.state_dir = tmp_path / "state"
         lock = MockLock.return_value
         rc = run.run_flow(
             project_root=Path("/repo"),
@@ -81,8 +85,9 @@ class TestRunFlowMainLock:
     @patch("tianluo.commands.run.PersistenceManager")
     @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_worktree_body_takes_no_lock(
-        self, MockLock, _MockPersist, _MockSM, mock_impl
+        self, MockLock, _MockPersist, _MockSM, mock_impl, tmp_path
     ):
+        _MockPersist.return_value.state_dir = tmp_path / "state"
         rc = run.run_flow(
             project_root=Path("/wt"),
             task_description="do it",
@@ -97,8 +102,9 @@ class TestRunFlowMainLock:
     @patch("tianluo.commands.run.PersistenceManager")
     @patch("tianluo.commands.merge.merge_lock.MergeLock")
     def test_lock_released_even_when_impl_raises(
-        self, MockLock, _MockPersist, _MockSM, mock_impl, _mock_resolve
+        self, MockLock, _MockPersist, _MockSM, mock_impl, _mock_resolve, tmp_path
     ):
+        _MockPersist.return_value.state_dir = tmp_path / "state"
         lock = MockLock.return_value
         mock_impl.side_effect = RuntimeError("boom")
         try:

@@ -100,6 +100,9 @@ def _run_failed_flow(
         mock_pm.load_flow.return_value = flow
         mock_pm.load_flow_by_id.return_value = flow
         mock_pm._peek_active_flow_id.return_value = flow.flow_id
+        # run.pid is published through persistence.state_dir; a bare MagicMock
+        # attribute fspaths to a relative junk path the marker guard rejects.
+        mock_pm.state_dir = project_root / "tianluo" / "state"
 
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm

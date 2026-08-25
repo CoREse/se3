@@ -1,0 +1,42 @@
+id: '301'
+description: '## 现象
+
+
+  仓库根目录出现 `MagicMock/` 目录树（`MagicMock/{mock.state_dir,PersistenceManager().state_dir}/<id>/`），全部为空目录，截至
+  2026-08-25 已累积 1684 个。首次出现于 2026-08-20 22:04，此后每轮测试都会新增一批（08-21 一天新增约 970 个），只增不减。已被
+  .gitignore 的 `/*` 白名单规则覆盖，不会进 git，但属于持续的测试污染。
+
+
+  ## 根因（确定性，非偶发）
+
+
+  1. tests/commands/test_run.py 大量测试用 `@patch("tianluo.commands.run.PersistenceManager")`
+  mock 掉持久层，`persistence.state_dir` 是 MagicMock。
+
+  2. run.py 将其传给 `acquire_run_marker(persistence.state_dir, ...)`（commit 5f5fd922，2026-08-21
+  引入）。
+
+  3. run_pidfile.py:290 处 `Path(state_dir)` 调用 `os.fspath()`，而 MagicMock 的 `__fspath__`
+  返回字符串 `MagicMock/<mock名>/<id>`；随后 `mkdir(parents=True, exist_ok=True)` 在 CWD（仓库根）真实建出目录。
+
+  4. 每个 mock 的 id（内存地址）不同 → 每个用例每轮运行都创建新目录，永不命中 exist_ok 去重。
+
+
+  ## 修复建议
+
+
+  - 测试层（根治）：受影响测试给 mock 赋真实路径 `mock_pm.return_value.state_dir = tmp_path`。
+
+  - 产品层（可选加固）：acquire_run_marker 对传入路径做健全性检查（如要求绝对路径），避免编程错误被 "Never raises" 语义静默吞掉——目前
+  mock 一路走到磁盘写入而没有任何测试失败，说明这些测试并未真正覆盖 marker 逻辑。
+
+  - 清理：`rm -rf MagicMock/`（修复测试后执行，否则会长回来）。'
+status: in-progress
+tags:
+- test-pollution
+- run-pidfile
+source: human
+created_at: '2026-08-25T11:16:16.636670'
+updated_at: '2026-08-25T15:17:28.111121'
+title: 测试污染：mock 的 state_dir 被真实 mkdir，仓库根目录不断堆积 MagicMock/ 空目录
+type: bug

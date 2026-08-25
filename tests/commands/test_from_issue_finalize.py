@@ -732,6 +732,9 @@ class TestSyncFromIssueResumeFinalizeE2E:
         mock_pm = MagicMock()
         mock_pm.load_flow.return_value = flow
         mock_pm.load_flow_by_id.return_value = flow
+        # run.pid is published through persistence.state_dir; a bare MagicMock
+        # attribute fspaths to a relative junk path the marker guard rejects.
+        mock_pm.state_dir = tmp_path / "tianluo" / "state"
 
         mock_sm = MagicMock()
         mock_sm.run_step.return_value = StepStatus.COMPLETED
@@ -768,6 +771,9 @@ class TestSyncFromIssueResumeFinalizeE2E:
         mock_pm = MagicMock()
         mock_pm.load_flow.return_value = flow
         mock_pm.load_flow_by_id.return_value = flow
+        # run.pid is published through persistence.state_dir; a bare MagicMock
+        # attribute fspaths to a relative junk path the marker guard rejects.
+        mock_pm.state_dir = tmp_path / "tianluo" / "state"
 
         mock_sm = MagicMock()
         # The step fails again with retries already exhausted → auto-fail branch.
@@ -797,6 +803,9 @@ class TestSyncFromIssueResumeFinalizeE2E:
         mock_pm = MagicMock()
         mock_pm.load_flow.return_value = flow
         mock_pm.load_flow_by_id.return_value = flow
+        # run.pid is published through persistence.state_dir; a bare MagicMock
+        # attribute fspaths to a relative junk path the marker guard rejects.
+        mock_pm.state_dir = tmp_path / "tianluo" / "state"
 
         mock_sm = MagicMock()
         mock_sm.run_step.return_value = StepStatus.FAILED
