@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.12.3 - 2026-08-26
+
+- Fold a still-present previous finding into the current round's finding at the same evidence line, so one defect produces one fix-loop entry instead of a duplicate per round
+- Carry the folded statement — including its verbatim expectation-source quote — inside divergence so every existing fix-step renderer shows it without any renderer change, and surface the surviving finding's own expectation source the same way
+- Keep identity comparison on a finding's own wording only, so folding never shifts a finding's pairing identity or dedup signature
+- Transfer a deduped-away duplicate's carried statements (and the higher severity) onto the surviving finding, so dedup can never drop content a fold had promised to keep
+- Record folds in a new folded_still_present_count stat that travels with validation_stats into step outputs and is excluded from the dropped-reason summary
+- Compute the dropped-issue summary log from the structural-validation stage only, so it no longer contradicts the per-reason rejection counters once findings are folded or re-admitted
+- Preserve the fail-closed verbatim re-admission path unchanged when a previous finding has no counterpart at the same position or was not individually verdicted
+- Add regression coverage for same-position folding, non-folding at differing positions, counter/log self-consistency, identity invariance across a fold, and carry-block transfer on dedup
 ## 12.12.2 - 2026-08-25
 
 - Reject a non-absolute `state_dir` in `acquire_run_marker` with `ValueError` before any filesystem write, so a mocked persistence layer can no longer create stray directories on disk

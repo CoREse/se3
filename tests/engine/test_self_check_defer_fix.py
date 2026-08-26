@@ -46,6 +46,11 @@ from tianluo.engine.steps.self_check import (
     self_check_handler,
     _merge_dedup_issues,
     _issue_signature,
+    _describe_issue,
+    _has_critical_or_high,
+    _fold_still_present_into_current,
+    _classify_still_present_prev_issues,
+    _FOLD_MARKER,
 )
 
 
@@ -209,6 +214,541 @@ class TestMergeDedup:
         empty = {"severity": "low"}
         merged = _merge_dedup_issues([], [empty, empty])
         assert len(merged) == 2
+
+    def test_duplicate_carrying_nothing_is_dropped_exactly_as_before(self):
+        a = _valid_issue(actual="alpha bug", path="a.py")
+        a_copy = _valid_issue(actual="alpha bug", path="a.py",
+                              quote="handle edge cases")
+        merged = _merge_dedup_issues([a], [a_copy])
+        assert merged == [a]
+
+
+class TestDedupCarryBlockTransfer:
+    """A deduped-away duplicate must not take a carried statement with it.
+
+    The dedup RULE is untouched — same signature, same survivor. What the
+    fold adds is that a duplicate may be carrying a previous finding whose
+    only route into the fix loop is that carry region, so the region moves
+    onto the survivor before the duplicate is discarded.
+    """
+
+    @staticmethod
+    def _carrying(*, own="shared wording", severity="medium",
+                  prev_severity="medium", prev_actual="previous round wording"):
+        prev = _valid_issue(actual=prev_actual, path="a.py",
+                            severity=prev_severity, quote="handle edge cases")
+        current = _valid_issue(actual=own, path="a.py", severity=severity)
+        folded = _fold_still_present_into_current([current], [prev], [True])
+        assert folded[2] == 1
+        return folded[0][0], prev
+
+    def test_carried_statement_moves_onto_the_survivor(self):
+        stashed = _valid_issue(actual="shared wording", path="a.py")
+        carrying, prev = self._carrying()
+        merged = _merge_dedup_issues([stashed], [carrying])
+        # Same dedup verdict as without the fold: one entry, the existing one.
+        assert len(merged) == 1
+        assert merged[0]["actual_behavior"] == "shared wording"
+        # ... but the statement it was carrying is still readable.
+        assert prev["actual_behavior"] in merged[0]["divergence"]
+        assert (
+            prev["expectation_source"]["verbatim_quote"]
+            in merged[0]["divergence"]
+        )
+        assert prev["evidence_lines"][0] in merged[0]["divergence"]
+
+    def test_transfer_does_not_shift_the_survivor_identity(self):
+        from tianluo.engine.steps.self_check import _issue_identity_tokens
+
+        stashed = _valid_issue(actual="shared wording", path="a.py")
+        carrying, _prev = self._carrying()
+        merged = _merge_dedup_issues([stashed], [carrying])
+        assert _issue_signature(merged) == _issue_signature([stashed])
+        assert (
+            _issue_identity_tokens(merged[0])
+            == _issue_identity_tokens(stashed)
+        )
+
+    def test_transfer_raises_the_survivor_severity(self):
+        stashed = _valid_issue(actual="shared wording", path="a.py",
+                               severity="medium")
+        carrying, _prev = self._carrying(prev_severity="critical")
+        merged = _merge_dedup_issues([stashed], [carrying])
+        assert merged[0]["severity"] == "critical"
+        assert _has_critical_or_high(merged) is True
+        # The stashed dict itself is an audit record; it is copied, not mutated.
+        assert stashed["severity"] == "medium"
+
+    def test_transfer_never_lowers_the_survivor_severity(self):
+        stashed = _valid_issue(actual="shared wording", path="a.py",
+                               severity="critical")
+        carrying, _prev = self._carrying(severity="low", prev_severity="low")
+        merged = _merge_dedup_issues([stashed], [carrying])
+        assert merged[0]["severity"] == "critical"
+
+    def test_transfer_stacks_behind_what_the_survivor_already_carries(self):
+        survivor, survivor_prev = self._carrying(prev_actual="survivor's older statement")
+        carrying, dup_prev = self._carrying(prev_actual="duplicate's older statement")
+        merged = _merge_dedup_issues([survivor], [carrying])
+        assert len(merged) == 1
+        rendered = merged[0]["divergence"]
+        assert rendered.count(_FOLD_MARKER) == 2
+        for statement in (survivor_prev, dup_prev):
+            assert statement["actual_behavior"] in rendered
+
+
+class TestFoldStillPresentIntoCurrent:
+    """Position-keyed fold-in of ``still_present`` previous findings.
+
+    The reviewer is REQUIRED by the prompt to re-list a ``still_present``
+    finding while the same finding is also re-admitted verbatim, so both
+    arrivals are structural. The fold joins them on evidence position alone —
+    never on whether two descriptions read alike.
+    """
+
+    @staticmethod
+    def _assert_carries(rendered, *statements):
+        """Every field of every folded statement must be readable."""
+        for statement in statements:
+            for key in ("actual_behavior", "expected_behavior", "divergence"):
+                value = statement.get(key)
+                if value:
+                    assert value in rendered
+            for line in statement.get("evidence_lines") or []:
+                assert line in rendered
+            source = statement.get("expectation_source") or {}
+            if source.get("verbatim_quote"):
+                assert source["verbatim_quote"] in rendered
+
+    def test_same_position_folds_without_mutating_the_original(self):
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode")
+        prev = _valid_issue(actual="old wording", path="a.py",
+                            divergence="last round's failure mode",
+                            quote="handle edge cases")
+        original_current = dict(current)
+        original_prev = dict(prev)
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert unfolded == []
+        assert len(issues) == 1
+        assert issues[0]["actual_behavior"] == "new wording"
+        # The fold is lossless: both statements, both expectation-source
+        # quotes and both evidence citations survive in the one finding.
+        self._assert_carries(issues[0]["divergence"], prev)
+        # This round's own wording still leads; the folded one follows it.
+        assert issues[0]["divergence"].startswith(current["divergence"])
+        # The raw_issues audit records must stay verbatim.
+        assert current == original_current
+        assert prev == original_prev
+
+    def test_folded_statement_keeps_unknown_schema_fields(self):
+        # Losslessness must not depend on a hard-coded field list.
+        current = _valid_issue(actual="new wording", path="a.py")
+        prev = dict(_valid_issue(actual="old wording", path="a.py"),
+                    some_future_field="a value only the newer schema knows")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert "a value only the newer schema knows" in issues[0]["divergence"]
+
+    def test_fold_does_not_shift_the_signature_dedup_key(self):
+        # The fold writes into ``divergence``, which the signature dedup reads.
+        # That key is matched by EQUALITY, so widening it would stop a
+        # re-report from matching its own earlier self.
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode")
+        prev = _valid_issue(actual="old wording", path="a.py",
+                            divergence="last round's failure mode")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert _issue_signature(issues) == _issue_signature([current])
+
+    def test_fold_leaves_the_pairing_identity_unchanged(self):
+        # A finding's identity is its OWN wording, before and after a fold.
+        # Widening it with carried text could tie a resolution summary between
+        # two previous findings and hand it to the wrong one, leaving the
+        # finding the verdict actually described unclaimed.
+        from tianluo.engine.steps.self_check import _issue_identity_tokens
+
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode",
+                               quote="Implement the defer feature")
+        prev = _valid_issue(actual="rollback hook omitted sudo", path="a.py",
+                            divergence="last round's failure mode",
+                            quote="handle edge cases")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert _issue_identity_tokens(issues[0]) == _issue_identity_tokens(current)
+        # The carried statement IS readable in the text — it just scores no
+        # identity of its own.
+        assert "rollback hook omitted sudo" in issues[0]["divergence"]
+        assert "rollback" not in _issue_identity_tokens(issues[0])
+
+    def test_fold_scaffolding_never_becomes_identity(self):
+        # The markers, field labels and severity note the fold renders are
+        # words a resolution summary can easily contain; letting them score
+        # would make every folded finding a magnet for unrelated summaries.
+        from tianluo.engine.steps.self_check import _issue_identity_tokens
+
+        current = _valid_issue(actual="alpha", path="a.py", severity="low",
+                               divergence="beta")
+        prev = _valid_issue(actual="gamma", path="a.py", severity="critical",
+                            divergence="delta")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        # Exactly this round's own identity — neither the carried statement
+        # nor the rendering that carries it contributes anything.
+        assert _issue_identity_tokens(issues[0]) == _issue_identity_tokens(current)
+        assert "severity_raised" in issues[0]["divergence"]
+        assert _FOLD_MARKER in issues[0]["divergence"]
+
+    def test_two_previous_findings_at_one_position_both_fold(self):
+        current = _valid_issue(actual="third wording", path="a.py")
+        prev_a = _valid_issue(actual="first wording", path="a.py")
+        prev_b = _valid_issue(actual="second wording", path="a.py")
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [prev_a, prev_b], [True, True],
+        )
+        assert (folded, unfolded, len(issues)) == (2, [], 1)
+        self._assert_carries(issues[0]["divergence"], prev_a, prev_b)
+        assert issues[0]["divergence"].count(_FOLD_MARKER) == 2
+
+    def test_different_position_is_left_to_the_readmission_path(self):
+        current = _valid_issue(actual="new wording", path="a.py", line=1)
+        drifted = _valid_issue(actual="old wording", path="a.py", line=9)
+        elsewhere = _valid_issue(actual="other bug", path="b.py")
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [drifted, elsewhere], [True, True],
+        )
+        assert folded == 0
+        assert unfolded == [drifted, elsewhere]
+        assert issues == [current]
+
+    def test_case_differing_paths_are_distinct_positions(self):
+        # On a case-sensitive filesystem ``Foo.py`` and ``foo.py`` are two
+        # files, so their findings are two defects and must not be folded.
+        current = _valid_issue(actual="new wording", path="foo.py")
+        other_file = _valid_issue(actual="old wording", path="Foo.py")
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [other_file], [True],
+        )
+        assert (folded, unfolded, issues) == (0, [other_file], [current])
+
+    def test_identical_case_sensitive_position_still_folds(self):
+        current = _valid_issue(actual="new wording", path="Foo.py")
+        prev = _valid_issue(actual="old wording", path="Foo.py")
+        _issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert (folded, unfolded) == (1, [])
+
+    def test_positionless_previous_issue_is_not_folded(self):
+        current = _valid_issue(actual="new wording", path="a.py")
+        blind = {"severity": "low", "actual_behavior": "no position"}
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [blind, "not-a-dict"], [True, True],
+        )
+        assert folded == 0
+        assert unfolded == [blind, "not-a-dict"]
+        assert issues == [current]
+
+    def test_fail_closed_sweep_entry_is_never_folded(self):
+        # The sweep re-admits findings NO verdict named individually. Nothing
+        # says such a finding is the same defect as a same-line re-report, so
+        # it keeps the existing separate re-admission path.
+        current = _valid_issue(actual="new wording", path="a.py")
+        swept = _valid_issue(actual="unclaimed previous finding", path="a.py")
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [swept], [False],
+        )
+        assert (folded, unfolded, issues) == (0, [swept], [current])
+
+    def test_only_the_identified_entries_fold(self):
+        current = _valid_issue(actual="new wording", path="a.py")
+        verdicted = _valid_issue(actual="named by a verdict", path="a.py")
+        swept = _valid_issue(actual="swept in fail-closed", path="a.py")
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [verdicted, swept], [True, False],
+        )
+        assert folded == 1
+        assert unfolded == [swept]
+        assert "named by a verdict" in issues[0]["divergence"]
+        assert "swept in fail-closed" not in issues[0]["divergence"]
+
+    def test_classify_marks_sweep_entries_unidentified(self):
+        # Two previous findings, one unpairable/indecisive still_present
+        # verdict → the fail-closed sweep re-admits both, and neither is
+        # marked as individually identified.
+        prev_a = _valid_issue(actual="alpha bug", path="a.py")
+        prev_b = _valid_issue(actual="beta bug", path="b.py")
+        issues, identified = _classify_still_present_prev_issues(
+            [{"prev_issue_summary": "", "status": "still_present"}],
+            [prev_a, prev_b],
+        )
+        assert issues == [prev_a, prev_b]
+        assert identified == [False, False]
+
+    def test_classify_marks_paired_verdicts_identified(self):
+        prev_a = _valid_issue(actual="alpha bug", path="a.py")
+        prev_b = _valid_issue(actual="beta bug", path="b.py")
+        issues, identified = _classify_still_present_prev_issues(
+            [
+                {"prev_issue_summary": "alpha bug", "status": "still_present"},
+                {"prev_issue_summary": "beta bug", "status": "fixed"},
+            ],
+            [prev_a, prev_b],
+        )
+        assert issues == [prev_a]
+        assert identified == [True]
+
+    def test_same_missing_in_without_evidence_lines_does_not_fold(self):
+        # Two distinct omissions can name the same integration point; with no
+        # evidence line to compare there is no position match, so they stay
+        # separate findings.
+        current = dict(_valid_issue(actual="omission A"),
+                       evidence_lines=[], missing_in=["deployment/setup.sh"])
+        prev = dict(_valid_issue(actual="omission B"),
+                    evidence_lines=[], missing_in=["deployment/setup.sh"])
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert (folded, unfolded, issues) == (0, [prev], [current])
+
+    def test_legacy_location_alone_does_not_fold(self):
+        current = {"severity": "medium", "actual_behavior": "one",
+                   "location": "deployment/setup.sh"}
+        prev = {"severity": "medium", "actual_behavior": "two",
+                "location": "deployment/setup.sh"}
+        issues, unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert (folded, unfolded, issues) == (0, [prev], [current])
+
+    def test_fold_raises_top_level_severity_to_the_higher_one(self):
+        # A still-present HIGH re-reported as medium must not become a
+        # deferrable medium: the severity gates read the top-level field only.
+        current = _valid_issue(actual="new wording", path="a.py",
+                               severity="medium")
+        prev = _valid_issue(actual="old wording", path="a.py",
+                            severity="high")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert issues[0]["severity"] == "high"
+        assert _has_critical_or_high(issues) is True
+        # The round's own severity is preserved in the record, not erased.
+        assert current["severity"] == "medium"
+        assert "severity_raised" in issues[0]["divergence"]
+        assert "reported as medium this round" in issues[0]["divergence"]
+
+    def test_fold_never_lowers_the_current_severity(self):
+        current = _valid_issue(actual="new wording", path="a.py",
+                               severity="critical")
+        prev = _valid_issue(actual="old wording", path="a.py",
+                            severity="low")
+        issues, _unfolded, folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        assert folded == 1
+        assert issues[0]["severity"] == "critical"
+        assert "severity_raised" not in issues[0]["divergence"]
+
+    def test_describe_issue_carries_every_folded_statement(self):
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode",
+                               quote="Implement the defer feature")
+        # A second evidence citation: the fold joins on the PRIMARY position
+        # only, but every citation of both statements must survive.
+        prev = dict(
+            _valid_issue(actual="old wording", path="a.py",
+                         divergence="last round's failure mode",
+                         quote="handle edge cases"),
+            evidence_lines=["a.py:1", "b.py:20"],
+        )
+        issues, _unfolded, _folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        rendered = _describe_issue(issues[0])
+        self._assert_carries(rendered, current, prev)
+
+    def test_describe_issue_unchanged_without_folding(self):
+        issue = _valid_issue(actual="lone wording", path="a.py")
+        rendered = _describe_issue(issue)
+        assert rendered == (
+            "a.py:1 | actual: lone wording | expected: correct behavior "
+            "| divergence: concrete failure mode"
+        )
+
+    def test_deferred_stash_rescue_prompt_carries_folded_statements(self):
+        # The state machine's deferred-stash rescue is a route into IMPLEMENT
+        # that bypasses ``_build_fix_outputs``; it must not hide folded content.
+        from tianluo.engine.state_machine import StateMachine
+
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode",
+                               quote="Implement the defer feature")
+        # A second evidence citation: the fold joins on the PRIMARY position
+        # only, but every citation of both statements must survive.
+        prev = dict(
+            _valid_issue(actual="old wording", path="a.py",
+                         divergence="last round's failure mode",
+                         quote="handle edge cases"),
+            evidence_lines=["a.py:1", "b.py:20"],
+        )
+        issues, _unfolded, _folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        sm = Mock(spec=StateMachine)
+        sm._get_max_fix_iterations.return_value = 5
+        flow = Mock()
+        flow.state.get_fix_iteration.return_value = 1
+        flow.state.context = {}
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING)
+        StateMachine._route_deferred_into_fix_loop(sm, flow, step, issues)
+
+        instructions = step.outputs["fix_instructions"]
+        self._assert_carries(instructions, current, prev)
+        assert instructions.count("- [") == 1
+
+    def test_implement_fix_context_carries_folded_statements(self):
+        from tianluo.engine.steps.implement import _format_fix_context_structured
+
+        current = _valid_issue(actual="new wording", path="a.py",
+                               divergence="this round's failure mode",
+                               quote="Implement the defer feature")
+        # A second evidence citation: the fold joins on the PRIMARY position
+        # only, but every citation of both statements must survive.
+        prev = dict(
+            _valid_issue(actual="old wording", path="a.py",
+                         divergence="last round's failure mode",
+                         quote="handle edge cases"),
+            evidence_lines=["a.py:1", "b.py:20"],
+        )
+        issues, _unfolded, _folded = _fold_still_present_into_current(
+            [current], [prev], [True],
+        )
+        rendered = _format_fix_context_structured(
+            {"reason": "self_check", "issues": issues, "iteration": 2},
+        )
+        self._assert_carries(rendered, current, prev)
+        assert rendered.count("  - [") == 1
+
+    def test_implement_fix_context_unchanged_without_folding(self):
+        from tianluo.engine.steps.implement import _format_fix_context_structured
+
+        issue = _valid_issue(actual="lone wording", path="a.py")
+        rendered = _format_fix_context_structured(
+            {"reason": "self_check", "issues": [issue], "iteration": 2},
+        )
+        assert rendered.splitlines() == [
+            "Reason: self_check",
+            "Self-check findings:",
+            "  - [medium] lone wording — concrete failure mode @ a.py:1",
+        ]
+
+
+class TestFoldedFindingMeetsTheDeferredStash:
+    """The stash merge is the fold's other dedup call site.
+
+    A finding this round folded a previous one into can collide with an
+    identically-worded stash entry from an earlier pass. The collision verdict
+    is the pre-existing one; what must not happen is the folded statement
+    leaving the fix loop with the dropped duplicate.
+    """
+
+    @staticmethod
+    def _run(step, flow, payload):
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = json.dumps(payload)
+            mock_cls.return_value = mock_caller
+            return self_check_handler(step, flow)
+
+    def test_stash_duplicate_keeps_the_folded_statement(self, tmp_path):
+        flow = _make_flow(tmp_path)
+        stashed = _valid_issue(actual="shared wording", path="a.py")
+        prev = _valid_issue(actual="previous round wording", path="a.py",
+                            quote="handle edge cases")
+        current = _valid_issue(actual="shared wording", path="a.py")
+        step = _make_step(
+            pass_index=2, passes_required=2, threshold=3,
+            deferred=[stashed],
+        )
+        step.inputs["prev_self_check_issues"] = [prev]
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "previous round wording",
+                 "status": "still_present"},
+            ],
+            "summary": "s",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["validation_stats"]["folded_still_present_count"] == 1
+        issues = step.outputs["issues"]
+        # Dedup verdict unchanged: the stash entry survives, the duplicate goes.
+        assert len(issues) == 1
+        assert issues[0] is not stashed
+        assert issues[0]["actual_behavior"] == "shared wording"
+        instructions = step.outputs["fix_instructions"]
+        assert instructions.count("- [") == 1
+        # The folded previous finding reached the fix loop all the same.
+        assert prev["actual_behavior"] in instructions
+        assert prev["expectation_source"]["verbatim_quote"] in instructions
+
+
+class TestFoldedSeverityReachesFixImmediately:
+    """A still-present HIGH folded into a medium re-report keeps its weight.
+
+    The defer decision and ``_has_critical_or_high`` read the top-level
+    ``severity`` only, so a fold that left the top level at the re-report's
+    severity would route a high finding into the deferral path it could not
+    take before folding existed.
+    """
+
+    @staticmethod
+    def _run(step, flow, payload):
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = json.dumps(payload)
+            mock_cls.return_value = mock_caller
+            return self_check_handler(step, flow)
+
+    def test_high_prev_folded_into_medium_report_fixes_now(self, tmp_path):
+        flow = _make_flow(tmp_path)
+        prev = _valid_issue(severity="high", actual="old high wording",
+                            path="a.py", quote="handle edge cases")
+        current = _valid_issue(severity="medium", actual="new medium wording",
+                               path="a.py")
+        step = _make_step(pass_index=1, passes_required=3, threshold=3)
+        step.inputs["prev_self_check_issues"] = [prev]
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "old high wording",
+                 "status": "still_present"},
+            ],
+            "summary": "s",
+        })
+        assert result == StepStatus.REVISION_NEEDED
+        assert "self_check_deferred" not in step.outputs
+        issues = step.outputs["issues"]
+        assert len(issues) == 1
+        assert issues[0]["severity"] == "high"
+        assert "old high wording" in step.outputs["fix_instructions"]
+        assert "new medium wording" in step.outputs["fix_instructions"]
 
 
 # ---------------------------------------------------------------------------

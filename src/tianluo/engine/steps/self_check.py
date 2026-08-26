@@ -94,6 +94,7 @@ _NON_REJECTION_STAT_KEYS = frozenset(
         "kept_count",
         "undecidable_scope_kept_count",
         "readmitted_still_present_count",
+        "folded_still_present_count",
     }
 )
 
@@ -1782,6 +1783,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         kept_issues, validation_stats = _validate_and_filter_issues(
             raw_issues, validation_inputs,
         )
+        # WHY: the drop tally reports STRUCTURAL VALIDATION rejections, so it
+        # is captured HERE — before the fold / re-admission below change
+        # ``kept_count``. Deriving it from the final count would contradict the
+        # per-reason counters (which only ever count raw rejections), and would
+        # silence the summary entirely once re-admissions outnumber rejections.
+        validated_kept_count = validation_stats["kept_count"]
+        dropped = validation_stats["input_count"] - validated_kept_count
 
         # WHY: a "still_present" verdict IS an unresolved-finding declaration.
         # Returning clean while the round's own resolutions record says a
@@ -1790,12 +1798,33 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # passed structural validation when it was first reported, so it is
         # re-admitted verbatim rather than re-validated against the newer
         # (possibly narrower) scope.
-        still_present = _still_present_prev_issues(
-            prev_issue_resolutions, prev_issues,
+        still_present, individually_verdicted = (
+            _classify_still_present_prev_issues(
+                prev_issue_resolutions, prev_issues,
+            )
         )
         if still_present:
+            # A previous finding the reviewer BOTH verdicted still_present
+            # individually AND re-reported at the same evidence line is FOLDED
+            # into that finding (one defect → one fix-loop entry, both
+            # statements preserved). Everything else — a fail-closed sweep
+            # entry, or no counterpart at that line — travels the verbatim
+            # re-admission path unchanged.
+            kept_issues, unfolded, folded = _fold_still_present_into_current(
+                kept_issues, still_present, individually_verdicted,
+            )
+            if folded:
+                # Folding leaves the list length unchanged, so the length-delta
+                # ``readmitted_still_present_count`` cannot record it; without
+                # its own counter the consolidation would be invisible.
+                validation_stats["folded_still_present_count"] = folded
+                logger.info(
+                    "Self-check folded %s still-present previous issue(s) into "
+                    "this round's finding at the same evidence position",
+                    folded,
+                )
             before = len(kept_issues)
-            kept_issues = _merge_dedup_issues(kept_issues, still_present)
+            kept_issues = _merge_dedup_issues(kept_issues, unfolded)
             readmitted = len(kept_issues) - before
             if readmitted:
                 validation_stats["readmitted_still_present_count"] = readmitted
@@ -1808,8 +1837,10 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Single-line observability log so on-call can see at a glance how
         # many issues the LLM proposed vs how many survived validation, and
-        # which rejection reasons fired.
-        dropped = validation_stats["input_count"] - validation_stats["kept_count"]
+        # which rejection reasons fired. Reports the validation stage only —
+        # what folding and re-admission did afterwards has its own log lines
+        # above, and mixing them in would make this arithmetic disagree with
+        # the rejection-reason counters it prints alongside.
         if dropped > 0:
             reasons = ", ".join(
                 f"{k}={v}" for k, v in validation_stats.items()
@@ -1818,7 +1849,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             )
             logger.info(
                 f"Self-check validation: {validation_stats['input_count']} raw → "
-                f"{validation_stats['kept_count']} kept (dropped {dropped}: {reasons})"
+                f"{validated_kept_count} kept (dropped {dropped}: {reasons})"
             )
 
         # Use ``kept_issues`` for the fix-loop decision; preserve ``raw_issues``
@@ -1961,6 +1992,60 @@ def _normalize_description(text: str) -> str:
     return " ".join(tokens)
 
 
+def _issue_primary_evidence_line(issue: dict) -> str:
+    """The issue's first non-empty ``evidence_lines`` entry, or "".
+
+    WHY: this — and ONLY this — is the position a fold may join two statements
+    on. ``missing_in`` names an integration point rather than a line, and the
+    legacy ``location`` may be a bare file path, so two genuinely distinct
+    omissions can share either one; joining on them would collapse different
+    defects into a single finding. Falling through to "" instead leaves the
+    previous finding on the existing separate re-admission path, which is the
+    fail-closed direction.
+
+    The citation is stripped but NOT case-folded: on a case-sensitive
+    filesystem ``Foo.py:10`` and ``foo.py:10`` are two different files, and
+    folding them together would merge two defects into one fix-loop finding.
+    The signature dedup keeps its own lowercasing in
+    :func:`_issue_primary_location`, where the description is part of the key
+    and a coarse position cannot merge distinct findings on its own.
+    """
+    if not isinstance(issue, dict):
+        return ""
+    evidence = issue.get("evidence_lines") or []
+    if not isinstance(evidence, list):
+        return ""
+    for ev in evidence:
+        if isinstance(ev, str) and ev.strip():
+            return ev.strip()
+    return ""
+
+
+def _issue_primary_location(issue: dict) -> str:
+    """The issue's primary position for DEDUP, normalized for comparison.
+
+    Prefers ``evidence_lines[0]``, falls back to ``missing_in[0]`` and the
+    legacy ``location``; stripped and lowercased. The fallbacks are deliberate
+    here — the signature dedup also keys on the description, so a coarse
+    position cannot merge two differently-worded findings — and deliberately
+    absent from :func:`_issue_primary_evidence_line`, which folds on position
+    alone.
+    """
+    if not isinstance(issue, dict):
+        return ""
+    loc_raw = _issue_primary_evidence_line(issue)
+    if not loc_raw:
+        missing = issue.get("missing_in") or []
+        if isinstance(missing, list) and missing:
+            for m in missing:
+                if isinstance(m, str) and m.strip():
+                    loc_raw = m
+                    break
+    if not loc_raw:
+        loc_raw = str(issue.get("location", ""))
+    return loc_raw.strip().lower()
+
+
 def _issue_signature(issues: list) -> set:
     """Compute ``(location, normalized_description)`` issue identities.
 
@@ -1979,30 +2064,14 @@ def _issue_signature(issues: list) -> set:
     for i in issues:
         if not isinstance(i, dict):
             continue
-        # Location: prefer new schema's evidence_lines[0] / missing_in[0];
-        # fall back to legacy ``location``.
-        loc_raw = ""
-        evidence = i.get("evidence_lines") or []
-        if isinstance(evidence, list) and evidence:
-            for ev in evidence:
-                if isinstance(ev, str) and ev.strip():
-                    loc_raw = ev
-                    break
-        if not loc_raw:
-            missing = i.get("missing_in") or []
-            if isinstance(missing, list) and missing:
-                for m in missing:
-                    if isinstance(m, str) and m.strip():
-                        loc_raw = m
-                        break
-        if not loc_raw:
-            loc_raw = str(i.get("location", ""))
-        loc = loc_raw.strip().lower()
+        loc = _issue_primary_location(i)
         # Description: prefer new schema's ``actual_behavior`` + ``divergence``;
         # fall back to legacy ``description``.
         new_parts = [
             str(i.get("actual_behavior", "")).strip(),
-            str(i.get("divergence", "")).strip(),
+            # Own wording only: the identity key must not shift because a
+            # later round folded an earlier statement of the same defect in.
+            _split_folded_divergence(i)[0].strip(),
         ]
         new_desc = " ".join(p for p in new_parts if p)
         desc_raw = new_desc or str(i.get("description", ""))
@@ -2022,20 +2091,277 @@ def _merge_dedup_issues(existing: list, incoming: list) -> list:
     assumed already-deduped; its order is preserved and survivors of
     ``incoming`` are appended in order. The residual semantic near-duplicates
     are left for the implement step to merge when it consumes the list.
+
+    INVARIANT: the dedup RULE is untouched by folding — the signature reads a
+    finding's own wording only, so which entries collide and which one survives
+    are exactly what they were before the fold existed. What folding adds is a
+    consequence: a dropped duplicate may be CARRYING another finding's
+    statement, which has no other route into the fix loop. That carried region
+    is moved onto the survivor (and the survivor's severity raised to the
+    higher of the two) before the duplicate is discarded, so a fold can never
+    cost the fix loop content it would have received without one. A duplicate
+    carrying nothing is dropped exactly as before.
     """
     result = list(existing)
-    seen = _issue_signature(existing)
+    index_by_sig: dict = {}
+    for idx, issue in enumerate(result):
+        for sig in _issue_signature([issue]):
+            index_by_sig.setdefault(sig, idx)
+    seen = set(index_by_sig)
     for issue in incoming:
         sigs = _issue_signature([issue])
         if sigs and sigs <= seen:
+            _transfer_folded_statements(result, index_by_sig, sigs, issue)
             continue
         result.append(issue)
+        for sig in sigs:
+            index_by_sig.setdefault(sig, len(result) - 1)
         seen |= sigs
     return result
 
 
+def _transfer_folded_statements(
+    result: list, index_by_sig: dict, sigs: set, duplicate,
+) -> None:
+    """Move a deduped-away finding's carried statements onto its survivor.
+
+    Writes into the survivor's CARRY region only: the own-wording region is
+    what every identity comparator reads, so touching it would change the
+    survivor's own signature and pairing identity — the very thing the carry
+    region exists to keep out of them.
+    """
+    if not isinstance(duplicate, dict):
+        return
+    carried = _split_folded_divergence(duplicate)[2]
+    if not carried:
+        return
+    idx = min(index_by_sig[sig] for sig in sigs if sig in index_by_sig)
+    survivor = dict(result[idx])
+    own, own_source, own_carried = _split_folded_divergence(survivor)
+    survivor["divergence"] = own + own_source + own_carried + carried
+    if _severity_rank(duplicate.get("severity")) > _severity_rank(
+        survivor.get("severity")
+    ):
+        survivor["severity"] = duplicate.get("severity")
+    result[idx] = survivor
+
+
+# A folded statement is carried inside the surviving finding's ``divergence``
+# text rather than in a side key. WHY: the fix loop is a check finding's ONLY
+# destination, and a finding reaches IMPLEMENT through several renderers
+# (fix_instructions, the deferred-stash rescue, IMPLEMENT's structured fix
+# context, the CLI history display). Every one of them already renders
+# ``divergence``; a side key would be visible only to whichever renderer was
+# taught about it, so content the fold promised to keep could silently vanish
+# on the other routes.
+_FOLD_MARKER = "[same defect, earlier self-check round, still unresolved]"
+_FOLD_SEPARATOR = "\n\n" + _FOLD_MARKER + "\n"
+
+# The surviving finding's OWN ``expectation_source`` is a structured field that
+# no fix-loop renderer prints, so a fold would leave only the folded side's
+# quote readable. Emitted ahead of the folded blocks, once per distinct quote
+# the finding has carried — a re-report may cite a different source than the
+# generation before it — so every source quote reaches the fixing agent.
+_FOLD_OWN_SOURCE_MARKER = "[this round's statement, expectation source]"
+
+# Rendering order for a folded statement's fields. Keys outside this tuple are
+# appended in sorted order, so a schema addition is carried too — losslessness
+# must not depend on this list staying current.
+_FOLD_FIELD_ORDER = (
+    "severity",
+    "evidence_lines",
+    "missing_in",
+    "location",
+    "actual_behavior",
+    "description",
+    "expected_behavior",
+    "divergence",
+    "expectation_source",
+)
+
+
+def _render_folded_value(value) -> str:
+    """Render one field of a folded statement as prompt-readable text."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        if all(isinstance(item, str) for item in value):
+            return ", ".join(item.strip() for item in value if item.strip())
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if isinstance(value, dict):
+        # ``expectation_source`` lands here: JSON keeps the verbatim quote
+        # intact, which is the half of the fold the single-valued
+        # ``expectation_source`` field has no room for.
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _render_folded_statement(prev: dict, own_divergence: str) -> str:
+    """Render a previous finding as the text block folded into a current one.
+
+    ``own_divergence`` is the previous finding's ``divergence`` with any block
+    IT folded in an earlier round already split off — the caller re-appends
+    those after this one, so the generations stay a flat newest-first list
+    instead of nesting one level deeper per round. Anything else the previous
+    finding's ``divergence`` held (its own carried expectation-source region
+    included) is passed through here verbatim.
+    """
+    lines = []
+
+    def emit(key, value):
+        text = _render_folded_value(value)
+        if text:
+            lines.append(f"{key}: {text}")
+
+    for key in _FOLD_FIELD_ORDER:
+        if key in prev:
+            emit(key, own_divergence if key == "divergence" else prev[key])
+    for key in sorted(k for k in prev if k not in _FOLD_FIELD_ORDER):
+        emit(key, prev[key])
+    return "\n".join(lines)
+
+
+def _split_folded_divergence(issue: dict) -> tuple:
+    """Split a finding's ``divergence`` into its three fold regions.
+
+    Returns ``(own_text, own_source_line, folded_blocks)``. Index 0 is the
+    finding's OWN wording, which is what the identity keys
+    (:func:`_issue_signature`, :func:`_issue_identity_tokens`) must keep
+    reading: a fold appends to the later regions, and letting it shift the
+    identity key would silently change dedup and resolution-pairing outcomes.
+    """
+    divergence = issue.get("divergence")
+    if not isinstance(divergence, str):
+        return ("" if divergence is None else str(divergence)), "", ""
+    head, sep, rest = divergence.partition(_FOLD_SEPARATOR)
+    # The source region is split off even with no folded block behind it, so
+    # a carried source quote can never leak back into the own-wording region
+    # that the identity keys read.
+    own, marker, source = head.partition("\n\n" + _FOLD_OWN_SOURCE_MARKER)
+    return own, (marker + source if marker else ""), (sep + rest if sep else "")
+
+
+_SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+
+def _severity_rank(value) -> int:
+    """Order an issue severity; unknown/absent values rank below ``low``."""
+    return _SEVERITY_RANK.get(str(value or "").strip().lower(), 0)
+
+
+def _fold_still_present_into_current(
+    kept_issues: list, still_present: list, fold_eligible: list,
+) -> tuple:
+    """Fold ``still_present`` previous findings into same-position current ones.
+
+    WHY: the review prompt REQUIRES the reviewer to re-list every issue it
+    verdicts ``still_present``, while ``_still_present_prev_issues`` re-admits
+    that same previous finding verbatim. Both arrivals are therefore structural,
+    and the signature dedup cannot join them — its key includes the reviewer's
+    wording of the defect, which is rewritten every round. Left alone, one
+    defect enters the fix loop as two findings and accumulates a further copy
+    per round.
+
+    The fold criterion uses only what is known by construction: ``fold_eligible``
+    marks the previous findings a ``still_present`` verdict identified
+    INDIVIDUALLY (positionally paired or content-matched), and the primary
+    evidence line must be equal on both sides. No judgement about whether two
+    descriptions mean the same thing is made, and no LLM call is added. Line
+    drift therefore reads as a DIFFERENT position and the previous finding
+    stays unfolded — fail-closed, as before.
+
+    ``fold_eligible`` is a list parallel to ``still_present``. An entry the
+    fail-closed sweep re-admitted (no verdict named it) is marked ineligible:
+    the reviewer never declared THAT finding unresolved, so the evidence for
+    "these two statements are the same defect" is missing and it keeps the
+    existing separate re-admission path.
+
+    The fold is lossless: every field of the previous finding — its own
+    expectation-source quote included — is appended to the surviving finding's
+    ``divergence`` (see ``_FOLD_SEPARATOR``), so it reaches IMPLEMENT through
+    the renderers that already exist. A fold also raises the surviving
+    finding's top-level ``severity`` to the higher of the two.
+    INVARIANT: the severity gates (:func:`_has_critical_or_high` and the defer
+    decision) read only the top-level field, so a still-present high folded
+    into a medium re-report must not be able to enter the deferral path.
+
+    Returns ``(issues, unfolded, folded_count)``. ``issues`` mirrors
+    ``kept_issues`` with folded entries replaced by a copy (the original dict
+    is left untouched so ``raw_issues`` stays a verbatim audit record).
+    ``unfolded`` is for the caller's existing fail-closed re-admission path.
+    """
+    result = list(kept_issues)
+    positions: dict = {}
+    for idx, issue in enumerate(result):
+        loc = _issue_primary_evidence_line(issue)
+        if loc and loc not in positions:
+            positions[loc] = idx
+
+    unfolded: list = []
+    folded_count = 0
+    for offset, prev in enumerate(still_present):
+        eligible = offset < len(fold_eligible) and bool(fold_eligible[offset])
+        loc = _issue_primary_evidence_line(prev) if eligible else ""
+        idx = positions.get(loc) if loc else None
+        if idx is None:
+            unfolded.append(prev)
+            continue
+        current = dict(result[idx])
+        own_divergence, own_source_line, carried = _split_folded_divergence(current)
+        # ``prev``'s own source region travels inside the rendered
+        # ``divergence`` value rather than being dropped: it may hold quotes
+        # from rounds whose structured ``expectation_source`` has since been
+        # overwritten, and no comparator reads a carried block, so re-emitting
+        # it verbatim costs nothing.
+        prev_own, prev_source_line, prev_carried = _split_folded_divergence(prev)
+
+        own_rank = _severity_rank(current.get("severity"))
+        prev_rank = _severity_rank(prev.get("severity"))
+        escalation = ""
+        if prev_rank > own_rank:
+            escalation = (
+                f"\nseverity_raised: this finding was reported as "
+                f"{_render_folded_value(current.get('severity')) or 'unset'} "
+                f"this round; the folded statement's higher severity "
+                f"{_render_folded_value(prev.get('severity'))} now applies"
+            )
+            current["severity"] = prev.get("severity")
+
+        # Carried unconditionally, not only when the region is still empty:
+        # a finding that already carries an earlier round's source quote may
+        # have been re-reported this round against a DIFFERENT quote, and
+        # inheriting the old line would leave the current one — a structured
+        # field no fix-loop renderer prints — unreadable. Appending keeps both.
+        own_source = _render_folded_value(current.get("expectation_source"))
+        if own_source and own_source not in own_source_line:
+            own_source_line += f"\n\n{_FOLD_OWN_SOURCE_MARKER} {own_source}"
+
+        block = (
+            _render_folded_statement(prev, prev_own + prev_source_line)
+            + escalation
+        )
+        # Newest first: this round's wording and source, then the statement
+        # just folded, then whatever either side had already folded before it.
+        current["divergence"] = (
+            own_divergence + own_source_line + _FOLD_SEPARATOR
+            + block + prev_carried + carried
+        )
+        result[idx] = current
+        folded_count += 1
+    return result, unfolded, folded_count
+
+
 def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> list:
-    """Previous issues the reviewer verdicted as ``still_present``.
+    """Previous issues the reviewer verdicted as ``still_present``."""
+    return _classify_still_present_prev_issues(resolutions, prev_issues)[0]
+
+
+def _classify_still_present_prev_issues(
+    resolutions: list, prev_issues: list | None,
+) -> tuple[list, list]:
+    """``still_present`` previous issues, and which verdict named each one.
 
     INVARIANT: a ``still_present`` verdict ALWAYS puts its previous finding
     back into the fix loop — a round must never close clean while its own
@@ -2049,6 +2375,13 @@ def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> l
     that is indecisive, the round fails CLOSED: every previous issue no
     resolution confidently accounted for is re-admitted. Re-checking an
     already-fixed finding costs one round; dropping a live one loses it.
+
+    Returns ``(issues, identified)``, two parallel lists. ``identified[i]`` is
+    True only when a verdict named that finding individually (paired or content
+    matched) and False for the fail-closed sweep's entries — the sweep re-admits
+    findings the reviewer never declared unresolved, so its entries carry no
+    evidence that they describe the same defect as anything reported this round
+    and must not be folded into it.
     """
     prev = [item for item in (prev_issues or []) if isinstance(item, dict) and item]
     paired = [res for res in _pair_resolutions_with_prev(resolutions, prev_issues)
@@ -2058,6 +2391,7 @@ def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> l
         return str(res.get("status", "")).strip().lower() == "still_present"
 
     out: list = []
+    identified: list = []
     claimed: set = set()
     unpaired: list = []
     # Confidently paired verdicts are settled FIRST — whatever their status,
@@ -2069,6 +2403,7 @@ def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> l
             claimed.add(id(issue))
             if is_still_present(res):
                 out.append(issue)
+                identified.append(True)
         elif is_still_present(res):
             unpaired.append(res)
 
@@ -2078,15 +2413,19 @@ def _still_present_prev_issues(resolutions: list, prev_issues: list | None) -> l
         if match is not None:
             claimed.add(id(match))
             out.append(match)
+            identified.append(True)
         else:
             unresolved_verdict = True
     if unresolved_verdict:
         for issue in prev:
             if id(issue) not in claimed:
                 out.append(issue)
-    # The caller merges this into the round's kept issues with the shared
-    # signature dedup, so no second dedup rule is introduced here.
-    return out
+                identified.append(False)
+    # The caller decides how each of these lands: an individually identified
+    # one may be folded into the round's finding at the same evidence line,
+    # everything else is appended through the shared signature dedup. No dedup
+    # or fold rule is introduced here.
+    return out, identified
 
 
 def _match_resolution_by_content(
@@ -2197,16 +2536,27 @@ def _issue_identity_tokens(issue: dict) -> set:
     evidence file path (line number stripped) — so a summary that describes a
     *different* previous issue scores higher against that issue than against its
     positional partner.
+
+    INVARIANT: only the finding's OWN wording is read — the statements
+    :func:`_fold_still_present_into_current` carries inside ``divergence`` are
+    split off and ignored, exactly as :func:`_issue_signature` ignores them. A
+    finding's identity is therefore unchanged by folding, so a fold can never
+    move a pairing or dedup outcome and thereby push some other finding out of
+    the fix loop. Widening identity with carried text would do precisely that:
+    the extra tokens can tie a summary between two previous findings, handing
+    it to the positional partner and leaving the finding the verdict actually
+    described unclaimed.
     """
     if not isinstance(issue, dict):
         return set()
     source = issue.get("expectation_source") or {}
     quote = source.get("verbatim_quote", "") if isinstance(source, dict) else ""
+    own_divergence = _split_folded_divergence(issue)[0]
     parts = [
         quote,
         issue.get("expected_behavior", ""),
         issue.get("actual_behavior", ""),
-        issue.get("divergence", ""),
+        own_divergence,
     ]
     evidence = issue.get("evidence_lines") or []
     if isinstance(evidence, list):

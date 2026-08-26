@@ -16,6 +16,8 @@ from tianluo.engine.steps.self_check import (
     _format_fix_context,
     _issue_signature,
     _validate_and_filter_issues,
+    _fold_still_present_into_current,
+    _FOLD_MARKER,
     SELF_CHECK_PROMPT,
 )
 
@@ -2618,3 +2620,732 @@ class TestManifestWithoutASecondDomain:
         })
         assert "scope_manifest" in rendered
         assert "no changed path in this scope" in rendered
+
+
+# ---------------------------------------------------------------------------
+# still_present fold-in (one defect → one fix-loop finding)
+# ---------------------------------------------------------------------------
+
+
+class TestStillPresentFoldIn:
+    """A ``still_present`` previous finding whose primary evidence position the
+    reviewer re-reported this round is folded into that finding.
+
+    Data shapes are modelled on the creqt flow ``20260826-090952_6c1bcc5e``
+    rounds 22 / 24 / 26, where the review prompt's "re-list still_present
+    issues" rule and the verbatim re-admission each contributed a copy of the
+    same defect, so one deployment defect reached the fix loop three times.
+    """
+
+    _TASK = (
+        "Harden the deployment scripts: run remote commands with sudo, "
+        "document the rollback path, and validate the closure setup inputs"
+    )
+
+    @pytest.fixture
+    def flow(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="test-flow-fold",
+            task_description=self._TASK,
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "fold-change",
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+        ]
+        return flow
+
+    def _inputs(self, **extra):
+        inp = {
+            "task_description": self._TASK,
+            "task_description_base": self._TASK,
+            "changes_made": {
+                "files_changed": [
+                    {"path": "deployment/push-update.sh", "action": "modify"},
+                    {"path": "deployment/README.md", "action": "modify"},
+                    {"path": "deployment/closure/setup.sh", "action": "modify"},
+                ],
+            },
+            "test_results": {"passed": True, "returncode": 0},
+            "spec_content": {},
+            "fix_iteration": 2,
+            "max_fix_iterations": 10,
+        }
+        inp.update(extra)
+        return inp
+
+    @staticmethod
+    def _issue(*, path, line, actual, expected, divergence, quote,
+               severity="high"):
+        return {
+            "severity": severity,
+            "actual_behavior": actual,
+            "expected_behavior": expected,
+            "divergence": divergence,
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": quote,
+            },
+            "evidence_lines": [f"{path}:{line}"],
+            "missing_in": [],
+        }
+
+    @staticmethod
+    def _run(step, flow, payload):
+        with patch("tianluo.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = json.dumps(payload)
+            mock_cls.return_value = mock_caller
+            return self_check_handler(step, flow)
+
+    def test_same_position_folds_into_one_finding_losslessly(self, flow):
+        # Round-24 shape: the reviewer re-reports the very positions it
+        # verdicts ``still_present``, in its own new wording. One defect must
+        # reach the fix loop once — carrying BOTH statements and BOTH
+        # expectation-source quotes.
+        prev = [
+            self._issue(
+                path="deployment/push-update.sh", line=104,
+                actual="ssh command runs without sudo",
+                expected="ssh command runs under sudo",
+                divergence="update fails with permission denied",
+                quote="run remote commands with sudo",
+                severity="high",
+            ),
+            self._issue(
+                path="deployment/README.md", line=506,
+                actual="documented command omits the sudo prefix",
+                expected="documented command carries the sudo prefix",
+                divergence="operator copies a command that cannot run",
+                quote="document the rollback path",
+                severity="medium",
+            ),
+        ]
+        current = [
+            self._issue(
+                path="deployment/push-update.sh", line=104,
+                actual="the remote invocation is still unprivileged",
+                expected="the remote invocation is privileged",
+                divergence="deploy aborts on the target host",
+                quote="Harden the deployment scripts",
+            ),
+            self._issue(
+                path="deployment/README.md", line=506,
+                actual="the README example lacks elevation",
+                expected="the README example is elevated",
+                divergence="the pasted command is rejected",
+                quote="validate the closure setup inputs",
+            ),
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=prev),
+        )
+        result = self._run(step, flow, {
+            "issues": current,
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "ssh without sudo",
+                 "status": "still_present"},
+                {"prev_issue_summary": "README command without sudo",
+                 "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        # Two defects, two findings — not four.
+        assert len(issues) == 2
+        assert step.outputs["actionable_count"] == 2
+
+        stats = step.outputs["validation_stats"]
+        assert stats["folded_still_present_count"] == 2
+        assert "readmitted_still_present_count" not in stats
+        assert stats["kept_count"] == 2
+
+        # Each finding keeps its own fields untouched and carries the previous
+        # round's statement in full, expectation source included.
+        for cur, old, reported in zip(issues, prev, current):
+            assert cur["actual_behavior"] == reported["actual_behavior"]
+            assert cur["actual_behavior"] != old["actual_behavior"]
+            carried = cur["divergence"]
+            assert carried.startswith(reported["divergence"])
+            assert carried.count(_FOLD_MARKER) == 1
+            for value in (
+                old["actual_behavior"],
+                old["expected_behavior"],
+                old["divergence"],
+                old["severity"],
+                old["evidence_lines"][0],
+                old["expectation_source"]["verbatim_quote"],
+                old["expectation_source"]["type"],
+            ):
+                assert value in carried
+
+        instructions = step.outputs["fix_instructions"]
+        for issue in current + prev:
+            assert issue["actual_behavior"] in instructions
+            assert issue["expected_behavior"] in instructions
+            assert issue["divergence"] in instructions
+            assert (
+                issue["expectation_source"]["verbatim_quote"] in instructions
+            )
+        # And the fix_context the downstream step reads carries the same dicts.
+        assert step.outputs["fix_context"]["issues"] == issues
+
+    def test_a_finding_carrying_an_older_statement_folds_losslessly(self, flow):
+        # Round-26 SHAPE only: the previous finding is one a round-22 fold
+        # already produced, so it arrives carrying an older generation of the
+        # same defect. What is asserted is entirely THIS round's behaviour —
+        # one previous finding, one same-position re-report, one fold — and
+        # that the statement it was already carrying is not lost by that fold.
+        # Nothing here requires a later round to fold, re-identify or dedup
+        # anything again.
+        gen22 = self._issue(
+            path="deployment/README.md", line=506,
+            actual="doc command missing sudo (first wording)",
+            expected="doc command with sudo",
+            divergence="operator hits permission denied",
+            quote="run remote commands with sudo",
+        )
+        gen24 = self._issue(
+            path="deployment/README.md", line=506,
+            actual="doc command still unprivileged (second wording)",
+            expected="doc command elevated",
+            divergence="copy-paste of the doc fails",
+            quote="document the rollback path",
+        )
+        # The previous finding as a round-22 fold actually produced it.
+        gen24 = _fold_still_present_into_current([gen24], [gen22], [True])[0][0]
+        gen26 = self._issue(
+            path="deployment/README.md", line=506,
+            actual="README still shows the bare command (third wording)",
+            expected="README shows the elevated command",
+            divergence="the documented step cannot be executed",
+            quote="validate the closure setup inputs",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=[gen24]),
+        )
+        # One previous finding, one resolution: the verdict pairs positionally,
+        # so the fold's eligibility does not rest on any wording comparison.
+        result = self._run(step, flow, {
+            "issues": [gen26],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "README command without sudo",
+                 "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        assert len(issues) == 1
+        assert step.outputs["actionable_count"] == 1
+        assert step.outputs["validation_stats"]["folded_still_present_count"] == 1
+
+        # The chain is flattened, newest-first, and nothing nests deeper: one
+        # marker per carried generation, in chronological order.
+        carried = issues[0]["divergence"]
+        assert carried.count(_FOLD_MARKER) == 2
+        assert issues[0]["actual_behavior"] == gen26["actual_behavior"]
+        assert carried.startswith(gen26["divergence"])
+        order = [
+            carried.index(generation["actual_behavior"])
+            for generation in (gen24, gen22)
+        ]
+        assert order == sorted(order)
+        for generation in (gen24, gen22):
+            assert generation["expected_behavior"] in carried
+
+        instructions = step.outputs["fix_instructions"]
+        for generation in (gen22, gen24, gen26):
+            assert generation["actual_behavior"] in instructions
+            assert (
+                generation["expectation_source"]["verbatim_quote"]
+                in instructions
+            )
+        # One bullet, not three.
+        assert instructions.count("- [") == 1
+
+    def test_a_refreshed_expectation_source_is_carried_too(self, flow):
+        # A previous finding may already carry an expectation-source region
+        # from an earlier fold while the reviewer re-reports it against a
+        # DIFFERENT quote. Inheriting the old region would leave this round's
+        # structured quote — a field no fix-loop renderer prints — unreadable.
+        older = self._issue(
+            path="deployment/README.md", line=506,
+            actual="doc command missing sudo (first wording)",
+            expected="doc command with sudo",
+            divergence="operator hits permission denied",
+            quote="run remote commands with sudo",
+        )
+        carrying = self._issue(
+            path="deployment/README.md", line=506,
+            actual="doc command still unprivileged (second wording)",
+            expected="doc command elevated",
+            divergence="copy-paste of the doc fails",
+            quote="document the rollback path",
+        )
+        carrying = _fold_still_present_into_current(
+            [carrying], [older], [True],
+        )[0][0]
+        # Same finding re-reported this round, now grounded on another quote.
+        current = dict(
+            carrying,
+            expectation_source={
+                "type": "task_description",
+                "verbatim_quote": "validate the closure setup inputs",
+            },
+        )
+        prev = self._issue(
+            path="deployment/README.md", line=506,
+            actual="README command not elevated (previous round)",
+            expected="README command elevated",
+            divergence="the documented step cannot be executed",
+            quote="Harden the deployment scripts",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=[prev]),
+        )
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "README command not elevated",
+                 "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        assert len(issues) == 1
+        instructions = step.outputs["fix_instructions"]
+        # Both the inherited quote and this round's own quote are readable,
+        # alongside every carried statement.
+        for quote in (
+            "document the rollback path",
+            "validate the closure setup inputs",
+            "run remote commands with sudo",
+            "Harden the deployment scripts",
+        ):
+            assert quote in instructions
+        for statement in (older, prev):
+            assert statement["actual_behavior"] in instructions
+
+    def test_a_deduped_previous_finding_leaves_its_statement_behind(self, flow):
+        # A previous finding the fail-closed sweep re-admits keeps the
+        # pre-existing signature dedup: with the same position and the same
+        # own wording as a current finding it is dropped as a duplicate, and
+        # WHICH entry survives is unchanged. Only its CARRIED statement is
+        # rescued — that statement has no other route into the fix loop, and
+        # without the fold it would have been re-admitted on its own.
+        oldest = self._issue(
+            path="deployment/README.md", line=506,
+            actual="doc command missing sudo (first wording)",
+            expected="doc command with sudo",
+            divergence="operator hits permission denied",
+            quote="run remote commands with sudo",
+            severity="critical",
+        )
+        carrying_prev = _fold_still_present_into_current(
+            [self._issue(
+                path="deployment/README.md", line=506,
+                actual="the README example lacks elevation",
+                expected="the README example is elevated",
+                divergence="the pasted command is rejected",
+                quote="document the rollback path",
+                severity="medium",
+            )],
+            [oldest],
+            [True],
+        )[0][0]
+        other_prev = self._issue(
+            path="deployment/push-update.sh", line=104,
+            actual="ssh command runs without sudo",
+            expected="ssh command runs under sudo",
+            divergence="update fails with permission denied",
+            quote="run remote commands with sudo",
+        )
+        # The reviewer re-listed the carrying finding in ITS OWN earlier
+        # wording, so the two collide on the signature key.
+        current = self._issue(
+            path="deployment/README.md", line=506,
+            actual="the README example lacks elevation",
+            expected="the README example is elevated",
+            divergence="the pasted command is rejected",
+            quote="Harden the deployment scripts",
+            severity="medium",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(
+                prev_self_check_issues=[carrying_prev, other_prev],
+            ),
+        )
+        # One indecisive verdict against two previous findings → the
+        # fail-closed sweep re-admits both, neither individually identified,
+        # so neither is folded and both take the re-admission path.
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "", "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        # The dedup verdict itself is untouched: the duplicate is still
+        # dropped, and the current finding is still the survivor.
+        assert len(issues) == 2
+        assert "folded_still_present_count" not in step.outputs["validation_stats"]
+        assert issues[0]["actual_behavior"] == current["actual_behavior"]
+        assert issues[1] == other_prev
+        # The statement the duplicate was carrying is readable on the
+        # survivor, whose severity took the higher of the two.
+        assert oldest["actual_behavior"] in issues[0]["divergence"]
+        assert issues[0]["severity"] == "critical"
+        instructions = step.outputs["fix_instructions"]
+        assert oldest["actual_behavior"] in instructions
+        assert oldest["expectation_source"]["verbatim_quote"] in instructions
+
+    def test_line_drift_does_not_fold_and_still_readmits(self, flow):
+        # The fold criterion is structural: a drifted line number is a
+        # DIFFERENT position, so the previous finding keeps its own trip
+        # through the fail-closed re-admission path rather than being joined
+        # by a similarity guess.
+        prev = self._issue(
+            path="deployment/push-update.sh", line=104,
+            actual="ssh command runs without sudo",
+            expected="ssh command runs under sudo",
+            divergence="update fails with permission denied",
+            quote="run remote commands with sudo",
+        )
+        current = self._issue(
+            path="deployment/push-update.sh", line=117,
+            actual="the remote invocation is still unprivileged",
+            expected="the remote invocation is privileged",
+            divergence="deploy aborts on the target host",
+            quote="Harden the deployment scripts",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=[prev]),
+        )
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "ssh without sudo",
+                 "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        assert len(issues) == 2
+        assert step.outputs["actionable_count"] == 2
+        assert issues[1] == prev
+        assert all(_FOLD_MARKER not in i["divergence"] for i in issues)
+
+        stats = step.outputs["validation_stats"]
+        assert stats["readmitted_still_present_count"] == 1
+        assert "folded_still_present_count" not in stats
+        assert prev["actual_behavior"] in step.outputs["fix_instructions"]
+
+    def test_missing_position_counterpart_still_readmits(self, flow):
+        # No finding at that position at all this round → the pre-existing
+        # verbatim re-admission is untouched.
+        prev = self._issue(
+            path="deployment/closure/setup.sh", line=306,
+            actual="setup does not validate its inputs",
+            expected="setup validates its inputs",
+            divergence="a malformed input reaches the installer",
+            quote="validate the closure setup inputs",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=[prev]),
+        )
+        result = self._run(step, flow, {
+            "issues": [],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "setup input validation",
+                 "status": "still_present"},
+            ],
+            "summary": "nothing new",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["issues"] == [prev]
+        assert step.outputs["actionable_count"] == 1
+        stats = step.outputs["validation_stats"]
+        assert stats["readmitted_still_present_count"] == 1
+        assert "folded_still_present_count" not in stats
+
+    def test_fail_closed_sweep_entries_are_readmitted_not_folded(self, flow):
+        # An indecisive ``still_present`` verdict cannot say WHICH previous
+        # finding survives, so the fail-closed sweep re-admits every unclaimed
+        # one. Those carry no verdict of their own, so sharing an evidence
+        # position with a current finding is not evidence of the same defect —
+        # they keep the separate re-admission path.
+        prev = [
+            self._issue(
+                path="deployment/push-update.sh", line=104,
+                actual="ssh command runs without sudo",
+                expected="ssh command runs under sudo",
+                divergence="update fails with permission denied",
+                quote="run remote commands with sudo",
+            ),
+            self._issue(
+                path="deployment/README.md", line=506,
+                actual="documented command omits the sudo prefix",
+                expected="documented command carries the sudo prefix",
+                divergence="operator copies a command that cannot run",
+                quote="document the rollback path",
+            ),
+        ]
+        current = [
+            self._issue(
+                path="deployment/push-update.sh", line=104,
+                actual="the remote invocation is still unprivileged",
+                expected="the remote invocation is privileged",
+                divergence="deploy aborts on the target host",
+                quote="Harden the deployment scripts",
+            ),
+            self._issue(
+                path="deployment/README.md", line=506,
+                actual="the README example lacks elevation",
+                expected="the README example is elevated",
+                divergence="the pasted command is rejected",
+                quote="validate the closure setup inputs",
+            ),
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=prev),
+        )
+        # One verdict, two previous findings, and a summary with no
+        # discriminating tokens → neither pairing nor content match decides.
+        result = self._run(step, flow, {
+            "issues": current,
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "", "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        assert len(issues) == 4
+        assert all(_FOLD_MARKER not in i["divergence"] for i in issues)
+        stats = step.outputs["validation_stats"]
+        assert stats["readmitted_still_present_count"] == 2
+        assert "folded_still_present_count" not in stats
+
+    def test_omission_findings_sharing_missing_in_do_not_fold(self, flow):
+        # Two distinct omissions can name the same integration point. With no
+        # evidence line to compare, there is no position match and both reach
+        # the fix loop.
+        prev = {
+            "severity": "high",
+            "actual_behavior": "the rollback hook is never registered",
+            "expected_behavior": "the rollback hook is registered",
+            "divergence": "a failed push cannot be rolled back",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "document the rollback path",
+            },
+            "evidence_lines": [],
+            "missing_in": ["deployment/push-update.sh"],
+        }
+        current = {
+            "severity": "high",
+            "actual_behavior": "the input validation step is absent",
+            "expected_behavior": "the input validation step runs",
+            "divergence": "a malformed input reaches the installer",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "validate the closure setup inputs",
+            },
+            "evidence_lines": [],
+            "missing_in": ["deployment/push-update.sh"],
+        }
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=[prev]),
+        )
+        result = self._run(step, flow, {
+            "issues": [current],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "rollback hook never registered",
+                 "status": "still_present"},
+            ],
+            "summary": "unresolved",
+        })
+
+        assert result == StepStatus.REVISION_NEEDED
+        issues = step.outputs["issues"]
+        assert len(issues) == 2
+        assert all(_FOLD_MARKER not in i["divergence"] for i in issues)
+        stats = step.outputs["validation_stats"]
+        assert stats["readmitted_still_present_count"] == 1
+        assert "folded_still_present_count" not in stats
+
+    def test_counters_and_dropped_summary_stay_consistent(self, flow, caplog):
+        # Mixed round: one fold, one re-admission, and two structurally
+        # rejected raw issues. The drop tally reports STRUCTURAL VALIDATION
+        # only, so it agrees with the rejection-reason counters printed beside
+        # it however many findings the fold and the re-admission add back; the
+        # fold counter must never surface as a drop reason.
+        import logging
+
+        folding_prev = self._issue(
+            path="deployment/README.md", line=506,
+            actual="documented command omits the sudo prefix",
+            expected="documented command carries the sudo prefix",
+            divergence="operator copies a command that cannot run",
+            quote="document the rollback path",
+        )
+        readmitted_prev = self._issue(
+            path="deployment/closure/setup.sh", line=306,
+            actual="setup does not validate its inputs",
+            expected="setup validates its inputs",
+            divergence="a malformed input reaches the installer",
+            quote="validate the closure setup inputs",
+        )
+        current = self._issue(
+            path="deployment/README.md", line=506,
+            actual="the README example lacks elevation",
+            expected="the README example is elevated",
+            divergence="the pasted command is rejected",
+            quote="Harden the deployment scripts",
+        )
+        rejected = [
+            self._issue(
+                path="deployment/README.md", line=12,
+                actual="a", expected="b", divergence="c", quote="",
+            ),
+            self._issue(
+                path="deployment/README.md", line=13,
+                actual="d", expected="e", divergence="f", quote="",
+            ),
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(
+                prev_self_check_issues=[folding_prev, readmitted_prev],
+            ),
+        )
+        with caplog.at_level(
+            logging.INFO, logger="tianluo.engine.steps.self_check"
+        ):
+            result = self._run(step, flow, {
+                "issues": [current] + rejected,
+                "previous_issue_resolutions": [
+                    {"prev_issue_summary": "README command without sudo",
+                     "status": "still_present"},
+                    {"prev_issue_summary": "setup input validation",
+                     "status": "still_present"},
+                ],
+                "summary": "unresolved",
+            })
+
+        assert result == StepStatus.REVISION_NEEDED
+        stats = step.outputs["validation_stats"]
+        assert stats["input_count"] == 3
+        assert stats["empty_quote_count"] == 2
+        assert stats["folded_still_present_count"] == 1
+        assert stats["readmitted_still_present_count"] == 1
+        # 1 validated + 1 re-admitted; the fold adds no entry.
+        assert stats["kept_count"] == 2
+        assert len(step.outputs["issues"]) == 2
+        assert step.outputs["actionable_count"] == len(step.outputs["issues"])
+
+        summary = [
+            r.getMessage() for r in caplog.records
+            if "Self-check validation:" in r.getMessage()
+        ]
+        assert len(summary) == 1
+        # 3 raw − 1 validated survivor = 2 dropped, exactly the two rejections
+        # the reason counters report. Folding and re-admission move
+        # ``kept_count`` afterwards and must not distort this line.
+        assert "3 raw → 1 kept (dropped 2:" in summary[0]
+        assert "empty_quote_count=2" in summary[0]
+        assert "folded_still_present_count" not in summary[0]
+        assert "readmitted_still_present_count" not in summary[0]
+
+    def test_dropped_summary_survives_more_readmissions_than_rejections(
+        self, flow, caplog,
+    ):
+        # Deriving the drop tally from the FINAL kept count would go
+        # non-positive here and silence the log entirely, hiding a real
+        # structural rejection.
+        import logging
+
+        prev = [
+            self._issue(
+                path="deployment/push-update.sh", line=104,
+                actual="ssh command runs without sudo",
+                expected="ssh command runs under sudo",
+                divergence="update fails with permission denied",
+                quote="run remote commands with sudo",
+            ),
+            self._issue(
+                path="deployment/closure/setup.sh", line=306,
+                actual="setup does not validate its inputs",
+                expected="setup validates its inputs",
+                divergence="a malformed input reaches the installer",
+                quote="validate the closure setup inputs",
+            ),
+        ]
+        rejected = self._issue(
+            path="deployment/README.md", line=12,
+            actual="a", expected="b", divergence="c", quote="",
+        )
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=self._inputs(prev_self_check_issues=prev),
+        )
+        with caplog.at_level(
+            logging.INFO, logger="tianluo.engine.steps.self_check"
+        ):
+            result = self._run(step, flow, {
+                "issues": [rejected],
+                "previous_issue_resolutions": [
+                    {"prev_issue_summary": "ssh without sudo",
+                     "status": "still_present"},
+                    {"prev_issue_summary": "setup input validation",
+                     "status": "still_present"},
+                ],
+                "summary": "unresolved",
+            })
+
+        assert result == StepStatus.REVISION_NEEDED
+        stats = step.outputs["validation_stats"]
+        assert stats["empty_quote_count"] == 1
+        assert stats["readmitted_still_present_count"] == 2
+        assert step.outputs["actionable_count"] == 2
+        summary = [
+            r.getMessage() for r in caplog.records
+            if "Self-check validation:" in r.getMessage()
+        ]
+        assert len(summary) == 1
+        assert "1 raw → 0 kept (dropped 1:" in summary[0]
+        assert "empty_quote_count=1" in summary[0]
