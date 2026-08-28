@@ -11,6 +11,8 @@ facts that **cannot** be rebuilt by a daemon reconnecting:
   auth provider, keyed by ``owner_id``
 - ``daemon_keys``       — issued daemon-key **hashes** bound to an owner
 - ``breakglass_tokens`` — one-time admin break-glass token **hashes**
+- ``message_history``   — the prompt text an owner has actually sent from the
+  web console, per input channel (the up/down-arrow recall list)
 
 Machine / flow live state stays in memory (``ServerState``) and is rebuilt
 from daemon reconnects; it is deliberately NOT persisted here.
@@ -47,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 # Current schema version, tracked via ``PRAGMA user_version``. Bump and append
 # a migration to ``_MIGRATIONS`` to evolve the schema.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA_V1 = """
 CREATE TABLE IF NOT EXISTS owners (
@@ -94,6 +96,42 @@ CREATE TABLE IF NOT EXISTS breakglass_tokens (
 );
 """
 
+# v2 — web-console message history, the up/down-arrow recall list.
+#
+# WHY the text an owner SENT is persisted server-side while the text they have
+# not sent (the draft) stays in the browser: a sent message is a fact about the
+# owner, not about the device it was typed on, so it must follow them across
+# browsers and machines. ``owner_id`` cascades so deleting an owner takes their
+# history with it, and the ``(owner_id, channel)`` index is the only access
+# path — every read and write is scoped to exactly one owner's one channel.
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS message_history (
+    entry_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id   TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES owners(owner_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_message_history_owner_channel
+    ON message_history(owner_id, channel);
+"""
+
+#: The web console's history channels. Two inputs recall independently: the
+#: docked reply box (shared by respond and interject — one textarea, one
+#: conversation) and the New Task description. Keeping them apart is the point:
+#: a task description surfacing while answering a running flow's question is
+#: noise, not recall. The issue modal has no channel — it is not a prompt.
+HISTORY_CHANNEL_FLOW_REPLY = "flow-reply"
+HISTORY_CHANNEL_NEW_TASK = "new-task"
+MESSAGE_HISTORY_CHANNELS = (HISTORY_CHANNEL_FLOW_REPLY, HISTORY_CHANNEL_NEW_TASK)
+
+#: Per (owner, channel) cap, deliberately the same 500 as the CLI's
+#: ``tianluo.engine.prompt_history.MAX_ENTRIES``. The two stores are separate
+#: (the console never reads the CLI's file), but an operator moving between
+#: them should not find one of them forgetting sooner than the other.
+MESSAGE_HISTORY_MAX_ENTRIES = 500
+
 
 # --------------------------------------------------------------------------- #
 # Record dataclasses (returned by the repository; never expose raw Rows)      #
@@ -120,6 +158,38 @@ class DaemonKey:
     @property
     def revoked(self) -> bool:
         return self.revoked_at is not None
+
+
+@dataclass
+class MessageHistoryEntry:
+    """One recall-list entry, carrying the identity the browser merges on.
+
+    WHY ``entry_id`` leaves the store at all: a browser holds its own list of
+    what THIS session sent and folds it together with whatever a later read
+    returns. Text cannot decide whether a remote row *is* one of those sends —
+    the same words legitimately appear twice in one history — so the row's own
+    server-assigned id is the only sound identity, and it has to travel with
+    every entry the client ever sees.
+    """
+
+    entry_id: int
+    text: str
+    created_at: float
+
+
+@dataclass
+class MessageHistoryAppend:
+    """Outcome of one append: did it create a row, and which row is it now?
+
+    ``entry_id`` is the row this append *is*: the newly inserted one when
+    ``appended``, and — when the adjacent-repeat rule folded it — the existing
+    row it folded onto, which is exactly what lets the caller recognise its own
+    append in a later read. ``None`` only for text that is not a message at all
+    (blank), where there is no row to point at.
+    """
+
+    appended: bool
+    entry_id: Optional[int]
 
 
 class Store:
@@ -206,9 +276,16 @@ class Store:
         Migration hook: each step is an ``(target_version, sql)`` pair applied
         in order. v1 lays down the full initial schema; future schema changes
         append additional steps here.
+
+        INVARIANT: an already-published step is never edited in place. A
+        deployed database has recorded that it ran v1 and will only ever run
+        the steps *after* it, so a v1 edited today would reach a fresh install
+        and no existing one — the two would silently diverge. Schema changes
+        are only ever a new pair appended here plus a ``SCHEMA_VERSION`` bump.
         """
         migrations = [
             (1, _SCHEMA_V1),
+            (2, _SCHEMA_V2),
         ]
         for target, sql in migrations:
             if from_version < target:
@@ -593,6 +670,109 @@ class Store:
             )
             for r in rows
         ]
+
+    # ----- message history (web-console prompt recall) ---------------------- #
+
+    def append_message_history(
+        self,
+        owner_id: str,
+        channel: str,
+        text: str,
+        *,
+        max_entries: int = MESSAGE_HISTORY_MAX_ENTRIES,
+    ) -> MessageHistoryAppend:
+        """Append one *sent* prompt to ``(owner_id, channel)``; report where it landed.
+
+        Three rules, all enforced here rather than at the call site so every
+        entrance (REST today, anything later) obeys them:
+
+        - blank / whitespace-only text is not a message and is dropped;
+        - text identical to the newest entry is dropped — holding Enter on the
+          same answer should not push the previous ones out of reach;
+        - the newest ``max_entries`` survive, older rows are deleted.
+
+        WHY the return value names a row rather than answering yes/no: the
+        caller has to be able to recognise *this* append in a list it reads
+        later, and a fold produces no new row to recognise. Reporting the row
+        the fold landed on makes both outcomes point at the entry this append
+        became, which is the only identity the browser is allowed to merge on.
+
+        The read-back, the insert and the trim run inside one held write lock
+        so two concurrent sends cannot both see the same "last entry" and both
+        insert, nor race the trim into deleting a row that just arrived.
+        """
+        body = text if isinstance(text, str) else ""
+        if not body.strip():
+            return MessageHistoryAppend(appended=False, entry_id=None)
+        cap = max(1, int(max_entries))
+        with self._lock:
+            conn = self._conn()
+            last = conn.execute(
+                "SELECT entry_id, text FROM message_history "
+                "WHERE owner_id = ? AND channel = ? ORDER BY entry_id DESC LIMIT 1",
+                (owner_id, channel),
+            ).fetchone()
+            if last is not None and last["text"] == body:
+                return MessageHistoryAppend(
+                    appended=False, entry_id=int(last["entry_id"])
+                )
+            cur = conn.execute(
+                "INSERT INTO message_history (owner_id, channel, text, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (owner_id, channel, body, self._now()),
+            )
+            entry_id = int(cur.lastrowid)
+            conn.execute(
+                "DELETE FROM message_history "
+                "WHERE owner_id = ? AND channel = ? AND entry_id NOT IN ("
+                "    SELECT entry_id FROM message_history "
+                "    WHERE owner_id = ? AND channel = ? "
+                "    ORDER BY entry_id DESC LIMIT ?"
+                ")",
+                (owner_id, channel, owner_id, channel, cap),
+            )
+            conn.commit()
+            return MessageHistoryAppend(appended=True, entry_id=entry_id)
+
+    def list_message_history(
+        self,
+        owner_id: str,
+        channel: str,
+        *,
+        limit: int = MESSAGE_HISTORY_MAX_ENTRIES,
+    ) -> List[MessageHistoryEntry]:
+        """Return ``(owner_id, channel)``'s entries oldest-first, newest last.
+
+        Oldest-first because that is the order the arrow-key navigator walks
+        backwards through; the SQL selects the *newest* ``limit`` rows (that is
+        what a cap means) and hands them back re-ordered.
+        """
+        cap = max(0, int(limit))
+        if cap == 0:
+            return []
+        conn = self._conn()
+        rows = conn.execute(
+            "SELECT entry_id, text, created_at FROM message_history "
+            "WHERE owner_id = ? AND channel = ? ORDER BY entry_id DESC LIMIT ?",
+            (owner_id, channel, cap),
+        ).fetchall()
+        return [
+            MessageHistoryEntry(
+                entry_id=int(r["entry_id"]),
+                text=r["text"],
+                created_at=float(r["created_at"]),
+            )
+            for r in reversed(rows)
+        ]
+
+    def count_message_history(self, owner_id: str, channel: str) -> int:
+        """Row count for one ``(owner_id, channel)`` — the truncation probe."""
+        conn = self._conn()
+        row = conn.execute(
+            "SELECT COUNT(*) AS c FROM message_history WHERE owner_id = ? AND channel = ?",
+            (owner_id, channel),
+        ).fetchone()
+        return int(row["c"])
 
     # ----- break-glass tokens ---------------------------------------------- #
 

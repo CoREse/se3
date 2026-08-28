@@ -867,6 +867,24 @@ function removePathOnce(text, path) {
   return replaceTokenOnce(text, path, "");
 }
 
+// Literal (never regex) removal of EVERY occurrence of `token`.
+//
+// WHY this exists next to the first-occurrence rewrite instead of replacing it:
+// the two operations answer different questions. Planting a landed path owns
+// exactly the one marker it put there, so it stays first-occurrence — the user
+// may have copied the marker on purpose and the visible text is theirs. But
+// where a marker is dropped BECAUSE nothing backs it any more (a draft about to
+// outlive its strip, a stash whose row has settled), every copy is equally
+// unbacked: leaving the second one behind ships an internal marker to the agent
+// as prompt prose with the uploaded file named nowhere. split/join, so a file
+// name full of regex metacharacters is matched literally. Pure.
+function removeTokenEverywhere(text, token) {
+  const src = String(text == null ? "" : text);
+  const needle = String(token == null ? "" : token);
+  if (!needle) return src;
+  return src.split(needle).join("");
+}
+
 // Insert `text` at the caret of a textarea/input, replacing any selection, and
 // leave the caret just past what was inserted so the user can keep typing.
 // Touches only value/selectionStart/selectionEnd — no document, no events — so
@@ -1106,6 +1124,17 @@ function uploadScopeForStrip(stripId) {
   return null;
 }
 
+// Same reverse lookup keyed by the textarea, for the two subsystems that know
+// only the input they are serving (draft persistence, history navigation) yet
+// must reason about the attachment rows mirroring that box's text.
+function uploadScopeForInput(inputId) {
+  const id = String(inputId || "");
+  for (const name of Object.keys(UPLOAD_SCOPES)) {
+    if (UPLOAD_SCOPES[name].inputId === id) return UPLOAD_SCOPES[name];
+  }
+  return null;
+}
+
 function attachmentEntries(stripId) {
   if (!state.uploadAttachments || typeof state.uploadAttachments !== "object") {
     state.uploadAttachments = {};
@@ -1130,12 +1159,65 @@ function pendingUploadRefusal(stripId) {
   );
 }
 
+// The placeholder tokens a box's text may legitimately still carry: one per row
+// that is STILL in flight. A settled row's token is already out of the text (a
+// path replaced it, or a failure/cancel pulled it), so anything else that still
+// reads like a token is a leftover nobody is going to resolve.
+//
+// WHY this list is the currency for both drafts and the history stash: a
+// placeholder is only safe while the row behind it keeps pendingUploadRefusal()
+// refusing to send. Detached from that row it is not prompt prose but an
+// internal marker that would travel to the agent verbatim, with the uploaded
+// file named nowhere.
+function pendingUploadTokens(stripId) {
+  return attachmentEntries(stripId)
+    .filter((e) => e && String(e.status || "") === "uploading" && e.token)
+    .map((e) => String(e.token));
+}
+
+// The text of `inputId` as it may be PERSISTED: every in-flight placeholder
+// taken back out.
+//
+// WHY a draft may not carry a placeholder: the strip is deliberately NOT
+// persisted (an upload row is live state, not text), so a reload — or simply
+// leaving and re-entering the flow / New Task panel — restores the words
+// without the row that made them safe. pendingUploadRefusal() would then see
+// nothing in flight and happily send "[uploading shot.png #3]" as prose, while
+// the file that did land on the project machine is named by no prompt at all.
+// The words around it are ordinary text and a landed path is ordinary text
+// too; only the transient marker is dropped.
+//
+// WHY every copy goes, not just the first: the strip is what makes a marker
+// safe, and it is not persisted at all — so after the reload NO copy of it has
+// a row behind it. A marker the operator duplicated by hand would otherwise be
+// the one that survives, with pendingUploadRefusal() seeing nothing in flight.
+function draftTextForInput(inputId, text) {
+  let body = typeof text === "string" ? text : "";
+  const cfg = uploadScopeForInput(inputId);
+  if (!cfg) return body;
+  for (const token of pendingUploadTokens(cfg.stripId)) {
+    body = removeTokenEverywhere(body, token);
+  }
+  return body;
+}
+
 // Re-measure the docked textarea after a programmatic edit. The auto-grow
 // height is normally driven by the `input` event, which a value assignment does
 // NOT fire — without this, replacing a placeholder with a long path would leave
 // the box clipped at its pre-paste height.
 function syncUploadInput(cfg) {
   if (cfg && cfg.autoGrow) autoGrowReplyTextarea();
+  // A value assignment fires no `input` event, so the draft listener never sees
+  // the path that was just planted — the text is the prompt, and it has to be
+  // recoverable after a reload like anything else typed by hand. The pending
+  // placeholder this same call may have just inserted is the one thing that
+  // must NOT be persisted; see draftTextForInput.
+  if (cfg && cfg.inputId) {
+    const node = $(cfg.inputId);
+    if (node) {
+      scheduleDraftSave(draftKeyForInput(cfg.inputId), draftTextForInput(cfg.inputId, node.value));
+    }
+  }
 }
 
 // Resolve where a file pasted into `scope` should be stored.
@@ -1515,6 +1597,10 @@ async function performUpload(inputEl, file, target, stripId) {
   const fail = (code, prose) => {
     if (!claim()) return null;
     replaceInInputOnce(inputEl, token, "");
+    // The box may not be the only place this token lives: a history traversal
+    // started since the paste parked the operator's buffer off screen, and the
+    // marker has to leave that copy too.
+    rewriteHistoryStashForStrip(stripId, token, "");
     entry.status = "error";
     entry.code = code || "";
     entry.controller = null;
@@ -1573,7 +1659,11 @@ async function performUpload(inputEl, file, target, stripId) {
   // IS stored (the daemon already wrote it), so the row still settles to done —
   // it just has no path in the text to point at, which attachmentRowModel reads
   // as "nothing to remove".
-  const landed = replaceInInputOnce(inputEl, token, path);
+  // The path lands wherever the token is — the visible box, or the editing
+  // buffer a history traversal parked it in. Rewriting both is what keeps a
+  // recalled-and-returned prompt naming the file that was uploaded into it.
+  const landed = replaceInInputOnce(inputEl, token, path)
+    || rewriteHistoryStashForStrip(stripId, token, path);
   entry.status = "done";
   entry.code = "";
   entry.path = landed ? path : "";
@@ -1697,6 +1787,9 @@ function cancelAttachment(stripId, id) {
     replaceInInputOnce(inputEl, entry.token, "");
     syncUploadInput(cfg);
   }
+  // Also out of any editing buffer a history traversal parked: the row is gone
+  // and with it the gate that made the marker safe to hold.
+  if (entry && entry.token) rewriteHistoryStashForStrip(stripId, entry.token, "");
   revokePreviewUrl(entry);
   rows.splice(idx, 1);
   renderAttachmentStrip(stripId);
@@ -1723,6 +1816,10 @@ function removeAttachment(stripId, id) {
     inputEl.value = removePathOnce(String(inputEl.value == null ? "" : inputEl.value), model.path);
     syncUploadInput(cfg);
   }
+  // The path may be sitting in a parked editing buffer instead of the visible
+  // box (the upload landed while the operator was walking history); "stop
+  // mentioning this file" has to mean the same thing there.
+  if (model.canRemove) rewriteHistoryStashForStrip(stripId, model.path, "");
   revokePreviewUrl(entry);
   rows.splice(idx, 1);
   renderAttachmentStrip(stripId);
@@ -1760,6 +1857,16 @@ function discardAttachments(stripId) {
   const count = rows.length;
   const cfg = uploadScopeForStrip(stripId);
   const inputEl = cfg ? $(cfg.inputId) : null;
+  // A parked editing buffer is prompt text like any other: leaving the old
+  // project's paths (or a marker whose row is about to go) in it would bring
+  // back on ↓ exactly the unresolvable prompt this function exists to prevent.
+  for (const entry of rows) {
+    const model = attachmentRowModel(entry);
+    if (model.canRemove && model.path) rewriteHistoryStashForStrip(stripId, model.path, "");
+    else if (model.status === "uploading" && entry && entry.token) {
+      rewriteHistoryStashForStrip(stripId, entry.token, "");
+    }
+  }
   if (inputEl) {
     for (const entry of rows) {
       const model = attachmentRowModel(entry);
@@ -2381,6 +2488,1399 @@ function hasPendingCall(flow) {
 }
 
 // ---------------------------------------------------------------------------
+// Input drafts — unsent text, per device (localStorage)
+// ---------------------------------------------------------------------------
+//
+// WHY: a draft is "the words this device has typed and not sent yet". It has to
+// survive a reload, a dropped WebSocket and an expired session — none of which
+// the server can help with — so it lives in localStorage only and is never
+// shipped anywhere. (Text that WAS sent is a different asset: it belongs to the
+// owner, not the device, and is kept server-side as message history.)
+//
+// INVARIANT: the whole store is ONE localStorage key holding a
+// {draftKey -> {text, ts}} map. A single key is what makes the size bound cheap:
+// every write re-prunes the map (expired entries first, then the oldest beyond
+// MAX_ENTRIES), so a browser that has visited a thousand flows still holds at
+// most MAX_ENTRIES drafts. And every read and write is wrapped: localStorage
+// throws outright in some privacy modes and throws QuotaExceededError when
+// full, while a draft is only ever a convenience — a failure must degrade to
+// "there is no draft", never to an input box that will not take text.
+
+const DRAFTS = {
+  STORAGE_KEY: "se3_input_drafts",
+  MAX_ENTRIES: 20,
+  // Two weeks: long enough to survive a holiday, short enough that a forgotten
+  // draft does not follow the operator around forever.
+  TTL_MS: 14 * 24 * 60 * 60 * 1000,
+  // Debounce window for the per-keystroke save. Mutable so tests can drive the
+  // save path without sleeping through a real one.
+  debounceMs: 400,
+  // Fixed keys for the single-instance inputs. The reply box is per-flow and
+  // gets its key from flowDraftKey() instead.
+  NEW_TASK: "new-task",
+  ISSUE_DESCRIPTION: "issue-description",
+  ISSUE_TITLE: "issue-title",
+  // In-flight debounce timers and the text each one will write, keyed by draft
+  // key. `pending` exists so flushDraftSaves() can land a save the debounce
+  // window has not fired yet (page hide, or a test that will not sleep).
+  timers: {},
+  pending: {},
+  // draft key -> monotonic count of content changes; see draftEditEpoch().
+  edits: {},
+  // Last stamp handed out by draftStamp(); see there for why it is not simply
+  // Date.now().
+  lastStamp: 0,
+};
+
+// Per-slot edit counter. A send captures it before the POST and re-reads it on
+// success: the reply textarea deliberately stays editable while a request is in
+// flight, so "was this box touched since the send?" is the only honest way to
+// tell the delivered snapshot apart from a follow-up the operator started
+// typing while waiting. Counting changes rather than comparing text keeps the
+// answer right even when the follow-up happens to be typed back to the same
+// characters and then changed again.
+function draftEditEpoch(key) {
+  const k = String(key || "");
+  if (!k) return 0;
+  return Number(DRAFTS.edits[k]) || 0;
+}
+
+// Monotonic write stamp. Date.now() only has millisecond resolution and a burst
+// of saves lands inside a single tick, which makes "evict the oldest" genuinely
+// undecidable — a recency sort over equal timestamps evicts by insertion order,
+// which is not recency at all. Forcing the stamp strictly upward gives eviction
+// a total order. It stays within milliseconds of the wall clock in real use,
+// which is all a 14-day TTL asks of it.
+function draftStamp() {
+  const now = Date.now();
+  const next = now > DRAFTS.lastStamp ? now : DRAFTS.lastStamp + 1;
+  DRAFTS.lastStamp = next;
+  return next;
+}
+
+// Per-flow draft key. Two flows must never share a draft: the operator's
+// half-written answer to flow A is meaningless — and confusing — in flow B.
+function flowDraftKey(flowId) {
+  const id = String(flowId == null ? "" : flowId).trim();
+  return id ? "flow:" + id : "";
+}
+
+// The localStorage handle, or null when it is unusable. Merely TOUCHING
+// `localStorage` throws in some privacy modes, so even the existence probe is
+// guarded.
+function draftStorage() {
+  try {
+    if (typeof localStorage === "undefined" || !localStorage) return null;
+    return localStorage;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Read the stored map. Any failure — no storage, malformed JSON, a payload
+// written by a future/other version — reads as "no drafts" rather than
+// propagating: the caller is about to show an input box either way.
+function readDraftEntries() {
+  const store = draftStorage();
+  if (!store) return {};
+  let parsed;
+  try {
+    const raw = store.getItem(DRAFTS.STORAGE_KEY);
+    if (!raw) return {};
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    return {};
+  }
+  if (!parsed || typeof parsed !== "object") return {};
+  const entries = parsed.entries;
+  if (!entries || typeof entries !== "object") return {};
+  const out = {};
+  for (const key of Object.keys(entries)) {
+    const value = entries[key];
+    if (!key || !value || typeof value !== "object") continue;
+    if (typeof value.text !== "string" || !value.text) continue;
+    out[key] = { text: value.text, ts: Number(value.ts) || 0 };
+  }
+  return out;
+}
+
+// Pure: the bounded view of `entries` at time `now`. Expired and blank entries
+// drop out first, then the newest `max` survive. `max` of 0 is a real value
+// (keep nothing), not a missing argument — saveDraft passes MAX_ENTRIES-1 and
+// that floor has to hold even for a cap of one.
+function pruneDraftEntries(entries, now, max, ttlMs) {
+  const cap = Number.isFinite(max) && max >= 0 ? Math.floor(max) : DRAFTS.MAX_ENTRIES;
+  const ttl = Number.isFinite(ttlMs) && ttlMs > 0 ? ttlMs : DRAFTS.TTL_MS;
+  const stamp = Number.isFinite(now) ? now : 0;
+  const live = [];
+  const src = entries && typeof entries === "object" ? entries : {};
+  for (const key of Object.keys(src)) {
+    const value = src[key];
+    if (!key || !value || typeof value.text !== "string" || !value.text) continue;
+    const ts = Number(value.ts) || 0;
+    if (stamp - ts >= ttl) continue;
+    live.push([key, { text: value.text, ts }]);
+  }
+  live.sort((a, b) => b[1].ts - a[1].ts);
+  const out = {};
+  for (const [key, value] of live.slice(0, cap)) out[key] = value;
+  return out;
+}
+
+// Persist the map. Returns whether it landed; a false is deliberately silent —
+// losing a draft is a small loss, and there is no useful action to offer.
+function writeDraftEntries(entries) {
+  const store = draftStorage();
+  if (!store) return false;
+  try {
+    store.setItem(DRAFTS.STORAGE_KEY, JSON.stringify({ v: 1, entries }));
+    return true;
+  } catch (_) {
+    // Almost always QuotaExceededError, and almost always caused by something
+    // else on the origin. Retry once with a much smaller cap: shedding the
+    // oldest drafts is strictly better than dropping the one being typed.
+    try {
+      const trimmed = pruneDraftEntries(
+        entries,
+        Date.now(),
+        Math.max(1, Math.floor(DRAFTS.MAX_ENTRIES / 4)),
+        DRAFTS.TTL_MS,
+      );
+      store.setItem(DRAFTS.STORAGE_KEY, JSON.stringify({ v: 1, entries: trimmed }));
+      return true;
+    } catch (_e) {
+      return false;
+    }
+  }
+}
+
+// Drop a queued debounce so a save that is no longer wanted (the text was sent,
+// or a newer keystroke superseded it) cannot fire behind the caller's back.
+function cancelDraftSave(key) {
+  const k = String(key || "");
+  if (!k) return;
+  if (Object.prototype.hasOwnProperty.call(DRAFTS.timers, k)) {
+    clearTimeout(DRAFTS.timers[k]);
+    delete DRAFTS.timers[k];
+  }
+  delete DRAFTS.pending[k];
+}
+
+// Write one draft immediately. Blank / whitespace-only text is not a draft —
+// it clears the slot instead, so an emptied box does not resurrect itself.
+function saveDraft(key, text) {
+  const k = String(key || "");
+  if (!k) return false;
+  const body = typeof text === "string" ? text : "";
+  if (!body.trim()) return clearDraft(k);
+  const now = draftStamp();
+  const entries = readDraftEntries();
+  // WHY: prune the OTHERS to one below the cap and re-insert, rather than
+  // inserting and pruning the lot. draftStamp() orders THIS tab's writes, but a
+  // second tab (or a clock step) can leave a stored entry stamped ahead of us;
+  // taking this key out of the candidate set first makes the survival of the
+  // draft being typed right now structural rather than a matter of whose clock
+  // ran faster.
+  delete entries[k];
+  const kept = pruneDraftEntries(entries, now, Math.max(0, DRAFTS.MAX_ENTRIES - 1));
+  kept[k] = { text: body, ts: now };
+  return writeDraftEntries(kept);
+}
+
+// The stored draft for `key`, or "" when there is none / it has expired.
+function loadDraft(key) {
+  const k = String(key || "");
+  if (!k) return "";
+  const hit = readDraftEntries()[k];
+  if (!hit || typeof hit.text !== "string") return "";
+  if (Date.now() - (Number(hit.ts) || 0) >= DRAFTS.TTL_MS) return "";
+  return hit.text;
+}
+
+// What this slot's draft WOULD be once every queued save has landed. The
+// debounce means localStorage lags the keyboard by up to a window, so a
+// pending value — not the stored one — is the operator's latest text. Any
+// reader that must not lose the last few characters (restoring into a
+// reopened box, deciding whether a draft still mirrors what was sent) has to
+// go through here rather than straight to loadDraft().
+function effectiveDraftText(key) {
+  const k = String(key || "");
+  if (!k) return "";
+  if (Object.prototype.hasOwnProperty.call(DRAFTS.pending, k)) {
+    const body = DRAFTS.pending[k];
+    return typeof body === "string" ? body : "";
+  }
+  return loadDraft(k);
+}
+
+function clearDraft(key) {
+  const k = String(key || "");
+  if (!k) return false;
+  cancelDraftSave(k);
+  const entries = readDraftEntries();
+  if (!Object.prototype.hasOwnProperty.call(entries, k)) return false;
+  delete entries[k];
+  return writeDraftEntries(pruneDraftEntries(entries, Date.now()));
+}
+
+// Debounced save. Typing is the hot path — one localStorage round-trip per
+// keystroke would serialize the whole map on every character.
+function scheduleDraftSave(key, text) {
+  const k = String(key || "");
+  if (!k) return;
+  const body = typeof text === "string" ? text : "";
+  cancelDraftSave(k);
+  // Every caller of this is a real content change (a keystroke, or the upload
+  // path splicing a path token in), which is exactly what the epoch counts.
+  DRAFTS.edits[k] = draftEditEpoch(k) + 1;
+  DRAFTS.pending[k] = body;
+  const delay = Number.isFinite(DRAFTS.debounceMs) && DRAFTS.debounceMs >= 0
+    ? DRAFTS.debounceMs
+    : 400;
+  DRAFTS.timers[k] = setTimeout(() => {
+    delete DRAFTS.timers[k];
+    delete DRAFTS.pending[k];
+    saveDraft(k, body);
+  }, delay);
+}
+
+// Land every queued save now. Wired to page hide so a reload inside the
+// debounce window does not eat the last few characters.
+function flushDraftSaves() {
+  for (const k of Object.keys(DRAFTS.timers)) {
+    clearTimeout(DRAFTS.timers[k]);
+    delete DRAFTS.timers[k];
+    const body = DRAFTS.pending[k];
+    delete DRAFTS.pending[k];
+    if (typeof body === "string") saveDraft(k, body);
+  }
+}
+
+// Which draft slot an input element writes into. "" means "do not persist this
+// box right now" and every caller treats it as a no-op.
+function draftKeyForInput(inputId) {
+  const id = String(inputId || "");
+  if (id === "flow-reply-input") return flowDraftKey(state.selectedFlowId);
+  if (id === "nt-task") return DRAFTS.NEW_TASK;
+  if (id === "issue-description" || id === "issue-title") {
+    // Only the CREATE form drafts. In edit mode the box holds an existing
+    // issue's stored body; persisting that would both bury the operator's
+    // unsent new-issue draft and replay someone else's text into the next
+    // create form.
+    const form = $("issue-form");
+    const mode = form && form.dataset ? form.dataset.mode : "";
+    if (mode === "edit") return "";
+    return id === "issue-title" ? DRAFTS.ISSUE_TITLE : DRAFTS.ISSUE_DESCRIPTION;
+  }
+  return "";
+}
+
+// Re-run the content-dependent UI after a PROGRAMMATIC edit of a prompt box.
+// Assigning `.value` fires no `input` event, so nothing that normally rides on
+// typing runs by itself — the docked textarea's height is a function of its
+// content, and without this a multi-line draft (or a recalled history entry)
+// comes back clipped to one line. One helper for every programmatic writer, so
+// a new one cannot forget half of it.
+function syncInputContentChanged(inputId) {
+  if (String(inputId) === "flow-reply-input") autoGrowReplyTextarea();
+}
+
+// Refill an input from its draft. Returns the restored text ("" when there was
+// nothing to restore, which leaves the box exactly as the caller left it).
+function restoreDraftInto(inputId) {
+  const input = $(inputId);
+  if (!input) return "";
+  const key = draftKeyForInput(inputId);
+  if (!key) return "";
+  // WHY effectiveDraftText and not loadDraft: closing and reopening the same
+  // flow or modal inside the debounce window is an ordinary gesture (type,
+  // dismiss, think again, reopen), and reading only what has been persisted
+  // would hand back a blank box while the queued save lands moments later with
+  // nowhere to put itself.
+  const text = effectiveDraftText(key);
+  if (!text) return "";
+  input.value = text;
+  syncInputContentChanged(inputId);
+  return text;
+}
+
+// Persist what this box holds, on every keystroke, behind the debounce.
+function bindDraftInput(inputId) {
+  const input = $(inputId);
+  if (!input || typeof input.addEventListener !== "function") return;
+  input.addEventListener("input", () => {
+    // Typing around a placeholder must not smuggle it into localStorage
+    // either — the draft is restored without the strip that backs it.
+    scheduleDraftSave(draftKeyForInput(inputId), draftTextForInput(inputId, input.value));
+  });
+}
+
+// Retire the text a send just delivered — and only that text.
+//
+// WHY this is not an unconditional blank-and-clear: every box that feeds a
+// submission stays enabled for the whole round trip (the docked-chat UX lets
+// the operator keep writing while the daemon works; the two modals never lock
+// their textareas either), so by the time a success lands the box may already
+// hold a follow-up that was never sent. Emptying it and dropping its draft —
+// which also cancels the queued debounce carrying the newest characters —
+// would destroy writing the operator has no way to get back, and a slow
+// connection would silently eat every sentence typed during it.
+//
+// INVARIANT: the edit epoch (`editEpoch`, captured by the caller before
+// awaiting) is the ONLY thing that decides this. Comparing the box's current
+// text against the delivered snapshot looks equivalent and is not: an operator
+// who edits mid-flight and happens to land back on the same characters has
+// still written something they never sent, so a text match would retire
+// exactly the work the epoch exists to protect. Untouched → retire; touched →
+// leave both the box and the draft entirely alone.
+//
+// `inputId` is passed empty when the box on screen belongs to somewhere else
+// (the operator switched flows mid-flight); the draft slot is then the only
+// thing to retire. Returns whether the delivered text was retired.
+function retireSentText(inputId, draftKey, editEpoch) {
+  const key = String(draftKey || "");
+  if (draftEditEpoch(key) !== (Number(editEpoch) || 0)) return false;
+  const input = inputId ? $(inputId) : null;
+  if (input && typeof input.value === "string") {
+    input.value = "";
+    syncInputContentChanged(inputId);
+  }
+  if (key) clearDraft(key);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Message history — text that was SENT, per owner (server-side)
+// ---------------------------------------------------------------------------
+//
+// WHY the mirror image of the draft cache above: a draft is "what this device
+// has not sent yet" and stays in localStorage, while a sent message is a fact
+// about the *owner* — so it lives on the server, scoped to owner_id, and the
+// same operator recalls it from another browser or another machine.
+//
+// Two channels, never merged: the docked reply box (respond and interject share
+// one textarea, so they share one conversation) and the New Task description. A
+// task description surfacing while answering a running flow's question would be
+// noise, not recall. The issue modal has no channel — it is a form, not a prompt.
+//
+// The navigation semantics deliberately copy the CLI's (prompt_toolkit in
+// multiline mode): ↑ only reaches history when the caret is on the FIRST line,
+// ↓ only when it is on the LAST — anywhere else the arrow is caret movement,
+// which is the whole reason a multi-line box can be navigated at all.
+//
+// INVARIANT: history is a convenience layered on top of the prompt, never a
+// gate in front of it. Every network touch here is best-effort — an unreachable
+// or 401 endpoint degrades to whatever this session sent (an in-memory list)
+// and must never block typing, submitting, or the first paint of the views the
+// two boxes live in (hence the lazy load on first focus / first arrow key).
+
+const MSG_HISTORY = {
+  REPLY: "flow-reply",
+  NEW_TASK: "new-task",
+  // Same 500 as the CLI's prompt_history.MAX_ENTRIES and as the server's own
+  // cap: the client trims too so an over-long in-memory list cannot grow past
+  // what a reload would hand back.
+  MAX_ENTRIES: 500,
+  // How long an arrow key may wait on the lazy GET before the in-memory list
+  // stands in for it. An unreachable server usually *fails* fast, but a hung
+  // connection never answers at all, and without a deadline the deferred
+  // keystroke (and every one queued behind it) would wait forever. Mutable so
+  // tests can pin it without sleeping.
+  loadTimeoutMs: 6000,
+  // channel -> {entries: [oldest..newest], dropped, loaded, loading}; an entry
+  // is {id, text, serverId} — see normalizeHistoryEntry for why identity is a
+  // field and never the text, and installHistoryEntries for what sits in
+  // `dropped`.
+  channels: {},
+  // inputId -> {cursor, stash}; see historyNavState for what cursor means.
+  nav: {},
+  // Counter behind the ids of entries this session created. Monotonic for the
+  // life of the page (a sign-out does NOT rewind it) so an id can never be
+  // reused while a request carrying the previous one is still in flight.
+  seq: 0,
+};
+
+// Which channel a box recalls from. "" means "this box has no history".
+function historyChannelForInput(inputId) {
+  const id = String(inputId || "");
+  if (id === "flow-reply-input") return MSG_HISTORY.REPLY;
+  if (id === "nt-task") return MSG_HISTORY.NEW_TASK;
+  return "";
+}
+
+// The inputs fed by one channel — a send has to reset the navigation of every
+// box that recalls the entry it just added, or the next ↑ would resume from a
+// stale position.
+function historyInputsForChannel(channel) {
+  const ch = String(channel || "");
+  if (ch === MSG_HISTORY.REPLY) return ["flow-reply-input"];
+  if (ch === MSG_HISTORY.NEW_TASK) return ["nt-task"];
+  return [];
+}
+
+function historyChannelState(channel) {
+  const ch = String(channel || "");
+  if (!ch) return { entries: [], dropped: [], loaded: true, loading: null };
+  if (!MSG_HISTORY.channels[ch]) {
+    MSG_HISTORY.channels[ch] = { entries: [], dropped: [], loaded: false, loading: null };
+  }
+  const st = MSG_HISTORY.channels[ch];
+  // A caller (or a test) may have replaced `entries` wholesale; the overflow
+  // behind it is an implementation detail nobody else maintains.
+  if (!Array.isArray(st.dropped)) st.dropped = [];
+  return st;
+}
+
+// Per-input cursor. `cursor` counts steps back from the newest entry: 0 is the
+// editing state (nothing recalled), 1 is the newest entry, entries.length is
+// the oldest. `stash` holds the text that was being edited when the operator
+// first stepped into history, so walking all the way back down returns it.
+// `queued` counts ↑ presses taken while the first load was still in flight and
+// `guard` is the box's text when the first of them was pressed; see
+// deferHistoryStep().
+// `stashTokens` lists the in-flight upload placeholders the stash was holding
+// when it was taken; see stashHistoryTokens/settledStashText for why a stashed
+// buffer cannot be a plain string.
+function historyNavState(inputId) {
+  const id = String(inputId || "");
+  if (!MSG_HISTORY.nav[id]) {
+    MSG_HISTORY.nav[id] = { cursor: 0, stash: "", stashTokens: [], queued: 0, guard: "" };
+  }
+  const nav = MSG_HISTORY.nav[id];
+  // A caller (or a test) may have built the record by hand; the token list is
+  // bookkeeping nobody else maintains.
+  if (!Array.isArray(nav.stashTokens)) nav.stashTokens = [];
+  return nav;
+}
+
+function resetHistoryNav(inputId) {
+  const nav = historyNavState(inputId);
+  nav.cursor = 0;
+  nav.stash = "";
+  nav.stashTokens = [];
+  // A reset means the box's content was replaced out from under the operator
+  // (a send emptied it, a modal reopened). Steps queued against the text that
+  // was there before must not land on the new one.
+  nav.queued = 0;
+  nav.guard = "";
+}
+
+// Drop every cached list and cursor. History is owner-scoped, so signing out
+// (or being signed out by a 401) has to take it with it — otherwise the next
+// owner to use this browser recalls the previous one's messages before the
+// first fetch replaces them.
+function clearMessageHistoryCache() {
+  MSG_HISTORY.channels = {};
+  MSG_HISTORY.nav = {};
+}
+
+// ---------------------------------------------------------------------------
+// Entry identity
+// ---------------------------------------------------------------------------
+//
+// INVARIANT: an entry's identity is its `serverId` — the id the server
+// assigned the row this append became — and NEVER its text. The same words
+// legitimately appear twice in one history (only an *immediately* repeated
+// send is folded), so "the remote list contains this text" says nothing about
+// whether that row is this session's send or an older, unrelated one. Every
+// place that has to answer "are these two the same append?" goes through
+// sameHistoryEntry, and nothing here is allowed to compare text to decide it.
+//
+// `id` is a page-unique key that exists so an entry stays findable before the
+// server has named it (a POST still in flight, or one that never lands at
+// all). Such an entry has `serverId: null` and therefore matches nothing but
+// itself — which is exactly the rule for text this session sent and cannot
+// prove the server accepted.
+
+function nextLocalHistoryId() {
+  MSG_HISTORY.seq = (Number(MSG_HISTORY.seq) || 0) + 1;
+  return "l" + MSG_HISTORY.seq;
+}
+
+// A server row id, or null when the value is not one. `0` is not a valid
+// AUTOINCREMENT rowid, so the falsy check is safe and keeps ""/null/undefined
+// from becoming a numeric 0 that would collide with every other unnamed entry.
+function historyServerId(raw) {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+// Coerce whatever the wire (or a caller) handed over into an entry record.
+// Blank text is not a message and yields null. A plain string is tolerated so
+// a server that predates entry ids still fills the box — its entries simply
+// carry no identity and can never collapse against a local send, which is the
+// safe direction (a duplicate shown beats a real message swallowed).
+function normalizeHistoryEntry(raw) {
+  if (typeof raw === "string") {
+    if (!raw.trim()) return null;
+    return { id: nextLocalHistoryId(), text: raw, serverId: null };
+  }
+  if (!raw || typeof raw !== "object") return null;
+  // Already canonical (an entry this session created, passing back through a
+  // merge): hand back the SAME object. Callers holding a reference to it — the
+  // pending POST waiting to learn its server id above all — must keep pointing
+  // at the record that stays in the list.
+  if (typeof raw.id === "string" && raw.id && typeof raw.text === "string"
+      && Object.prototype.hasOwnProperty.call(raw, "serverId")) {
+    return raw.text.trim() ? raw : null;
+  }
+  const text = typeof raw.text === "string" ? raw.text : "";
+  if (!text.trim()) return null;
+  const serverId = historyServerId(
+    raw.serverId !== undefined ? raw.serverId : raw.id !== undefined ? raw.id : raw.entry_id,
+  );
+  const id = typeof raw.id === "string" && raw.id
+    ? raw.id
+    : serverId !== null
+      ? "s" + serverId
+      : nextLocalHistoryId();
+  return { id, text, serverId };
+}
+
+// Do two entry records stand for the SAME append? Two server ids decide it
+// outright; otherwise only the page-unique key can, and two entries that both
+// lack a server id are two different appends however alike they read.
+function sameHistoryEntry(a, b) {
+  if (!a || !b) return false;
+  if (a.serverId !== null && a.serverId !== undefined
+      && b.serverId !== null && b.serverId !== undefined) {
+    return a.serverId === b.serverId;
+  }
+  return a.id === b.id;
+}
+
+function historyIndexOfEntry(entries, entry) {
+  if (!Array.isArray(entries) || !entry) return -1;
+  for (let i = 0; i < entries.length; i++) {
+    if (sameHistoryEntry(entries[i], entry)) return i;
+  }
+  return -1;
+}
+
+function historyCap(max) {
+  return Number.isFinite(max) && max > 0 ? Math.floor(max) : MSG_HISTORY.MAX_ENTRIES;
+}
+
+// The three list operations below only ORDER — they place an entry, or fold two
+// lists together, and stop there without applying the cap.
+//
+// WHY ordering and capping are separate steps: the rule is
+// "先定序、后截断" — the sequence is decided first and the cap applied to
+// the result. A channel cannot truncate at the moment of the append, because an
+// append whose POST has not answered yet is not finally ordered; the cap is
+// installHistoryEntries()'s job alone.
+
+// Place `text` at the end of `entries` with NO repeat judgement at all — blank
+// is still not a message. Returns the entry record created, or null.
+//
+// WHY an append that skips the repeat rule exists: while a POST is in flight
+// nobody yet knows whose judgement the append is under. The server may well
+// accept it as a legitimate non-adjacent repeat (its newest entry can differ
+// from this cache's), so the entry has to sit in the list, in local send order,
+// until the answer says which row it became — rule 4. degradeHistoryAppend()
+// below is what applies the local rule, and only once the answer never comes.
+//
+// WHY the entry remembers the text it was appended AFTER: the repeat rule is
+// judged against the newest entry the appending side saw AT THE APPEND, and by
+// the time the verdict arrives that entry need no longer be the neighbour. A
+// GET answering in between merges the owner's other devices' rows into the
+// sequence, and one of them may land immediately in front of this append with
+// the same text purely by coincidence. Re-reading the neighbour then would fold
+// a delivered message away on a text match with a row it has nothing to do
+// with — exactly the text-based inference rule 3 forbids. `null` means the
+// append had no predecessor, so nothing can make it a repeat.
+function orderHistoryAppend(entries, text) {
+  if (!Array.isArray(entries)) return null;
+  const entry = normalizeHistoryEntry(typeof text === "string" ? text : "");
+  if (!entry) return null;
+  const last = entries[entries.length - 1];
+  entry.prevText = last && typeof last.text === "string" ? last.text : null;
+  entries.push(entry);
+  return entry;
+}
+
+// Place `text` at the end of `entries` under this side's stack rules — blank is
+// not a message and a repeat of the newest entry is not a new one. Returns the
+// entry record created, or null.
+//
+// WHY the repeat rule lives here as well as on the server: it is judged ONCE,
+// by whichever side performs the append. When the endpoint is reachable that
+// side is the server (which sees the owner's real newest entry, including
+// another device's); this local judgement is what stands in when it is not —
+// i.e. only on the degraded, client-only path.
+function orderHistoryPush(entries, text) {
+  if (!Array.isArray(entries)) return null;
+  const entry = normalizeHistoryEntry(typeof text === "string" ? text : "");
+  if (!entry) return null;
+  const last = entries[entries.length - 1];
+  if (last && last.text === entry.text) return null;
+  entries.push(entry);
+  return entry;
+}
+
+// Fold the server's list together with what THIS session sent.
+//
+// WHY a set of ids and not an alignment of equal text: the POST that ships an
+// entry races the GET that fetches the list, so the answer may already contain
+// none, some, or all of this session's own sends — and text cannot tell which.
+// An answer of [C, D] fetched before this session sent a third entry "C" reads
+// exactly like an answer that already contains that send, so a text-based fold
+// either swallows a delivered message or shows it twice, and no amount of
+// alignment or ordering heuristics separates the two cases. The server id
+// does, unambiguously: a local entry collapses when — and only when — the
+// answer contains the row that this very append became (its insert, or the row
+// the server folded it onto, both reported by the POST). Everything else is
+// kept in the order this session sent it, which is rule 4: an entry the server
+// never named is kept, never guessed away.
+//
+// WHY the unnamed entries are not simply tipped onto the end: the ordering rule
+// is "排在其发出时该通道已知历史之后" — an unnamed entry sits after the history
+// that was already known when it was sent, not after everything the answer
+// happens to carry. The rows this session DID have named are the pins that say
+// where that was: they appear in both lists, so a local entry between two of
+// them belongs between the same two remote rows. Without the pins a late answer
+// carrying an unrelated newer row would shove this session's own send behind
+// it, re-dating a message on nothing but arrival time. An entry with no pin
+// before it falls to the end (the ordinary case: sent before the list was ever
+// fetched, and genuinely the newest thing this session knows), unless a pin
+// FOLLOWS it locally — then it was sent before that row and goes in front of it.
+function orderHistoryMerge(remote, local) {
+  const remoteEntries = [];
+  const remoteAt = new Map();
+  for (const raw of Array.isArray(remote) ? remote : []) {
+    const entry = normalizeHistoryEntry(raw);
+    if (!entry) continue;
+    const sid = entry.serverId;
+    if (sid !== null && sid !== undefined) {
+      if (remoteAt.has(sid)) continue;
+      remoteAt.set(sid, remoteEntries.length);
+    }
+    remoteEntries.push(entry);
+  }
+
+  const locals = [];
+  for (const raw of Array.isArray(local) ? local : []) {
+    const entry = normalizeHistoryEntry(raw);
+    if (!entry) continue;
+    const sid = entry.serverId;
+    const pin = sid !== null && sid !== undefined && remoteAt.has(sid) ? remoteAt.get(sid) : -1;
+    locals.push({ entry, pin });
+  }
+  // The nearest pin AFTER each local entry, so one sent before any pin still
+  // lands in front of it rather than at the newest end.
+  const nextPin = new Array(locals.length).fill(-1);
+  for (let i = locals.length - 1, ahead = -1; i >= 0; i--) {
+    nextPin[i] = ahead;
+    if (locals[i].pin >= 0) ahead = locals[i].pin;
+  }
+
+  // Bucketed by the remote index each unnamed entry follows; -1 is "in front of
+  // the whole answer". Filling them in local order is what keeps this session's
+  // sends in send order among themselves.
+  const slots = new Map();
+  const seen = new Set(remoteAt.keys());
+  for (let i = 0, prevPin = -1; i < locals.length; i++) {
+    const { entry, pin } = locals[i];
+    // Named by a row the answer returned: that row IS this append, shown once.
+    if (pin >= 0) {
+      prevPin = pin;
+      continue;
+    }
+    const sid = entry.serverId;
+    if (sid !== null && sid !== undefined) {
+      if (seen.has(sid)) continue;
+      seen.add(sid);
+    }
+    const at = prevPin >= 0
+      ? prevPin
+      : nextPin[i] >= 0
+        ? nextPin[i] - 1
+        : remoteEntries.length - 1;
+    const bucket = slots.get(at);
+    if (bucket) bucket.push(entry);
+    else slots.set(at, [entry]);
+  }
+
+  const merged = [];
+  const flush = (at) => {
+    const bucket = slots.get(at);
+    if (bucket) for (const entry of bucket) merged.push(entry);
+  };
+  flush(-1);
+  for (let i = 0; i < remoteEntries.length; i++) {
+    merged.push(remoteEntries[i]);
+    flush(i);
+  }
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
+// The cap, applied to a CHANNEL rather than to a bare list
+// ---------------------------------------------------------------------------
+//
+// A channel keeps its ordered list in two pieces: `entries`, the capped window
+// the boxes recall from, and `dropped`, the entries the cap pushed out ahead of
+// it (oldest first). historyOrdered() puts them back together; every mutation
+// works on that whole sequence and hands it to installHistoryEntries(), which
+// re-splits it.
+
+function historyOrdered(st) {
+  const dropped = Array.isArray(st.dropped) ? st.dropped : [];
+  return dropped.length ? dropped.concat(st.entries) : st.entries.slice();
+}
+
+// Install `ordered` (the channel's full sequence, oldest→newest) and cap it.
+//
+// WHY the evicted entries are kept at all while something is pending, instead
+// of being cut loose the moment the cap is exceeded: an append whose POST has
+// not answered is not finally ordered. The server may still fold it onto an
+// existing row, and then it was never a separate entry — it displaced nothing,
+// so the entry the cap pushed out to make room for it must still be there. A
+// straight truncate at append time cannot undo that: the fold would leave this
+// browser one entry short of the window the server still holds, i.e. a message
+// silently lost to a duplicate that turned out not to be one. So while any
+// append is awaiting its verdict the eviction is provisional and the displaced
+// entries wait here; once nothing is pending the ordering is final and they go.
+//
+// INVARIANT: this is the ONLY place the client applies the 500-entry cap, and
+// it always cuts from the OLD end of the whole ordered sequence — a pending
+// entry is capped in its local send position like any other, never spared and
+// never moved to the newest end to survive.
+function installHistoryEntries(st, ordered) {
+  const cap = historyCap(MSG_HISTORY.MAX_ENTRIES);
+  const overflow = ordered.length > cap ? ordered.length - cap : 0;
+  const provisional = overflow > 0 && ordered.some((e) => e && e.pending);
+  st.entries = overflow ? ordered.slice(overflow) : ordered;
+  // Bounded even if a POST never settles at all: the overflow may hold at most
+  // one further capped window, after which the oldest of it is let go.
+  st.dropped = provisional ? ordered.slice(Math.max(0, overflow - cap), overflow) : [];
+  return st.entries;
+}
+
+// Keep every live arrow-key traversal of `channel` pointing at the entry its
+// box is actually showing, across a change of the entry list.
+//
+// WHY this is not optional: `cursor` counts back from the NEWEST entry, so any
+// insertion at the end (a send that landed while the operator was browsing) or
+// eviction at the front (the cap) silently re-aims it at a different entry.
+// The box's text would then no longer be the entry the cursor names, and the
+// next ↑/↓ — which must move to the chronologically adjacent state — would
+// repeat an entry or skip one. Re-derive the cursor from the entry itself.
+function rebaseHistoryNav(channel, before, after) {
+  const prev = Array.isArray(before) ? before : [];
+  const next = Array.isArray(after) ? after : [];
+  for (const inputId of historyInputsForChannel(channel)) {
+    // The raw map on purpose: an input nobody has navigated has no state, and
+    // materializing one here would resurrect it for every later reset.
+    const nav = MSG_HISTORY.nav[inputId];
+    if (!nav || !(Number(nav.cursor) > 0)) continue;
+    const shownIdx = prev.length - nav.cursor;
+    const shown = prev[shownIdx];
+    const idx = historyIndexOfEntry(next, shown);
+    if (idx >= 0) {
+      nav.cursor = next.length - idx;
+      continue;
+    }
+    // The displayed entry is gone (the cap evicted it, a fold merged it away).
+    // It cannot be pointed at, so the cursor takes the VIRTUAL position just
+    // older than the nearest surviving entry that followed it: ↓ then recalls
+    // that chronologically adjacent survivor rather than the one after it.
+    // WHY not "the oldest survivor": naming a real entry the box is not
+    // showing makes the very next ↓ step past it, skipping an entry — exactly
+    // what happens when the cap evicts the entry under a live traversal.
+    let parked = -1;
+    for (let i = shownIdx + 1; i < prev.length; i++) {
+      const at = historyIndexOfEntry(next, prev[i]);
+      if (at >= 0) {
+        parked = at;
+        break;
+      }
+    }
+    // Nothing newer survived either: the list bears no relation to the
+    // traversal any more, so the cursor is merely kept inside it.
+    nav.cursor = parked >= 0 ? next.length - parked + 1 : Math.min(nav.cursor, next.length);
+  }
+}
+
+// Pure caret probes, taking the value and offset rather than the element so the
+// edge semantics can be pinned down without a DOM. An out-of-range / missing
+// offset reads as end-of-text, which is where a freshly focused box sits.
+function caretAtFirstLine(value, caret) {
+  const body = typeof value === "string" ? value : "";
+  const pos = Number.isFinite(caret)
+    ? Math.max(0, Math.min(body.length, caret))
+    : body.length;
+  // Offset 0 is always on the first line, but lastIndexOf clamps a negative
+  // fromIndex to 0 and would still match a leading newline there, reporting a
+  // caret sitting on an empty first line as "not first line" — which makes ↑
+  // a keyboard dead-end (browser default is a no-op at offset 0 too).
+  if (pos === 0) return true;
+  return body.lastIndexOf("\n", pos - 1) === -1;
+}
+
+function caretAtLastLine(value, caret) {
+  const body = typeof value === "string" ? value : "";
+  const pos = Number.isFinite(caret)
+    ? Math.max(0, Math.min(body.length, caret))
+    : body.length;
+  return body.indexOf("\n", pos) === -1;
+}
+
+// Fetch one channel's list, at most once per session, and merge it under
+// anything this session already sent. Plain `fetch`, NOT authedFetch: a 401 on
+// this background convenience must not drive the whole console back to the
+// login gate behind the operator's back — the endpoints that actually deliver
+// their text still do that. Never rejects; a failure leaves the in-memory list
+// as the history and is invisible at the input.
+async function ensureMessageHistoryLoaded(channel) {
+  const ch = String(channel || "");
+  if (!ch) return [];
+  const st = historyChannelState(ch);
+  if (st.loaded) return st.entries;
+  if (st.loading) return st.loading;
+  const request = (async () => {
+    try {
+      const resp = await fetch(`/api/message-history/${encodeURIComponent(ch)}`);
+      if (resp && resp.ok) {
+        const data = await resp.json();
+        // The same owner-scoping guard both POST settlement paths apply, and
+        // for the same reason: history is owner-scoped and signing out swaps
+        // the whole cache for a fresh one. A read issued under the PREVIOUS
+        // owner's session must neither seed the new session's list nor re-aim
+        // its live traversal — rebaseHistoryNav below writes the CURRENT
+        // owner's cursors, so indexing them against the old owner's entries
+        // would leave the box showing one entry while the cursor names
+        // another.
+        if (historyChannelState(ch) !== st) return;
+        const remote = Array.isArray(data && data.entries) ? data.entries : [];
+        // Anything sent before the fetch landed may or may not be in the
+        // response, so fold rather than replace — see orderHistoryMerge for
+        // why the fold is decided by entry id. A late answer (one the deadline
+        // below already gave up on) still folds in here; it is only the
+        // *waiting* that is bounded, not the merge. The merge can insert older
+        // entries ahead of, and evict entries behind, whatever a box is
+        // currently showing, so a traversal in progress is re-aimed with it.
+        const before = st.entries;
+        installHistoryEntries(st, orderHistoryMerge(remote, historyOrdered(st)));
+        rebaseHistoryNav(ch, before, st.entries);
+      }
+    } catch (_) {
+      /* offline / blocked / bad JSON — the session's own list stands in */
+    }
+  })();
+  st.loading = (async () => {
+    const deadline = historyLoadDeadline();
+    try {
+      await Promise.race([request, deadline.promise]);
+    } finally {
+      deadline.cancel();
+    }
+    // One attempt per session either way: a retry loop behind a keystroke is
+    // exactly the thing that must not happen on an unreachable server. Marking
+    // it loaded when the deadline wins is the point — every later arrow key
+    // then goes straight to the in-memory list instead of queueing behind a
+    // request that may never answer.
+    st.loaded = true;
+    st.loading = null;
+    return st.entries;
+  })();
+  return st.loading;
+}
+
+// A timer that resolves after MSG_HISTORY.loadTimeoutMs, plus the handle to
+// cancel it. Cancelling matters: a browser tab (and a test process) should not
+// be held awake by a deadline whose request already answered. A host with no
+// usable timer, or a non-positive/absent setting, yields a promise that never
+// settles — i.e. no deadline at all, which is the pre-timeout behaviour.
+function historyLoadDeadline() {
+  const ms = Number(MSG_HISTORY.loadTimeoutMs);
+  let id = null;
+  const promise = new Promise((resolve) => {
+    if (!Number.isFinite(ms) || ms <= 0 || typeof setTimeout !== "function") return;
+    try {
+      id = setTimeout(resolve, ms);
+    } catch (_) {
+      /* no timer host — never settles, same as no deadline */
+    }
+  });
+  return {
+    promise,
+    cancel: () => {
+      if (id === null) return;
+      try {
+        clearTimeout(id);
+      } catch (_) {
+        /* nothing to cancel */
+      }
+      id = null;
+    },
+  };
+}
+
+// Ship one delivered message to the server and adopt the identity it answers
+// with. Nothing is reported to the operator either way — the text is already
+// delivered, and a history write that did not land is not their problem — but
+// the answer is not thrown away: it is the only thing that can say which row
+// this append became, and the merge is built on exactly that.
+function postMessageHistory(channel, text, entry, channelState) {
+  if (typeof fetch !== "function") {
+    degradeHistoryAppend(channel, entry, channelState);
+    return;
+  }
+  try {
+    const p = fetch(`/api/message-history/${encodeURIComponent(channel)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (p && typeof p.then === "function") {
+      p.then((resp) => (resp && resp.ok && typeof resp.json === "function" ? resp.json() : null))
+        .then((data) => reconcileHistoryAppend(channel, entry, data, channelState))
+        .catch(() => degradeHistoryAppend(channel, entry, channelState));
+    } else {
+      // A `fetch` that answers with no promise cannot ever name the row.
+      degradeHistoryAppend(channel, entry, channelState);
+    }
+  } catch (_) {
+    /* no network stack at all — this append is the client's own to judge */
+    degradeHistoryAppend(channel, entry, channelState);
+  }
+}
+
+// The append will never be named by the server — the endpoint was unreachable,
+// answered an error, or named no row. Only NOW has the operation degraded to
+// client-only history, and only now may the client's own adjacent-repeat rule
+// judge this append, against the entry that immediately precedes it.
+//
+// WHY the judgement waits this long: while the POST was in flight the server
+// might have accepted the text as a legitimate non-adjacent repeat (its newest
+// entry is not necessarily this cache's), and an entry folded away up front
+// could never be recalled again — the browser would have discarded a message
+// the server actually kept. Keeping it until the request settles costs at most
+// a transient duplicate; folding it early loses a delivered message for good.
+function degradeHistoryAppend(channel, entry, channelState) {
+  const ch = String(channel || "");
+  if (!ch || !entry) return;
+  const st = historyChannelState(ch);
+  // Same owner-scoping guard as reconcileHistoryAppend: an answer to the
+  // PREVIOUS owner's request must not touch the new session's list.
+  if (channelState && channelState !== st) return;
+  // The verdict is in (or will never come), so this append is finally ordered
+  // and the eviction it provisionally caused may now become permanent — which
+  // is what re-installing the sequence below settles.
+  entry.pending = false;
+  const before = st.entries.slice();
+  const ordered = historyOrdered(st);
+  // Already named by an earlier answer: that identity stands, and the local
+  // rule has no say over an append the server took.
+  const named = entry.serverId !== null && entry.serverId !== undefined;
+  if (!named) {
+    // Judged against the predecessor recorded AT THE APPEND (orderHistoryAppend
+    // above), never against whoever is standing there now: a GET that landed
+    // while the POST was in flight may have merged an unrelated server row in
+    // front of this entry, and folding on a text match with THAT row would
+    // discard a delivered message no identifier ever linked to it.
+    const repeat = typeof entry.prevText === "string" && entry.prevText === entry.text;
+    if (repeat) {
+      const idx = historyIndexOfEntry(ordered, entry);
+      if (idx >= 0) ordered.splice(idx, 1);
+    }
+  }
+  installHistoryEntries(st, ordered);
+  rebaseHistoryNav(ch, before, st.entries);
+}
+
+// Bind this session's append to the row the server says it became.
+//
+// Three outcomes, and each one is about identity, never about text:
+//
+// - the server inserted a row: the local entry now HAS a server id, so a later
+//   read recognises it instead of showing the message twice;
+// - the server folded it onto an existing row (the adjacent-repeat rule, which
+//   only the server can judge correctly — it alone sees the owner's real
+//   newest entry): the local entry and that row are one and the same append,
+//   so if the sequence already holds that row the local one is dropped, and
+//   one append appears exactly once;
+// - the append is not in the sequence any more: later sends have carried it
+//   past the cap, and an answer only ever NAMES an append — it never moves one
+//   back into the window.
+//
+// A failed / unanswered POST reaches none of these: the entry keeps its
+// null server id and stays in the list on local send order, which is the
+// degraded case the rules reserve for exactly this.
+function reconcileHistoryAppend(channel, entry, data, channelState) {
+  const serverId = data && typeof data === "object" ? historyServerId(data.entry_id) : null;
+  // An answer that names no row leaves this append exactly as unidentified as
+  // no answer at all, so it takes the same degraded path.
+  if (serverId === null) {
+    degradeHistoryAppend(channel, entry, channelState);
+    return;
+  }
+  const ch = String(channel || "");
+  if (!ch) return;
+  const st = historyChannelState(ch);
+  // History is owner-scoped and signing out swaps the whole cache for a fresh
+  // one. An answer to a request the PREVIOUS owner sent must not land in the
+  // new session's list, so it is dropped unless the list it was recorded in is
+  // still the live one.
+  if (channelState && channelState !== st) return;
+  if (entry) entry.pending = false;
+  const before = st.entries.slice();
+  const ordered = historyOrdered(st);
+  const mineIdx = historyIndexOfEntry(ordered, entry);
+  const twinIdx = ordered.findIndex(
+    (e, i) => i !== mineIdx && e && e.serverId === serverId,
+  );
+  if (mineIdx >= 0) {
+    // WHY the id is written even on the branch that drops the entry: the entry
+    // record is the same object a live traversal is holding as "what the box
+    // is showing". Naming it first is what lets rebaseHistoryNav recognise the
+    // surviving twin as the same append and keep the cursor on it; dropping it
+    // unnamed would leave the cursor pointing at a neighbouring entry while the
+    // box still shows this text, and the next arrow would repeat or skip one.
+    ordered[mineIdx].serverId = serverId;
+    if (twinIdx >= 0) ordered.splice(mineIdx, 1);
+  }
+  // WHY nothing is added when the sequence no longer holds this append: an
+  // entry that is neither in the window nor in the overflow behind it has
+  // already been carried off the old end by 500 later sends. Re-adding it here
+  // would put an old append at the NEWEST end — out of local send order — and
+  // evict a genuinely newer entry to make room. The answer only ever names an
+  // append; it never resurrects one the cap has finished with.
+  installHistoryEntries(st, ordered);
+  rebaseHistoryNav(ch, before, st.entries);
+}
+
+// Record a message that WAS delivered. Called only from the success branches of
+// the send paths: a failed send left no text anywhere, so it is not history.
+//
+// `options.retired` is what retireSentText() decided about the box on screen —
+// whether the send actually emptied it. WHY the two cases must differ: an
+// emptied box is back in the editing state and its cursor belongs at 0, but a
+// box that kept a follow-up (or a recalled entry the operator was reading) is
+// still mid-traversal, and resetting it would both re-aim the arrows and throw
+// away the stashed edit that walking back down exists to return.
+function recordMessageHistory(channel, text, options) {
+  const ch = String(channel || "");
+  if (!ch) return false;
+  const body = typeof text === "string" ? text : "";
+  const st = historyChannelState(ch);
+  const before = st.entries.slice();
+  // WHY the adjacent-repeat rule is NOT applied here whenever a POST is going
+  // out: the append is the server's to judge as long as the request may still
+  // answer, and it judges against the owner's REAL newest entry, which another
+  // device may have changed since this cache was filled. Folding on the local
+  // view first would leave a delivered — and, on the server, genuinely
+  // appended — message with no record in this session at all if the answer is
+  // slow or never arrives. So it goes in on local send order (rule 4) and the
+  // answer decides: reconcileHistoryAppend names or folds it, and
+  // degradeHistoryAppend applies the local rule if the answer never comes.
+  const posting = !!body.trim() && typeof fetch === "function";
+  const ordered = historyOrdered(st);
+  const entry = posting
+    ? orderHistoryAppend(ordered, body)
+    : orderHistoryPush(ordered, body);
+  // Marked BEFORE the cap runs: an append still awaiting its verdict is what
+  // makes the eviction behind it provisional (see installHistoryEntries).
+  if (entry && posting) entry.pending = true;
+  installHistoryEntries(st, ordered);
+  const retired = !options || options.retired !== false;
+  if (retired) {
+    // The box was cleared by the send; the cursor returns to the editing state
+    // with it, so the next ↑ starts at the entry just added.
+    for (const inputId of historyInputsForChannel(ch)) resetHistoryNav(inputId);
+  } else {
+    rebaseHistoryNav(ch, before, st.entries);
+  }
+  // WHY every non-blank delivery is posted, even one that repeats the cached
+  // newest entry: this cache is a snapshot, and another device may have
+  // appended since it was taken. Only the server knows what the owner's actual
+  // previous entry is, and it applies the same repeat rule itself — so letting
+  // a stale local view veto the POST is the one way to lose an entry
+  // permanently. A duplicate write is free; a dropped one is not.
+  if (body.trim()) postMessageHistory(ch, body, entry || { text: body }, st);
+  return !!entry;
+}
+
+// Write a recalled entry into the box: text, caret at the end (recall is an
+// "edit from here" gesture, and a caret left at 0 would send the next ↑ back
+// into history instead of moving within the recalled text), then the same
+// content-changed recompute a keystroke would have triggered.
+//
+// WHY this goes through the draft path instead of assigning `.value`: what the
+// box holds after a recall is unsent text like any other, and the epoch is the
+// sole record of "this box changed since the request went out". Without the
+// bump, a submission in flight lands on a box the operator has since walked
+// back to their half-written draft in, and retireSentText() — seeing an
+// untouched epoch — erases writing that was never delivered, localStorage copy
+// and all. Restoring the stash counts for the same reason.
+function applyHistoryText(inputId, text) {
+  const input = $(inputId);
+  if (!input) return false;
+  const body = typeof text === "string" ? text : "";
+  input.value = body;
+  try {
+    if (typeof input.setSelectionRange === "function") {
+      input.setSelectionRange(body.length, body.length);
+    } else {
+      input.selectionStart = body.length;
+      input.selectionEnd = body.length;
+    }
+  } catch (_) {
+    /* a detached / non-text element has no caret to place */
+  }
+  scheduleDraftSave(draftKeyForInput(inputId), draftTextForInput(inputId, body));
+  syncInputContentChanged(inputId);
+  return true;
+}
+
+// The text `cursor` steps back from the newest entry ("" when the cursor has
+// walked off a list the merge shortened under it).
+function historyEntryText(entries, cursor) {
+  const entry = entries[entries.length - cursor];
+  return entry && typeof entry.text === "string" ? entry.text : "";
+}
+
+// ---------------------------------------------------------------------------
+// The stash and the upload lifecycle
+// ---------------------------------------------------------------------------
+//
+// INVARIANT: the stashed editing buffer is NOT a detached snapshot. Stepping
+// into history moves the operator's half-written text off screen while its
+// uploads keep running, and every rewrite the upload lifecycle performs on the
+// visible textarea — a landed path replacing a placeholder, a failure or a
+// cancel pulling one out — has to reach the buffer too, or ↓ hands back a
+// placeholder for a row that has since settled. pendingUploadRefusal() then
+// sees nothing in flight and the internal marker ships as prompt prose while
+// the file that did land is named nowhere.
+//
+// Two mechanisms, and both are needed: rewriteHistoryStash() carries each
+// lifecycle edit into the buffer (which is what preserves the uploaded path),
+// and settledStashText() refuses on restore to hand back any placeholder that
+// no longer has a live row behind it (which is what covers a row that left by
+// some other route). While the row IS still in flight the placeholder stays —
+// the gate is still up, and the text is still honest.
+
+// The placeholders `value` carries that are still backed by a live row, so a
+// stash knows which of its markers may later need settling. Boxes with no
+// attachment strip stash nothing.
+function stashHistoryTokens(inputId, value) {
+  const cfg = uploadScopeForInput(inputId);
+  if (!cfg) return [];
+  const body = typeof value === "string" ? value : "";
+  return pendingUploadTokens(cfg.stripId).filter((token) => body.indexOf(token) >= 0);
+}
+
+// Carry one lifecycle rewrite into whatever buffer a live traversal of this box
+// has parked. A no-op when nothing is stashed, or when the token is not in it
+// (the ordinary case: the box itself still holds the placeholder).
+//
+// WHY the token is un-listed only once NO copy of it is left: the rewrite owns
+// exactly the one marker the upload planted (first occurrence — the operator
+// may have duplicated the visible marker by hand), but a duplicate left behind
+// is just as unbacked as the one that was rewritten, and the stash is off
+// screen so nobody can see it to delete it. Keeping the token listed while a
+// copy survives is what lets settledStashText() drop the rest on restore;
+// un-listing it eagerly would strand an internal marker in text the operator
+// can then submit as prompt prose.
+function rewriteHistoryStash(inputId, token, replacement) {
+  const id = String(inputId || "");
+  // The raw map on purpose: a box nobody has navigated has no state, and
+  // materializing one here would resurrect it for every later reset.
+  const nav = MSG_HISTORY.nav[id];
+  if (!nav || typeof nav.stash !== "string" || !nav.stash) return false;
+  const needle = String(token || "");
+  if (!needle) return false;
+  const hit = nav.stash.indexOf(needle) >= 0;
+  if (hit) nav.stash = replaceTokenOnce(nav.stash, needle, replacement);
+  if (Array.isArray(nav.stashTokens) && nav.stash.indexOf(needle) < 0) {
+    nav.stashTokens = nav.stashTokens.filter((t) => t !== needle);
+  }
+  return hit;
+}
+
+// Same, addressed by strip — the upload lifecycle knows its strip, not the box.
+function rewriteHistoryStashForStrip(stripId, token, replacement) {
+  const cfg = uploadScopeForStrip(stripId);
+  if (!cfg) return false;
+  return rewriteHistoryStash(cfg.inputId, token, replacement);
+}
+
+// The stash as it may be handed back to the operator: any placeholder whose row
+// is no longer in flight taken out — every copy of it, for the same reason
+// draftTextForInput drops every copy: once the row is gone no occurrence is
+// backed, and a surviving duplicate would ship as prompt prose. A rewrite that
+// already landed left no token to find, so a completed upload's path survives
+// this untouched.
+function settledStashText(inputId, nav) {
+  let text = nav && typeof nav.stash === "string" ? nav.stash : "";
+  const tokens = nav && Array.isArray(nav.stashTokens) ? nav.stashTokens : [];
+  if (!tokens.length || !text) return text;
+  const cfg = uploadScopeForInput(inputId);
+  const live = cfg ? pendingUploadTokens(cfg.stripId) : [];
+  for (const token of tokens) {
+    if (live.indexOf(token) < 0) text = removeTokenEverywhere(text, token);
+  }
+  return text;
+}
+
+// ↑ one step further back. False means "there was nothing to recall" — the
+// caller then leaves the keystroke to the browser.
+function historyRecallPrev(inputId, channel) {
+  const st = historyChannelState(channel);
+  const nav = historyNavState(inputId);
+  if (nav.cursor >= st.entries.length) return false;
+  if (nav.cursor === 0) {
+    const input = $(inputId);
+    nav.stash = input && typeof input.value === "string" ? input.value : "";
+    nav.stashTokens = stashHistoryTokens(inputId, nav.stash);
+  }
+  nav.cursor += 1;
+  return applyHistoryText(inputId, historyEntryText(st.entries, nav.cursor));
+}
+
+// ↓ one step forward; stepping past the newest entry restores the stash — the
+// half-written text the operator left behind when they went looking.
+function historyRecallNext(inputId, channel) {
+  const st = historyChannelState(channel);
+  const nav = historyNavState(inputId);
+  if (nav.cursor <= 0) return false;
+  nav.cursor -= 1;
+  if (nav.cursor === 0) {
+    const stash = settledStashText(inputId, nav);
+    nav.stash = "";
+    nav.stashTokens = [];
+    return applyHistoryText(inputId, stash);
+  }
+  return applyHistoryText(inputId, historyEntryText(st.entries, nav.cursor));
+}
+
+// The ↑/↓ handler. Returns whether the keystroke was consumed by history.
+function onHistoryKeydown(event, inputId) {
+  if (!event) return false;
+  const key = event.key;
+  if (key !== "ArrowUp" && key !== "ArrowDown") return false;
+  // A modified arrow belongs to the browser (selection, word/paragraph jumps).
+  // Ignoring modified keys is also what keeps every existing chord on these
+  // boxes — Ctrl/Cmd+Enter to submit above all — untouched.
+  if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return false;
+  const channel = historyChannelForInput(inputId);
+  if (!channel) return false;
+  const input = $(inputId);
+  if (!input) return false;
+  const up = key === "ArrowUp";
+  const value = typeof input.value === "string" ? input.value : "";
+  const atEdge = up
+    ? caretAtFirstLine(value, input.selectionStart)
+    : caretAtLastLine(value, input.selectionEnd);
+  if (!atEdge) return false;
+  const st = historyChannelState(channel);
+  // INVARIANT: whatever is already in memory is tried FIRST, load or no load.
+  // The in-memory list is authoritative for this session's own sends, and a
+  // pending (or hung) GET must never stand between the operator and text they
+  // just delivered — deferring unconditionally made an unanswered request
+  // swallow arrow keys that had a perfectly good local entry to recall.
+  const moved = up
+    ? historyRecallPrev(inputId, channel)
+    : historyRecallNext(inputId, channel);
+  if (moved) {
+    // Still worth starting the lazy load, so the entries BEHIND this session's
+    // own reach the box before the operator walks that far back.
+    if (!st.loaded) ensureMessageHistoryLoaded(channel);
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    return true;
+  }
+  // Nothing local to recall.
+  const nav = historyNavState(inputId);
+  if (!up && nav.queued > 0) {
+    // A ↓ cancelling a ↑ that is still queued behind the load. The pair has to
+    // net out to "never left the editing state"; letting the ↓ through while
+    // the ↑ still replays would recall an entry the operator took back.
+    nav.queued -= 1;
+    if (!nav.queued) nav.guard = "";
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    return true;
+  }
+  // A ↓ can never recall anything however the load turns out — the cursor has
+  // to have walked back first, and it is at the editing state — so it is left
+  // to the browser rather than swallowed for a round trip that cannot help it.
+  if (up && !st.loaded) {
+    // The very first ↑ on a box is normally the operator's FIRST touch of it,
+    // so it is also the load trigger — and the list cannot be in memory yet.
+    // Leaving the key to the browser here would recall nothing and demand a
+    // second press once the GET landed, which reads as "history is broken".
+    // Instead take the key now and replay the step when the list arrives.
+    // (The load stays lazy: nothing is fetched until this touch, so neither the
+    // flow view nor the New Task modal waits on it to paint; and the wait is
+    // bounded by MSG_HISTORY.loadTimeoutMs, so a hung request releases.)
+    deferHistoryStep(inputId, channel);
+    if (typeof event.preventDefault === "function") event.preventDefault();
+    return true;
+  }
+  // With nothing to recall the caret moves exactly as it would in any other
+  // textarea.
+  return false;
+}
+
+// Queue one ↑ pressed while the first load is still in flight, and replay the
+// queue when it settles.
+//
+// WHY a COUNT of steps rather than each press remembering the cursor it saw:
+// two presses inside the same window both saw cursor 0, so a per-press
+// "is my cursor still what it was" staleness test made the first replay
+// invalidate the second — two keys consumed, one entry walked. Counting makes
+// the queue additive, so N presses walk N entries once the list lands.
+//
+// `guard` is the box's text at the first queued press; it is the honest
+// staleness test, because a keystroke in between means the operator went back
+// to writing and a late recall must not overwrite it.
+function deferHistoryStep(inputId, channel) {
+  const nav = historyNavState(inputId);
+  const input = $(inputId);
+  const value = input && typeof input.value === "string" ? input.value : "";
+  if (!nav.queued) nav.guard = value;
+  nav.queued = (Number(nav.queued) || 0) + 1;
+  const replay = () => {
+    // Re-read the nav state rather than closing over it: signing out swaps the
+    // whole cache for a fresh one, and a queue drained from the orphaned
+    // object would replay the previous owner's steps into the new session.
+    const cur = historyNavState(inputId);
+    const steps = Number(cur.queued) || 0;
+    cur.queued = 0;
+    if (!steps) return;
+    const box = $(inputId);
+    const now = box && typeof box.value === "string" ? box.value : "";
+    if (now !== cur.guard) return;
+    cur.guard = "";
+    for (let i = 0; i < steps; i++) {
+      if (!historyRecallPrev(inputId, channel)) break;
+    }
+  };
+  // The load never rejects, but replay is wired to both settlements anyway:
+  // the queue must drain on any outcome, or a key stays consumed for nothing.
+  const pending = ensureMessageHistoryLoaded(channel);
+  if (pending && typeof pending.then === "function") pending.then(replay, replay);
+  else replay();
+}
+
+// Arrow-key recall for one box. The focus listener is the lazy load: the list
+// is fetched when the operator first touches the box, never as part of opening
+// the flow view or the New Task modal.
+function bindMessageHistory(inputId) {
+  const input = $(inputId);
+  if (!input || typeof input.addEventListener !== "function") return;
+  const channel = historyChannelForInput(inputId);
+  if (!channel) return;
+  input.addEventListener("focus", () => {
+    ensureMessageHistoryLoaded(channel);
+  });
+  input.addEventListener("keydown", (e) => {
+    onHistoryKeydown(e, inputId);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Toast notifications
 // ---------------------------------------------------------------------------
 //
@@ -2471,6 +3971,8 @@ function handleUnauthorized() {
   if (state.authState === AUTH_STATES.LOGIN) return;
   state.authState = nextAuthState(state.authState, "unauthorized");
   state.identity = null;
+  // The session that owned this history is gone; drop it with the identity.
+  clearMessageHistoryCache();
   teardownWs();
   applyAuthState();
 }
@@ -5745,8 +7247,19 @@ function resetReplyBox() {
   // rows for paths that live in the previous flow's project, whose × button
   // then has nothing to remove, and leaks their preview object URLs.
   clearAttachments("flow-attachments");
+  // Re-entering a flow brings back whatever was typed there and never sent.
+  // The blanking above is the "open clears everything" reset; the restore has
+  // to follow it, or it would wipe the draft it exists to bring back. The
+  // draft is per-flow, so switching flows swaps the text rather than leaking
+  // one flow's half-written answer into another.
+  restoreDraftInto("flow-reply-input");
+  // Entering a flow is a fresh editing state: the arrow-key cursor returns to
+  // "not in history" so the first ↑ starts at the newest entry, and the stash
+  // of whatever was being edited in the previous flow does not come back here.
+  resetHistoryNav("flow-reply-input");
   // Reset the auto-grow height back to a single line on a fresh flow / chip
-  // switch (mobile portrait only; a no-op on desktop).
+  // switch (mobile portrait only; a no-op on desktop). Also re-measures for a
+  // restored draft that came back empty.
   autoGrowReplyTextarea();
   // Textarea stays enabled so the user can begin drafting immediately;
   // Send remains disabled until a target chip is available.
@@ -5937,6 +7450,10 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
   const submit = $("flow-reply-submit");
   submit.disabled = true;
   armPendingSend(target);
+  // Snapshot the reply box's edit counter BEFORE the POST; retireSentText()
+  // compares against it so a follow-up typed during the round trip survives.
+  const draftKey = flowDraftKey(flowId);
+  const editEpoch = draftEditEpoch(draftKey);
 
   // Normalize the note to null when blank so an approval carries no spurious
   // feedback (matching _interpret_confirm_answer's approve → (True, None)).
@@ -5956,15 +7473,31 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
       },
     );
     if (resp.ok) {
-      // Success decided solely by resp.ok — clear the free-text box (the note
+      // Success decided solely by resp.ok — retire the free-text box (the note
       // textarea lives in the rebuilt context panel and is discarded on the
       // finally re-render) and toast before the best-effort echo, same as
       // sendReply (issue #193 boundary).
-      if (state.selectedFlowId === flowId) {
-        $("flow-reply-input").value = "";
-        autoGrowReplyTextarea();
-        clearAttachments("flow-attachments");
-      }
+      //
+      // The note travelled with the decision, so the draft mirroring it is
+      // stale — and it is retired by flow id, not by "is this flow still open",
+      // because the operator may have switched flows while the POST was in
+      // flight and would otherwise find the sent text waiting on their return.
+      const boxOpen = state.selectedFlowId === flowId;
+      const retired = retireSentText(
+        boxOpen ? "flow-reply-input" : "",
+        draftKey,
+        editEpoch,
+      );
+      // The strip only ever mirrors paths present in the text, so the rows go
+      // with the text and stay with a follow-up that kept it.
+      if (boxOpen && retired) clearAttachments("flow-attachments");
+      // A rejection's note is text the operator wrote and delivered, so it is
+      // recallable like any other reply. A bare approval carries none (`note`
+      // is normalized to null above) and adds nothing to the history.
+      // `boxOpen && retired` is the honest "the box on screen was emptied":
+      // a flow switch mid-flight retires the other flow's draft slot while
+      // this flow's textarea keeps whatever is in it, cursor included.
+      if (note) recordMessageHistory(MSG_HISTORY.REPLY, note, { retired: boxOpen && retired });
       showToast("success", approved ? tf("toast.approved", "Approved.") : tf("toast.rejected", "Rejected."));
       // Optimistic echo as a human-readable user bubble so the decision shows
       // immediately without waiting for the next history_data push.
@@ -6007,6 +7540,11 @@ async function sendReply(flowId, target, text) {
   // matches), proving the daemon has observed the submission; the 8s fallback
   // catches a stuck ws so the UI does not stall forever.
   armPendingSend(target);
+  // Snapshot the reply box's edit counter BEFORE the POST. Because the textarea
+  // stays enabled above, anything typed from here on is a follow-up that was
+  // never sent, and retireSentText() uses this to leave it alone.
+  const draftKey = flowDraftKey(flowId);
+  const editEpoch = draftEditEpoch(draftKey);
 
   try {
     let resp;
@@ -6033,15 +7571,28 @@ async function sendReply(flowId, target, text) {
       // (issue #193, same class as #191): a render exception inside the old
       // wide try-block surfaced as "Could not send — network error" even
       // though the daemon had already received and acted on the "1".
-      if (state.selectedFlowId === flowId) {
-        $("flow-reply-input").value = "";
-        // Cleared content collapses the auto-grow textarea back to one line.
-        autoGrowReplyTextarea();
-        // The paths travelled with the text that was just sent; the rows now
-        // mirror nothing. UI only — the files stay on the project machine,
-        // where the flow is about to read them.
-        clearAttachments("flow-attachments");
-      }
+      //
+      // Delivered text is no longer a draft either. The slot is keyed by flow
+      // id rather than by the open view, so a flow switch mid-flight cannot
+      // strand the sent text in the box the operator comes back to. Covers
+      // respond AND interject — they share this one textarea and therefore this
+      // one draft slot. Clearing the box collapses the auto-grow textarea back
+      // to one line, which retireSentText() does for us.
+      const boxOpen = state.selectedFlowId === flowId;
+      const retired = retireSentText(
+        boxOpen ? "flow-reply-input" : "",
+        draftKey,
+        editEpoch,
+      );
+      // The paths travelled with the text that was just sent; once that text is
+      // gone the rows mirror nothing. UI only — the files stay on the project
+      // machine, where the flow is about to read them. A follow-up that kept
+      // the box keeps its rows too, or its path tokens would lose their × .
+      if (boxOpen && retired) clearAttachments("flow-attachments");
+      // ...and it becomes history instead: the owner's, not the device's, so
+      // it goes to the server. Respond and interject share the textarea, hence
+      // the single channel — recall walks one conversation, not two.
+      recordMessageHistory(MSG_HISTORY.REPLY, text, { retired: boxOpen && retired });
       // Keep the synthetic interject chip visible in `pending` visual state
       // until the real interjection chip materializes (via ws push) — that
       // gives the user immediate feedback that the submission is in flight
@@ -7443,6 +8994,17 @@ function formatTagsForInput(tags) {
   return tags.join(", ");
 }
 
+// Which form the issue modal is currently showing. Bumped by every open, so a
+// submission can tell whether the modal on screen is still the one it left.
+//
+// WHY the draft epochs cannot answer that on their own: they only count edits
+// to the CREATE drafts, and the edit form has no draft slot at all (see
+// draftKeyForInput). An operator who dismisses a slow create and opens an
+// existing issue therefore leaves both epochs untouched, so the create's
+// success would read the edit form as "untouched since I left" and blank the
+// two boxes — and close the modal — under work that has nothing to do with it.
+let _issueFormSession = 0;
+
 // Track which form fields the user has modified so that the edit PATCH
 // body can distinguish "user cleared a field" (send empty string) from
 // "user didn't touch a field" (don't include in the body).
@@ -7536,6 +9098,7 @@ function _setIssueDescriptionLock(phase, message) {
 }
 
 function openIssueCreateModal() {
+  _issueFormSession += 1;
   $("issue-modal-title").textContent = tf("issueModal.title", "New Issue");
   _setIssueDescriptionLock("clear");
   $("issue-description").value = "";
@@ -7555,12 +9118,17 @@ function openIssueCreateModal() {
   $("issue-machine-row").classList.remove("hidden");
   _populateIssueMachineSelect();
   _refreshIssueProjectOptions();
+  // Restore last, after the blanking above AND after dataset.mode is "create":
+  // draftKeyForInput reads that mode to keep the edit form out of the drafts.
+  restoreDraftInto("issue-description");
+  restoreDraftInto("issue-title");
   $("issue-modal").classList.remove("hidden");
   $("issue-description").focus();
 }
 
 function openIssueEditModal(iss) {
   if (!iss) return;
+  _issueFormSession += 1;
   $("issue-modal-title").textContent = tf("issueModal.editTitle", "Edit Issue #" + (iss.id || "?"), { id: iss.id || "?" });
   _setIssueDescriptionLock("clear");
   $("issue-description").value = iss.description || "";
@@ -7645,6 +9213,15 @@ async function submitIssueForm(event) {
 
   const submit = $("issue-form-submit");
   submit.disabled = true;
+  // Snapshot both drafted boxes' edit counters BEFORE the request. The modal
+  // stays editable while it is in flight, so a report rewritten during the
+  // round trip was never created and must survive the success. (Edit mode has
+  // no draft slot — see draftKeyForInput — and the epochs go unused there.)
+  const descEditEpoch = draftEditEpoch(DRAFTS.ISSUE_DESCRIPTION);
+  const titleEditEpoch = draftEditEpoch(DRAFTS.ISSUE_TITLE);
+  // ...and which form those boxes belong to, because the modal can be dismissed
+  // and reopened on something else entirely before the answer lands.
+  const formSession = _issueFormSession;
 
   try {
     let resp;
@@ -7701,7 +9278,23 @@ async function submitIssueForm(event) {
     }
 
     if (resp.ok || resp.status === 202) {
-      closeIssueModal();
+      // Only this submission's own form may be closed. A modal reopened during
+      // the round trip is a different piece of work — dismissing it would throw
+      // away whatever the operator has since put in it.
+      const sameForm = _issueFormSession === formSession;
+      if (sameForm) closeIssueModal();
+      // Only a successful CREATE consumes the new-issue draft; an edit was
+      // never drafted (see draftKeyForInput) and must not clear one. Each box
+      // is retired independently and only if untouched since the request went
+      // out, so a title left alone is consumed while a description the
+      // operator kept rewriting stays a draft. The boxes are blanked only while
+      // they still BELONG to this form: once the modal has been reopened they
+      // show another context's text, which the draft epochs cannot see, so the
+      // filed draft is retired without touching what is on screen.
+      if (mode === "create") {
+        retireSentText(sameForm ? "issue-description" : "", DRAFTS.ISSUE_DESCRIPTION, descEditEpoch);
+        retireSentText(sameForm ? "issue-title" : "", DRAFTS.ISSUE_TITLE, titleEditEpoch);
+      }
       showToast("success", mode === "create" ? tf("toast.issueCreated", "Issue created.") : tf("toast.issueUpdated", "Issue updated."));
       fetchIssues();
     } else {
@@ -16727,6 +18320,12 @@ function openNewTask() {
   // The strip mirrors the task text, which was just blanked — leaving last
   // session's rows would point at paths no longer in the box.
   clearAttachments("nt-attachments");
+  // After the reset above, never before it: the "open clears everything"
+  // semantics would otherwise blank the draft this restore exists to return.
+  restoreDraftInto("nt-task");
+  // Same as the reply box: a re-opened modal is an editing state, not a
+  // resumed walk through history.
+  resetHistoryNav("nt-task");
   $("new-task-modal").classList.remove("hidden");
   refreshProjectOptions();
 }
@@ -16913,6 +18512,11 @@ async function submitNewTask(event) {
 
   const submit = $("nt-submit");
   submit.disabled = true;
+  // Snapshot the description box's edit counter BEFORE the POST. Only the Send
+  // button locks — the textarea stays editable for the whole round trip, so
+  // anything typed from here on is a task that was never published and
+  // retireSentText() must leave it (and its queued draft save) alone.
+  const taskEditEpoch = draftEditEpoch(DRAFTS.NEW_TASK);
   try {
     const resp = await authedFetch("/api/flows", {
       method: "POST",
@@ -16931,6 +18535,15 @@ async function submitNewTask(event) {
     });
     if (resp.status === 202) {
       closeNewTask();
+      // Published — the description is history now, not an unsent draft. Both
+      // halves of that sentence are literal: the local draft goes, and the
+      // description enters the owner's recallable New Task history. Retiring
+      // it goes through the same epoch gate as the reply box: a description
+      // rewritten while the launch was in flight was never published, and
+      // clearing the slot would also cancel its queued debounce and hand the
+      // next open of this panel a blank box.
+      const retired = retireSentText("nt-task", DRAFTS.NEW_TASK, taskEditEpoch);
+      recordMessageHistory(MSG_HISTORY.NEW_TASK, task, { retired });
       // The paths went out inside `task` itself; the rows have nothing left to
       // mirror. Only the strip is cleared — the uploaded files stay on the
       // project machine, which is exactly where the flow is about to read them.
@@ -17137,6 +18750,9 @@ async function handleLogout() {
   // Reset the mobile panel switch so a fresh login lands on the machine list.
   applyListPanelAction("reset");
   state.authState = nextAuthState(state.authState, "logout");
+  // Message history follows the OWNER, so it must not outlive their session on
+  // this browser — the next person to sign in here starts from their own.
+  clearMessageHistoryCache();
   teardownWs();
   // Wipe any rendered owner data so a different owner signing in next sees a
   // clean surface rather than the previous owner's machines.
@@ -18056,6 +19672,23 @@ function init() {
   // types (mobile portrait only; a no-op on desktop).
   $("flow-reply-input").addEventListener("input", autoGrowReplyTextarea);
 
+  // Local drafts for every text box whose content is "typed but not yet sent".
+  // The reply box is keyed per flow; the other three have fixed slots.
+  bindDraftInput("flow-reply-input");
+  bindDraftInput("nt-task");
+  bindDraftInput("issue-description");
+  bindDraftInput("issue-title");
+  // Arrow-key recall of text that WAS sent, for the two prompt boxes that have
+  // a history channel (the issue modal is a form, not a prompt). Registered as
+  // its own keydown listener so the Ctrl/Cmd+Enter submit binding above and the
+  // auto-grow `input` binding stay exactly as they were.
+  bindMessageHistory("flow-reply-input");
+  bindMessageHistory("nt-task");
+  // A reload inside the debounce window would otherwise eat the last few
+  // characters — pagehide fires on the paths (bfcache, tab close) where
+  // unload does not.
+  window.addEventListener("pagehide", flushDraftSaves);
+
   // File attachments on both prompt inputs (paste / drag-drop / file picker).
   // Two scopes, three inputs: respond and interject share the docked textarea.
   bindUploadScope("newTask");
@@ -18397,6 +20030,7 @@ if (typeof module !== "undefined" && module.exports) {
     validateUploadFile,
     uploadPlaceholderToken,
     replaceTokenOnce,
+    removeTokenEverywhere,
     removePathOnce,
     insertAtCaret,
     formatFileSize,
@@ -18406,6 +20040,9 @@ if (typeof module !== "undefined" && module.exports) {
     UPLOAD_ERROR_KEYS,
     pendingUploadNames,
     pendingUploadRefusal,
+    pendingUploadTokens,
+    uploadScopeForInput,
+    uploadScopeForStrip,
     // Upload orchestration + attachment strip (G5) — the DOM-stub tests in
     // tests/frontend/file_upload.test.mjs drive these directly.
     UPLOAD_SCOPES,
@@ -18513,6 +20150,65 @@ if (typeof module !== "undefined" && module.exports) {
     // Reply-panel diff-aware equality (G4) — exposed for the DOM-free tests in
     // tests/frontend/test_app_pure.mjs.
     interventionsSignature,
+    // Local input drafts (G1) — the pure store helpers plus the DOM-touching
+    // bind/restore pair and the clear-path entry points, exposed for
+    // tests/frontend/input_drafts.test.mjs.
+    DRAFTS,
+    flowDraftKey,
+    draftKeyForInput,
+    draftStorage,
+    readDraftEntries,
+    writeDraftEntries,
+    pruneDraftEntries,
+    saveDraft,
+    loadDraft,
+    clearDraft,
+    effectiveDraftText,
+    draftEditEpoch,
+    retireSentText,
+    scheduleDraftSave,
+    cancelDraftSave,
+    flushDraftSaves,
+    restoreDraftInto,
+    bindDraftInput,
+    draftTextForInput,
+    syncInputContentChanged,
+    // Owner-scoped message history (G2) — the pure stack/caret helpers plus the
+    // navigation and record entry points, exposed for
+    // tests/frontend/message_history.test.mjs.
+    MSG_HISTORY,
+    historyChannelForInput,
+    historyChannelState,
+    historyNavState,
+    resetHistoryNav,
+    clearMessageHistoryCache,
+    orderHistoryPush,
+    orderHistoryAppend,
+    orderHistoryMerge,
+    historyOrdered,
+    installHistoryEntries,
+    degradeHistoryAppend,
+    normalizeHistoryEntry,
+    sameHistoryEntry,
+    rebaseHistoryNav,
+    reconcileHistoryAppend,
+    caretAtFirstLine,
+    caretAtLastLine,
+    ensureMessageHistoryLoaded,
+    recordMessageHistory,
+    onHistoryKeydown,
+    historyRecallPrev,
+    historyRecallNext,
+    stashHistoryTokens,
+    rewriteHistoryStash,
+    rewriteHistoryStashForStrip,
+    settledStashText,
+    bindMessageHistory,
+    resetReplyBox,
+    openNewTask,
+    openIssueCreateModal,
+    openIssueEditModal,
+    submitIssueForm,
     // WebUI i18n subsystem (G6) — exposed for the DOM-free + DOM-stub tests in
     // tests/frontend/i18n_render_switch.test.mjs.
     I18N,

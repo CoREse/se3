@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.13.0 - 2026-08-28
+
+- Add local draft caching for the web console's flow reply, new-task and issue inputs, restoring unsent text when a page, flow or modal is reopened
+- Isolate drafts per input position (per flow for the reply box) and clear them on successful reply, interject, structured decision and issue creation
+- Bound draft storage with an entry cap and expiry cleanup, and degrade silently to no-draft when localStorage is unavailable so inputs always stay usable
+- Add server-side message history stored per login owner, so previously sent prompts follow the user across browsers and machines
+- Add up/down-arrow history recall for the reply box and the new-task description, matching the CLI's first-line/last-line cursor semantics and restoring the in-progress edit when arrowing past the newest entry
+- Keep flow reply/interject and new-task history in separate channels, cap each at 500 entries per owner, and drop the oldest beyond that
+- Introduce a schema v2 migration adding the message_history table; existing databases upgrade in place with their data intact
+- Fall back to session-only in-memory history when the history API is unavailable, so sending and typing are never blocked
 ## 12.12.3 - 2026-08-26
 
 - Fold a still-present previous finding into the current round's finding at the same evidence line, so one defect produces one fix-loop entry instead of a duplicate per round

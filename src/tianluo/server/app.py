@@ -66,7 +66,12 @@ from .auth.registry import (
 )
 from .auth.session import CookieConfig, SessionStore, read_cookie
 from .identity import IdentityService
-from .persistence import IdentityAlreadyBound, Store
+from .persistence import (
+    MESSAGE_HISTORY_CHANNELS,
+    MESSAGE_HISTORY_MAX_ENTRIES,
+    IdentityAlreadyBound,
+    Store,
+)
 from .state import ServerState, records_reach_bytes
 from .ws import (
     ConnectionManager,
@@ -622,6 +627,17 @@ class CreateDaemonKeyRequest(BaseModel):
     """Body of ``POST /api/daemon-keys`` — mint a new daemon key for the owner."""
 
     label: str = ""
+
+
+class AppendHistoryRequest(BaseModel):
+    """Body of ``POST /api/message-history/{channel}`` — record a sent prompt.
+
+    Only text the console has actually delivered reaches here; the browser
+    posts it *after* the send succeeded, so a failed send leaves no trace in
+    the recall list.
+    """
+
+    text: str
 
 
 class CreateUserRequest(BaseModel):
@@ -2768,6 +2784,76 @@ def create_app(
                 detail=result.get("error") or "issue reopen failed on daemon",
             )
         return {"status": "reopened", "machine_id": machine_id, "issue_id": issue_id}
+
+    # -- web-console message history ---------------------------------------
+    # The up/down-arrow recall list behind the two prompt inputs. Both routes
+    # are scoped to ``identity_.owner_id`` and the owner is NEVER a parameter:
+    # there is no request shape that reads or writes another owner's history,
+    # so cross-owner leakage is not a check that can be forgotten. Unsent text
+    # (the draft) is deliberately not here — that belongs to the device and
+    # stays in the browser's localStorage.
+
+    def _history_channel(channel: str) -> str:
+        """Validate a channel path segment, or 404 like any unknown resource.
+
+        An unknown channel is a nonexistent collection, not a malformed
+        request — same semantics as an unknown flow / issue id elsewhere.
+        """
+        ch = (channel or "").strip()
+        if ch not in MESSAGE_HISTORY_CHANNELS:
+            raise HTTPException(
+                status_code=404, detail=f"unknown history channel '{channel}'"
+            )
+        return ch
+
+    @app.get("/api/message-history/{channel}")
+    async def get_message_history(
+        channel: str,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        ch = _history_channel(channel)
+        entries = await asyncio.to_thread(
+            store.list_message_history, identity_.owner_id, ch
+        )
+        # WHY each entry is an object rather than a bare string: the browser
+        # folds this list together with what it sent itself, and only the
+        # server-assigned id can say whether a row here *is* one of those
+        # sends. The same text legitimately appears twice in one history, so a
+        # text comparison would silently swallow a genuine repeat.
+        return {
+            "channel": ch,
+            "entries": [{"id": e.entry_id, "text": e.text} for e in entries],
+            "count": len(entries),
+        }
+
+    @app.post("/api/message-history/{channel}")
+    async def append_message_history(
+        channel: str,
+        req: AppendHistoryRequest,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        ch = _history_channel(channel)
+        # Blank text, and text identical to the newest entry, are dropped by
+        # the store rather than rejected: the browser fires this off after a
+        # successful send and has nothing useful to do with an error.
+        #
+        # WHY the reply carries an id in BOTH outcomes: it is the caller's only
+        # way to recognise this append in a list it reads later. On "appended"
+        # that is the new row; on "skipped" it is the existing row the
+        # adjacent-repeat rule folded this send onto — which is a different
+        # fact from "some older row happens to hold the same words", and the
+        # browser must not confuse the two. Blank text is the one case with no
+        # row to name, and reports a null id.
+        result = await asyncio.to_thread(
+            store.append_message_history, identity_.owner_id, ch, req.text
+        )
+        return {
+            "status": "appended" if result.appended else "skipped",
+            "channel": ch,
+            "appended": result.appended,
+            "entry_id": result.entry_id,
+            "max_entries": MESSAGE_HISTORY_MAX_ENTRIES,
+        }
 
     # -- daemon-key self-management ----------------------------------------
     # An owner mints / lists / revokes its OWN daemon keys (the credential a

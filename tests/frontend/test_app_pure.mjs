@@ -7575,4 +7575,36 @@ testRoundRenderMod.registerTestRoundRenderTests({ app, check, findOne, findAll }
 const implementFixRoundMod = await import("./implement_fix_round.test.mjs");
 implementFixRoundMod.registerImplementFixRoundTests({ app, check, findOne, findAll });
 
+// ---------------------------------------------------------------------------
+// Local input drafts for the four prompt boxes (G1)
+// ---------------------------------------------------------------------------
+//
+// A draft is "typed here, not sent yet" — a per-device fact, so it lives in
+// localStorage and nowhere else. These checks hold the whole contract: the
+// debounced save and the refill (with the docked textarea re-measured so a
+// multi-line draft does not come back clipped), isolation by position (one
+// slot per flow, one each for the other three boxes), EVERY existing clear
+// path dropping the draft with the text it mirrored, the entry cap and TTL
+// that keep the store bounded, and — the one that decides whether this is safe
+// to ship — a storage that throws degrading to "there is no draft" instead of
+// to an input box that will not take text.
+const inputDraftsMod = await import("./input_drafts.test.mjs");
+await inputDraftsMod.registerInputDraftTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
+// Owner-scoped message history + arrow-key recall (G2)
+// ---------------------------------------------------------------------------
+//
+// The mirror image of the draft cache: text that WAS sent belongs to the owner,
+// not the device, so it lives on the server and follows them across browsers.
+// These checks hold the CLI-parity navigation (↑ only from the first line, ↓
+// only from the last, with the in-progress edit stashed and handed back when ↓
+// walks past the newest entry), the two channels that never mix, the four
+// delivery paths that push and the failure path that does not — and the part
+// that decides whether it is safe to ship: an unreachable or 401 history
+// endpoint degrading to this session's own list, with Ctrl/Cmd+Enter and the
+// auto-grow binding on the same textarea untouched.
+const messageHistoryMod = await import("./message_history.test.mjs");
+await messageHistoryMod.registerMessageHistoryTests({ app, check, checkAsync, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

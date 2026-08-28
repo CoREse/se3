@@ -45,6 +45,18 @@ export async function registerConfirmChipTests(ctx) {
     fetchCalls = 0;
     lastReq = null;
     globalThis.fetch = (input, init) => {
+      // The owner-scoped message-history calls (G2) ride along beside a
+      // decision: a lazy GET when the box is focused, and a POST after the
+      // decision lands. They are best-effort bookkeeping on a DIFFERENT
+      // endpoint, so they are answered but not counted — "exactly one POST"
+      // here has always meant exactly one *decision* POST.
+      if (String(input).includes("/api/message-history/")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ entries: [] }),
+        });
+      }
       fetchCalls += 1;
       lastReq = {
         input: String(input),

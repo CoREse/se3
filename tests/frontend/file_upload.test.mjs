@@ -51,6 +51,13 @@ export async function registerFileUploadTests(ctx) {
     const calls = [];
     const saved = globalThis.fetch;
     globalThis.fetch = async (url, init) => {
+      // The owner-scoped message-history calls (G2) ride along beside a
+      // successful publish/send on a DIFFERENT endpoint — best-effort
+      // bookkeeping, not part of the upload/spawn contract these checks count.
+      // Answered so nothing rejects, but not recorded.
+      if (String(url).includes("/api/message-history/")) {
+        return { ok: true, status: 200, json: async () => ({ entries: [] }) };
+      }
       calls.push({ url: String(url), init: init || {} });
       const spec = responder(String(url), init || {}) || {};
       if (spec.throws) throw new Error("network down");
