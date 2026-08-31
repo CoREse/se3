@@ -31,8 +31,13 @@ from typing import (
 )
 
 from tianluo.daemon import protocol
+from tianluo.daemon.history import (
+    MAX_BYTES_PER_REPORT,
+    MAX_RECORDS_PER_REPORT,
+)
 from tianluo.daemon.wire_metrics import WireMetrics
 
+from .history_summary import summarize_history_records
 from .state import ServerState, records_reach_bytes
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -255,6 +260,66 @@ async def _decode_frame(raw: str) -> "protocol.Message":
             LARGE_FRAME_WARN_BYTES,
         )
     return protocol.decode(raw)
+
+
+def _billed_bytes(record: Any) -> int:
+    """The byte size the daemon's read budget charged for *record*.
+
+    ``read_flow`` bills each record its post-compaction WIRE size, which for the
+    ~99 % uncompacted path is the on-disk jsonl line — and that line is exactly
+    ``json.dumps(message, ensure_ascii=False)`` as ``chat_history`` wrote it. So
+    re-serializing the message the frame carried reproduces the daemon's own
+    figure rather than approximating it.
+    """
+    if not isinstance(record, dict):
+        return 0
+    message = record.get("message")
+    if not isinstance(message, dict):
+        message = record
+    try:
+        return len(
+            json.dumps(message, ensure_ascii=False, default=str).encode("utf-8")
+        )
+    except (TypeError, ValueError):  # pragma: no cover - defensive
+        return 0
+
+
+def _frame_is_chunk_bounded(records: Any) -> bool:
+    """Whether a ``HISTORY_DATA`` frame was cut short by the daemon's chunk bound.
+
+    ``read_flow`` stops at :data:`~tianluo.daemon.history.MAX_RECORDS_PER_REPORT`
+    records or :data:`~tianluo.daemon.history.MAX_BYTES_PER_REPORT` bytes and
+    reports the read as truncated; the pull handler then keeps reading and
+    sending from the advancing cursor for exactly as long as that keeps
+    happening. So a frame AT the bound says "more of this reply is coming" and a
+    frame under it is the reply's last — which is the only thing the wire says
+    about a multi-frame reply, since nothing in the daemon→server protocol (which
+    this split leaves untouched) carries the truncation flag itself.
+
+    INVARIANT: the comparison is made on the daemon's OWN billing basis (see
+    :func:`_billed_bytes`), never on the encoded frame's size. A frame wraps the
+    billed lines in protocol and record-envelope bytes the budget never counted,
+    so a final untruncated read sitting just under the cap encodes to just over
+    it — read as "still draining", that left the marker open and consumed the
+    next genuine live append as the reply's closing frame.
+
+    :func:`~tianluo.server.state.records_reach_bytes` runs first as a cheap
+    OVER-estimating pre-filter: it is far quicker than a re-serialization and
+    can only over-count, so a frame it puts under the cap is under it for
+    certain and the exact pass is skipped.
+    """
+    if not isinstance(records, list):
+        return False
+    if len(records) >= MAX_RECORDS_PER_REPORT:
+        return True
+    if not records_reach_bytes(records, MAX_BYTES_PER_REPORT):
+        return False
+    total = 0
+    for record in records:
+        total += _billed_bytes(record)
+        if total >= MAX_BYTES_PER_REPORT:
+            return True
+    return False
 
 
 def _render_ui_frame(payload: Dict[str, Any]) -> str:
@@ -944,11 +1009,34 @@ async def request_history(
     message = protocol.make_history_request(
         flow_id, project_root=project_root, cursor=cursor
     )
+    # Everything this request brings back is a REPLAY of already-persisted
+    # history — a cache-miss bundle, a reconnect backfill, a requires_full
+    # repair — so the browser leg summarizes it exactly like the REST bundle
+    # response, whatever ``mode`` each frame of the reply wears. This is the one
+    # funnel every回程 pull leaves through, which is why the marker is armed
+    # here rather than at each call site. The cursor rides along because it
+    # fixes the shape of the head this reply must start with, which is how the
+    # marker later tells that head apart from a live append that raced this
+    # dispatch.
+    #
+    # INVARIANT: armed BEFORE the send, retracted when the send fails. The
+    # daemon's reply can be read off the receive loop while this send coroutine
+    # is still resuming, so a marker armed afterwards would miss its own reply's
+    # head — and every chunked tail behind that head would then fail to open the
+    # (still-expecting-a-head) marker and be broadcast whole.
+    await state.mark_history_replay(flow_id, cursor=cursor)
     if connection is not None:
-        return await manager.send_to_connection(
+        sent = await manager.send_to_connection(
             target_machine, connection, message
         )
-    return await manager.send_to(target_machine, message)
+    else:
+        sent = await manager.send_to(target_machine, message)
+    if not sent:
+        # Retract by the shape armed above: a rival pull for the same flow may
+        # have been armed and dispatched successfully in between, and it must
+        # keep the replay identity its dispatch earned.
+        await state.unmark_history_replay(flow_id, cursor=cursor)
+    return sent
 
 
 async def request_detail(
@@ -1400,6 +1488,8 @@ async def _push_history_data(
     flow_id: str,
     mode: str,
     records: list,
+    *,
+    replay: bool = False,
 ) -> None:
     """Broadcast a history-data delta for *flow_id* to its owner's UI clients.
 
@@ -1419,6 +1509,21 @@ async def _push_history_data(
     contains (per-step-file record counts), so the client can check its held
     ``stepId#ordinal`` set against it and ask for exactly the numbers it lacks;
     the signature says which bundle generation those counts describe.
+
+    INVARIANT: the summarize/whole verdict is ONE decision per frame, taken from
+    the server-side MECHANISM that produced it (``replay`` — see
+    :meth:`ServerState.take_history_replay`) and from nothing else. It never
+    consults a record's own creation stamp, the daemon's clock offset, or any
+    browser's subscription instant, so one frame leaves the server in exactly
+    one shape and every subscriber of the owner receives that same shape.
+    WHY: those inputs cannot decide the question they were asked. A record's
+    stamp is a naive daemon-local ISO string, so a daemon a timezone away reads
+    hours into the future or hours into the past; and a push loop that lags by a
+    tick makes a genuine tail append look older than a console that just opened.
+    Both misreadings turned real-time increments into lazified chips — the
+    running console then fetching back a body it had just been handed — and
+    split one append into a whole copy for the early browser and a summarized
+    one for the late browser.
     """
     if hub is None or hub.client_count == 0:
         return
@@ -1427,7 +1532,6 @@ async def _push_history_data(
         "type": "history_data",
         "flow_id": flow_id,
         "mode": mode,
-        "records": records,
     }
     # Read the bundle AFTER the frame was applied, so the counts describe what
     # the client should hold once it merges these records — the same values the
@@ -1461,6 +1565,23 @@ async def _push_history_data(
     )
     if usage is not None:
         frame["usage"] = usage
+    # A replay frame carries already-persisted history back to a browser, so it
+    # is shaped exactly like the REST bundle response: collapsed-state fields,
+    # bodies fetched on expand. The judgement is the frame's ORIGIN, never its
+    # transport — such a frame either answers a pull the server dispatched (head
+    # and every chunked tail of that reply) or replaces the whole bundle
+    # wholesale (a daemon that restarted and lost its cursors re-sends a flow's
+    # entire persisted history as one ``full``). A large recovery arrives as a
+    # ``full`` head plus ``append`` tails, so transport alone would let most of a
+    # big session's download and eager panel-building through untouched.
+    #
+    # Anything the pull markers do not name came off the live tail-append path
+    # and rides WHOLE: it is the browser's real-time increment, already in its
+    # hands, so lazifying it would only make the running console ask for a body
+    # it was just given.
+    frame["records"] = (
+        summarize_history_records(records, flow_id) if replay else records
+    )
     await hub.broadcast_owned(frame, owner)
 
 
@@ -2119,6 +2240,33 @@ async def _handle_message(
                 or outcome.rejected_full
                 or not applied
             )
+            # Accounted for EVERY frame that arrives, relayed or not, and
+            # BEFORE the self-heal below can arm a pull of its own: a reply's
+            # ``full`` head is suppressed from the fan-out whenever a REST caller
+            # is parked on the pull, and a frame the cache discarded still cost
+            # the daemon a chunk of its reply — so skipping either, or letting
+            # this frame consume the marker for the pull it just triggered, would
+            # leave the marker out of step with the reply it tracks and release
+            # the rest of a recovery to ship whole. ``cursor_base`` goes along so
+            # an append that raced an outstanding pull's dispatch — anchored at
+            # the daemon's push水位, hence PAST the cursor we asked from — is not
+            # mistaken for that pull's head.
+            replay = await state.take_history_replay(
+                flow_id,
+                mode_full=mode == protocol.HISTORY_MODE_FULL,
+                chunk_bounded=lambda: _frame_is_chunk_bounded(records),
+                cursor_base=cursor_base if isinstance(cursor_base, dict) else {},
+            )
+            # Anything the pull markers do not name came off the live
+            # tail-append path, so the whole frame rides to every subscriber
+            # untouched (``_push_history_data``). The verdict is ONE per frame
+            # and identical for all browsers: it reads the mechanism that
+            # produced the frame and nothing else — not a record's own creation
+            # stamp (a naive daemon-local string a timezone apart reads hours
+            # off), not a browser's subscription instant (a push loop that lags
+            # one tick makes a genuine append look older than a console that
+            # just opened). Both readings lazified real-time increments and made
+            # one frame leave the server in two shapes.
             # HOP-4 DEBUG (server → UI fanout decision): whether this frame was
             # applied to the bundle and whether it will be broadcast to /ws/ui.
             # ``applied=False`` on a boundary append means state.append_history
@@ -2212,7 +2360,8 @@ async def _handle_message(
                     await state.clear_recovery_pull(flow_id)
             if not suppress_broadcast:
                 await _push_history_data(
-                    hub, state, machine_id, flow_id, mode, records
+                    hub, state, machine_id, flow_id, mode, records,
+                    replay=replay,
                 )
             elif applied:
                 # The frame changed the bundle but its records may not be

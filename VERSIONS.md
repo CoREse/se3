@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.14.0 - 2026-08-31
+
+- Deliver WebUI history bundles in a collapsed-render summary form so opening a message-heavy session downloads far less data and paints faster
+- Add GET /api/history/{flow_id}/detail to fetch one message's detail body on demand, served from the server history cache and falling back to the existing daemon back-haul on a cache miss
+- Fetch message details lazily on expand in both the running-flow console and the history detail view, caching fetched details per message so re-expanding never re-requests
+- Keep failed tool-call details inlined with the summary so failure chips still auto-expand instantly and failure-heavy sessions issue no burst of on-demand requests
+- Show a localized 'detail unavailable' notice (en-US and zh-CN) when the server cache misses and the owning daemon cannot answer, instead of a blank panel or an endless spinner
+- Classify each server-to-browser history frame by the server-side mechanism that produced it, so replay frames (REST responses, back-haul forwards, reconnect backfill, missing backfill, snapshot replacement) are summarized while genuine live tail appends stay full and trigger no detail requests
+- Leave the daemon-to-server uplink protocol and push loop unchanged; collapsed visuals and expanded content match the previous behavior
 ## 12.13.0 - 2026-08-28
 
 - Add local draft caching for the web console's flow reply, new-task and issue inputs, restoring unsent text when a page, flow or modal is reopened

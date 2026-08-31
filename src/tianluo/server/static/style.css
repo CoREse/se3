@@ -2157,6 +2157,19 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   font-style: italic;
   font-size: 10.5px;
 }
+/* Transient states of an on-demand detail panel (see attachChipDetail): the
+   body is fetched on first expand, so the panel is never blank -- it shows the
+   loading line, then either the payload or the unavailable notice. */
+.tool-detail-loading,
+.tool-detail-unavailable {
+  color: var(--fg-dim);
+  font-style: italic;
+  font-size: 10.5px;
+  margin: 0;
+}
+.tool-detail-unavailable {
+  color: var(--yellow);
+}
 
 /* -- long-content folding ------------------------------------------- */
 

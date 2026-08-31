@@ -18,7 +18,10 @@ daemons and exposes it to the web frontend:
 * ``GET /api/uploads/file`` — read one stored attachment back out of that
   directory (the inline-thumbnail path), via the same daemon socket;
 * ``GET /api/history`` — the aggregated history-session index;
-* ``GET /api/history/{id}`` — one flow's history records (pulled on demand);
+* ``GET /api/history/{id}`` — one flow's history records (pulled on demand),
+  shaped for the collapsed render: tool-call detail bodies are held back;
+* ``GET /api/history/{id}/detail`` — one tool call's detail body, fetched when
+  the user expands its chip;
 * ``/`` and ``/static`` — the bundled web frontend (static files).
 
 The heavy web dependencies (``fastapi``, ``uvicorn``) are isolated in the
@@ -65,6 +68,11 @@ from .auth.registry import (
     make_require_owner,
 )
 from .auth.session import CookieConfig, SessionStore, read_cookie
+from .history_summary import (
+    DETAIL_SOURCE_PROGRESS,
+    DETAIL_SOURCE_RAW,
+    summarize_history_records,
+)
 from .identity import IdentityService
 from .persistence import (
     MESSAGE_HISTORY_CHANNELS,
@@ -138,6 +146,18 @@ def _discover_ui_languages() -> list:
 #: still takes real time on a multi-MB session); a shorter window risks 504s
 #: even when the daemon is healthy and still reading.
 HISTORY_PULL_TIMEOUT = 30.0
+
+#: How often the on-demand detail endpoint re-reads the bundle while following a
+#: daemon pull's later frames. A pull larger than the daemon's per-frame byte
+#: budget arrives as a ``full`` head plus ``append`` tails and the pull waiter is
+#: resolved by the head alone, so a detail living in a later tail must not be
+#: reported absent while it is still on the wire. The follow ends on the bundle's
+#: own verdict (the record arrived, or the daemon provably read past its line —
+#: see ``ServerState.get_history_record_detail``), never on an elapsed-silence
+#: guess; this interval only decides how promptly that verdict is noticed, and is
+#: short enough to be imperceptible while costing a handful of cheap metadata
+#: reads rather than a spin.
+HISTORY_PULL_TAIL_POLL = 0.25
 
 #: Seconds ``GET /api/history`` waits for connected daemons to answer the
 #: broadcast ``MSG_HISTORY_INDEX_REQUEST`` (a forced index re-push) before it
@@ -457,6 +477,14 @@ async def _history_response(payload: dict, request: Request) -> Response:
     compression step it asked not to have.
     """
     gzip_ok = "gzip" in request.headers.get("accept-encoding", "").lower()
+    # Summary shaping happens HERE — the single funnel every history snapshot
+    # leaves through — so no delivery (full / delta / backfill / a reconciled
+    # re-read) can escape it. The cache keeps the full bundle; only the wire
+    # copy loses the detail bodies, and the size decision below is therefore
+    # made on what actually ships.
+    payload["records"] = summarize_history_records(
+        payload.get("records"), payload.get("flow_id") or ""
+    )
     records = payload.get("records")
     big = isinstance(records, list) and (
         len(records) >= HISTORY_RESPONSE_OFFLOAD_RECORDS
@@ -3197,6 +3225,154 @@ def create_app(
         index = await state.get_history_index(owner=_scope_for(identity_))
         return {"sessions": index, "count": len(index)}
 
+    async def _resolve_history_owner(
+        flow_id: str, scope: Optional[str]
+    ) -> Tuple[str, str]:
+        """Resolve ``(owning_machine, owner)`` for *flow_id* or raise 404.
+
+        Ownership gate shared by every history read: a flow whose owning machine
+        belongs to another owner (or is unknown) reads as absent — even if its
+        records happen to be cached server-side — so one owner can never reach
+        another's history, bundle or single detail alike.
+
+        WHY a miss here is a plain 404 with NO daemon-side work: a stale browser
+        tab polling the URL of a deleted / never-existing flow would otherwise
+        drive a full build_index cold rebuild (~17.5k stats) on every connected
+        daemon per request — re-creating on demand the exact rebuild storm the
+        presence gating removed. Discovery of a freshly created flow is the list
+        endpoint's job (it alone pays the forced re-push).
+        """
+        owner_machine = await state.find_machine_for_history_flow(
+            flow_id, owner=scope
+        )
+        if owner_machine is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no history for flow '{flow_id}'",
+            )
+        target_owner = await state.get_machine_owner(owner_machine)
+        if target_owner is None or (scope is not None and target_owner != scope):
+            raise HTTPException(
+                status_code=404,
+                detail=f"no history for flow '{flow_id}'",
+            )
+        return owner_machine, target_owner
+
+    async def _pull_history_from_daemon(
+        flow_id: str,
+        owner_machine: str,
+        connection: Any,
+        project_root: str,
+        *,
+        deadline: Optional[float] = None,
+    ) -> None:
+        """Dispatch a coalesced daemon full pull for this flow and await it.
+
+        Shared by the bundle cache-miss path, the running-worktree self-heal
+        reconcile and the on-demand detail endpoint, so all three go through the
+        SAME leader/follower coalescing:
+        concurrent callers for ``(flow_id, owner_machine)`` collapse onto one
+        in-flight ``MSG_HISTORY_REQUEST``; a follower whose leader failed
+        before dispatching (``_PullAbandoned``) retries as a fresh leader
+        rather than waiting out the timeout behind a pull that will never be
+        answered. Raises ``HTTPException`` 404 when no connected daemon owns
+        the flow and 504 on a pull timeout.
+
+        INVARIANT: the ENTIRE round trip is bounded by one deadline — the
+        leader's dispatch as much as the wait for the reply, and every
+        ``_PullAbandoned`` retry out of the same remaining budget rather than a
+        fresh one. *deadline* (a ``loop.time()`` instant) lets a caller that has
+        further work to do under the same bound — the detail route follows the
+        reply's later frames — share its budget instead of stacking a second
+        one; omitted, the call gets its own ``HISTORY_PULL_TIMEOUT``.
+        WHY the dispatch needs bounding too: ``send_to_connection`` ends in
+        ``websocket.send_text``, which has no timeout of its own and blocks for
+        as long as a backpressured or half-open daemon socket refuses to drain.
+        A caller parked there never reached the ``wait_for`` below, so the
+        browser sat on the loading state with no upper bound at all.
+        """
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + HISTORY_PULL_TIMEOUT
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"timed out pulling history for flow '{flow_id}'",
+                )
+            fut, is_leader = history_registry.begin_pull(flow_id, owner_machine)
+            pull_dispatched = False
+            try:
+                if is_leader:
+                    # The leader's daemon send is INSIDE this try so the
+                    # ``finally`` also covers a cancellation that fires while
+                    # ``send_text`` is blocked: without it, a client
+                    # disconnecting mid-send would leave the leader's waiter
+                    # parked and the key marked in-flight forever, turning
+                    # every later request into a follower that sends no new
+                    # ``MSG_HISTORY_REQUEST`` and merely times out.
+                    sent = await asyncio.wait_for(
+                        request_history(
+                            manager,
+                            state,
+                            flow_id,
+                            machine_id=owner_machine,
+                            connection=connection,
+                            project_root=project_root or "",
+                        ),
+                        timeout=remaining,
+                    )
+                    if not sent:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=(
+                                "no connected daemon owns history for flow "
+                                f"'{flow_id}'"
+                            ),
+                        )
+                    pull_dispatched = True
+                await asyncio.wait_for(
+                    fut, timeout=max(0.0, deadline - loop.time())
+                )
+                return
+            except asyncio.TimeoutError:
+                raise HTTPException(
+                    status_code=504,
+                    detail=f"timed out pulling history for flow '{flow_id}'",
+                )
+            except _PullAbandoned:
+                # Our leader failed before dispatching a daemon request and
+                # released us (the in-flight marker is already cleared). Loop
+                # back to try to become the new leader ourselves rather than
+                # parking behind an abandoned pull until the timeout.
+                continue
+            finally:
+                if is_leader and not pull_dispatched:
+                    # The leader failed or was cancelled BEFORE a successful
+                    # daemon dispatch (its send returned ``False`` or it was
+                    # cancelled before / while sending). Release every
+                    # follower parked behind it and clear the in-flight marker
+                    # so the next request leads a fresh pull immediately —
+                    # otherwise ``discard`` would leave the marker set
+                    # (followers remain) and strand them until
+                    # ``HISTORY_PULL_TIMEOUT`` waiting on a
+                    # ``MSG_HISTORY_REQUEST`` that was never sent.
+                    history_registry.fail_pull(
+                        flow_id, owner_machine, exclude=fut
+                    )
+                else:
+                    # Drop our waiter on every other exit path — timeout,
+                    # cancellation after a successful dispatch, a follower
+                    # leaving, or success. On success ``resolve`` has already
+                    # popped this waiter and cleared the in-flight marker, so
+                    # the call is a no-op; otherwise it removes the now-dead
+                    # waiter and, when it was the last one for the key, clears
+                    # the marker. Because the leader keeps the pull genuinely
+                    # in flight here, followers correctly stay parked on the
+                    # already-dispatched request.
+                    history_registry.discard(flow_id, fut, owner_machine)
+
     @app.get("/api/history/{flow_id}")
     async def history_detail(
         request: Request,
@@ -3222,111 +3398,16 @@ def create_app(
         # failures (the daemon ``/ws`` key channel never touches the browser
         # ``SessionStore``), and MUST stay fail-closed — cross-owner still reads
         # 404 below, unauthenticated still 401s at ``require_owner``.
-        # Ownership gate first: a flow whose owning machine belongs to another
-        # owner (or is unknown) reads as absent — even if its records happen to
-        # be cached server-side — so one owner can never pull another's history.
+        # Ownership gate first (see _resolve_history_owner): a flow owned by
+        # another owner reads as absent even when its records are cached here.
         scope = _scope_for(identity_)
-        owner_machine = await state.find_machine_for_history_flow(flow_id, owner=scope)
-        # A cache miss here returns 404 immediately — the detail endpoint stays
-        # a cheap indexed lookup with NO daemon-side work. WHY it must not
-        # force a fleet refresh: a stale browser tab (or any client) polling the
-        # detail URL of a deleted / never-existing flow would otherwise drive a
-        # full build_index cold rebuild (~17.5k stats) on every connected daemon
-        # per request — re-creating on demand the exact rebuild storm the
-        # presence gating removed. Discovery of a freshly created flow is the
-        # list endpoint's job (it alone pays the forced re-push); once the flow
-        # is indexed the browser reaches its detail through this fast path.
-        if owner_machine is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"no history for flow '{flow_id}'",
-            )
-        target_owner = await state.get_machine_owner(owner_machine)
-        if target_owner is None or (scope is not None and target_owner != scope):
-            raise HTTPException(
-                status_code=404,
-                detail=f"no history for flow '{flow_id}'",
-            )
+        owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
 
         async def _pull_from_daemon(connection: Any, project_root: str) -> None:
-            """Dispatch a coalesced daemon full pull for this flow and await it.
-
-            Shared by the cache-miss path and the running-worktree self-heal
-            reconcile so both go through the SAME leader/follower coalescing:
-            concurrent callers for ``(flow_id, owner_machine)`` collapse onto one
-            in-flight ``MSG_HISTORY_REQUEST``; a follower whose leader failed
-            before dispatching (``_PullAbandoned``) retries as a fresh leader
-            rather than waiting out the timeout behind a pull that will never be
-            answered. Raises ``HTTPException`` 404 when no connected daemon owns
-            the flow and 504 on a pull timeout.
-            """
-            while True:
-                fut, is_leader = history_registry.begin_pull(flow_id, owner_machine)
-                pull_dispatched = False
-                try:
-                    if is_leader:
-                        # The leader's daemon send is INSIDE this try so the
-                        # ``finally`` also covers a cancellation that fires while
-                        # ``send_text`` is blocked: without it, a client
-                        # disconnecting mid-send would leave the leader's waiter
-                        # parked and the key marked in-flight forever, turning
-                        # every later request into a follower that sends no new
-                        # ``MSG_HISTORY_REQUEST`` and merely times out.
-                        sent = await request_history(
-                            manager,
-                            state,
-                            flow_id,
-                            machine_id=owner_machine,
-                            connection=connection,
-                            project_root=project_root or "",
-                        )
-                        if not sent:
-                            raise HTTPException(
-                                status_code=404,
-                                detail=(
-                                    "no connected daemon owns history for flow "
-                                    f"'{flow_id}'"
-                                ),
-                            )
-                        pull_dispatched = True
-                    await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
-                    return
-                except asyncio.TimeoutError:
-                    raise HTTPException(
-                        status_code=504,
-                        detail=f"timed out pulling history for flow '{flow_id}'",
-                    )
-                except _PullAbandoned:
-                    # Our leader failed before dispatching a daemon request and
-                    # released us (the in-flight marker is already cleared). Loop
-                    # back to try to become the new leader ourselves rather than
-                    # parking behind an abandoned pull until the timeout.
-                    continue
-                finally:
-                    if is_leader and not pull_dispatched:
-                        # The leader failed or was cancelled BEFORE a successful
-                        # daemon dispatch (its send returned ``False`` or it was
-                        # cancelled before / while sending). Release every
-                        # follower parked behind it and clear the in-flight marker
-                        # so the next request leads a fresh pull immediately —
-                        # otherwise ``discard`` would leave the marker set
-                        # (followers remain) and strand them until
-                        # ``HISTORY_PULL_TIMEOUT`` waiting on a
-                        # ``MSG_HISTORY_REQUEST`` that was never sent.
-                        history_registry.fail_pull(
-                            flow_id, owner_machine, exclude=fut
-                        )
-                    else:
-                        # Drop our waiter on every other exit path — timeout,
-                        # cancellation after a successful dispatch, a follower
-                        # leaving, or success. On success ``resolve`` has already
-                        # popped this waiter and cleared the in-flight marker, so
-                        # the call is a no-op; otherwise it removes the now-dead
-                        # waiter and, when it was the last one for the key, clears
-                        # the marker. Because the leader keeps the pull genuinely
-                        # in flight here, followers correctly stay parked on the
-                        # already-dispatched request.
-                        history_registry.discard(flow_id, fut, owner_machine)
+            """This route's binding of the shared coalesced daemon pull."""
+            await _pull_history_from_daemon(
+                flow_id, owner_machine, connection, project_root
+            )
 
         # Cache hit: serve a not-modified / delta / full snapshot atomically.
         # ``after`` is the opaque progress token the client echoes on a WS
@@ -3524,6 +3605,199 @@ def create_app(
             status_code=409,
             detail=f"history ownership changed while pulling flow '{flow_id}'",
         )
+
+    @app.get("/api/history/{flow_id}/detail")
+    async def history_record_detail(
+        flow_id: str,
+        tool_use_id: str = "",
+        step_id: str = "",
+        ordinal: int = -1,
+        source: str = DETAIL_SOURCE_PROGRESS,
+        identity_: OwnerIdentity = Depends(require_owner),
+    ) -> dict:
+        """Serve ONE tool chip's detail body, on demand.
+
+        The bundle response ships collapsed-state fields only (see
+        :func:`~tianluo.server.history_summary.summarize_history_records`); this
+        is where the browser comes back for the body when the user expands a
+        chip. It follows the shape of ``GET /api/calls/{id}/detail``: an
+        owner-scoped lookup that prefers the server's own memory and falls back
+        to the owning daemon, whose on-disk jsonl is authoritative.
+
+        Addressed by the record's stable ``step_id`` + ``ordinal`` identity plus
+        the ``tool_use_id`` inside it. WHY not ``tool_use_id`` alone: it is
+        unique only within a record — codex synthesizes ids like
+        ``codex_tool_1`` per call, so two steps of one flow can each hold that
+        id and a flow-wide scan would answer the first chip with the second
+        call's body. ``step_id#ordinal`` is the same identity the frontend
+        reconciles records by, and it survives the bundle rotations (append /
+        full replace / re-pull) that a positional address would not.
+
+        ``source`` is answered exactly as asked: the live ``stream_progress``
+        payload and the final record's ``raw_json`` render visibly different
+        panels (the daemon-built one can carry a pre-write diff the browser
+        cannot reconstruct), so a source the bundle does not hold is reported
+        unavailable rather than silently substituted.
+
+        Status codes are what the frontend's "detail unavailable" state reads:
+        503 the owning daemon is not reachable, 504 it did not answer in time,
+        404 the flow (or the call) genuinely does not exist here.
+        """
+        tool_use_id = (tool_use_id or "").strip()
+        step_id = (step_id or "").strip()
+        if not tool_use_id:
+            raise HTTPException(
+                status_code=422, detail="tool_use_id is required"
+            )
+        if not step_id or ordinal < 0:
+            raise HTTPException(
+                status_code=422,
+                detail="step_id and a non-negative ordinal are required",
+            )
+        # Anything but the explicit raw-record source reads as the
+        # stream_progress payload, so an unknown value degrades to the common
+        # case rather than 4xx-ing a browser that is merely newer or older.
+        wanted = (
+            DETAIL_SOURCE_RAW if source == DETAIL_SOURCE_RAW
+            else DETAIL_SOURCE_PROGRESS
+        )
+        scope = _scope_for(identity_)
+        owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
+
+        async def _read() -> Tuple[bool, Dict[str, Any]]:
+            return await state.get_history_record_detail(
+                flow_id,
+                step_id=step_id,
+                ordinal=ordinal,
+                tool_use_id=tool_use_id,
+                source=wanted,
+                expected_machine_id=owner_machine,
+                expected_owner=target_owner,
+            )
+
+        loop = asyncio.get_running_loop()
+        # The whole route — the daemon DISPATCH, the wait for its reply, and the
+        # follow of that reply's later frames — is bounded by this one instant,
+        # which is the one existing pull timeout. It is handed to
+        # ``_pull_history_from_daemon`` rather than left to bound only the tail
+        # follow: the send at the head of the round trip has no timeout of its
+        # own, so a stalled daemon socket used to park the route before any
+        # deadline was ever consulted and the expanded panel sat on its loading
+        # message forever instead of falling back to the unavailable state.
+        deadline = loop.time() + HISTORY_PULL_TIMEOUT
+
+        async def _read_through_pull_tail() -> Optional[Dict[str, Any]]:
+            """Re-read the just-pulled bundle, following the daemon's tail.
+
+            WHY a single re-read is not enough: a pull whose history exceeds the
+            daemon's per-frame byte budget is answered as a ``full`` head
+            followed by ``append`` tails (see ``_handle_history_request``), and
+            the shared pull waiter is resolved by the FIRST authoritative frame.
+            A chip whose body sits in a later tail would therefore read as
+            absent — the browser would paint the localized "unavailable" state
+            while its detail was still on the wire from a perfectly healthy
+            daemon.
+
+            INVARIANT: the follow ends only on a verdict the BUNDLE states, never
+            on elapsed silence. ``settled`` is the bundle's own "this line will
+            not arrive": the addressed record is here, or the daemon already
+            streamed a higher ordinal for the step, so it read past this line and
+            skipped it. A cursor total is deliberately NOT such a verdict — a
+            drain advances it frame by frame, and its head can declare the whole
+            file while the records lag — see ``get_history_record_detail``. There
+            is no daemon "recovery complete" signal on the wire either, and
+            adding one would change the daemon→server protocol this split
+            explicitly does not touch, so a quiet gap between two 256 KiB tails
+            must read as "still coming", not as completion. The only other exit
+            is the shared deadline above, and it exits as 504 rather than as
+            ``None``: running out of time is "the daemon did not answer in
+            time", not "this call has no such body" — the browser paints the
+            same unavailable state either way, but an operator reading the
+            status code must not see a timeout reported as a genuine 404.
+
+            WHY it watches the bundle rather than parking another waiter on
+            ``history_registry``: a parked waiter makes the next ``mode: full``
+            frame for this flow read as a pull reply and suppresses its
+            ``/ws/ui`` broadcast. That is correct while a pull is genuinely in
+            flight, but this follow outlives the pull it started from, so it
+            must observe the cache without changing how frames are relayed.
+            """
+            while True:
+                _cached, found = await _read()
+                if found["detail"] is not None:
+                    return found["detail"]
+                if found["settled"]:
+                    return None
+                now = loop.time()
+                if now >= deadline:
+                    raise HTTPException(
+                        status_code=504,
+                        detail=(
+                            "timed out pulling detail for flow "
+                            f"'{flow_id}'"
+                        ),
+                    )
+                await asyncio.sleep(min(HISTORY_PULL_TAIL_POLL, deadline - now))
+
+        cached, found = await _read()
+        detail = found["detail"]
+        if detail is None and cached and not found["settled"]:
+            # A bundle IS cached but has not yet reached this line: another
+            # request's recovery installed the drain's head and its later frames
+            # are still arriving. Dispatching a rival pull would fight that
+            # drain, so follow the one already in flight — under the same single
+            # deadline, and ending on the same bundle-stated verdict, never on a
+            # silent gap between two frames.
+            detail = await _read_through_pull_tail()
+        elif detail is None and not cached:
+            # The bundle was never cached, or the budget sweep evicted it since
+            # the summary was served. Re-pull it through the SAME coalesced
+            # leader/follower path the bundle cache-miss uses, then follow the
+            # reply's frames. A bundle that IS cached and whose addressed record
+            # is settled falls straight through to the 404 below — see
+            # get_history_record_detail.
+            owner_connection = await manager.get_connection(owner_machine)
+            if owner_connection is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "no connected daemon owns history for flow "
+                        f"'{flow_id}'"
+                    ),
+                )
+            flow_project_root = await state.get_history_flow_project_root(
+                flow_id, owner=target_owner
+            )
+            try:
+                await _pull_history_from_daemon(
+                    flow_id,
+                    owner_machine,
+                    owner_connection,
+                    flow_project_root or "",
+                    deadline=deadline,
+                )
+            except HTTPException as exc:
+                # The pull path reports "no daemon took the request" as 404
+                # because for a whole bundle that is indistinguishable from an
+                # unknown flow. Here the flow IS known (the owner gate passed),
+                # so the honest answer is that the body is temporarily
+                # unreachable — which is the state the chip renders.
+                if exc.status_code == 404:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "could not reach the daemon owning flow "
+                            f"'{flow_id}'"
+                        ),
+                    ) from None
+                raise
+            detail = await _read_through_pull_tail()
+        if detail is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no detail for tool call '{tool_use_id}'",
+            )
+        return {"flow_id": flow_id, "tool_use_id": tool_use_id, **detail}
 
     # -- frontend (static files) -------------------------------------------
 

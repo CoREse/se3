@@ -60,10 +60,19 @@ def test_in_flight_branch_attaches_the_panel():
     start = src.index("function applyFragmentToBubble(")
     end = src.index("function appendPartialFragment(", start)
     body = src[start:end]
-    assert "attachChipDetail(chip, norm.toolDetail" in body, (
+    # The payload now goes through `chipDetailForFragment`, which prefers the
+    # record's inline `tool_detail` and falls back to the lazy ref the server
+    # leaves when it holds a successful call's body back. Either way a running
+    # call must still mount a panel.
+    assert "chipDetailForFragment(norm)" in body, (
         "a running call must be expandable, not just the settled one"
     )
+    assert "attachChipDetail(chip, detail" in body
     assert "/*expanded=*/false" in body, "the in-flight panel starts folded"
+    src_fn = src[src.index("function chipDetailForFragment("):]
+    assert "norm.toolDetail" in src_fn[: src_fn.index("\n}")], (
+        "chipDetailForFragment must still prefer an inline tool_detail"
+    )
 
 
 def test_nothing_infers_in_flight_from_a_missing_detail():

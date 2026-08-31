@@ -7607,4 +7607,18 @@ await inputDraftsMod.registerInputDraftTests({ app, check, checkAsync, findOne, 
 const messageHistoryMod = await import("./message_history.test.mjs");
 await messageHistoryMod.registerMessageHistoryTests({ app, check, checkAsync, findOne, findAll });
 
+// ---------------------------------------------------------------------------
+// Lazy tool-call details (server ships collapsed state, bodies on demand)
+// ---------------------------------------------------------------------------
+//
+// The history bundle no longer carries every tool call's body. These checks
+// hold the four things that decides whether that is safe to ship: the chip
+// header stays byte-identical across the elision, a collapsed chip builds no
+// panel DOM and issues no request, expanding fetches exactly once and caches
+// the answer, an unreachable body renders an i18n notice instead of a blank or
+// a spinner — and a FAILED call keeps its body inline and its chip
+// auto-expanded, so a failure-heavy session still opens with zero requests.
+const lazyDetailMod = await import("./history_lazy_detail.test.mjs");
+await lazyDetailMod.registerHistoryLazyDetailTests({ app, check, checkAsync, findOne, findAll });
+
 console.log(`\n${passed} checks passed.`);

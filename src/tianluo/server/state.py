@@ -28,6 +28,8 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from tianluo.daemon import protocol
 
+from .history_summary import locate_record_detail
+
 logger = logging.getLogger(__name__)
 
 
@@ -630,6 +632,115 @@ class HistoryWriteOutcome:
     suppressed_cursor: Optional[Dict[str, Any]] = None
 
 
+
+@dataclass
+class _PendingPull:
+    """One dispatched ``MSG_HISTORY_REQUEST`` whose reply has not drained yet."""
+
+    #: What the reply's HEAD frame must look like. ``read_flow`` derives the
+    #: mode from the request's cursor alone — a cursorless request is answered
+    #: with a ``full`` head (then ``append`` tails), a cursor-bearing one with
+    #: ``append`` frames only — so this is a fact about our own request, not a
+    #: guess about the daemon.
+    expects_full: bool
+    #: The cursor the request carried (empty for a cursorless pull). The reply
+    #: reads FROM it, so its head can only be anchored AT or BEHIND it, never
+    #: past it.
+    cursor: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class _ReplayDrain:
+    """The replay markers held for one flow: pulls in flight plus drain state."""
+
+    #: Dispatched pulls whose replies have not finished draining, front first.
+    pulls: List[_PendingPull] = field(default_factory=list)
+    #: Whether the frontmost pull's reply has actually STARTED arriving. Until
+    #: it has, a frame that cannot be that reply's head is live traffic that
+    #: raced the dispatch, and must leave the marker alone.
+    draining: bool = False
+    #: Leak guard for a pull whose reply never arrives at all.
+    deadline: float = 0.0
+
+
+def _cursor_base_ahead(
+    cursor_base: Optional[Dict[str, Any]], requested: Dict[str, Any]
+) -> bool:
+    """Whether *cursor_base* starts PAST *requested* for at least one step file.
+
+    A pull's reply is read from the cursor the request carried, so every frame
+    of it is anchored at or behind that cursor (a file whose cursor the daemon
+    had to discard is re-delivered from line 0 — further behind still). A live
+    push-loop append, by contrast, is anchored at the daemon's own push水位,
+    which in every case that arms a recovery pull sits AHEAD of the water mark
+    the server asked from. That asymmetry is what tells the two apart when both
+    wear ``mode: append``.
+
+    A version-skewed daemon sends no ``cursor_base`` at all; an empty one claims
+    nothing, so it never disqualifies a frame from being the reply's head — the
+    safe direction, since a head misread as live would ship its bodies whole.
+    """
+    if not cursor_base:
+        return False
+    for name, raw_base in cursor_base.items():
+        try:
+            base = int(raw_base)
+        except (TypeError, ValueError):
+            continue
+        try:
+            want = int(requested.get(name, 0) or 0)
+        except (TypeError, ValueError):
+            want = 0
+        if base > want:
+            return True
+    return False
+
+
+def _normalized_cursor(cursor: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A cursor reduced to comparable form (numeric line counts, string keys)."""
+    normalized: Dict[str, Any] = {}
+    for name, raw in (cursor or {}).items():
+        try:
+            normalized[str(name)] = int(raw)
+        except (TypeError, ValueError):
+            normalized[str(name)] = raw
+    return normalized
+
+
+def _same_pull_shape(
+    pull: _PendingPull, expects_full: bool, cursor: Optional[Dict[str, Any]]
+) -> bool:
+    """Whether *pull* was armed for a request of exactly this shape.
+
+    The request shape (cursorless-full vs. read-from-this-cursor) is all that
+    distinguishes one armed pull from another — it is what :func:`_frame_opens_reply`
+    matches a reply's head against — so it is also how a caller whose send failed
+    finds the marker it armed itself, rather than whichever was armed last.
+    """
+    if pull.expects_full != expects_full:
+        return False
+    return _normalized_cursor(pull.cursor) == _normalized_cursor(cursor)
+
+
+def _frame_opens_reply(
+    pull: _PendingPull,
+    mode_full: bool,
+    cursor_base: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether this frame can be *pull*'s reply HEAD rather than a live append.
+
+    Only ever consulted before a drain has started. Both tests are one-sided on
+    purpose: they reject a frame only when the shape of our OWN request proves
+    it cannot be the answer, so an ambiguous frame is still read as the head
+    (summarized) instead of being released to the browser whole.
+    """
+    if pull.expects_full:
+        return mode_full
+    if mode_full:
+        return False
+    return not _cursor_base_ahead(cursor_base, pull.cursor)
+
+
 class ServerState:
     """Thread-safe (asyncio-safe) in-memory store of all machine state."""
 
@@ -641,6 +752,22 @@ class ServerState:
     #: at worst one redundant pull fires per interval and the flow is never
     #: permanently wedged.
     _HISTORY_RECOVERY_TTL: float = 30.0
+
+    #: Leak guard on a dispatched pull's REPLAY marker (see
+    #: :meth:`mark_history_replay`). The marker is normally retired by the
+    #: reply's own closing frame, so this only covers a pull whose reply never
+    #: arrived at all — the daemon died between the request and its first frame,
+    #: or dropped the request on the floor — so a flow cannot stay marked for the
+    #: rest of the server's life. It is pushed forward by every frame of a drain,
+    #: so a legitimately long multi-MB recovery can never age out mid-reply
+    #: however slow the link.
+    #:
+    #: WHY it is NOT an idle window: the dispatch→first-frame gap is a cold jsonl
+    #: read of a multi-MB session (the very latency ``HISTORY_PULL_TIMEOUT`` is
+    #: sized for), and the drain→next-live-append gap is one push-loop tick — the
+    #: two overlap, so no quiet-time threshold can separate them. A drain is
+    #: bounded by COUNTING its frames instead (see :meth:`take_history_replay`).
+    _HISTORY_REPLAY_TTL: float = 120.0
 
     #: Minimum seconds between cache-miss ``full`` daemon pulls for the SAME
     #: flow. A self-heal poll that presents a diverged token forces one full
@@ -729,6 +856,22 @@ class ServerState:
         #: treats the marker as stale and re-arms a fresh pull, so the bundle
         #: still self-heals without the user exiting and re-entering the chat.
         self._history_recovery_inflight: Dict[str, float] = {}
+        #: flow_id -> :class:`_ReplayDrain` for history pulls this server
+        #: dispatched whose reply has not finished draining.
+        #: WHY it exists: the browser leg must summarize every REPLAY of
+        #: already-persisted history (see
+        #: :mod:`tianluo.server.history_summary`) and leave only genuine
+        #: post-subscription tail appends whole — and a pull's reply is NOT one
+        #: frame. A history larger than the daemon's per-frame byte budget comes
+        #: back as a ``full`` head plus ``append`` tails that are, on the wire,
+        #: indistinguishable from the live push loop's appends. The distinction
+        #: is the frame's ORIGIN, so the server records the origin it knows: it
+        #: asked for this, and it knows the SHAPE of the head that answer must
+        #: start with. One entry is armed per dispatched ``MSG_HISTORY_REQUEST``
+        #: and retired by that reply's own closing frame (see
+        #: :meth:`take_history_replay`); the deadline is only a leak guard for a
+        #: request that is never answered at all.
+        self._history_replay_pulls: Dict[str, _ReplayDrain] = {}
         #: flow_id -> monotonic time of the last cache-miss ``full`` daemon pull
         #: dispatched by the REST endpoint. Used to rate-limit repeated full
         #: rebuilds of the SAME flow (see :meth:`mark_full_pull` /
@@ -1457,6 +1600,212 @@ class ServerState:
                 by_id[fid] for fid in order if fid in by_id
             ]
 
+    async def mark_history_replay(
+        self, flow_id: str, *, cursor: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Arm one outstanding pull reply for *flow_id*.
+
+        Called right after a ``MSG_HISTORY_REQUEST`` leaves the server — the one
+        funnel every回程 pull goes through (a bundle cache miss, the
+        ``requires_full`` self-heal, a reconnect backfill). Everything that reply
+        brings back is a re-delivery of already-persisted history, whatever
+        ``mode`` each of its frames wears, so the browser leg summarizes it
+        exactly like the REST bundle response.
+
+        Queued, not counted: two pulls can be in flight for one flow (a REST
+        cache miss and a ``requires_full`` self-heal), and their replies drain
+        one after the other. One arm per request, one retirement per reply, so
+        the second drain is not read as live traffic the moment the first ends.
+
+        *cursor* is the cursor the request carried (``None`` for a cursorless
+        full rebuild). It is kept because it fixes the shape of the reply's HEAD
+        frame, which is the only thing that separates the answer we are waiting
+        for from a live append that raced its dispatch (see
+        :meth:`take_history_replay`).
+        """
+        if not flow_id:
+            return
+        async with self._lock:
+            drain = self._history_replay_pulls.get(flow_id)
+            if drain is None:
+                drain = _ReplayDrain()
+                self._history_replay_pulls[flow_id] = drain
+            drain.pulls.append(
+                _PendingPull(
+                    expects_full=not cursor,
+                    cursor=dict(cursor) if cursor else {},
+                )
+            )
+            drain.deadline = time.monotonic() + self._HISTORY_REPLAY_TTL
+
+    async def unmark_history_replay(
+        self, flow_id: str, *, cursor: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Retract the marker THIS caller armed for a request that never left.
+
+        :meth:`mark_history_replay` is called BEFORE the send rather than after
+        it, because the daemon's reply can be read off the socket while the send
+        coroutine is still resuming — a marker armed afterwards would miss its
+        own reply's head, and every chunked tail behind that head would then be
+        classified as live traffic and shipped whole. The cost of arming first
+        is a marker left behind when the send FAILS, which this retracts.
+
+        WHY it retracts BY SHAPE rather than the queue tail: two pulls can be
+        armed concurrently for one flow (a cursorless REST rebuild and the ws
+        self-heal's incremental recovery), and only one of them may fail to
+        send — a stale socket after a daemon reconnect fails one caller while
+        the other dispatches fine. Popping the tail would then strip the marker
+        off the pull that genuinely LEFT the server, and its reply — arriving as
+        ``append`` frames that no longer match any armed shape — would be
+        classified as live traffic and relayed to the browsers whole. A pull
+        that was dispatched keeps its replay identity until its own closing
+        frame retires it, so the failed caller only ever takes back a marker
+        armed for a request of the shape it armed itself (*cursor*, or
+        cursorless for a full rebuild).
+
+        Only a pull that has not started draining is retractable: once frames of
+        a reply are arriving, the marker belongs to that reply. With no armed
+        pull of this shape left to take back, nothing is retracted — the leak
+        guard (:attr:`_HISTORY_REPLAY_TTL`) covers the residue, which is far
+        cheaper than unmarking a live reply.
+        """
+        if not flow_id:
+            return
+        expects_full = not cursor
+        async with self._lock:
+            drain = self._history_replay_pulls.get(flow_id)
+            if drain is None or not drain.pulls:
+                return
+            # A started drain owns the frontmost pull whatever its shape.
+            floor = 1 if drain.draining else 0
+            index = next(
+                (
+                    i
+                    for i in range(len(drain.pulls) - 1, floor - 1, -1)
+                    if _same_pull_shape(drain.pulls[i], expects_full, cursor)
+                ),
+                None,
+            )
+            if index is None:
+                return
+            drain.pulls.pop(index)
+            if not drain.pulls:
+                self._history_replay_pulls.pop(flow_id, None)
+
+    async def take_history_replay(
+        self,
+        flow_id: str,
+        *,
+        mode_full: bool = False,
+        chunk_bounded: Any = False,
+        cursor_base: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Account one inbound ``HISTORY_DATA`` frame and classify its origin.
+
+        Returns ``True`` when the frame REPLAYS already-persisted history (a
+        pull reply's frame, or a whole-bundle snapshot replacement) and ``False``
+        for a genuine post-subscription tail append, which rides to the browser
+        whole.
+
+        INVARIANT: every frame of a dispatched pull's reply — its head and all
+        of its chunked tails — is classified as a replay, and the marker that
+        tracks that reply is retired by the reply's OWN closing frame. Called
+        for EVERY history frame that arrives for *flow_id*, including the ones
+        the fan-out suppresses: a drain's ``full`` head is suppressed whenever a
+        REST caller is parked on the pull, and skipping its accounting would
+        leave the reply one frame out of step with the marker.
+
+        WHY the head gate (``_frame_opens_reply``): the daemon pauses its push
+        loop for a flow only once the drain STARTS, so an append emitted in the
+        dispatch→drain-start window (seconds on the links the widened pull
+        timeouts exist for) reaches the server BEFORE the reply's head. Counting
+        such an interloper against the marker retired it on the spot, and every
+        tail chunk of the recovery behind it — everything past the first frame
+        of a big session — then shipped to every subscribed browser whole while
+        the parked REST waiter returned the same records summarized, leaving the
+        browser holding both copies. So until a reply has actually started
+        arriving, only a frame whose shape MATCHES the head our own request must
+        be answered with may open (and hence consume) it; anything else is live
+        traffic that raced the dispatch and is classified on its own shape.
+
+        *chunk_bounded* says the frame reached the daemon's per-frame chunk bound
+        (:data:`~tianluo.daemon.history.MAX_BYTES_PER_REPORT` /
+        :data:`~tianluo.daemon.history.MAX_RECORDS_PER_REPORT`), which is the one
+        thing the wire does say about a reply still having more to come: the
+        daemon keeps reading and sending from the advancing cursor for exactly as
+        long as its reads truncate, so a frame under the bound is the reply's
+        LAST. That closing frame is itself a replay; the next frame for the flow
+        is a live increment. It may be passed as a CALLABLE, which is evaluated
+        only when a marker is actually outstanding — measuring it against the
+        daemon's billing basis costs a pass over the frame's records, and the
+        overwhelming majority of frames have no drain to close.
+
+        WHY not a quiet-time threshold: the dispatch→first-frame gap is a cold
+        multi-MB jsonl read (seconds — the latency ``HISTORY_PULL_TIMEOUT`` is
+        sized for) while the drain→next-live-append gap is one push-loop tick
+        (~1 s), so any idle window either cuts a slow recovery short or swallows
+        the live traffic that follows a fast one. Counting the reply's own frames
+        separates them without asking the daemon→server protocol for a bit it
+        does not carry.
+
+        WHY not "the bundle looks caught up": every drain frame declares only the
+        water mark the reader has reached, so the bundle looks complete after
+        each one — reading that as convergence would classify the whole tail of a
+        recovery as live.
+
+        With no reply outstanding the verdict falls back to the frame's own
+        shape: a ``mode: full`` frame is a whole-bundle snapshot replacement —
+        a daemon that restarted and lost its cursors re-sends a flow's entire
+        persisted history that way — which is a replay of already-persisted
+        history no less than an answer to a pull we sent.
+        """
+        if not flow_id:
+            return False
+        now = time.monotonic()
+        async with self._lock:
+            drain = self._history_replay_pulls.get(flow_id)
+            if drain is not None and now > drain.deadline:
+                # A request nobody ever answered; drop it rather than let it
+                # shape this flow's live traffic for the rest of the uptime.
+                self._history_replay_pulls.pop(flow_id, None)
+                drain = None
+            if drain is None or not drain.pulls:
+                return mode_full
+            if not drain.draining:
+                # Replies drain in dispatch order down one socket, but a pull
+                # armed while an earlier one was still in flight would be stuck
+                # behind it if the daemon ever answered out of order — so the
+                # head is matched against every pull still waiting, not just the
+                # frontmost, and the one it opens is promoted.
+                opened = next(
+                    (
+                        index
+                        for index, pull in enumerate(drain.pulls)
+                        if _frame_opens_reply(pull, mode_full, cursor_base)
+                    ),
+                    None,
+                )
+                if opened is None:
+                    # A live append that raced the dispatch. It leaves the
+                    # marker untouched — and its own deadline unrefreshed, since
+                    # it is no evidence the reply we are waiting for is alive.
+                    return mode_full
+                if opened:
+                    drain.pulls.insert(0, drain.pulls.pop(opened))
+                drain.draining = True
+            # Push the leak guard out on every frame of the reply so a long
+            # multi-MB recovery cannot age out mid-drain.
+            drain.deadline = now + self._HISTORY_REPLAY_TTL
+            bounded = chunk_bounded() if callable(chunk_bounded) else chunk_bounded
+            if not bounded:
+                # Under the chunk bound: this is the reply's LAST frame, so the
+                # pull it answers retires here.
+                drain.pulls.pop(0)
+                drain.draining = False
+                if not drain.pulls:
+                    self._history_replay_pulls.pop(flow_id, None)
+            return True
+
     async def mark_full_pull(self, flow_id: str) -> None:
         """Stamp the monotonic time of a cache-miss ``full`` daemon pull.
 
@@ -1655,6 +2004,19 @@ class ServerState:
                 continue
             for flow_id in sorted(markers, key=markers.get)[:excess]:
                 markers.pop(flow_id, None)
+        # Survives eviction on purpose: a flow evicted mid-drain still has reply
+        # frames on the wire, and mis-reading them as live increments would ship
+        # their bodies whole. The reply's own closing frame retires it (and the
+        # leak-guard deadline covers a request never answered); trimming here
+        # only bounds the map on a very long-lived server, oldest guard first.
+        excess = len(self._history_replay_pulls) - limit
+        if excess > 0:
+            oldest = sorted(
+                self._history_replay_pulls,
+                key=lambda flow_id: self._history_replay_pulls[flow_id].deadline,
+            )
+            for flow_id in oldest[:excess]:
+                self._history_replay_pulls.pop(flow_id, None)
 
     def _history_admission_suppressed(self, flow_id: str) -> bool:
         """Whether a frame must NOT be allowed to (re)create *flow_id*'s bundle.
@@ -3031,7 +3393,7 @@ class ServerState:
 
         Returns ``(applied, added, updated, dropped)`` — the records that
         actually changed the bundle (new tail records plus the new content of
-        in-place updates, in frame order), and the three counts for the caller's
+        in-place updates, in frame order) and the three counts for the caller's
         diagnostic log.
 
         Per record, keyed by :meth:`_record_identity`:
@@ -3627,6 +3989,97 @@ class ServerState:
                 # and never a fabricated zero.
                 "usage": self._bundle_usage(cached),
             }
+
+    async def get_history_record_detail(
+        self,
+        flow_id: str,
+        *,
+        step_id: str,
+        ordinal: int,
+        tool_use_id: str,
+        source: str,
+        expected_machine_id: Optional[str] = None,
+        expected_owner: Optional[str] = None,
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """Read ONE chip's full detail out of the cached bundle.
+
+        The counterpart of :func:`~tianluo.server.history_summary.summarize_history_records`:
+        the browser receives collapsed-state fields only and comes back here for
+        the body when the user expands a chip. The cache still holds the full
+        bundle, so a hit costs one scan and no daemon round-trip.
+
+        The chip is addressed by its record's stable ``(step_id, ordinal)``
+        identity plus the ``tool_use_id`` within it — never by ``tool_use_id``
+        alone, which repeats across a flow (codex synthesizes ``codex_tool_1``
+        per call), so a flow-wide scan would answer one chip with another call's
+        body.
+
+        Ownership is validated exactly as in :meth:`get_history_snapshot` and
+        under the same lock, so a flow that has moved daemons (or belongs to
+        another owner) reads as a miss rather than leaking a stale body.
+
+        Returns ``(bundle_readable, lookup)``. WHY the two are separate: only a
+        MISSING bundle justifies a daemon re-pull. A bundle that is present and
+        already holds the addressed record is authoritative — re-pulling it
+        would spend a full multi-MB round trip (and a 10 s wait) to re-learn
+        what the cache already knows, turning a stale browser tab's dead chip
+        into daemon load.
+
+        ``lookup`` carries :func:`locate_record_detail`'s verdict plus
+        ``settled``: True when the answer cannot change by waiting — the record
+        is here, or the daemon already streamed a higher ordinal for its step and
+        so read past it. The detail route waits out a multi-frame daemon recovery
+        precisely while ``settled`` is False, so it never has to guess that a
+        silent gap means the recovery finished.
+        """
+        async with self._lock:
+            # Expanding a chip is a UI read of this flow, so it refreshes the
+            # eviction recency exactly like a snapshot read does — a reader
+            # working through a long session's details must not have its bundle
+            # swept out from under them by an idle-looking LRU.
+            self._note_history_view(flow_id)
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return False, {"detail": None, "settled": False}
+            bundle_machine = str(cached.get("machine_id") or "")
+            if (
+                expected_machine_id is not None
+                and bundle_machine != expected_machine_id
+            ):
+                return False, {"detail": None, "settled": False}
+            if expected_owner is not None:
+                resolved_machine = self._find_machine_for_history_flow_locked(
+                    flow_id, owner=expected_owner
+                )
+                if (
+                    resolved_machine is None
+                    or resolved_machine != expected_machine_id
+                ):
+                    return False, {"detail": None, "settled": False}
+            # The returned payload references record sub-objects rather than
+            # copying them; the same detachment argument as get_history_snapshot
+            # applies — an eviction during the response render simply stops the
+            # two paths sharing.
+            found = locate_record_detail(
+                cached["records"],
+                step_id=step_id,
+                ordinal=ordinal,
+                tool_use_id=tool_use_id,
+                source=source,
+            )
+            # INVARIANT: only the RECORDS settle the question, never the cursor.
+            # A cursor total is not an upper bound on the file — a multi-frame
+            # drain advances it frame by frame — and it is not a lower bound on
+            # what is still coming either: the drain's head can declare the whole
+            # file while its records lag far behind (that trailing window is
+            # exactly what :meth:`_bundle_pending_positions` names *pending*).
+            # Reading either direction as a verdict answers a chip "unavailable"
+            # while its record is still on the wire. So the bundle speaks only
+            # through what it HOLDS — the record itself, or a higher ordinal for
+            # the same step, which proves the daemon read past this line — and
+            # the route's deadline is the sole time bound.
+            settled = bool(found["record_found"] or found["passed"])
+            return True, {"detail": found["detail"], "settled": settled}
 
     @staticmethod
     def _catalog_for_bundle(cached: Dict[str, Any]) -> Any:

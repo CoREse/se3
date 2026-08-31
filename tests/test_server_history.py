@@ -427,17 +427,27 @@ def test_request_history_uses_prevalidated_machine_without_reresolving():
             return True
 
     class State:
+        def __init__(self):
+            self.replays = []
+
         async def find_machine_for_history_flow(self, flow_id):
             raise AssertionError("ownership must not be resolved a second time")
 
+        async def mark_history_replay(self, flow_id, **kwargs):
+            self.replays.append(flow_id)
+
     async def scenario():
         manager = Manager()
+        state = State()
         sent = await request_history(
             manager,
-            State(),
+            state,
             "f1",
             machine_id="m-owner",
         )
+        # A dispatched pull marks the flow so its whole reply drain is relayed
+        # to browsers in summarized form.
+        assert state.replays == ["f1"]
         assert sent is True
         assert len(manager.sent) == 1
         machine_id, message = manager.sent[0]
@@ -460,11 +470,15 @@ def test_request_history_pins_exact_connection():
             self.sent.append((machine_id, connection, message))
             return connection == "validated-socket"
 
+    class State:
+        async def mark_history_replay(self, flow_id, **kwargs):
+            return None
+
     async def scenario():
         manager = Manager()
         sent = await request_history(
             manager,
-            object(),
+            State(),
             "f1",
             machine_id="m-owner",
             connection="validated-socket",

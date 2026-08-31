@@ -3973,6 +3973,7 @@ function handleUnauthorized() {
   state.identity = null;
   // The session that owned this history is gone; drop it with the identity.
   clearMessageHistoryCache();
+  clearLazyDetailCache();
   teardownWs();
   applyAuthState();
 }
@@ -5477,6 +5478,14 @@ async function loadFlowConversation(flowId, opts) {
     // append with a different recordKey) would otherwise survive and duplicate
     // it. A mid-list removal shifts indices, so the cheap incremental-append
     // render can no longer be trusted — force a full rebuild in that case.
+    // A REST delivery is as authoritative as a WS frame: a reconnect receives
+    // its replacement snapshot HERE, so the bodies cached against the previous
+    // generation must be retired here too. A REPLACEMENT is read off the
+    // server's generation (a full replace mints a new one; an append keeps it),
+    // with the render shape as the fallback only when a legacy server sends
+    // none — reading "full render" as "replaced" would otherwise evict on every
+    // silent self-heal that happens to fall back to a full.
+    noteLazyDetailBundle(flowId, result.generation, restReplacedBundle(result));
     const reconciled = reconcileLocalEchoes(result.records);
     const echoRemoved = reconciled !== result.records;
     // G3: a silent periodic self-heal that changed nothing must not repaint. On
@@ -7931,6 +7940,9 @@ function applyHistoryFrameRecords(msg) {
     if (append) {
       const rec = reconcileAppendRecords(state.historyRecords, records);
       if (rec.changed) {
+        // An append that REWROTE a held line (a retry) invalidates the bodies
+        // cached against that line's address, exactly like a full replacement.
+        noteLazyDetailBundle(msg.flow_id, msg.generation, rec.updatedInPlace);
         state.historyRecords = rec.records;
         // A mid-list in-place update (a retry rewrote an already-rendered line)
         // cannot be repainted by the tail-only incremental render — force a full
@@ -7951,9 +7963,11 @@ function applyHistoryFrameRecords(msg) {
       // A full push replaces the cached bundle server-side (a new generation),
       // so any progress token / signature we held no longer pins it — drop them
       // so the next reconnect re-fetch falls back to a full load rather than
-      // echoing a stale delta cursor.
+      // echoing a stale delta cursor. The lazily fetched bodies are pinned to
+      // the same generation by their step_id#ordinal address, so they go too.
       state.historyProgress = null;
       state.historySignature = null;
+      noteLazyDetailBundle(msg.flow_id, msg.generation, /*replaced=*/true);
       renderHistoryRecords(msg.flow_id, state.historyRecords, append);
       refreshHistoryStickyHeader();
       refreshHistoryMetaAndUsage(msg.flow_id);
@@ -7989,6 +8003,9 @@ function applyHistoryFrameRecords(msg) {
         return;                             // all no-op re-deliveries — skip entirely
       }
       merged = rec.records;
+      // A retry that rewrote a held line under its unchanged address retires the
+      // body cached against it (mirrors the history-view branch above).
+      noteLazyDetailBundle(msg.flow_id, msg.generation, rec.updatedInPlace);
       // A real WS increment landed for the open flow — mark the push path alive
       // so a pending progression grace timer skips its fallback rebuild. Only
       // this genuine-change path counts (the no-op case returned above).
@@ -8012,9 +8029,11 @@ function applyHistoryFrameRecords(msg) {
       merged = records;
       // Full push = new server bundle generation; the held delta cursor and the
       // signature it was paired with are now stale, so invalidate both (mirrors
-      // the history-view branch above).
+      // the history-view branch above) — and with them the bodies cached
+      // against this generation's record addresses.
       state.flowConversationProgress = null;
       state.flowConversationSignature = null;
+      noteLazyDetailBundle(msg.flow_id, msg.generation, /*replaced=*/true);
       // A mode:full WS push also delivered fresh authoritative records for the
       // open flow, so it likewise counts as the push path being alive.
       state.flowConversationAppendSeq += 1;
@@ -8428,6 +8447,9 @@ async function openHistorySession(flowId, opts) {
       await reconcileCursorCompleteness("history", flowId, result.cursor, result.generation, result.pending);
       return;
     }
+    // Same authority as the WS frame path: a full REST replacement (or a
+    // rewritten line folded into one) retires the previous generation's bodies.
+    noteLazyDetailBundle(flowId, result.generation, restReplacedBundle(result));
     state.historyRecords = result.records;
     // Delta delivery → incremental append render; full fallback → full rebuild.
     renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
@@ -9564,6 +9586,14 @@ async function confirmIssueLaunch() {
 //
 // Unparsable / unknown blocks fall back to a short JSON stringify so they
 // degrade gracefully into the rendered text instead of being silently dropped.
+// INVARIANT: this walk NEVER rehydrates an elision stub. It runs only for a
+// record with no `content` of its own, whose folded bubble body is therefore
+// recovered from `raw_json` here -- which makes every value it reads
+// fold-visible, and the server leaves all of them inline for exactly that
+// reason (`history_summary._elide_raw_json`'s fold_visible branch). Rebuilding
+// a synthetic string from a stub's line count and leading characters would put
+// that synthetic text in the message body itself, where no later expand can
+// replace it.
 function extractAssistantText(rawJson) {
   if (!Array.isArray(rawJson) || !rawJson.length) return "";
   const parts = [];
@@ -9587,6 +9617,9 @@ function extractAssistantText(rawJson) {
       if (typeof block === "string") { parts.push(block); continue; }
       if (typeof block !== "object") continue;
       const bt = String(block.type || "").toLowerCase();
+      // A non-string `text` here is the record's OWN payload: this walk only
+      // runs for a record whose bodies the summary left inline, so nothing it
+      // reads is ever a stub.
       if (bt === "text" && typeof block.text === "string") {
         parts.push(block.text);
       } else if (bt === "tool_use") {
@@ -9918,6 +9951,27 @@ function normalizeRecord(rec) {
   const rawJson = pick("raw_json");
   const rawNdjson = pick("raw_ndjson");
 
+  // The summary's own list of stripped calls: which CHIPS must fetch their
+  // panel on expand. It never reaches the content recovery below -- a record
+  // that has no content of its own keeps every fold-visible body inline, so
+  // there is nothing there to rehydrate.
+  const lazyToolUseIdsRaw = pick("lazy_tool_use_ids");
+  const lazyToolUseIds = Array.isArray(lazyToolUseIdsRaw)
+    ? lazyToolUseIdsRaw.filter((x) => typeof x === "string" && x)
+    : null;
+  // Which of each lazy call's two bodies the server actually replaced, one
+  // character per id in the same order ("u" input, "r" result, "b" both --
+  // `history_summary.LAZY_BODY_MASK_KEY`). It is NOT the same question as "is
+  // this call lazy": boundary rule (c) keeps a fold-visible input inline while
+  // the record's envelope result is still collapsed, and a scalar or
+  // unprofitable input rides inline the same way. Only a body this mask names
+  // may be rehydrated -- `__elided__` is legal in a tool's real arguments, so
+  // rehydrating by shape would rewrite an inline argument the server kept on
+  // purpose and change the collapsed chip header.
+  const lazyBodyMaskRaw = pick("lazy_body_mask");
+  const lazyBodyMask =
+    typeof lazyBodyMaskRaw === "string" ? lazyBodyMaskRaw : null;
+
   let content = pick("content");
   if (typeof content !== "string" || content === "") {
     const recovered = extractAssistantText(rawJson);
@@ -9949,6 +10003,29 @@ function normalizeRecord(rec) {
   const toolDetailRaw = pick("tool_detail");
   const toolDetail =
     toolDetailRaw && typeof toolDetailRaw === "object" ? toolDetailRaw : null;
+
+  // Lazy-detail markers written by the server's summary shaping
+  // (`history_summary.summarize_history_records`). The collapsed chip needs
+  // only its header, so a successful call's detail body is held back and
+  // fetched on expand; these fields say WHICH chips lost their body and under
+  // which flow id to ask for it.
+  //
+  // INVARIANT: a FAILED call is never marked here. Its chip auto-expands
+  // (`upgradeChipToFailure`), so lazifying it would turn a failure-heavy
+  // session into a burst of requests at load time — the exact cost the
+  // summary exists to remove.
+  const toolDetailLazy = pick("tool_detail_lazy") === true;
+  const detailFlowRaw = pick("detail_flow");
+  const detailFlow =
+    typeof detailFlowRaw === "string" && detailFlowRaw ? detailFlowRaw : null;
+  // A digest of the bodies THIS delivery held back. `stepId#ordinal` is stable
+  // across a retry's in-place rewrite by design, so it alone cannot tell a
+  // replacement body from the one already cached; the version moves whenever
+  // what the detail endpoint would answer moves.
+  const detailVersionRaw = pick("detail_version");
+  const detailVersion =
+    typeof detailVersionRaw === "string" && detailVersionRaw
+      ? detailVersionRaw : null;
 
   // Per-call token usage (G5): record_response (chat_history.py) attaches a
   // `token_usage` dict — the increment for THIS LLM call, parsed from the
@@ -9994,6 +10071,11 @@ function normalizeRecord(rec) {
     toolUseId: toolUseId,
     isError: isError,
     toolDetail: toolDetail,
+    toolDetailLazy: toolDetailLazy,
+    lazyToolUseIds: lazyToolUseIds,
+    lazyBodyMask: lazyBodyMask,
+    detailFlow: detailFlow,
+    detailVersion: detailVersion,
     ordinal: ordinal,
   };
 }
@@ -10063,13 +10145,44 @@ function recordKey(rec) {
   return legacyKeyFromNorm(n);
 }
 
+// The DETAIL identity of one delivery of a record: the server's digest of the
+// bodies it held back, plus which bodies and which calls that digest covers.
+// `null` for a whole delivery — its bodies ride inline, addressed by nothing.
+function detailDeliveryVersion(n) {
+  if (!n || !n.detailVersion) return null;
+  return n.detailVersion + "\u0000" + String(n.lazyBodyMask) + "\u0000"
+    + (n.lazyToolUseIds ? n.lazyToolUseIds.join(",") : "");
+}
+
 // True when two records sharing a stable `stepId#ordinal` identity carry the
-// SAME rendered content — i.e. this is a plain re-delivery (REST∩WS overlap),
-// not a retry that rewrote line N with new output. Compared via the legacy
-// coarse signature (role/kind/status/ts/len/content[:96]), which captures a
-// content or status change while treating a byte-identical re-delivery as equal.
+// SAME deliverable — i.e. `b` is a plain re-delivery (REST∩WS overlap) rather
+// than something the held copy `a` cannot answer with. The visible signature
+// (role/kind/status/ts/len/content[:96]) is the first test; the detail identity
+// is the second.
+//
+// WHY the detail identity has to be part of it: `stepId#ordinal` is stable
+// across a retry's in-place rewrite by design, so a rewrite whose change sits
+// PAST the kept 96-char head — the tool body, exactly what the summary holds
+// back — is invisible to the coarse signature. Reported as an unchanged
+// duplicate, the old record stayed held, the chip kept its old lazy ref, and
+// re-expanding answered out of the cache with the previous attempt's body. That
+// is precisely what the server's `detail_version` exists to prevent.
+//
+// WHY it is ASYMMETRIC (only `b` may supersede `a`, never the reverse): a
+// summarized re-delivery of a line already held WHOLE is the ordinary REST∩WS
+// overlap — every idle poll's delta re-carries the tail the WS append already
+// placed. It adds nothing the held copy lacks, so adopting it would trade an
+// inline body for an on-demand fetch and repaint the pane on every poll.
 function sameStableRecordContent(a, b) {
-  return legacyKeyFromNorm(normalizeRecord(a)) === legacyKeyFromNorm(normalizeRecord(b));
+  const na = normalizeRecord(a);
+  const nb = normalizeRecord(b);
+  if (legacyKeyFromNorm(na) !== legacyKeyFromNorm(nb)) return false;
+  const held = detailDeliveryVersion(na);
+  const next = detailDeliveryVersion(nb);
+  if (held === next) return true;
+  // The held copy carries its bodies inline; nothing a summary can say improves
+  // on that.
+  return held === null;
 }
 
 // True when two record arrays would render identically — same length and, at
@@ -10719,6 +10832,9 @@ function mergeHistoryDelivery(response, existing, requestBaseline) {
       signature,
       cursor,
       render: "full",
+      // A backfilled number can REWRITE a held line (a retry's rewrite folded
+      // in out of order), which retires anything cached against its address.
+      updatedInPlace: rec.updatedInPlace,
     };
   }
   if (response && response.delivery === "delta") {
@@ -10747,6 +10863,7 @@ function mergeHistoryDelivery(response, existing, requestBaseline) {
         signature,
         cursor,
         render: "full",
+        updatedInPlace: true,
       };
     }
     // The delta carries the outage-window gap records. While this fetch was in
@@ -12201,6 +12318,40 @@ function refreshPartialAgentBadge(row, norm) {
   row.__partialBadge = badge;
 }
 
+// The detail payload a stream_progress chip should mount: the inline one when
+// the record still carries it (live WebSocket frames, and every failed call),
+// otherwise the lazy ref the server left in its place.
+function chipDetailForFragment(norm) {
+  if (norm && norm.toolDetail) return norm.toolDetail;
+  if (norm && norm.toolDetailLazy) {
+    return makeLazyDetail({
+      flow: norm.detailFlow,
+      stepId: norm.stepId,
+      ordinal: norm.ordinal,
+      toolUseId: norm.toolUseId,
+      source: DETAIL_SOURCE_PROGRESS,
+      version: norm.detailVersion,
+    });
+  }
+  return null;
+}
+
+// The lazy-fetch context for a record's raw_json-derived chips, or null when
+// the record arrived whole (a live WebSocket frame, or a bundle with nothing
+// worth holding back).
+function lazyOptsForRecord(norm) {
+  if (!norm || !norm.detailFlow || !norm.lazyToolUseIds) return null;
+  if (!norm.lazyToolUseIds.length) return null;
+  return {
+    flow: norm.detailFlow,
+    stepId: norm.stepId,
+    ordinal: norm.ordinal,
+    toolUseIds: norm.lazyToolUseIds,
+    bodyMask: norm.lazyBodyMask,
+    version: norm.detailVersion,
+  };
+}
+
 // Apply one stream_progress fragment to a bubble: either upgrade an existing
 // chip via tool_use_id (state-machine path) or append text via the legacy
 // renderToolMarkers fallback (text / thinking deltas, or records that lack
@@ -12251,7 +12402,7 @@ function applyFragmentToBubble(row, norm) {
         inline.appendChild(c);
         return c;
       })();
-      upgradeChipToSuccess(chip, parsed.header, norm.toolDetail);
+      upgradeChipToSuccess(chip, parsed.header, chipDetailForFragment(norm));
     } else {
       // in-flight (tool_use). Skip if we already have a chip for this id —
       // the daemon emits exactly one in-flight per id, but a duplicate
@@ -12263,8 +12414,9 @@ function applyFragmentToBubble(row, norm) {
         // away without shoving the live conversation around while it streams.
         // The terminal upgrade re-runs attachChipDetail, which drops this
         // toggle/panel pair first, so no duplicate panel survives.
-        if (norm.toolDetail) {
-          attachChipDetail(chip, norm.toolDetail, /*expanded=*/false);
+        const detail = chipDetailForFragment(norm);
+        if (detail) {
+          attachChipDetail(chip, detail, /*expanded=*/false);
         }
         reg.set(norm.toolUseId, chip);
         inline.appendChild(chip);
@@ -12970,6 +13122,297 @@ function upgradeChipToFailure(chip, header, detail) {
   attachChipDetail(chip, detail, /*expanded=*/true);
 }
 
+// --- Lazy tool-call details ------------------------------------------------
+//
+// A history bundle reaches the browser in COLLAPSED-STATE form: a successful
+// tool call's body (a Write's content, a Bash/Read output, a large
+// tool_result) is stripped server-side and fetched here on first expand. Two
+// things keep that invisible:
+//
+//   * the chip HEADER stays byte-identical. The server replaces an oversize
+//     string with a stub preserving the only two things a header formatter
+//     reads -- the line count and the leading characters -- and
+//     `rehydrateElidedValue` turns it back into a string with exactly those
+//     properties before any header is derived from it;
+//   * a lazified chip builds NO panel DOM until it is expanded, so a long
+//     session no longer pays first paint for thousands of panels nobody opens.
+//     A detail that still rides inline is small by construction -- the server
+//     holds back only oversize bodies -- and keeps rendering eagerly, so the
+//     folded-panel contract every other renderer relies on is unchanged.
+//
+// INVARIANT: failed calls are exempt end to end -- their body rides inline and
+// their chip still auto-expands, so opening a failure-heavy session fires no
+// on-demand requests at all.
+
+const ELIDED_MARKER_KEY = "__elided__";
+
+function isElidedStub(v) {
+  return !!v && typeof v === "object" && v[ELIDED_MARKER_KEY] === true;
+}
+
+// Rebuild a string that agrees with the elided original on its line count and
+// its first `head.length` characters. Nothing else survives -- and nothing else
+// is read: every chip header either counts lines or previews at most 80 chars,
+// and the server's head is kept comfortably wider than that.
+function rehydrateElidedValue(v) {
+  if (isElidedStub(v)) {
+    const head = typeof v.head === "string" ? v.head : "";
+    const raw = Number(v.lines);
+    const total = isFinite(raw) && raw > 0 ? Math.floor(raw) : 1;
+    const headLines = head.split("\n").length;
+    const pad = total > headLines ? total - headLines : 0;
+    return head + "\n".repeat(pad);
+  }
+  if (Array.isArray(v)) return v.map(rehydrateElidedValue);
+  if (v && typeof v === "object") {
+    const out = {};
+    for (const k of Object.keys(v)) out[k] = rehydrateElidedValue(v[k]);
+    return out;
+  }
+  return v;
+}
+
+// The two detail sources a chip can come from. They are NOT interchangeable:
+// the same tool_use_id exists both as a live `stream_progress` fragment (whose
+// payload the daemon built, and which can show a pre-write diff the browser
+// cannot reconstruct) and inside the final assistant record's raw_json. A chip
+// asks for the source it would have rendered inline.
+const DETAIL_SOURCE_PROGRESS = "progress";
+const DETAIL_SOURCE_RAW = "raw";
+
+// `lazy_body_mask` characters (mirrors `history_summary.LAZY_BODY_*`): which of
+// a lazy call's two bodies the server actually replaced with a stub.
+const LAZY_BODY_INPUT = "u";
+const LAZY_BODY_RESULT = "r";
+const LAZY_BODY_BOTH = "b";
+
+// A `raw` reply is rebuilt by the same local formatter the chip would have run
+// inline. An ORPHAN tool_result (no preceding tool_use, so no input to format
+// against) renders as a plain text panel, not as a tool_input/result pair --
+// naming that here keeps the expanded panel identical to the un-summarized
+// one instead of silently upgrading it to a different shape.
+const LAZY_RENDER_TEXT = "text";
+
+// A lazy ref is the chip's whole ADDRESS, not just its tool id. `tool_use_id`
+// is unique only INSIDE one record -- codex synthesizes ids like `codex_tool_1`
+// per call, so two steps of a flow can each hold that id -- and a fetch (or a
+// cache entry) keyed on it alone would answer the first chip with the second
+// call's body. `stepId` + `ordinal` is the same stable identity `recordKey`
+// reconciles records by, so it names exactly the message the user expanded.
+// An unaddressable record yields null: the server never lazifies one, so the
+// caller keeps whatever it already had rather than fetching into the void.
+function makeLazyDetail(ref) {
+  const flow = ref && ref.flow ? String(ref.flow) : "";
+  const stepId = ref && ref.stepId ? String(ref.stepId) : "";
+  const toolUseId = ref && ref.toolUseId ? String(ref.toolUseId) : "";
+  const ord = ref ? ref.ordinal : null;
+  const ordinal =
+    typeof ord === "number" && isFinite(ord) && ord >= 0 ? Math.floor(ord) : null;
+  if (!flow || !stepId || !toolUseId || ordinal === null) return null;
+  const out = {
+    __lazy__: true,
+    flow: flow,
+    stepId: stepId,
+    ordinal: ordinal,
+    toolUseId: toolUseId,
+    source: (ref && ref.source) || DETAIL_SOURCE_PROGRESS,
+    // The server's `detail_version` for this record: a digest of the bodies it
+    // held back. The ADDRESS is deliberately stable across a retry's in-place
+    // rewrite, so without this a rewritten line — one whose new summary is
+    // byte-identical because the change sits past the kept 96-char head — would
+    // keep being answered out of the cache with the previous attempt's body.
+    version: (ref && ref.version) ? String(ref.version) : "",
+  };
+  if (ref && ref.render) out.render = String(ref.render);
+  return out;
+}
+
+function isLazyDetail(d) {
+  return !!d && typeof d === "object" && d.__lazy__ === true;
+}
+
+// Resolved detail responses, keyed by the record's address AND the bundle
+// generation it was fetched from. Re-expanding the same chip -- or the same call
+// seen from both the running-flow console and the history pane -- never
+// re-requests.
+const _lazyDetailCache = new Map();
+
+// flow_id -> {gen, epoch}. `gen` is the SERVER's bundle generation as last seen
+// on a delivery; `epoch` is the local counter that enters the cache key.
+//
+// WHY a generation belongs in the key at all: `step_id#ordinal` is stable across
+// a retry's in-place rewrite -- that is exactly what makes it a good address --
+// so the SAME address can name a different call after the daemon rewrites the
+// line. A body cached against the address alone would then be served under the
+// replacement chip: the previous attempt's output, presented as this one's.
+const _lazyDetailBundles = new Map();
+
+function clearLazyDetailCache() {
+  _lazyDetailCache.clear();
+  _lazyDetailBundles.clear();
+}
+
+function lazyDetailEpoch(flowId) {
+  const held = _lazyDetailBundles.get(String(flowId || ""));
+  return held ? held.epoch : 0;
+}
+
+// Retire every body cached for *flowId*'s current generation and move it on to
+// the next. Entries keyed to the retired epoch can no longer be looked up, and
+// are dropped outright so a long session does not accumulate them. Other flows
+// are untouched.
+function dropLazyDetailCacheForFlow(flowId) {
+  const id = String(flowId || "");
+  if (!id) return;
+  const held = _lazyDetailBundles.get(id) || { gen: null, epoch: 0 };
+  const prefix = id + "\u0000" + String(held.epoch) + "\u0000";
+  for (const key of Array.from(_lazyDetailCache.keys())) {
+    if (key.startsWith(prefix)) _lazyDetailCache.delete(key);
+  }
+  _lazyDetailBundles.set(id, { gen: held.gen, epoch: held.epoch + 1 });
+}
+
+// Fold one authoritative delivery's identity into the cache scope. *replaced* is
+// the caller's own verdict that the records it just applied superseded what it
+// held (a full snapshot, or a retry rewriting a line in place); *generation* is
+// the server's name for the bundle those records came from. Either moving on is
+// enough to retire the bodies fetched against the previous one. Applies to REST
+// and WebSocket deliveries alike -- a reconnect that receives its replacement
+// snapshot over REST invalidates exactly like a `mode:full` frame does.
+// Did this REST delivery supersede what the client held? A retry rewriting a
+// line in place says so directly; a whole-bundle replacement is normally read
+// off the server's rotated generation, and only a server that sends none falls
+// back to the render shape.
+function restReplacedBundle(result) {
+  if (!result) return false;
+  if (result.updatedInPlace === true) return true;
+  return result.render === "full" && !Number.isInteger(result.generation);
+}
+
+function noteLazyDetailBundle(flowId, generation, replaced) {
+  const id = String(flowId || "");
+  if (!id) return;
+  const gen = Number.isInteger(generation) ? generation : null;
+  const held = _lazyDetailBundles.get(id);
+  if (!held) {
+    _lazyDetailBundles.set(id, { gen: gen, epoch: 0 });
+    return;
+  }
+  const rotated = gen !== null && held.gen !== null && gen !== held.gen;
+  if (rotated || replaced) {
+    dropLazyDetailCacheForFlow(id);
+  }
+  const now = _lazyDetailBundles.get(id);
+  if (gen !== null) now.gen = gen;
+}
+
+function lazyDetailCacheKey(ref) {
+  return [
+    ref.flow, String(lazyDetailEpoch(ref.flow)),
+    ref.stepId, String(ref.ordinal), String(ref.version || ""),
+    ref.source || DETAIL_SOURCE_PROGRESS, ref.toolUseId,
+  ].join("\u0000");
+}
+
+function lazyDetailUrl(ref) {
+  return "/api/history/" + encodeURIComponent(ref.flow) + "/detail"
+    + "?tool_use_id=" + encodeURIComponent(ref.toolUseId)
+    + "&step_id=" + encodeURIComponent(ref.stepId)
+    + "&ordinal=" + encodeURIComponent(String(ref.ordinal))
+    + "&source=" + encodeURIComponent(ref.source || DETAIL_SOURCE_PROGRESS);
+}
+
+// Turn one detail response into the payload `renderToolDetailPanel` consumes.
+// A `raw` reply hands back the UN-elided tool_use / tool_result blocks and the
+// SAME local formatters that would have run on an un-summarized bundle build
+// the payload -- so there is no second server-side renderer to drift from.
+function lazyDetailFromResponse(data, ref) {
+  if (!data || typeof data !== "object") return null;
+  if (data.source === DETAIL_SOURCE_RAW) {
+    if (ref && ref.render === LAZY_RENDER_TEXT) {
+      const text = _toolExtractText(data.result);
+      return { kind: "text", text: text, truncated: false };
+    }
+    const name = typeof data.tool_name === "string" && data.tool_name
+      ? data.tool_name : "Tool";
+    const input = data.input && typeof data.input === "object" ? data.input : {};
+    if (data.status === "in-flight") return _toolInFlightDetailPayload(name, input);
+    return _toolDetailPayload(name, input, data.result);
+  }
+  return data.detail && typeof data.detail === "object" ? data.detail : null;
+}
+
+// The cached unit is the server RESPONSE, not the rendered panel: the same
+// reply feeds both the detail panel (through `lazyDetailFromResponse`) and the
+// "View raw" restore (which needs the un-elided `input` / `result` the panel
+// formatters consume), so one fetch serves both and neither can request a body
+// the other already holds.
+//
+// A failed fetch is deliberately NOT cached: the "detail unavailable" state has
+// to be retryable by collapsing and expanding again, which is the only recovery
+// affordance the chip has.
+// How many times a request superseded mid-flight is re-issued under the new
+// generation before the chip gives up and shows its unavailable state. Bounded
+// so a bundle churning faster than the network cannot spin here forever.
+const _MAX_LAZY_DETAIL_RETRIES = 2;
+
+function fetchLazyDetailResponse(ref, attempt) {
+  const key = lazyDetailCacheKey(ref);
+  const tries = attempt || 0;
+  // INVARIANT: a body fetched under a superseded bundle generation is never
+  // painted. Evicting the cache entry is not enough on its own -- a consumer
+  // already awaiting the old promise holds a reference the eviction cannot
+  // reach, and a silent full replacement whose summarized record is visually
+  // identical keeps the very DOM that continuation would paint into. So the
+  // epoch is captured at request time and re-checked at resolve time, and a
+  // stale answer is thrown away rather than rendered.
+  const supersede = (promise) => {
+    if (tries >= _MAX_LAZY_DETAIL_RETRIES) return promise;
+    return promise.catch((err) => {
+      if (err && err.__supersededDetail) {
+        return fetchLazyDetailResponse(ref, tries + 1);
+      }
+      throw err;
+    });
+  };
+  const hit = _lazyDetailCache.get(key);
+  if (hit) return supersede(hit);
+  const epoch = lazyDetailEpoch(ref.flow);
+  const pending = (async () => {
+    const resp = await authedFetch(lazyDetailUrl(ref));
+    if (!resp.ok) throw new Error("tool detail unavailable: " + resp.status);
+    const data = await resp.json();
+    if (!data || typeof data !== "object") {
+      throw new Error("tool detail unavailable: empty");
+    }
+    if (lazyDetailEpoch(ref.flow) !== epoch) {
+      const err = new Error("tool detail superseded");
+      err.__supersededDetail = true;
+      throw err;
+    }
+    return data;
+  })();
+  _lazyDetailCache.set(key, pending);
+  pending.catch(() => {
+    if (_lazyDetailCache.get(key) === pending) _lazyDetailCache.delete(key);
+  });
+  return supersede(pending);
+}
+
+function fetchLazyDetail(ref) {
+  const key = lazyDetailCacheKey(ref);
+  return fetchLazyDetailResponse(ref).then((data) => {
+    const payload = lazyDetailFromResponse(data, ref);
+    if (!payload) {
+      // A reply we cannot turn into a panel is as good as unreachable, and
+      // must stay retryable like any other failure.
+      _lazyDetailCache.delete(key);
+      throw new Error("tool detail unavailable: empty");
+    }
+    return payload;
+  });
+}
+
 function attachChipDetail(chip, detail, expanded) {
   // Remove any prior toggle + details panel so an upgrade replaces them
   // rather than duplicating (the chip head row is rebuilt by setChipHeader
@@ -12981,6 +13424,7 @@ function attachChipDetail(chip, detail, expanded) {
     ));
   for (const o of old) chip.removeChild(o);
   if (!detail) return;
+  const lazy = isLazyDetail(detail);
   const panel = el("div", "tool-marker-details" + (expanded ? " expanded" : " folded"));
   const toggle = el("button", "tool-marker-toggle",
     expanded
@@ -12988,14 +13432,48 @@ function attachChipDetail(chip, detail, expanded) {
       : tf("tool.detail.toggleShow", "details"));
   toggle.type = "button";
   const body = el("div", "tool-marker-details-body");
-  try {
-    body.appendChild(renderToolDetailPanel(detail));
-  } catch (err) {
-    try { console.warn("tool detail render failed", err); }
-    catch (_) { /* console may be absent */ }
-    body.appendChild(el("pre", "tool-marker-details-fallback",
-      _safeJsonStringify(detail)));
-  }
+
+  const paint = (payload) => {
+    body.innerHTML = "";
+    try {
+      body.appendChild(renderToolDetailPanel(payload));
+    } catch (err) {
+      try { console.warn("tool detail render failed", err); }
+      catch (_) { /* console may be absent */ }
+      body.appendChild(el("pre", "tool-marker-details-fallback",
+        _safeJsonStringify(payload)));
+    }
+  };
+
+  // One-shot body build for a lazy detail. `loaded` stays false on failure so
+  // collapsing and expanding again is a genuine retry -- the only recovery
+  // affordance the chip has.
+  let loaded = false;
+  let inFlight = false;
+  const fill = () => {
+    if (!lazy || loaded || inFlight) return;
+    inFlight = true;
+    body.innerHTML = "";
+    body.appendChild(el("p", "tool-detail-loading",
+      tf("tool.detail.loading", "Loading details...")));
+    Promise.resolve()
+      .then(() => fetchLazyDetail(detail))
+      .then((payload) => {
+        inFlight = false;
+        loaded = true;
+        paint(payload);
+      })
+      .catch(() => {
+        // Never leave the panel blank or spinning: the body is unreachable
+        // (server cache miss + daemon down, or a genuine 404), and the chip
+        // says so in the user's language.
+        inFlight = false;
+        body.innerHTML = "";
+        body.appendChild(el("p", "tool-detail-unavailable",
+          tf("tool.detail.unavailable", "Details are unavailable right now.")));
+      });
+  };
+
   toggle.addEventListener("click", () => {
     const open = panel.classList.contains("expanded");
     panel.classList.toggle("expanded", !open);
@@ -13004,11 +13482,16 @@ function attachChipDetail(chip, detail, expanded) {
       ? tf("tool.detail.toggleHide", "hide details")
       : tf("tool.detail.toggleShow", "details");
     if (!open) {
+      fill();
       try { requestAnimationFrame(() => panel.scrollIntoView({ block: "nearest" })); }
       catch (_) { /* RAF / DOM optional in test env */ }
     }
   });
+  if (!lazy) paint(detail);
   panel.appendChild(body);
+  // A failed call's detail always rides inline, so this only ever fires a fetch
+  // for a lazy chip somebody deliberately opened.
+  if (expanded) fill();
   // toggle sits as a direct child of the chip head row (right-aligned via
   // .tool-marker-toggle's `margin-left:auto`); the details panel follows it
   // and wraps to its own row via flex-basis:100%.
@@ -13672,10 +14155,76 @@ function _toolDetailPayload(toolName, input, resultData) {
 // chip byte-for-byte (the live chip is driven by `format_tool_chip_header` /
 // `build_tool_detail_payload` on the daemon side; these JS helpers are the
 // frontend mirror).
-function extractAssistantChipEvents(rawJson) {
+//
+// *lazy* is the summary-shaping contract (see `attachChipDetail`): when the
+// server held a chip's body back it names the flow to fetch it from and the
+// `tool_use_id`s it stripped. Those chips get a lazy ref in place of the detail
+// they can no longer derive locally; every other chip -- including every FAILED
+// one, whose body always rides inline -- still builds its payload here for free.
+function extractAssistantChipEvents(rawJson, lazy) {
   if (!Array.isArray(rawJson)) return null;
   const events = [];
   const byId = new Map();
+  const lazyFlow = lazy && lazy.flow ? String(lazy.flow) : "";
+  const lazyIds = lazyFlow && Array.isArray(lazy.toolUseIds)
+    ? new Set(lazy.toolUseIds) : null;
+  // INVARIANT: only a value the SUMMARY actually replaced is rehydrated, and
+  // only in the BODY the summary replaced it in. `lazy_tool_use_ids` names a
+  // CALL -- one of whose two bodies can legitimately ride inline while the
+  // other is stripped (boundary rule (c) keeps a fold-visible input whole; a
+  // scalar or unprofitable input stays put) -- so the per-id `lazy_body_mask`
+  // is what says which body lost text. `__elided__` is not a reserved word in a
+  // tool's arguments: a live call may legitimately pass
+  // `{__elided__: true, head: "...", lines: 2}`, so rehydrating by call (or by
+  // shape) would rewrite a body the server deliberately kept and change both
+  // its folded header and its expanded panel.
+  const bodyMask = lazy && typeof lazy.bodyMask === "string"
+    ? lazy.bodyMask : null;
+  const maskFor = (id) => {
+    if (!lazyIds || !id || !lazyIds.has(id)) return "";
+    if (bodyMask === null) return LAZY_BODY_BOTH;
+    const at = lazy.toolUseIds.indexOf(id);
+    const ch = at >= 0 ? bodyMask.charAt(at) : "";
+    // A mask shorter than the id list (an older / truncated frame) says
+    // nothing about this id, so fall back to the pre-mask reading rather than
+    // silently leaving a stub in place -- a stub rendered as-is would put an
+    // object where the header expects a string.
+    return ch || LAZY_BODY_BOTH;
+  };
+  const holdsBody = (id, body) => {
+    const mask = maskFor(id);
+    return mask === LAZY_BODY_BOTH || mask === body;
+  };
+  const rehydrateInput = (id, value) =>
+    holdsBody(id, LAZY_BODY_INPUT) ? rehydrateElidedValue(value) : value;
+  const rehydrateResult = (id, value) =>
+    holdsBody(id, LAZY_BODY_RESULT) ? rehydrateElidedValue(value) : value;
+  // A chip whose body was stripped must NOT re-derive it from the elided
+  // raw_json (that would render a truncated panel as if it were the whole
+  // thing); it fetches the real one on expand instead.
+  //
+  // *derive* is a THUNK, not a value: building a detail payload is the
+  // expensive half of the final view (an Edit's panel runs an O(n·m) LCS diff
+  // over the whole file), and a lazified chip must not pay it for a body it is
+  // about to fetch. Only a chip that kept its body still derives one.
+  const detailFor = (id, derive, render) => {
+    if (lazyIds && id && lazyIds.has(id)) {
+      const ref = makeLazyDetail({
+        flow: lazyFlow,
+        stepId: lazy.stepId,
+        ordinal: lazy.ordinal,
+        toolUseId: id,
+        source: DETAIL_SOURCE_RAW,
+        version: lazy.version,
+        // Which local formatter turns the fetched blocks back into a panel.
+        // It must be the SAME one this chip would have run inline, or the
+        // expanded view would differ from the un-summarized bundle's.
+        render: render,
+      });
+      if (ref) return ref;
+    }
+    return derive();
+  };
   const pushText = (text) => {
     if (!text) return;
     const last = events[events.length - 1];
@@ -13684,6 +14233,12 @@ function extractAssistantChipEvents(rawJson) {
   };
   const handleToolUse = (name, input, id) => {
     const toolName = name || "Tool";
+    // Rehydrate BEFORE the header is derived: an elided stub is an object, and
+    // every formatter below expects a string. The stub's line count and leading
+    // characters are exactly what the header reads, so the result is identical
+    // to the un-summarized bundle's. Scoped to the ids the server says it
+    // stripped -- an unmarked record is already whole and is rendered as-is.
+    input = rehydrateInput(id, input);
     const header = _toolInFlightBody(toolName, input);
     const evt = {
       kind: "chip",
@@ -13694,7 +14249,7 @@ function extractAssistantChipEvents(rawJson) {
       // A call the step ended without a tool_result stays in-flight here; give
       // it the same expandable input payload the live chip got, so the final
       // view is not strictly poorer than the stream it replaced.
-      detail: _toolInFlightDetailPayload(toolName, input),
+      detail: detailFor(id, () => _toolInFlightDetailPayload(toolName, input)),
       _input: input || {},
     };
     events.push(evt);
@@ -13702,6 +14257,7 @@ function extractAssistantChipEvents(rawJson) {
   };
   const handleToolResult = (id, content, isError) => {
     const existing = id ? byId.get(id) : null;
+    content = rehydrateResult(id, content);
     if (existing) {
       const toolName = existing.name || "Tool";
       const input = existing._input || {};
@@ -13709,10 +14265,15 @@ function extractAssistantChipEvents(rawJson) {
       existing.header = isError
         ? _toolFailureBody(toolName, input, content)
         : _toolSuccessBody(toolName, input, content);
-      existing.detail = _toolDetailPayload(toolName, input, content);
+      existing.detail = detailFor(
+        id, () => _toolDetailPayload(toolName, input, content));
     } else {
       // Orphan result with no preceding tool_use — we have no input data, so
-      // fall back to a text-kind detail and a plain truncated header.
+      // fall back to a text-kind detail and a plain truncated header. The
+      // summary strips this shape too (a legacy / mis-streamed record can carry
+      // a large tool_result on its own), so it goes through `detailFor` like any
+      // other chip: the header still reads the stub's preview, but the panel
+      // must show the ORIGINAL result, never the prefix the stub kept.
       const text = _toolExtractText(content);
       events.push({
         kind: "chip",
@@ -13720,7 +14281,11 @@ function extractAssistantChipEvents(rawJson) {
         name: "Tool",
         status: isError ? "failure" : "success",
         header: _toolTruncatePreview(text, 60),
-        detail: { kind: "text", text: text, truncated: false },
+        detail: detailFor(
+          id,
+          () => ({ kind: "text", text: text, truncated: false }),
+          LAZY_RENDER_TEXT,
+        ),
       });
     }
   };
@@ -14491,6 +15056,220 @@ function formatRaw(payload) {
   catch (_) { return String(payload); }
 }
 
+// --- restoring a summarized raw payload ------------------------------------
+//
+// What a browser holds is the SUMMARIZED record: a successful tool call's
+// oversize input / result was replaced by an `__elided__` stub and a
+// stream_progress fragment's `tool_detail` was dropped for a
+// `tool_detail_lazy` marker (see `history_summary.summarize_history_records`).
+// "View raw" is the one control whose entire purpose is to show the record as
+// it was recorded, so it must fetch what the summary held back instead of
+// printing the stubs -- the same on-demand fetch (and the same cache) the chip
+// detail panel uses, so opening both costs a single request.
+
+// INVARIANT: at least as deep as the server's own elision walk
+// (`history_summary._MAX_ELIDE_DEPTH`, 32), plus the containers between a
+// rendered payload's root and a tool block's input: a record envelope, its
+// message, the raw_json line list, the line, its message, the block list, the
+// block. A shallower bound made a deeply nested stub invisible here, so "View
+// raw" printed the elision object as if it were the original record and never
+// asked for the body it was missing.
+const _MAX_RAW_RESTORE_DEPTH = 64;
+
+// Wire-only fields the summary shaping added; the original record has none, so
+// a restored payload drops them again.
+const _LAZY_WIRE_KEYS = [
+  "tool_detail_lazy", "lazy_tool_use_ids", "lazy_body_mask",
+  "detail_flow", "detail_version",
+];
+
+function containsElidedStub(value, depth) {
+  if (isElidedStub(value)) return true;
+  if (!value || typeof value !== "object") return false;
+  const d = depth || 0;
+  if (d > _MAX_RAW_RESTORE_DEPTH) return false;
+  if (Array.isArray(value)) {
+    for (const item of value) if (containsElidedStub(item, d + 1)) return true;
+    return false;
+  }
+  for (const k of Object.keys(value)) {
+    if (containsElidedStub(value[k], d + 1)) return true;
+  }
+  return false;
+}
+
+function _rawResultId(block) {
+  if (typeof block.tool_use_id === "string" && block.tool_use_id) {
+    return block.tool_use_id;
+  }
+  if (typeof block.toolUseId === "string" && block.toolUseId) {
+    return block.toolUseId;
+  }
+  return "";
+}
+
+function _lazyBodyKey(source, toolUseId) {
+  return source + " " + toolUseId;
+}
+
+// Walk any raw payload shape (an NDJSON line list, a bare block, a whole .jsonl
+// envelope) and collect which bodies it is missing. Deliberately shape-agnostic
+// rather than mirroring one layout: the same control renders raw_json, a single
+// message, and the record envelope, and all three can carry summarized blocks.
+function collectLazyRawRefs(value, out, depth) {
+  if (!value || typeof value !== "object") return;
+  const d = depth || 0;
+  if (d > _MAX_RAW_RESTORE_DEPTH) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectLazyRawRefs(item, out, d + 1);
+    return;
+  }
+  const type = typeof value.type === "string" ? value.type.toLowerCase() : "";
+  if (type === "tool_use" && typeof value.id === "string" && value.id &&
+      containsElidedStub(value.input, 0)) {
+    out.raw.add(value.id);
+  }
+  if (type === "tool_result") {
+    const rid = _rawResultId(value);
+    if (rid && containsElidedStub(value.content, 0)) out.raw.add(rid);
+  }
+  if (value.tool_detail_lazy === true &&
+      typeof value.tool_use_id === "string" && value.tool_use_id) {
+    out.progress.add(value.tool_use_id);
+  }
+  for (const k of Object.keys(value)) {
+    collectLazyRawRefs(value[k], out, d + 1);
+  }
+}
+
+// `{flow, raw:Set, progress:Set}` for a payload that lost something, else null.
+// A record with no `detail_flow` cannot be asked about, so it reads as "nothing
+// to restore" and prints whatever it holds -- the pre-summary behaviour.
+function lazyRawRefsFor(norm, payload) {
+  const flow = norm && typeof norm.detailFlow === "string" ? norm.detailFlow : "";
+  if (!flow) return null;
+  const out = {
+    flow: flow,
+    stepId: norm && norm.stepId ? norm.stepId : "",
+    ordinal: norm ? norm.ordinal : null,
+    version: norm ? norm.detailVersion : null,
+    raw: new Set(),
+    progress: new Set(),
+  };
+  collectLazyRawRefs(payload, out, 0);
+  if (!out.raw.size && !out.progress.size) return null;
+  return out;
+}
+
+// Put the fetched bodies back where the shaping took them from, returning a
+// COPY -- the summarized record stays untouched, so the chip headers derived
+// from it (and the next expand) keep reading exactly what they read before.
+function spliceLazyRawBodies(value, bodies, depth) {
+  if (!value || typeof value !== "object") return value;
+  const d = depth || 0;
+  if (d > _MAX_RAW_RESTORE_DEPTH) return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => spliceLazyRawBodies(item, bodies, d + 1));
+  }
+  const out = {};
+  for (const k of Object.keys(value)) {
+    out[k] = spliceLazyRawBodies(value[k], bodies, d + 1);
+  }
+  const type = typeof value.type === "string" ? value.type.toLowerCase() : "";
+  let restored = false;
+  if (type === "tool_use" && typeof value.id === "string" && value.id &&
+      containsElidedStub(value.input, 0)) {
+    const data = bodies.get(_lazyBodyKey(DETAIL_SOURCE_RAW, value.id));
+    if (data && data.source === DETAIL_SOURCE_RAW &&
+        data.input && typeof data.input === "object") {
+      out.input = data.input;
+      restored = true;
+    }
+  }
+  if (type === "tool_result") {
+    const rid = _rawResultId(value);
+    if (rid && containsElidedStub(value.content, 0)) {
+      const data = bodies.get(_lazyBodyKey(DETAIL_SOURCE_RAW, rid));
+      if (data && data.source === DETAIL_SOURCE_RAW) {
+        out.content = data.result;
+        restored = true;
+      }
+    }
+  }
+  if (value.tool_detail_lazy === true &&
+      typeof value.tool_use_id === "string" && value.tool_use_id) {
+    const data = bodies.get(
+      _lazyBodyKey(DETAIL_SOURCE_PROGRESS, value.tool_use_id));
+    if (data && data.detail && typeof data.detail === "object") {
+      out.tool_detail = data.detail;
+      restored = true;
+    }
+  }
+  // The markers are dropped only where a body actually came back: a container
+  // we could not restore keeps saying so rather than quietly losing the fact
+  // that something is missing.
+  if (restored) for (const k of _LAZY_WIRE_KEYS) delete out[k];
+  return out;
+}
+
+function restoreLazyRawPayload(refs, payload) {
+  const wanted = [];
+  const push = (source, id) => wanted.push([
+    _lazyBodyKey(source, id),
+    makeLazyDetail({
+      flow: refs.flow,
+      stepId: refs.stepId,
+      ordinal: refs.ordinal,
+      toolUseId: id,
+      source: source,
+      version: refs.version,
+    }),
+  ]);
+  refs.raw.forEach((id) => push(DETAIL_SOURCE_RAW, id));
+  refs.progress.forEach((id) => push(DETAIL_SOURCE_PROGRESS, id));
+  // A record that lost bodies but carries no usable address cannot be restored
+  // at all. Rejecting routes it to the caller's "unavailable" branch, which is
+  // the honest answer -- printing the stubs there would pass the summary off as
+  // the original record.
+  if (wanted.some(([_key, ref]) => !ref)) {
+    return Promise.reject(new Error("tool detail unavailable: unaddressable"));
+  }
+  return Promise.all(wanted.map(
+    ([key, ref]) => fetchLazyDetailResponse(ref).then((data) => [key, data])
+  )).then((pairs) => spliceLazyRawBodies(payload, new Map(pairs), 0));
+}
+
+// Fill a "View raw" <pre>, restoring anything the summary held back first.
+// Resolves to `true` when the printed text is the record's real raw payload;
+// `false` means the bodies were unreachable, so the caller must let a later
+// expand retry (the same recovery affordance a lazy chip has).
+function paintRawInto(pre, norm, payload, fallbackText) {
+  if (payload == null && fallbackText != null) {
+    pre.textContent = String(fallbackText);
+    return Promise.resolve(true);
+  }
+  const refs = lazyRawRefsFor(norm, payload);
+  if (!refs) {
+    pre.textContent = formatRaw(payload);
+    return Promise.resolve(true);
+  }
+  pre.textContent = tf("raw.loading", "Loading the original record...");
+  return restoreLazyRawPayload(refs, payload)
+    .then((restored) => {
+      pre.textContent = formatRaw(restored);
+      return true;
+    })
+    .catch(() => {
+      // Never pass the summary off as the original: say the body is out of
+      // reach and keep the (self-describing) stubs visible underneath it.
+      pre.textContent =
+        tf("raw.unavailable",
+           "The original record is unavailable right now; showing the summary.")
+        + "\n" + formatRaw(payload);
+      return false;
+    });
+}
+
 // Resolve the raw payload + kind for a record, or `{payload:null}` when the
 // record carries nothing inspectable. Shared by `hasRawPayload` (a cheap
 // predicate the user-marker path uses to decide whether a "展开全部" toggle is
@@ -14532,12 +15311,16 @@ function makeRawToggle(norm) {
   const btn = el("button", "raw-toggle", tf("raw.view", "View raw"));
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
+  let rendering = false;
   let shown = false;
   btn.addEventListener("click", () => {
     shown = !shown;
-    if (shown && !rendered) {
-      pre.textContent = formatRaw(payload);
-      rendered = true;
+    if (shown && !rendered && !rendering) {
+      rendering = true;
+      paintRawInto(pre, norm, payload, null).then((ok) => {
+        rendering = false;
+        rendered = ok;
+      });
     }
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
@@ -14574,16 +15357,19 @@ function makeAssistantRawToggle(content, norm) {
   btn.type = "button";
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
+  let rendering = false;
   let shown = false;
   btn.addEventListener("click", () => {
     shown = !shown;
-    if (shown && !rendered) {
+    if (shown && !rendered && !rendering) {
       // Prefer the structured raw payload; fall back to the unrendered content
       // literal so the original record is never unreachable.
-      pre.textContent = hasRaw
-        ? formatRaw(payload)
-        : String(content == null ? "" : content);
-      rendered = true;
+      rendering = true;
+      paintRawInto(pre, norm, hasRaw ? payload : null,
+                   String(content == null ? "" : content)).then((ok) => {
+        rendering = false;
+        rendered = ok;
+      });
     }
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
@@ -14622,14 +15408,18 @@ function makeUserRawToggle(norm) {
   btn.type = "button";
   const pre = el("pre", "raw-json hidden");
   let rendered = false;
+  let rendering = false;
   let shown = false;
   btn.addEventListener("click", () => {
     shown = !shown;
-    if (shown && !rendered) {
+    if (shown && !rendered && !rendering) {
       // Prefer the second-layer raw payload; fall back to the original .jsonl
       // envelope record so Layer 3 is never empty for a user turn.
-      pre.textContent = hasRaw ? formatRaw(payload) : formatRaw(envelope);
-      rendered = true;
+      rendering = true;
+      paintRawInto(pre, norm, hasRaw ? payload : envelope, null).then((ok) => {
+        rendering = false;
+        rendered = ok;
+      });
     }
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
@@ -14770,7 +15560,7 @@ function makeUserPromptToggle(split, norm) {
 function renderNarrativeNodes(text, norm) {
   const rawJson = norm && norm.raw && norm.raw.raw_json;
   const chipEvents = Array.isArray(rawJson)
-    ? (extractAssistantChipEvents(rawJson) || []).filter(
+    ? (extractAssistantChipEvents(rawJson, lazyOptsForRecord(norm)) || []).filter(
         (e) => e && e.kind === "chip")
     : [];
   if (!chipEvents.length) return renderToolMarkers(text);
@@ -19762,6 +20552,13 @@ if (typeof module !== "undefined" && module.exports) {
     hasRawPayload,
     makeRawToggle,
     makeUserRawToggle,
+    makeAssistantRawToggle,
+    // Restoring a summarized raw payload behind "View raw" (exposed for
+    // tests/frontend/history_lazy_detail.test.mjs).
+    formatRaw,
+    containsElidedStub,
+    lazyRawRefsFor,
+    paintRawInto,
     STEP_REPORT_RENDERERS,
     reportList,
     // Token-usage display (G4) — exposed for the DOM-free tests in
@@ -19859,6 +20656,19 @@ if (typeof module !== "undefined" && module.exports) {
     upgradeChipToSuccess,
     upgradeChipToFailure,
     attachChipDetail,
+    rehydrateElidedValue,
+    isElidedStub,
+    makeLazyDetail,
+    isLazyDetail,
+    lazyDetailUrl,
+    lazyDetailCacheKey,
+    lazyDetailFromResponse,
+    clearLazyDetailCache,
+    dropLazyDetailCacheForFlow,
+    noteLazyDetailBundle,
+    lazyDetailEpoch,
+    chipDetailForFragment,
+    lazyOptsForRecord,
     renderToolDetailPanel,
     extractAssistantChipEvents,
     renderChipEvents,
