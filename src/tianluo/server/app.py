@@ -3279,6 +3279,7 @@ def create_app(
         project_root: str,
         *,
         deadline: Optional[float] = None,
+        cursor: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Dispatch a coalesced daemon full pull for this flow and await it.
 
@@ -3299,6 +3300,13 @@ def create_app(
         further work to do under the same bound — the detail route follows the
         reply's later frames — share its budget instead of stacking a second
         one; omitted, the call gets its own ``HISTORY_PULL_TIMEOUT``.
+        *cursor* makes the request an INCREMENTAL one: the daemon answers with
+        ``append`` frames from that water mark rather than rebuilding the whole
+        bundle. Only the interrupted-delivery repair uses it — every other
+        caller wants the cursorless full — and the coalescing key deliberately
+        ignores it: a concurrent full pull already brings back everything an
+        incremental would, so collapsing the two onto one reply is correct.
+
         WHY the dispatch needs bounding too: ``send_to_connection`` ends in
         ``websocket.send_text``, which has no timeout of its own and blocks for
         as long as a backpressured or half-open daemon socket refuses to drain.
@@ -3334,6 +3342,7 @@ def create_app(
                             machine_id=owner_machine,
                             connection=connection,
                             project_root=project_root or "",
+                            cursor=cursor,
                         ),
                         timeout=remaining,
                     )
@@ -3417,10 +3426,20 @@ def create_app(
         scope = _scope_for(identity_)
         owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
 
-        async def _pull_from_daemon(connection: Any, project_root: str) -> None:
-            """This route's binding of the shared coalesced daemon pull."""
+        async def _pull_from_daemon(
+            connection: Any,
+            project_root: str,
+            *,
+            cursor: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            """This route's binding of the shared coalesced daemon pull.
+
+            *cursor* asks the daemon for an ``append`` backfill from that water
+            mark instead of a full rebuild (see the interrupted-delivery repair
+            below); ``None`` is the cursorless full every other caller wants.
+            """
             await _pull_history_from_daemon(
-                flow_id, owner_machine, connection, project_root
+                flow_id, owner_machine, connection, project_root, cursor=cursor
             )
 
         # Cache hit: serve a not-modified / delta / full snapshot atomically.
@@ -3481,8 +3500,32 @@ def create_app(
                 not missing_map
                 and snapshot.get("delivery") == "not_modified"
                 and not await state.full_pull_throttled(flow_id)
-                and await state.is_active_worktree_flow(
-                    flow_id, owner=target_owner
+                and (
+                    await state.is_active_worktree_flow(
+                        flow_id, owner=target_owner
+                    )
+                    # INTERRUPTED-DELIVERY REPAIR. The worktree predicate above
+                    # is about a cache that may be behind a still-WRITING flow;
+                    # this one is about a cache that is behind what the daemon
+                    # already tried to send it. A flow's history is delivered in
+                    # up to ~150 frames, and a socket that dies in the middle
+                    # leaves a self-consistent PREFIX behind (see
+                    # ``ServerState._OpenDelivery``): the client is provably in
+                    # sync with the cache, so this poll answers
+                    # ``not_modified``, and nothing else will ever ask for the
+                    # rest.
+                    #
+                    # WHY it must NOT be gated on ``is_active_worktree_flow``:
+                    # the flow this happens to is typically COMPLETED — opening a
+                    # big archived session is what triggers a multi-frame pull at
+                    # all — and a completed flow receives no further appends, so
+                    # the append-driven self-heal that repairs a live flow never
+                    # fires for it. Under the old gate the one flow that could
+                    # not repair itself was the exact one that needed to. The
+                    # gate is widened, not removed: a bundle with no interrupted
+                    # delivery still never reconciles, so an ordinary completed
+                    # flow's idle poll costs what it always did.
+                    or await state.history_delivery_repair_due(flow_id)
                 )
             ):
                 owner_connection = await manager.get_connection(owner_machine)
@@ -3499,10 +3542,41 @@ def create_app(
                     cached_record_count = len(
                         (cached_bundle or {}).get("records") or []
                     )
+                    # How to pull. A worktree self-heal stays what it was — a
+                    # cursorless full, because that flow's history is split
+                    # across two roots and only a whole re-read merges them.
+                    # An interrupted delivery instead goes through
+                    # ``plan_recovery_pull``, which gives two things a bare
+                    # cursorless pull cannot:
+                    #
+                    #   * an INCREMENTAL backfill anchored at the server's own
+                    #     water mark whenever the bundle is reusable. A repair
+                    #     that re-drains from zero re-runs the very risk that
+                    #     broke the bundle — a second interruption would leave a
+                    #     SHORTER prefix — while an append-only backfill can only
+                    #     extend it, so repeated repairs converge instead of
+                    #     oscillating;
+                    #   * the at-most-one-recovery-per-flow dedup, so a 3 s poll
+                    #     cannot stack repairs on top of the drain already
+                    #     filling the bundle. ``None`` means one is running: fall
+                    #     through and serve the cache, unrepaired for now.
+                    repair_cursor = None
+                    if await state.history_delivery_incomplete(flow_id):
+                        plan = await state.plan_recovery_pull(
+                            flow_id, owner_machine, repair=True
+                        )
+                        if plan is None:
+                            return await _history_response(
+                                {"flow_id": flow_id, "cached": True, **snapshot},
+                                request,
+                            )
+                        _kind, repair_cursor = plan
                     await state.mark_full_pull(flow_id)
                     try:
                         await _pull_from_daemon(
-                            owner_connection, reconcile_root or ""
+                            owner_connection,
+                            reconcile_root or "",
+                            cursor=repair_cursor,
                         )
                     except HTTPException:
                         # The reconcile is best-effort robustness: if the daemon

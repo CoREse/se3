@@ -2270,18 +2270,28 @@ async def _serve_loop(
 
     recv_task = asyncio.create_task(receive())
     beat_task = asyncio.create_task(heartbeat())
-    done, pending = await asyncio.wait(
-        {recv_task, beat_task}, return_when=asyncio.FIRST_COMPLETED
-    )
-    for task in pending:
-        task.cancel()
-    for task in (*done, *pending):
-        # Retrieve results/exceptions so a finished receive() task does not
-        # leave an unhandled WebSocketDisconnect dangling.
-        try:
-            await task
-        except (asyncio.CancelledError, Exception):  # pragma: no cover - defensive
-            pass
+    try:
+        done, pending = await asyncio.wait(
+            {recv_task, beat_task}, return_when=asyncio.FIRST_COMPLETED
+        )
+        for task in pending:
+            task.cancel()
+        for task in (*done, *pending):
+            # Retrieve results/exceptions so a finished receive() task does not
+            # leave an unhandled WebSocketDisconnect dangling.
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover - defensive
+                pass
+    finally:
+        # INVARIANT: a history delivery this socket was still sending cannot
+        # finish, so the bundle it was extending must not be left presenting
+        # itself as the whole conversation. This is the exact detection point for
+        # the failure the whole marker exists for — a 147-frame reply cut by a
+        # keepalive close — and it fires here rather than in the endpoint's own
+        # teardown so a bare ``_serve_loop`` (the harness the relay tests drive)
+        # sees the same repair path production does.
+        await state.note_machine_deliveries_interrupted(machine_id)
 
 
 async def _handle_message(
@@ -2449,6 +2459,19 @@ async def _handle_message(
                 mode_full=mode == protocol.HISTORY_MODE_FULL,
                 chunk_bounded=lambda: _frame_is_chunk_bounded(records),
                 cursor_base=cursor_base if isinstance(cursor_base, dict) else {},
+                # The frame's own statement of whether its delivery is finished.
+                # Absent from a pre-``final`` daemon's frame, where the
+                # chunk-bound estimate above remains the only signal: such a
+                # daemon's PULL replies are still tracked for completeness (the
+                # estimate says whether a reply has more to come), it is only its
+                # live push backlog that goes unstated — exactly the behaviour
+                # that shipped before the bit existed.
+                final=(
+                    bool(message.payload["final"])
+                    if isinstance(message.payload.get("final"), bool)
+                    else None
+                ),
+                machine_id=machine_id,
             )
             replay = verdict.replay
             if verdict.from_pull and resolved_pull:
@@ -2560,9 +2583,9 @@ async def _handle_message(
             logger.debug(
                 "hist-diag ws HISTORY_DATA flow=%s mode=%s records=%d "
                 "applied=%s rejected_full=%s resolved_pull=%s "
-                "suppress_broadcast=%s",
+                "suppress_broadcast=%s delivery_incomplete=%s",
                 flow_id, mode, len(records), applied, outcome.rejected_full,
-                resolved_pull, suppress_broadcast,
+                resolved_pull, suppress_broadcast, verdict.delivery_incomplete,
             )
             # Self-heal the requires_full stuck-state. A live ``append`` that
             # ``append_history`` discarded (first-sighting after a server

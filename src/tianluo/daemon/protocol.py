@@ -1537,6 +1537,7 @@ def make_history_data(
     cursor_base: Dict[str, Any] | None = None,
     usage: Optional[Dict[str, Any]] = None,
     usage_catalog: Optional[Dict[str, Any]] = None,
+    final: Optional[bool] = None,
     seq: int = 0,
 ) -> Message:
     """daemon → server: deliver history records for *flow_id*.
@@ -1574,6 +1575,30 @@ def make_history_data(
     owning machine), which is why the catalog must ride the wire. Purely
     additive like *usage*: omitted when ``None``, ignored by pre-7 peers.
 
+    *final* (additive, optional) is the DELIVERY-COMPLETENESS bit: ``True`` says
+    this frame ends what the sender set out to deliver, ``False`` that more
+    frames of the SAME delivery are still to come. The daemon derives it from
+    its own read (``not read.truncated``) on both multi-frame paths — the
+    on-demand pull drain and the push loop's byte-bounded catch-up.
+
+    INVARIANT: a delivery the receiver never saw declared ``final`` is
+    INCOMPLETE, and the receiver may not present it as settled. WHY the wire has
+    to say this: before it did, a 147-frame reply cut in the middle (a keepalive
+    close, a daemon restart) left the server holding a self-consistent PREFIX —
+    its cursor named exactly the step files that had arrived and its pending
+    window was empty — so neither side could tell the conversation's tail was
+    missing and it never came back. Nothing else on the wire carries it: the
+    cursor states only how far the reader has got, which every frame of a drain
+    makes look complete.
+
+    Degradation is explicit and safe: a version-skewed daemon omits the key, the
+    receiver reads ``None`` as "not stated" and falls back to the pre-existing
+    heuristic (a frame UNDER the daemon's chunk bound is a reply's last) plus
+    its own dispatched-pull bookkeeping. That fallback is what shipped before,
+    so an old daemon is no worse off than it was — it merely loses the sharper
+    signal. Additive in the same sense as *cursor_base* / *usage*, hence no
+    ``PROTOCOL_VERSION`` bump: an old SERVER ignores the key outright.
+
     Raises :class:`ProtocolError` when *mode* is not a recognized value.
     """
     if mode not in HISTORY_MODES:
@@ -1591,6 +1616,8 @@ def make_history_data(
         payload["usage"] = dict(usage)
     if usage_catalog is not None:
         payload["usage_catalog"] = dict(usage_catalog)
+    if final is not None:
+        payload["final"] = bool(final)
     return Message(type=MSG_HISTORY_DATA, payload=payload, seq=seq)
 
 

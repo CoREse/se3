@@ -670,6 +670,36 @@ class _ReplayDrain:
 
 
 @dataclass
+class _OpenDelivery:
+    """A multi-frame history delivery for one flow that has not finished.
+
+    INVARIANT: while an entry exists here the flow's cached bundle is missing
+    the tail of a delivery already in progress, so it may NOT present itself as
+    settled — every snapshot of it is flagged ``incomplete`` and, once the
+    delivery is provably no longer arriving, the flow is armed for a repair
+    pull. WHY the marker is needed at all: a bundle derives its cursor,
+    signature and pending window from the frames that ACTUALLY arrived, so a
+    reply cut in the middle leaves a perfectly self-consistent PREFIX — cursor
+    naming exactly the step files that landed, ``pending`` empty — and neither
+    the server, the browser's ``stepId#ordinal`` self-check, nor the daemon
+    (which keeps its own delivery cursor across a reconnect and never re-sends)
+    can tell the conversation's tail is gone.
+    """
+
+    #: The machine whose delivery this is, so a daemon disconnect can stall
+    #: exactly the deliveries that die with it.
+    machine_id: str
+    #: Monotonic time of the last frame of this delivery. A delivery that is
+    #: still arriving refreshes it, which is what keeps a healthy multi-MB drain
+    #: from being mistaken for an interrupted one.
+    last_frame_at: float
+    #: Set when the delivery is KNOWN to be dead (the owning daemon's socket
+    #: ended) rather than merely quiet, so the repair fires at once instead of
+    #: waiting out the stall grace.
+    stalled: bool = False
+
+
+@dataclass
 class ReplayVerdict:
     """How one inbound ``HISTORY_DATA`` frame was classified.
 
@@ -687,6 +717,13 @@ class ReplayVerdict:
     #: after which the bundle is settled and the next frame for the flow is live
     #: traffic again.
     closing: bool = False
+
+    #: Whether the delivery this frame belongs to is still UNFINISHED after it
+    #: (see :class:`_OpenDelivery`). Carried out for the receive loop's
+    #: diagnostics only — the marker itself lives in ``ServerState`` — so a
+    #: journal tail can attribute an ``incomplete`` bundle to the frame that
+    #: left it that way.
+    delivery_incomplete: bool = False
 
 
 def _cursor_base_ahead(
@@ -795,6 +832,21 @@ class ServerState:
     #: bounded by COUNTING its frames instead (see :meth:`take_history_replay`).
     _HISTORY_REPLAY_TTL: float = 120.0
 
+    #: Seconds of silence after which a still-unfinished history delivery (see
+    #: :class:`_OpenDelivery`) is treated as INTERRUPTED, so a poll may repair
+    #: the flow. It is a backstop: the common case — the owning daemon's socket
+    #: ending mid-drain — is detected exactly, at disconnect
+    #: (:meth:`note_machine_deliveries_interrupted`), and needs no timer.
+    #:
+    #: WHY it must sit well above the gap BETWEEN a healthy drain's frames: the
+    #: daemon reads each chunk off disk in a worker thread and the frames of one
+    #: reply arrive back to back, so a second or two is the normal spacing and a
+    #: grace this size cannot mistake a slow-but-live drain for a dead one.
+    #: Every arriving frame refreshes the marker, so the grace is measured from
+    #: the LAST frame, not from the delivery's start — a genuinely long reply
+    #: never ages out mid-drain however many frames it takes.
+    _HISTORY_DELIVERY_STALL_GRACE: float = 15.0
+
     #: Minimum seconds between cache-miss ``full`` daemon pulls for the SAME
     #: flow. A self-heal poll that presents a diverged token forces one full
     #: rebuild; without this floor a client stuck presenting the same stale
@@ -898,6 +950,17 @@ class ServerState:
         #: :meth:`take_history_replay`); the deadline is only a leak guard for a
         #: request that is never answered at all.
         self._history_replay_pulls: Dict[str, _ReplayDrain] = {}
+        #: flow_id -> :class:`_OpenDelivery` for a multi-frame delivery that has
+        #: not declared itself finished. This is the completeness half of the
+        #: history path: ``_history_replay_pulls`` tracks a pull's IDENTITY (is
+        #: this frame a replay we asked for?), this tracks whether what the
+        #: sender set out to deliver has actually all landed. They are separate
+        #: because a delivery can outlive its identity question — the push
+        #: loop's byte-bounded catch-up has backlog behind it with no pull
+        #: marker at all — and because the identity marker is retired by the
+        #: reply's closing frame precisely when this one must NOT be: a reply
+        #: that never sent a closing frame is the case that needs repairing.
+        self._history_deliveries: Dict[str, _OpenDelivery] = {}
         #: flow_id -> monotonic time of the last cache-miss ``full`` daemon pull
         #: dispatched by the REST endpoint. Used to rate-limit repeated full
         #: rebuilds of the SAME flow (see :meth:`mark_full_pull` /
@@ -1747,6 +1810,8 @@ class ServerState:
         mode_full: bool = False,
         chunk_bounded: Any = False,
         cursor_base: Optional[Dict[str, Any]] = None,
+        final: Optional[bool] = None,
+        machine_id: str = "",
     ) -> ReplayVerdict:
         """Account one inbound ``HISTORY_DATA`` frame and classify its origin.
 
@@ -1778,6 +1843,17 @@ class ServerState:
         arriving, only a frame whose shape MATCHES the head our own request must
         be answered with may open (and hence consume) it; anything else is live
         traffic that raced the dispatch and is classified on its own shape.
+
+        This is also the single funnel where a delivery's COMPLETENESS is
+        tracked (see :class:`_OpenDelivery`), because it is called for every
+        history frame — relayed, suppressed or discarded — and it already knows
+        which delivery the frame belongs to. *final* is the frame's own
+        statement (``protocol.make_history_data``): ``True`` ends the delivery,
+        ``False`` says more of it is coming, ``None`` that the daemon is too old
+        to say. When it IS stated it also settles the reply's closing frame
+        outright, in place of the *chunk_bounded* heuristic below — the sender's
+        own read is authoritative where the receiver's size estimate only infers
+        — and the estimate stays as the fallback for the ``None`` case.
 
         *chunk_bounded* says the frame reached the daemon's per-frame chunk bound
         (:data:`~tianluo.daemon.history.MAX_BYTES_PER_REPORT` /
@@ -1821,7 +1897,17 @@ class ServerState:
                 self._history_replay_pulls.pop(flow_id, None)
                 drain = None
             if drain is None or not drain.pulls:
-                return ReplayVerdict(mode_full)
+                # Live traffic, or a reply whose marker is gone. With no pull
+                # outstanding for this flow, the frame's own ``final`` bit is
+                # both the only completeness statement available and an
+                # unambiguous one — it describes the delivery this frame belongs
+                # to, and that is the only delivery in progress.
+                incomplete = self._note_delivery_locked(
+                    flow_id, machine_id, finished=final, now=now
+                )
+                return ReplayVerdict(
+                    mode_full, delivery_incomplete=incomplete
+                )
             if not drain.draining:
                 # Replies drain in dispatch order down one socket, but a pull
                 # armed while an earlier one was still in flight would be stuck
@@ -1840,7 +1926,19 @@ class ServerState:
                     # A live append that raced the dispatch. It leaves the
                     # marker untouched — and its own deadline unrefreshed, since
                     # it is no evidence the reply we are waiting for is alive.
-                    return ReplayVerdict(mode_full)
+                    #
+                    # Its ``final`` bit is likewise about ITS delivery, not about
+                    # the reply we are still waiting for, so it may only ever
+                    # ADD incompleteness here, never clear the pull's.
+                    incomplete = self._note_delivery_locked(
+                        flow_id,
+                        machine_id,
+                        finished=(False if final is False else None),
+                        now=now,
+                    )
+                    return ReplayVerdict(
+                        mode_full, delivery_incomplete=incomplete
+                    )
                 if opened:
                     drain.pulls.insert(0, drain.pulls.pop(opened))
                 drain.draining = True
@@ -1848,7 +1946,24 @@ class ServerState:
             # multi-MB recovery cannot age out mid-drain.
             drain.deadline = now + self._HISTORY_REPLAY_TTL
             rest_served = drain.rest_served
-            bounded = chunk_bounded() if callable(chunk_bounded) else chunk_bounded
+            if final is not None:
+                # The sender stated it: a reply that says it has more to come is
+                # not closed by an estimate that happens to put this frame under
+                # the bound, and one that says it is done is not held open by an
+                # estimate that puts it over. The heuristic below is what the
+                # wire USED to leave us with, and stays the fallback.
+                bounded = not final
+            else:
+                bounded = (
+                    chunk_bounded() if callable(chunk_bounded) else chunk_bounded
+                )
+            incomplete = self._note_delivery_locked(
+                flow_id,
+                machine_id,
+                finished=not bounded,
+                now=now,
+                from_pull=True,
+            )
             if not bounded:
                 # Under the chunk bound: this is the reply's LAST frame, so the
                 # pull it answers retires here.
@@ -1864,6 +1979,170 @@ class ServerState:
                 from_pull=True,
                 rest_served=rest_served,
                 closing=not bounded,
+                delivery_incomplete=incomplete,
+            )
+
+    def _note_delivery_locked(
+        self,
+        flow_id: str,
+        machine_id: str,
+        *,
+        finished: Optional[bool],
+        now: float,
+        from_pull: bool = False,
+    ) -> bool:
+        """Record what one frame said about its delivery. Returns "still open".
+
+        *finished* is ``True`` (this frame ended the delivery), ``False`` (more
+        of it is coming) or ``None`` (nothing stated — a pre-``final`` daemon's
+        live frame). ``None`` deliberately neither opens nor closes a marker: an
+        unstated frame is not evidence either way, and inventing one would
+        either wedge every old daemon's flow as permanently incomplete or clear
+        a marker a newer frame legitimately set. It does refresh an open
+        marker's clock, because a frame arriving IS evidence the delivery is
+        still alive.
+
+        *from_pull* says the frame belongs to a reply the server asked for, and
+        is what a ``finished`` frame needs in order to clear a STALLED marker.
+        WHY: a live one-frame append is a complete delivery in its own right and
+        truthfully says so, but it says nothing about the dead delivery whose
+        tail the bundle is still missing — letting it clear that marker would
+        hand back a bundle that calls itself whole while a hole from an earlier
+        reply remains. Only a reply that ran to its declared end brings the
+        bundle up to the sender's water mark, so only that may settle it. Caller
+        must hold ``self._lock``.
+        """
+        open_delivery = self._history_deliveries.get(flow_id)
+        if finished is False:
+            if open_delivery is None:
+                self._history_deliveries[flow_id] = _OpenDelivery(
+                    machine_id=machine_id, last_frame_at=now
+                )
+                self._prune_history_deliveries()
+            else:
+                open_delivery.last_frame_at = now
+                # A delivery that is arriving again is not stalled, whatever a
+                # previous disconnect concluded: the repair this marker exists to
+                # trigger is exactly what is now in progress.
+                open_delivery.stalled = False
+                if machine_id:
+                    open_delivery.machine_id = machine_id
+            return True
+        if finished is True:
+            if (
+                open_delivery is not None
+                and open_delivery.stalled
+                and not from_pull
+            ):
+                return True
+            self._history_deliveries.pop(flow_id, None)
+            return False
+        if open_delivery is not None:
+            open_delivery.last_frame_at = now
+            return True
+        return False
+
+    def _prune_history_deliveries(self) -> None:
+        """Bound the open-delivery map. Caller must hold ``self._lock``.
+
+        Interrupted deliveries are repaired by a poll on the flow, so a flow
+        nobody ever opens again keeps its marker forever. Dropping the OLDEST
+        entries costs only that flow's automatic repair — it still rebuilds
+        through the ordinary cache-miss pull — while keeping a long-lived server
+        from accumulating one entry per flow it ever served.
+        """
+        limit = 4096
+        excess = len(self._history_deliveries) - limit
+        if excess <= 0:
+            return
+        oldest = sorted(
+            self._history_deliveries,
+            key=lambda fid: self._history_deliveries[fid].last_frame_at,
+        )
+        for flow_id in oldest[:excess]:
+            self._history_deliveries.pop(flow_id, None)
+
+    async def history_delivery_incomplete(self, flow_id: str) -> bool:
+        """Whether *flow_id*'s bundle is missing the tail of a delivery."""
+        async with self._lock:
+            return flow_id in self._history_deliveries
+
+    async def note_machine_deliveries_interrupted(
+        self, machine_id: str
+    ) -> List[str]:
+        """Declare every open delivery from *machine_id* dead. Returns the flows.
+
+        Called when a daemon's socket ends. INVARIANT: a delivery whose sender
+        is gone cannot finish, so the bundle it was extending stays flagged
+        INCOMPLETE and the flow is armed for a repair pull — the ``requires_full``
+        latch the rest of the history path already self-heals on.
+
+        WHY the arming happens here rather than being left to the next append:
+        the flow that loses its tail this way is typically a COMPLETED one (a
+        console opening an archived session is what triggers the multi-frame
+        pull in the first place), and a completed flow gets no further appends —
+        so the append-driven recovery that repairs a live flow never fires for
+        it. Its only remaining trigger is a REST poll, which is why the poll's
+        reconcile branch consults :meth:`take_history_delivery_repair`.
+
+        The reply's replay marker goes with it: that reply is not coming, and
+        leaving the marker armed would make the NEXT frames for this flow — live
+        traffic from the reconnected daemon — be misread as its continuation.
+        """
+        if not machine_id:
+            return []
+        async with self._lock:
+            interrupted = [
+                flow_id
+                for flow_id, delivery in self._history_deliveries.items()
+                if delivery.machine_id == machine_id
+            ]
+            for flow_id in interrupted:
+                self._history_deliveries[flow_id].stalled = True
+                self._history_replay_pulls.pop(flow_id, None)
+                self._history_requires_full.add(flow_id)
+                # A recovery whose reply died with this socket is not "in
+                # flight" — leaving its marker would make the next poll's
+                # ``plan_recovery_pull`` refuse a repair for a whole TTL while
+                # nothing was coming. The dedup exists to stop a poll fighting a
+                # LIVE drain, and there is no longer one.
+                self._history_recovery_inflight.pop(flow_id, None)
+        if interrupted:
+            logger.warning(
+                "hist-diag history delivery INTERRUPTED machine=%s flows=%s "
+                "(the socket ended mid-delivery; the cached bundles are a "
+                "PREFIX and stay flagged incomplete until a repair pull "
+                "completes them)",
+                machine_id, ",".join(interrupted),
+            )
+        return interrupted
+
+    async def history_delivery_repair_due(self, flow_id: str) -> bool:
+        """Whether *flow_id*'s interrupted delivery should be repaired now.
+
+        ``True`` when the bundle is missing a delivery's tail AND that delivery
+        is provably no longer arriving — its sender's socket ended
+        (:meth:`note_machine_deliveries_interrupted`), or nothing of it has
+        landed for :attr:`_HISTORY_DELIVERY_STALL_GRACE`. A delivery still in
+        flight answers ``False``, which is what keeps a poll from dispatching a
+        rival pull against the drain that is already filling the bundle.
+
+        WHY this is a pure query and does NOT arm the ``requires_full`` latch it
+        obviously wants: arming that latch makes every live append be discarded
+        until a repair lands, so an arm that is not immediately followed by a
+        dispatched repair would freeze a still-running flow for a recovery TTL
+        (the poll can decide not to pull at all — no connected daemon, a repair
+        already in flight). The arming therefore happens inside
+        :meth:`plan_recovery_pull` (``repair=True``), in the same critical
+        section that decides how to pull and marks it in flight.
+        """
+        async with self._lock:
+            delivery = self._history_deliveries.get(flow_id)
+            if delivery is None:
+                return False
+            return delivery.stalled or (
+                (time.monotonic() - delivery.last_frame_at)
+                >= self._HISTORY_DELIVERY_STALL_GRACE
             )
 
     async def mark_history_reply_served(self, flow_id: str) -> None:
@@ -2135,6 +2414,12 @@ class ServerState:
         self._history_cold_advised_at.pop(flow_id, None)
         self._history_requires_full.discard(flow_id)
         self._history_recovery_inflight.pop(flow_id, None)
+        # The bundle a half-finished delivery was extending is gone, so there is
+        # nothing left to repair: the flow is cold, and re-admission goes through
+        # the UI-driven cache-miss pull that rebuilds it whole. Keeping the marker
+        # would have a poll dispatch a repair for a bundle the budget just refused
+        # to hold — the eviction⇄回拉 storm ``_history_cold`` exists to prevent.
+        self._history_deliveries.pop(flow_id, None)
         self._history_evictions += 1
         self._history_evicted_bytes += freed
         logger.info(
@@ -2585,6 +2870,11 @@ class ServerState:
                     # pulls the new machine's complete history.
                     del self._history_data[flow_id]
                     self._history_requires_full.add(flow_id)
+                    # An unfinished delivery from the SUPERSEDED machine has
+                    # nothing left to complete — its bundle is gone with it — and
+                    # the cache miss this leaves behind already forces a full
+                    # rebuild from the new daemon.
+                    self._history_deliveries.pop(flow_id, None)
                     # The just-superseded machine's recovery pull (if any) no
                     # longer helps — the flow now needs a full pull from the NEW
                     # daemon. Drop the marker so ``take_recovery_pull`` can fire a
@@ -3011,7 +3301,7 @@ class ServerState:
             self._history_recovery_inflight.pop(flow_id, None)
 
     async def plan_recovery_pull(
-        self, flow_id: str, machine_id: str
+        self, flow_id: str, machine_id: str, *, repair: bool = False
     ) -> Optional[Tuple[str, Optional[Dict[str, Any]]]]:
         """Decide how to self-heal a ``requires_full`` flow, atomically.
 
@@ -3049,9 +3339,18 @@ class ServerState:
         presence/machine/cursor reads and the ``requires_full`` / recovery-inflight
         writes all happen in one critical section, so a racing append cannot slip
         between the decision and its dedup marker.
+
+        *repair* is the interrupted-delivery entry point (see
+        :meth:`history_delivery_repair_due`): the flow's bundle is a PREFIX of a
+        delivery that died rather than a bundle a discarded append flagged, so
+        nothing has armed ``requires_full`` for it. Arming it HERE — rather than
+        in the caller — keeps the arm and the dedup marker in one critical
+        section, so the latch can never be left set by a decision that then
+        dispatches nothing (which would discard every live append of a still
+        running flow until the recovery TTL).
         """
         async with self._lock:
-            if flow_id not in self._history_requires_full:
+            if not repair and flow_id not in self._history_requires_full:
                 return None
             dispatched_at = self._history_recovery_inflight.get(flow_id)
             # Same monotonic-clock TTL dedup as ``take_recovery_pull``: at most
@@ -3062,6 +3361,10 @@ class ServerState:
                 and (time.monotonic() - dispatched_at) < self._HISTORY_RECOVERY_TTL
             ):
                 return None
+            # Past the dedup, so a plan IS about to be returned and dispatched:
+            # only now may the latch be armed (see *repair* above).
+            if repair:
+                self._history_requires_full.add(flow_id)
             existing = self._history_data.get(flow_id)
             can_incremental = (
                 existing is not None
@@ -3334,6 +3637,11 @@ class ServerState:
                 # — otherwise a client self-checking off a pushed frame would draw
                 # the pending/unfillable line differently from one that polled.
                 "pending": {k: list(v) for k, v in pending.items()},
+                # Same one-source-of-truth rule for the completeness bit: a
+                # console told by an advisory that the bundle moved must be able
+                # to read the same "this is a prefix, not the whole
+                # conversation" statement the poll would give it.
+                "incomplete": flow_id in self._history_deliveries,
             }
 
     async def get_history_usage(
@@ -3792,6 +4100,11 @@ class ServerState:
           daemon → keep waiting) when it falls here, and *unfillable* (a proven
           hole → retire it) otherwise. Empty ``{}`` whenever the records cover the
           cursor — so an in-sync bundle names nothing pending.
+        * ``incomplete`` — ``True`` while the bundle is missing the tail of a
+          delivery the sender declared unfinished (see
+          :class:`_OpenDelivery`). It is the ONE field not derived from the
+          cached records, and therefore the only one that can contradict a
+          truncated bundle's own self-consistency.
         * ``resync`` — ``True`` only when the client presented a signed cursor
           (*after*) the server could not bind to the current bundle (expired /
           tampered / a stale generation or machine from a daemon-reconnect bundle
@@ -4055,6 +4368,22 @@ class ServerState:
                 # can distinguish "keep waiting" from "give up" for any cursor
                 # gap; empty ({}) whenever the bundle's records cover its cursor.
                 "pending": {k: list(v) for k, v in pending.items()},
+                # INVARIANT: a bundle missing the tail of a delivery already in
+                # progress may never present itself as settled. Every other field
+                # of this reply is derived from the records that ACTUALLY
+                # arrived, so a delivery cut in the middle produces a flawlessly
+                # self-consistent PREFIX — the cursor names exactly the step
+                # files that landed, ``pending`` is empty, the client's
+                # ``stepId#ordinal`` self-check finds no hole — and the loss is
+                # invisible to every party. This flag is the one field that is
+                # NOT derived from the records: it comes from what the SENDER
+                # said it would deliver (see ``_OpenDelivery``), which is why it
+                # can contradict them. ``delivery`` still describes
+                # client-vs-cache agreement (``not_modified`` = you hold what we
+                # hold); this describes cache-vs-flow, and the two are
+                # independent — the poll that repairs the bundle is dispatched
+                # off exactly that combination.
+                "incomplete": flow_id in self._history_deliveries,
                 # True when the client presented a signed cursor (``after``) the
                 # server could not bind to this bundle (see ``resync`` above) — a
                 # stale/expired/rotated cursor that fell back to full. The reply's
