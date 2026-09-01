@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.15.1 - 2026-09-01
+
+- Fix WebUI step results rendering as a raw JSON code block when the model emitted unescaped ASCII double quotes inside a JSON string value; such payloads now render as structured results, matching the engine-side parser that already recovered them.
+- Add a browser-independent unescaped-quote repair pass to the WebUI lenient JSON parser, applied only after strict parsing and trailing-comma repair both fail; it scans JSON string state deterministically instead of relying on `JSON.parse` error text or offsets, which differ between browsers.
+- Make the trailing-comma repair JSON-string-aware so a literal `,}` or `,]` inside result text is no longer silently deleted from the rendered output.
+- Add a fence-body fallback when the balanced scan locates no result region, recovering each ```json block independently from its own body up to its first closing fence; unrecoverable blocks fail closed and keep their raw display without affecting later blocks.
+- Keep every fence region recovered by the fallback — including intermediate tool-call fences — out of the Layer-1 narrative, so recovered JSON is never duplicated as both a structured card and raw text.
+- Deliberately scope the repair to unescaped quotes only: no single-quote conversion and no truncation closing, so prose containing stray braces is never mistaken for a JSON region and excised from the narrative.
+- Extend the browserless frontend test harness with regressions covering the real failing payload for discovery and for a non-discovery step type, multiple desynced fences in one turn, and unrecoverable fences not swallowing their neighbors.
 ## 12.15.0 - 2026-09-01
 
 - Open the WebUI flow history view at the tail, rendering only the last 10 step blocks and loading earlier step blocks on demand as the user scrolls up, so very large sessions become browsable instead of stalling mid-load
