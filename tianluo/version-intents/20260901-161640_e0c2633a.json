@@ -1,0 +1,19 @@
+{
+  "flow_id": "20260901-161640_e0c2633a",
+  "change_summary": "## Changes Made\n\n### Files Changed:\n- [modified] src/tianluo/server/static/app.js\n- [modified] tests/frontend/test_app_pure.mjs\n- [modified] tianluo/code-index.md\n\n## Verification\n\nNo verification results available.",
+  "versions_changes": [
+    "Fix WebUI step results rendering as a raw JSON code block when the model emitted unescaped ASCII double quotes inside a JSON string value; such payloads now render as structured results, matching the engine-side parser that already recovered them.",
+    "Add a browser-independent unescaped-quote repair pass to the WebUI lenient JSON parser, applied only after strict parsing and trailing-comma repair both fail; it scans JSON string state deterministically instead of relying on `JSON.parse` error text or offsets, which differ between browsers.",
+    "Make the trailing-comma repair JSON-string-aware so a literal `,}` or `,]` inside result text is no longer silently deleted from the rendered output.",
+    "Add a fence-body fallback when the balanced scan locates no result region, recovering each ```json block independently from its own body up to its first closing fence; unrecoverable blocks fail closed and keep their raw display without affecting later blocks.",
+    "Keep every fence region recovered by the fallback — including intermediate tool-call fences — out of the Layer-1 narrative, so recovered JSON is never duplicated as both a structured card and raw text.",
+    "Deliberately scope the repair to unescaped quotes only: no single-quote conversion and no truncation closing, so prose containing stray braces is never mistaken for a JSON region and excised from the narrative.",
+    "Extend the browserless frontend test harness with regressions covering the real failing payload for discovery and for a non-discovery step type, multiple desynced fences in one turn, and unrecoverable fences not swallowing their neighbors."
+  ],
+  "bump_type": "patch",
+  "is_tag": false,
+  "pre_session_baseline": "12.14.1",
+  "provisional_suggested_version": "12.14.2",
+  "consumed": false,
+  "consumed_by": null
+}
