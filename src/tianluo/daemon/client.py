@@ -2143,6 +2143,18 @@ class DaemonClient:
                             cursor_base=read.cursor_base,
                             usage=read.usage,
                             usage_catalog=read.usage_catalog,
+                            # INVARIANT: this drain declares its own end. A
+                            # truncated read means another frame of THIS reply
+                            # follows, so the server may not settle the bundle on
+                            # it — which is what makes a reply cut mid-drain
+                            # (keepalive close, daemon restart) detectable
+                            # instead of leaving a self-consistent prefix behind.
+                            # The no-progress exit below is the one case where a
+                            # frame declared ``final=False`` is nonetheless the
+                            # last one we send; the server then treats the
+                            # delivery as unfinished, which is the truth — the
+                            # tail it was promised genuinely never arrives.
+                            final=not read.truncated,
                             seq=self._next_seq(),
                         ),
                     )
@@ -2650,6 +2662,12 @@ class DaemonClient:
                         cursor_base=read.cursor_base,
                         usage=read.usage,
                         usage_catalog=read.usage_catalog,
+                        # A byte-bounded catch-up chunk has backlog behind it
+                        # (see the fast-push re-arm below), so it is no more a
+                        # complete delivery than a drain's middle frame: say so,
+                        # and the server keeps the bundle unsettled until the
+                        # chunk that finally clears the backlog arrives.
+                        final=not read.truncated,
                         seq=self._next_seq(),
                     ),
                 )

@@ -297,6 +297,39 @@ def test_big_render_declares_encoding_so_gzip_middleware_passes_through():
     assert json.loads(gzip.decompress(response.body))["delivery"] == "full"
 
 
+def test_big_bundle_shaping_runs_under_the_render_gate(monkeypatch):
+    """Summary shaping is an O(bundle) pass, so it obeys the same gate.
+
+    It used to run ahead of the ``big`` decision and outside the gate, so N
+    concurrent opens of a big flow held N shaped copies before the gate had
+    admitted even one — the transient-memory source the gate exists to bound.
+    The size decision is deliberately taken on the UNSHAPED records: shaping only
+    ever removes bytes, so the estimate can over-classify (batched render for a
+    payload that ships small) but never under-classify.
+    """
+    # One permit, so ``Semaphore.locked()`` is a direct read of "the gate is
+    # held" (a fresh event loop below gets a gate built from this value).
+    monkeypatch.setattr(app_module, "HISTORY_RENDER_CONCURRENCY", 1)
+    original = app_module.summarize_history_records
+    seen = []
+
+    def spy(records, flow_id):
+        gate = app_module._history_render_gate()
+        seen.append(gate.locked())
+        return original(records, flow_id)
+
+    monkeypatch.setattr(app_module, "summarize_history_records", spy)
+
+    async def scenario():
+        await app_module._history_response(_big_payload(), _Req("gzip"))
+        await app_module._history_response(_small_payload(), _Req("gzip"))
+
+    asyncio.run(scenario())
+    # The big payload shaped with the gate held; the small one skipped it (the
+    # gate would cost more than the render it protects).
+    assert seen == [True, False]
+
+
 def test_a_client_that_cannot_gzip_still_gets_plain_json():
     async def scenario():
         return await app_module._history_response(_big_payload(), _Req("identity"))

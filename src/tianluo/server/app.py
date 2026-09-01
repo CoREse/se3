@@ -82,6 +82,8 @@ from .persistence import (
 )
 from .state import ServerState, records_reach_bytes
 from .ws import (
+    HEARTBEAT_TIMEOUT,
+    PING_INTERVAL,
     ConnectionManager,
     DetailRequestRegistry,
     HistoryRequestRegistry,
@@ -477,19 +479,25 @@ async def _history_response(payload: dict, request: Request) -> Response:
     compression step it asked not to have.
     """
     gzip_ok = "gzip" in request.headers.get("accept-encoding", "").lower()
-    # Summary shaping happens HERE — the single funnel every history snapshot
-    # leaves through — so no delivery (full / delta / backfill / a reconciled
-    # re-read) can escape it. The cache keeps the full bundle; only the wire
-    # copy loses the detail bodies, and the size decision below is therefore
-    # made on what actually ships.
-    payload["records"] = summarize_history_records(
-        payload.get("records"), payload.get("flow_id") or ""
-    )
     records = payload.get("records")
     big = isinstance(records, list) and (
         len(records) >= HISTORY_RESPONSE_OFFLOAD_RECORDS
         or records_reach_bytes(records, HISTORY_RESPONSE_OFFLOAD_BYTES)
     )
+    # Summary shaping happens in THIS function — the single funnel every history
+    # snapshot leaves through — so no delivery (full / delta / backfill / a
+    # reconciled re-read) can escape it. The cache keeps the full bundle; only
+    # the wire copy loses the detail bodies.
+    #
+    # WHY it now runs INSIDE the gate on the big path, and why the size decision
+    # is taken BEFORE it: shaping is itself an O(records) pass over the whole
+    # bundle, so it belongs under the same concurrency discipline as the render
+    # and the gzip rather than running unbounded ahead of them — N concurrent
+    # big-bundle opens otherwise hold N shaped copies before the gate has
+    # admitted even one. Deciding ``big`` on the UNSHAPED records only ever
+    # over-estimates (shaping strictly removes bytes and never adds a record),
+    # so a payload that ships small can take the batched path but one that ships
+    # big can never take the inline one — the direction that keeps the loop safe.
     if big:
         # The gate bounds how many full-bundle copies exist off-lock at once
         # (see HISTORY_RENDER_CONCURRENCY); waiting here costs latency, never
@@ -497,11 +505,17 @@ async def _history_response(payload: dict, request: Request) -> Response:
         # ``ServerState._lock``, so a bundle evicted while this request queues or
         # renders cannot change what it will serve.
         async with _history_render_gate():
+            payload["records"] = summarize_history_records(
+                records, payload.get("flow_id") or ""
+            )
             body = await dump_json_chunked(payload, **_HISTORY_JSON_KWARGS)
             gzipped = gzip_ok and len(body) >= GZIP_MIN_SIZE
             if gzipped:
                 body = await asyncio.to_thread(_gzip_history_body, body)
     else:
+        payload["records"] = summarize_history_records(
+            records, payload.get("flow_id") or ""
+        )
         body, gzipped = _render_history_body(payload, False)
     headers = {}
     if gzipped:
@@ -3265,6 +3279,7 @@ def create_app(
         project_root: str,
         *,
         deadline: Optional[float] = None,
+        cursor: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Dispatch a coalesced daemon full pull for this flow and await it.
 
@@ -3285,6 +3300,13 @@ def create_app(
         further work to do under the same bound — the detail route follows the
         reply's later frames — share its budget instead of stacking a second
         one; omitted, the call gets its own ``HISTORY_PULL_TIMEOUT``.
+        *cursor* makes the request an INCREMENTAL one: the daemon answers with
+        ``append`` frames from that water mark rather than rebuilding the whole
+        bundle. Only the interrupted-delivery repair uses it — every other
+        caller wants the cursorless full — and the coalescing key deliberately
+        ignores it: a concurrent full pull already brings back everything an
+        incremental would, so collapsing the two onto one reply is correct.
+
         WHY the dispatch needs bounding too: ``send_to_connection`` ends in
         ``websocket.send_text``, which has no timeout of its own and blocks for
         as long as a backpressured or half-open daemon socket refuses to drain.
@@ -3320,6 +3342,7 @@ def create_app(
                             machine_id=owner_machine,
                             connection=connection,
                             project_root=project_root or "",
+                            cursor=cursor,
                         ),
                         timeout=remaining,
                     )
@@ -3403,10 +3426,20 @@ def create_app(
         scope = _scope_for(identity_)
         owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
 
-        async def _pull_from_daemon(connection: Any, project_root: str) -> None:
-            """This route's binding of the shared coalesced daemon pull."""
+        async def _pull_from_daemon(
+            connection: Any,
+            project_root: str,
+            *,
+            cursor: Optional[Dict[str, Any]] = None,
+        ) -> None:
+            """This route's binding of the shared coalesced daemon pull.
+
+            *cursor* asks the daemon for an ``append`` backfill from that water
+            mark instead of a full rebuild (see the interrupted-delivery repair
+            below); ``None`` is the cursorless full every other caller wants.
+            """
             await _pull_history_from_daemon(
-                flow_id, owner_machine, connection, project_root
+                flow_id, owner_machine, connection, project_root, cursor=cursor
             )
 
         # Cache hit: serve a not-modified / delta / full snapshot atomically.
@@ -3467,8 +3500,32 @@ def create_app(
                 not missing_map
                 and snapshot.get("delivery") == "not_modified"
                 and not await state.full_pull_throttled(flow_id)
-                and await state.is_active_worktree_flow(
-                    flow_id, owner=target_owner
+                and (
+                    await state.is_active_worktree_flow(
+                        flow_id, owner=target_owner
+                    )
+                    # INTERRUPTED-DELIVERY REPAIR. The worktree predicate above
+                    # is about a cache that may be behind a still-WRITING flow;
+                    # this one is about a cache that is behind what the daemon
+                    # already tried to send it. A flow's history is delivered in
+                    # up to ~150 frames, and a socket that dies in the middle
+                    # leaves a self-consistent PREFIX behind (see
+                    # ``ServerState._OpenDelivery``): the client is provably in
+                    # sync with the cache, so this poll answers
+                    # ``not_modified``, and nothing else will ever ask for the
+                    # rest.
+                    #
+                    # WHY it must NOT be gated on ``is_active_worktree_flow``:
+                    # the flow this happens to is typically COMPLETED — opening a
+                    # big archived session is what triggers a multi-frame pull at
+                    # all — and a completed flow receives no further appends, so
+                    # the append-driven self-heal that repairs a live flow never
+                    # fires for it. Under the old gate the one flow that could
+                    # not repair itself was the exact one that needed to. The
+                    # gate is widened, not removed: a bundle with no interrupted
+                    # delivery still never reconciles, so an ordinary completed
+                    # flow's idle poll costs what it always did.
+                    or await state.history_delivery_repair_due(flow_id)
                 )
             ):
                 owner_connection = await manager.get_connection(owner_machine)
@@ -3485,10 +3542,41 @@ def create_app(
                     cached_record_count = len(
                         (cached_bundle or {}).get("records") or []
                     )
+                    # How to pull. A worktree self-heal stays what it was — a
+                    # cursorless full, because that flow's history is split
+                    # across two roots and only a whole re-read merges them.
+                    # An interrupted delivery instead goes through
+                    # ``plan_recovery_pull``, which gives two things a bare
+                    # cursorless pull cannot:
+                    #
+                    #   * an INCREMENTAL backfill anchored at the server's own
+                    #     water mark whenever the bundle is reusable. A repair
+                    #     that re-drains from zero re-runs the very risk that
+                    #     broke the bundle — a second interruption would leave a
+                    #     SHORTER prefix — while an append-only backfill can only
+                    #     extend it, so repeated repairs converge instead of
+                    #     oscillating;
+                    #   * the at-most-one-recovery-per-flow dedup, so a 3 s poll
+                    #     cannot stack repairs on top of the drain already
+                    #     filling the bundle. ``None`` means one is running: fall
+                    #     through and serve the cache, unrepaired for now.
+                    repair_cursor = None
+                    if await state.history_delivery_incomplete(flow_id):
+                        plan = await state.plan_recovery_pull(
+                            flow_id, owner_machine, repair=True
+                        )
+                        if plan is None:
+                            return await _history_response(
+                                {"flow_id": flow_id, "cached": True, **snapshot},
+                                request,
+                            )
+                        _kind, repair_cursor = plan
                     await state.mark_full_pull(flow_id)
                     try:
                         await _pull_from_daemon(
-                            owner_connection, reconcile_root or ""
+                            owner_connection,
+                            reconcile_root or "",
+                            cursor=repair_cursor,
                         )
                     except HTTPException:
                         # The reconcile is best-effort robustness: if the daemon
@@ -3956,6 +4044,23 @@ def run(
         port=port,
         log_level=log_level,
         ws_max_size=protocol.MAX_WS_MESSAGE_BYTES,
+        # State the transport keepalive instead of inheriting uvicorn's
+        # undeclared 20 s / 20 s. A daemon draining a large flow's history sends
+        # ~150 frames back to back, and uvicorn's ping rides the same inbound
+        # stream the app is consuming — so a receive loop held up behind that
+        # backlog used to lose the connection to
+        # ``1011 INTERNAL_ERROR: keepalive ping timeout`` mid-drain, taking the
+        # rest of the reply with it. Sized to the application-level liveness
+        # rule this server already runs on (``ws.PING_INTERVAL`` /
+        # ``ws.HEARTBEAT_TIMEOUT``), so the transport never declares a peer dead
+        # that the protocol above it still considers alive.
+        #
+        # WHY this is a margin and NOT the fix: the head-of-line block that
+        # created those delays is removed by the per-client outbound queue in
+        # ``ws._UiClientChannel`` — this only stops a merely-slow drain from
+        # being killed by a timeout tighter than the app's own.
+        ws_ping_interval=PING_INTERVAL,
+        ws_ping_timeout=HEARTBEAT_TIMEOUT,
     )
     try:
         uvicorn.run(app, ws_per_message_deflate=True, **run_kwargs)
