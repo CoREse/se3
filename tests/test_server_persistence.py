@@ -459,3 +459,44 @@ def test_identity_link_idempotent_and_conflict(store):
     # Linking to a different owner conflicts.
     with pytest.raises(IdentityAlreadyBound):
         svc.link_identity_to_owner(b, "local", "alice", admin_override=True)
+
+
+def test_in_memory_store_survives_concurrent_reads():
+    """Reads on the SHARED in-memory connection must serialize like writes do.
+
+    An in-memory ``Store`` — what ``create_app()`` builds by default, so what
+    every test and every un-configured deployment runs on — cannot give each
+    thread its own connection (per-thread in-memory DBs would be separate empty
+    databases), so all threads drive ONE ``sqlite3.Connection``. The read methods
+    used to skip the lock the writers hold, and Starlette runs every sync
+    dependency in its threadpool — ``require_owner`` → ``get_owner`` on the
+    request hot path. Concurrent requests therefore reentered that connection and
+    raised ``sqlite3.InterfaceError: bad parameter or other API misuse``, which
+    surfaced as a 500 and then permanent 401s for that session.
+    """
+    store = Store(":memory:")
+    owners = [store.create_owner("o%d" % i) for i in range(8)]
+    for i, oid in enumerate(owners):
+        store.link_identity(oid, "local", "user%d" % i)
+
+    errors = []
+    barrier = threading.Barrier(8)
+
+    def worker(index):
+        barrier.wait()
+        try:
+            for _ in range(60):
+                assert store.get_owner(owners[index]) is not None
+                assert store.resolve_owner_by_identity(
+                    "local", "user%d" % index
+                ) == owners[index]
+                store.list_owners()
+        except Exception as exc:  # pragma: no cover - the regression itself
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []

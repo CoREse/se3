@@ -1,0 +1,363 @@
+{
+ "_source": "tianluo/history/20260831-095750_23865927 (52 steps / 4324 records / ~49 MB on disk), read back through DaemonHistoryReader.read_flow so the frame boundaries are the daemon's own chunk-bounded reads. Only the SHAPE is committed (per-step record counts and per-frame record counts); the record bodies are synthesized by the test.",
+ "flow_id": "20260831-095750_23865927",
+ "frames": [
+  26,
+  32,
+  32,
+  16,
+  57,
+  83,
+  80,
+  88,
+  60,
+  59,
+  111,
+  47,
+  53,
+  47,
+  70,
+  38,
+  87,
+  89,
+  21,
+  43,
+  90,
+  23,
+  54,
+  45,
+  69,
+  7,
+  28,
+  66,
+  77,
+  47,
+  23,
+  84,
+  78,
+  85,
+  33,
+  83,
+  66,
+  47,
+  7,
+  4,
+  30,
+  34,
+  15,
+  1,
+  4,
+  30,
+  33,
+  1,
+  4,
+  28,
+  32,
+  2,
+  1,
+  21,
+  1,
+  28,
+  43,
+  2,
+  1,
+  32,
+  1,
+  22,
+  16,
+  1,
+  11,
+  4,
+  26,
+  28,
+  19,
+  46,
+  1,
+  1,
+  4,
+  44,
+  1,
+  51,
+  1,
+  4,
+  36,
+  1,
+  64,
+  1,
+  34,
+  48,
+  1,
+  58,
+  81,
+  1,
+  4,
+  26,
+  40,
+  8,
+  1,
+  27,
+  1,
+  26,
+  34,
+  36,
+  1,
+  36,
+  1,
+  4,
+  24,
+  43,
+  14,
+  1,
+  4,
+  38,
+  38,
+  46,
+  24,
+  1,
+  7,
+  42,
+  10,
+  1,
+  4,
+  36,
+  28,
+  1,
+  73,
+  3,
+  1,
+  38,
+  9,
+  1,
+  50,
+  60,
+  1,
+  4,
+  26,
+  1,
+  34,
+  1,
+  24,
+  1,
+  53,
+  69,
+  1,
+  2,
+  69,
+  24,
+  7,
+  9,
+  25,
+  27,
+  0
+ ],
+ "steps": [
+  {
+   "step_id": "01_discovery_ffd5c452",
+   "records": 61
+  },
+  {
+   "step_id": "02_analyze_79d20f2e",
+   "records": 11
+  },
+  {
+   "step_id": "03_plan_4b4d2458",
+   "records": 35
+  },
+  {
+   "step_id": "04_confirm_8b3408a0",
+   "records": 7
+  },
+  {
+   "step_id": "05_implement_d5ee114f",
+   "records": 2037
+  },
+  {
+   "step_id": "06_test_a5536a37",
+   "records": 4
+  },
+  {
+   "step_id": "07_self_check_51f07a62",
+   "records": 80
+  },
+  {
+   "step_id": "08_test_5ea32934",
+   "records": 4
+  },
+  {
+   "step_id": "09_self_check_916106c0",
+   "records": 64
+  },
+  {
+   "step_id": "10_test_78358e8a",
+   "records": 4
+  },
+  {
+   "step_id": "11_self_check_c580f180",
+   "records": 63
+  },
+  {
+   "step_id": "12_adjudicate_d3acd1bc",
+   "records": 22
+  },
+  {
+   "step_id": "13_self_check_d1dd34c7",
+   "records": 74
+  },
+  {
+   "step_id": "14_adjudicate_368cece7",
+   "records": 33
+  },
+  {
+   "step_id": "15_self_check_f8b2bb79",
+   "records": 39
+  },
+  {
+   "step_id": "16_adjudicate_db8390dc",
+   "records": 11
+  },
+  {
+   "step_id": "17_test_fd54c1dc",
+   "records": 4
+  },
+  {
+   "step_id": "18_self_check_15a1b4d7",
+   "records": 121
+  },
+  {
+   "step_id": "19_test_1d515647",
+   "records": 4
+  },
+  {
+   "step_id": "20_self_check_67c6f9a9",
+   "records": 45
+  },
+  {
+   "step_id": "21_self_check_9c6e60a1",
+   "records": 52
+  },
+  {
+   "step_id": "22_test_7cf54dca",
+   "records": 4
+  },
+  {
+   "step_id": "23_self_check_00102497",
+   "records": 37
+  },
+  {
+   "step_id": "24_self_check_9f33a4be",
+   "records": 65
+  },
+  {
+   "step_id": "25_self_check_03ba18d3",
+   "records": 83
+  },
+  {
+   "step_id": "26_self_check_a1106f23",
+   "records": 140
+  },
+  {
+   "step_id": "27_test_bd56a997",
+   "records": 4
+  },
+  {
+   "step_id": "28_self_check_5ab85dfa",
+   "records": 75
+  },
+  {
+   "step_id": "29_adjudicate_fb76a285",
+   "records": 28
+  },
+  {
+   "step_id": "30_self_check_0fad6457",
+   "records": 97
+  },
+  {
+   "step_id": "31_adjudicate_38a9f8ab",
+   "records": 37
+  },
+  {
+   "step_id": "32_test_62747753",
+   "records": 4
+  },
+  {
+   "step_id": "33_self_check_1d7de348",
+   "records": 82
+  },
+  {
+   "step_id": "34_test_131cb947",
+   "records": 4
+  },
+  {
+   "step_id": "35_self_check_7c6b2abd",
+   "records": 147
+  },
+  {
+   "step_id": "36_adjudicate_51bc6721",
+   "records": 7
+  },
+  {
+   "step_id": "37_self_check_345b84b7",
+   "records": 53
+  },
+  {
+   "step_id": "38_test_cb8f8cff",
+   "records": 4
+  },
+  {
+   "step_id": "39_self_check_c7bf4cac",
+   "records": 65
+  },
+  {
+   "step_id": "40_self_check_b3f031c1",
+   "records": 77
+  },
+  {
+   "step_id": "41_self_check_3797b392",
+   "records": 48
+  },
+  {
+   "step_id": "42_self_check_e5f60ac3",
+   "records": 111
+  },
+  {
+   "step_id": "43_test_b02e45ad",
+   "records": 4
+  },
+  {
+   "step_id": "44_self_check_8c32d64c",
+   "records": 27
+  },
+  {
+   "step_id": "45_self_check_d76f918a",
+   "records": 35
+  },
+  {
+   "step_id": "46_self_check_035cb2f7",
+   "records": 25
+  },
+  {
+   "step_id": "47_self_check_0f0df406",
+   "records": 123
+  },
+  {
+   "step_id": "48_invariant_check_d09dacbd",
+   "records": 95
+  },
+  {
+   "step_id": "49_charter_freshness_b5fc1f1b",
+   "records": 7
+  },
+  {
+   "step_id": "50_version_analyze_5b8f1820",
+   "records": 9
+  },
+  {
+   "step_id": "51_commit_c4e4d916",
+   "records": 25
+  },
+  {
+   "step_id": "52_summarize_6201ea5c",
+   "records": 27
+  }
+ ]
+}

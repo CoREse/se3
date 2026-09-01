@@ -36,6 +36,7 @@ single-file / zero-dependency deployment goal.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sqlite3
 import threading
@@ -246,6 +247,41 @@ class Store:
             self._tlocal.conn = conn
         return conn
 
+    @contextlib.contextmanager
+    def _reading(self):
+        """Yield a connection safe to READ on, serializing only when shared.
+
+        WHY reads need this at all: :meth:`_conn` hands every thread its own
+        connection for a file-backed store, but an in-memory store — the default
+        for ``create_app()``, and so for every test and every bare deployment —
+        must share ONE connection, because per-thread in-memory databases would
+        each be a separate empty DB. The writes already serialize on
+        :attr:`_lock`; the reads did not, and Starlette runs every sync
+        dependency (``require_owner`` → :meth:`get_owner` on the request hot
+        path) in its threadpool. Two concurrent requests therefore drove the
+        same sqlite connection at once and raised
+        ``sqlite3.InterfaceError: bad parameter or other API misuse``, surfacing
+        as a 500 followed by 401s for that session.
+
+        The lock is taken ONLY for the shared-connection case, so a file-backed
+        deployment keeps its fully parallel reads.
+        """
+        if self._is_memory:
+            with self._lock:
+                yield self._conn()
+        else:
+            yield self._conn()
+
+    def _read_one(self, sql: str, params: tuple = ()):
+        """Run one read that returns at most one row, on a safe connection."""
+        with self._reading() as conn:
+            return conn.execute(sql, params).fetchone()
+
+    def _read_all(self, sql: str, params: tuple = ()) -> list:
+        """Run one read that returns many rows, on a safe connection."""
+        with self._reading() as conn:
+            return conn.execute(sql, params).fetchall()
+
     def close(self) -> None:
         """Close the connection for the current thread (and the shared one)."""
         if self._shared_conn is not None:
@@ -324,12 +360,11 @@ class Store:
         return oid
 
     def get_owner(self, owner_id: str) -> Optional[Owner]:
-        conn = self._conn()
-        row = conn.execute(
+        row = self._read_one(
             "SELECT owner_id, display_name, is_admin, created_at "
             "FROM owners WHERE owner_id = ?",
             (owner_id,),
-        ).fetchone()
+        )
         if row is None:
             return None
         return Owner(
@@ -340,11 +375,10 @@ class Store:
         )
 
     def list_owners(self) -> List[Owner]:
-        conn = self._conn()
-        rows = conn.execute(
+        rows = self._read_all(
             "SELECT owner_id, display_name, is_admin, created_at "
             "FROM owners ORDER BY created_at ASC"
-        ).fetchall()
+        )
         return [
             Owner(
                 owner_id=r["owner_id"],
@@ -549,21 +583,19 @@ class Store:
             conn.commit()
 
     def resolve_owner_by_identity(self, provider: str, external_id: str) -> Optional[str]:
-        conn = self._conn()
-        row = conn.execute(
+        row = self._read_one(
             "SELECT owner_id FROM identity_bindings WHERE provider = ? AND external_id = ?",
             (provider, external_id),
-        ).fetchone()
+        )
         return row["owner_id"] if row is not None else None
 
     def list_identities(self, owner_id: str) -> List[tuple]:
         """Return ``[(provider, external_id), ...]`` bound to ``owner_id``."""
-        conn = self._conn()
-        rows = conn.execute(
+        rows = self._read_all(
             "SELECT provider, external_id FROM identity_bindings "
             "WHERE owner_id = ? ORDER BY created_at ASC",
             (owner_id,),
-        ).fetchall()
+        )
         return [(r["provider"], r["external_id"]) for r in rows]
 
     # ----- local credentials (password hash) ------------------------------ #
@@ -587,11 +619,10 @@ class Store:
             conn.commit()
 
     def get_password_hash(self, owner_id: str) -> Optional[str]:
-        conn = self._conn()
-        row = conn.execute(
+        row = self._read_one(
             "SELECT password_hash FROM local_credentials WHERE owner_id = ?",
             (owner_id,),
-        ).fetchone()
+        )
         return row["password_hash"] if row is not None else None
 
     # ----- daemon keys ----------------------------------------------------- #
@@ -617,11 +648,10 @@ class Store:
 
     def resolve_owner_by_daemon_key(self, key_hash: str) -> Optional[str]:
         """Return the owner a *non-revoked* daemon key hash belongs to."""
-        conn = self._conn()
-        row = conn.execute(
+        row = self._read_one(
             "SELECT owner_id FROM daemon_keys WHERE key_hash = ? AND revoked_at IS NULL",
             (key_hash,),
-        ).fetchone()
+        )
         return row["owner_id"] if row is not None else None
 
     def revoke_daemon_key(self, key_id: str) -> bool:
@@ -650,7 +680,6 @@ class Store:
     def list_daemon_keys(
         self, owner_id: str, *, include_revoked: bool = True
     ) -> List[DaemonKey]:
-        conn = self._conn()
         sql = (
             "SELECT key_id, owner_id, key_hash, label, created_at, revoked_at "
             "FROM daemon_keys WHERE owner_id = ?"
@@ -658,7 +687,7 @@ class Store:
         if not include_revoked:
             sql += " AND revoked_at IS NULL"
         sql += " ORDER BY created_at ASC"
-        rows = conn.execute(sql, (owner_id,)).fetchall()
+        rows = self._read_all(sql, (owner_id,))
         return [
             DaemonKey(
                 key_id=r["key_id"],
@@ -750,12 +779,11 @@ class Store:
         cap = max(0, int(limit))
         if cap == 0:
             return []
-        conn = self._conn()
-        rows = conn.execute(
+        rows = self._read_all(
             "SELECT entry_id, text, created_at FROM message_history "
             "WHERE owner_id = ? AND channel = ? ORDER BY entry_id DESC LIMIT ?",
             (owner_id, channel, cap),
-        ).fetchall()
+        )
         return [
             MessageHistoryEntry(
                 entry_id=int(r["entry_id"]),
@@ -767,11 +795,10 @@ class Store:
 
     def count_message_history(self, owner_id: str, channel: str) -> int:
         """Row count for one ``(owner_id, channel)`` — the truncation probe."""
-        conn = self._conn()
-        row = conn.execute(
+        row = self._read_one(
             "SELECT COUNT(*) AS c FROM message_history WHERE owner_id = ? AND channel = ?",
             (owner_id, channel),
-        ).fetchone()
+        )
         return int(row["c"])
 
     # ----- break-glass tokens ---------------------------------------------- #

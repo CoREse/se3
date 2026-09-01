@@ -82,6 +82,8 @@ from .persistence import (
 )
 from .state import ServerState, records_reach_bytes
 from .ws import (
+    HEARTBEAT_TIMEOUT,
+    PING_INTERVAL,
     ConnectionManager,
     DetailRequestRegistry,
     HistoryRequestRegistry,
@@ -477,19 +479,25 @@ async def _history_response(payload: dict, request: Request) -> Response:
     compression step it asked not to have.
     """
     gzip_ok = "gzip" in request.headers.get("accept-encoding", "").lower()
-    # Summary shaping happens HERE — the single funnel every history snapshot
-    # leaves through — so no delivery (full / delta / backfill / a reconciled
-    # re-read) can escape it. The cache keeps the full bundle; only the wire
-    # copy loses the detail bodies, and the size decision below is therefore
-    # made on what actually ships.
-    payload["records"] = summarize_history_records(
-        payload.get("records"), payload.get("flow_id") or ""
-    )
     records = payload.get("records")
     big = isinstance(records, list) and (
         len(records) >= HISTORY_RESPONSE_OFFLOAD_RECORDS
         or records_reach_bytes(records, HISTORY_RESPONSE_OFFLOAD_BYTES)
     )
+    # Summary shaping happens in THIS function — the single funnel every history
+    # snapshot leaves through — so no delivery (full / delta / backfill / a
+    # reconciled re-read) can escape it. The cache keeps the full bundle; only
+    # the wire copy loses the detail bodies.
+    #
+    # WHY it now runs INSIDE the gate on the big path, and why the size decision
+    # is taken BEFORE it: shaping is itself an O(records) pass over the whole
+    # bundle, so it belongs under the same concurrency discipline as the render
+    # and the gzip rather than running unbounded ahead of them — N concurrent
+    # big-bundle opens otherwise hold N shaped copies before the gate has
+    # admitted even one. Deciding ``big`` on the UNSHAPED records only ever
+    # over-estimates (shaping strictly removes bytes and never adds a record),
+    # so a payload that ships small can take the batched path but one that ships
+    # big can never take the inline one — the direction that keeps the loop safe.
     if big:
         # The gate bounds how many full-bundle copies exist off-lock at once
         # (see HISTORY_RENDER_CONCURRENCY); waiting here costs latency, never
@@ -497,11 +505,17 @@ async def _history_response(payload: dict, request: Request) -> Response:
         # ``ServerState._lock``, so a bundle evicted while this request queues or
         # renders cannot change what it will serve.
         async with _history_render_gate():
+            payload["records"] = summarize_history_records(
+                records, payload.get("flow_id") or ""
+            )
             body = await dump_json_chunked(payload, **_HISTORY_JSON_KWARGS)
             gzipped = gzip_ok and len(body) >= GZIP_MIN_SIZE
             if gzipped:
                 body = await asyncio.to_thread(_gzip_history_body, body)
     else:
+        payload["records"] = summarize_history_records(
+            records, payload.get("flow_id") or ""
+        )
         body, gzipped = _render_history_body(payload, False)
     headers = {}
     if gzipped:
@@ -3956,6 +3970,23 @@ def run(
         port=port,
         log_level=log_level,
         ws_max_size=protocol.MAX_WS_MESSAGE_BYTES,
+        # State the transport keepalive instead of inheriting uvicorn's
+        # undeclared 20 s / 20 s. A daemon draining a large flow's history sends
+        # ~150 frames back to back, and uvicorn's ping rides the same inbound
+        # stream the app is consuming — so a receive loop held up behind that
+        # backlog used to lose the connection to
+        # ``1011 INTERNAL_ERROR: keepalive ping timeout`` mid-drain, taking the
+        # rest of the reply with it. Sized to the application-level liveness
+        # rule this server already runs on (``ws.PING_INTERVAL`` /
+        # ``ws.HEARTBEAT_TIMEOUT``), so the transport never declares a peer dead
+        # that the protocol above it still considers alive.
+        #
+        # WHY this is a margin and NOT the fix: the head-of-line block that
+        # created those delays is removed by the per-client outbound queue in
+        # ``ws._UiClientChannel`` — this only stops a merely-slow drain from
+        # being killed by a timeout tighter than the app's own.
+        ws_ping_interval=PING_INTERVAL,
+        ws_ping_timeout=HEARTBEAT_TIMEOUT,
     )
     try:
         uvicorn.run(app, ws_per_message_deflate=True, **run_kwargs)

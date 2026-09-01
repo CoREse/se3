@@ -661,6 +661,32 @@ class _ReplayDrain:
     draining: bool = False
     #: Leak guard for a pull whose reply never arrives at all.
     deadline: float = 0.0
+    #: Whether a frame of the reply CURRENTLY draining woke a parked REST
+    #: waiter. Set once by that frame and read by every later frame of the same
+    #: reply, so the fan-out can tell "these records are already going back to a
+    #: REST caller" from "nobody asked for these over REST" (see
+    #: :meth:`ServerState.mark_history_reply_served`).
+    rest_served: bool = False
+
+
+@dataclass
+class ReplayVerdict:
+    """How one inbound ``HISTORY_DATA`` frame was classified.
+
+    ``replay`` is the shaping verdict the browser leg needs (summarize like the
+    REST bundle, or ship whole). ``from_pull`` says the frame belongs to a reply
+    the SERVER asked for, and ``rest_served`` that this reply's records are
+    already being handed to a REST caller — together they are what lets the
+    fan-out drop a delivery the browser is receiving twice.
+    """
+
+    replay: bool
+    from_pull: bool = False
+    rest_served: bool = False
+    #: Whether THIS frame retired the pull it answers — the reply's last frame,
+    #: after which the bundle is settled and the next frame for the flow is live
+    #: traffic again.
+    closing: bool = False
 
 
 def _cursor_base_ahead(
@@ -1700,12 +1726,37 @@ class ServerState:
         chunk_bounded: Any = False,
         cursor_base: Optional[Dict[str, Any]] = None,
     ) -> bool:
+        """The shaping half of :meth:`take_history_replay_verdict`.
+
+        Kept as the narrow boolean the shaping decision actually needs, so a
+        caller that only asks "summarize this frame or ship it whole?" is not
+        made to unpack a verdict it has no use for.
+        """
+        verdict = await self.take_history_replay_verdict(
+            flow_id,
+            mode_full=mode_full,
+            chunk_bounded=chunk_bounded,
+            cursor_base=cursor_base,
+        )
+        return verdict.replay
+
+    async def take_history_replay_verdict(
+        self,
+        flow_id: str,
+        *,
+        mode_full: bool = False,
+        chunk_bounded: Any = False,
+        cursor_base: Optional[Dict[str, Any]] = None,
+    ) -> ReplayVerdict:
         """Account one inbound ``HISTORY_DATA`` frame and classify its origin.
 
-        Returns ``True`` when the frame REPLAYS already-persisted history (a
-        pull reply's frame, or a whole-bundle snapshot replacement) and ``False``
-        for a genuine post-subscription tail append, which rides to the browser
-        whole.
+        ``ReplayVerdict.replay`` is ``True`` when the frame REPLAYS
+        already-persisted history (a pull reply's frame, or a whole-bundle
+        snapshot replacement) and ``False`` for a genuine post-subscription tail
+        append, which rides to the browser whole. ``from_pull`` narrows that to
+        the frames of a reply the server itself asked for, and ``rest_served``
+        says a REST caller is already being handed this reply's records — the
+        pair the fan-out needs to stop delivering one conversation twice.
 
         INVARIANT: every frame of a dispatched pull's reply — its head and all
         of its chunked tails — is classified as a replay, and the marker that
@@ -1760,7 +1811,7 @@ class ServerState:
         history no less than an answer to a pull we sent.
         """
         if not flow_id:
-            return False
+            return ReplayVerdict(False)
         now = time.monotonic()
         async with self._lock:
             drain = self._history_replay_pulls.get(flow_id)
@@ -1770,7 +1821,7 @@ class ServerState:
                 self._history_replay_pulls.pop(flow_id, None)
                 drain = None
             if drain is None or not drain.pulls:
-                return mode_full
+                return ReplayVerdict(mode_full)
             if not drain.draining:
                 # Replies drain in dispatch order down one socket, but a pull
                 # armed while an earlier one was still in flight would be stuck
@@ -1789,22 +1840,56 @@ class ServerState:
                     # A live append that raced the dispatch. It leaves the
                     # marker untouched — and its own deadline unrefreshed, since
                     # it is no evidence the reply we are waiting for is alive.
-                    return mode_full
+                    return ReplayVerdict(mode_full)
                 if opened:
                     drain.pulls.insert(0, drain.pulls.pop(opened))
                 drain.draining = True
             # Push the leak guard out on every frame of the reply so a long
             # multi-MB recovery cannot age out mid-drain.
             drain.deadline = now + self._HISTORY_REPLAY_TTL
+            rest_served = drain.rest_served
             bounded = chunk_bounded() if callable(chunk_bounded) else chunk_bounded
             if not bounded:
                 # Under the chunk bound: this is the reply's LAST frame, so the
                 # pull it answers retires here.
                 drain.pulls.pop(0)
                 drain.draining = False
+                # The "a REST caller holds these records" fact belongs to the
+                # reply that just ended, not to the next one queued behind it.
+                drain.rest_served = False
                 if not drain.pulls:
                     self._history_replay_pulls.pop(flow_id, None)
-            return True
+            return ReplayVerdict(
+                True,
+                from_pull=True,
+                rest_served=rest_served,
+                closing=not bounded,
+            )
+
+    async def mark_history_reply_served(self, flow_id: str) -> None:
+        """Record that the reply now draining for *flow_id* woke a REST waiter.
+
+        WHY: a cache-miss open dispatches ONE ``MSG_HISTORY_REQUEST`` and the
+        daemon answers it with a ``full`` head plus every chunk-bounded tail the
+        flow needs (147 frames for this repo's own
+        ``20260831-095750_23865927``). The head resolves the parked REST handler,
+        which returns the bundle — and the tails then extend that same bundle,
+        which the same browser reads through its ordinary token-pinned polls. So
+        relaying those tails ships the identical conversation a second time:
+        measured at 103.9 MB down ``/ws/ui`` for one open whose REST body was
+        18.9 MB gzipped. Only the head was ever suppressed, because the fan-out
+        rule looked at one frame at a time and no frame but the head knows a REST
+        caller is waiting. This carries that fact forward to the rest of the
+        reply; the consoles are told the bundle moved by the records-less
+        ``history_cursor`` advisory instead, which is what they already act on
+        for a suppressed head.
+        """
+        if not flow_id:
+            return
+        async with self._lock:
+            drain = self._history_replay_pulls.get(flow_id)
+            if drain is not None and drain.draining:
+                drain.rest_served = True
 
     async def mark_full_pull(self, flow_id: str) -> None:
         """Stamp the monotonic time of a cache-miss ``full`` daemon pull.

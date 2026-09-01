@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import deque
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -136,6 +137,38 @@ UI_FRAME_CHUNKED_RECORDS = 200
 #: ``app.HISTORY_RESPONSE_OFFLOAD_BYTES`` for the same reason the record gate is
 #: aligned: it is the same bundle, relayed rather than served.
 UI_FRAME_CHUNKED_BYTES = 1024 * 1024
+
+#: How many event-loop turns a fan-out gives a client to accept the frame it was
+#: just offered before moving on and leaving the rest to that client's own
+#: outbound task (see :class:`_UiClientChannel`).
+#:
+#: WHY a turn budget and not a wall-clock grace: the point of the budget is to
+#: keep "the broadcast returned" meaning "the frame is on the wire" for a client
+#: whose send completes WITHOUT waiting on I/O — which is every in-process
+#: consumer, so the hub's delivery stays observable synchronously and the fan-out
+#: keeps its old pacing. A wall-clock grace G would instead be charged per frame
+#: — ~150 * min(G, that client's per-frame cost) over one big flow's drain, which
+#: is the very cost this change exists to remove, and no G both survives a loaded
+#: CI worker and stays cheap for a slow link. Turns cost microseconds and are
+#: independent of the client's link, so a slow console is billed nothing.
+UI_FANOUT_HANDOFF_TURNS = 4
+
+#: Bounds on ONE client's undelivered outbound backlog. A queue that a slow
+#: console never drains is a memory leak, so the backlog is capped on both axes
+#: (a relayed ``history_data`` frame of a big flow is ~0.7 MB, ordinary frames a
+#: few KB) and the overflow is DROPPED rather than waited on.
+UI_CLIENT_QUEUE_MAX_FRAMES = 64
+UI_CLIENT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
+
+#: Frame types a lagging client may lose without losing correctness. Every
+#: ``history_data`` frame carries the bundle's post-frame ``cursor`` /
+#: ``signature`` / ``pending``, so a console that misses one detects the hole on
+#: the NEXT frame it does receive (or on its next poll) and repairs it by asking
+#: for exactly the record numbers it lacks — the same self-check the suppressed
+#: ``history_cursor`` advisory drives. Nothing else is dropped preferentially:
+#: one-shot events (spawn failures, interjection lifecycle) have no such repair
+#: path, so they are only ever shed when the backlog is made of nothing else.
+UI_DROPPABLE_FRAME_TYPES = frozenset({"history_data"})
 
 
 async def dump_json_chunked(payload: Dict[str, Any], **dumps_kwargs: Any) -> bytes:
@@ -320,6 +353,29 @@ def _frame_is_chunk_bounded(records: Any) -> bool:
         if total >= MAX_BYTES_PER_REPORT:
             return True
     return False
+
+
+def _mid_reply_tail(verdict: Any) -> bool:
+    """Whether this frame is a NON-final tail of a reply already served by REST.
+
+    Such a frame gets no cursor advisory, and that is a deliberate exception to
+    "a suppressed frame still announces that the bundle moved".
+
+    WHY: the advisory drives the client's completeness self-check, and a client
+    whose records stop at the reply's head sees a gap of thousands of numbers —
+    past ``MISSING_MAX_ORDINALS``, so the numbered backfill cannot express it and
+    the check escalates to a token-less FULL re-pull of the whole bundle. Firing
+    that while the very records it is missing are already being delivered to it
+    — by the REST body it asked for plus the token-pinned poll that follows —
+    turns a saved 100 MB relay into a re-downloaded bundle. So the reply speaks
+    once it is settled: its head announces itself as before, its closing frame
+    carries the final cursor, and everything in between is a water mark that was
+    obsolete before the browser could act on it.
+    """
+    return bool(
+        getattr(verdict, "rest_served", False)
+        and not getattr(verdict, "closing", False)
+    )
 
 
 def _render_ui_frame(payload: Dict[str, Any]) -> str:
@@ -1204,6 +1260,142 @@ def _make_interjection_event(
     return payload
 
 
+class _UiClientChannel:
+    """One ``/ws/ui`` client's outbound queue, drained by its own task.
+
+    INVARIANT: no fan-out ever awaits a browser socket on the path that produced
+    the frame. Every send happens in THIS channel's task; :meth:`offer` only ever
+    appends to a bounded deque and returns.
+
+    WHY this exists (the defect it closes): the relay of a daemon's history reply
+    runs inside ``_serve_loop.receive()`` — one coroutine that reads the daemon
+    socket and awaits ``_handle_message`` per frame. With the fan-out awaiting
+    ``client.send_text`` inline, a browser that could not drain parked that
+    coroutine, so the DAEMON socket's inbound queue stopped being consumed, its
+    Pong was never processed, and uvicorn's WS keepalive closed the daemon
+    connection with ``1011 keepalive ping timeout`` — in the middle of a 147-frame
+    drain, which is how a large flow's conversation lost its tail. Measured with
+    ``scripts/measure_history_relay_backpressure.py`` over this repo's real
+    ``20260831-095750_23865927`` (147 frames / 4324 records): a browser costing
+    50 ms per frame parked the receive path for 11.3 s in total (2.5 s after this
+    change) while the event loop's worst lateness stayed at 60 ms throughout —
+    the loop was never the problem, the parked coroutine was. A slow console must
+    cost that console its frames and nothing else.
+    """
+
+    def __init__(self, hub: "UiHub", client: Any) -> None:
+        self._hub = hub
+        self.client = client
+        # (frame type, rendered text, encoded byte size)
+        self._queue: "deque" = deque()
+        self._bytes = 0
+        self._wake = asyncio.Event()
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self.closed = False
+        self.dropped = 0
+        self._task = asyncio.ensure_future(self._run())
+
+    def offer(self, ptype: str, text: str, nbytes: int) -> None:
+        """Queue one rendered frame for delivery. Never blocks, never raises."""
+        if self.closed:
+            return
+        self._queue.append((ptype, text, nbytes))
+        self._bytes += nbytes
+        self._trim()
+        self._idle.clear()
+        self._wake.set()
+
+    def _trim(self) -> None:
+        """Shed the oldest sheddable frames until the backlog is back in bounds.
+
+        Oldest-first because the newest frame carries the most advanced cursor:
+        a console that receives it learns the widest gap in one shot and repairs
+        it with one request, whereas keeping the oldest would hand it a stale
+        picture it must then repair twice.
+        """
+        # ``> 1``: the budget bounds a BACKLOG, so a single frame that is itself
+        # bigger than the byte budget (a whole-bundle relay of a big flow) is
+        # still delivered — it is already rendered and in memory, and dropping
+        # every such frame would mean a big flow never streams at all.
+        before = self.dropped
+        while len(self._queue) > 1 and (
+            len(self._queue) > UI_CLIENT_QUEUE_MAX_FRAMES
+            or self._bytes > UI_CLIENT_QUEUE_MAX_BYTES
+        ):
+            index = next(
+                (
+                    i
+                    for i, (ptype, _text, _n) in enumerate(self._queue)
+                    if ptype in UI_DROPPABLE_FRAME_TYPES
+                ),
+                0,
+            )
+            self._bytes -= self._queue[index][2]
+            del self._queue[index]
+            self.dropped += 1
+        # One line per queue-ful of loss, whatever the drop rate per offer:
+        # a lagging console must be visible in the log without becoming the log.
+        if self.dropped // UI_CLIENT_QUEUE_MAX_FRAMES != (
+            before // UI_CLIENT_QUEUE_MAX_FRAMES
+        ):
+            logger.warning(
+                "UI client is lagging; %d relayed frames dropped (backlog %d "
+                "frames / %.1f MiB). The client repairs itself from the cursor "
+                "carried by the frames it does receive.",
+                self.dropped, len(self._queue), self._bytes / (1024 * 1024),
+            )
+
+    async def _run(self) -> None:
+        while True:
+            if not self._queue:
+                self._idle.set()
+                self._wake.clear()
+                await self._wake.wait()
+                continue
+            ptype, text, nbytes = self._queue.popleft()
+            self._bytes -= nbytes
+            try:
+                await self.client.send_text(text)
+            except asyncio.CancelledError:  # pragma: no cover - shutdown
+                raise
+            except Exception:  # pragma: no cover - best effort
+                self.closed = True
+                self._idle.set()
+                await self._hub._client_failed(self.client)
+                return
+            if self._hub._metrics is not None:
+                self._hub._metrics.record(f"ui:{ptype or 'unknown'}", nbytes)
+
+    async def handoff(self, turns: int) -> None:
+        """Give this client *turns* loop turns to accept what it was offered.
+
+        Costs the caller nothing but a few scheduler round-trips, whatever the
+        client's link speed (see :data:`UI_FANOUT_HANDOFF_TURNS`).
+        """
+        for _ in range(max(0, turns)):
+            if self.closed or self._idle.is_set():
+                return
+            await asyncio.sleep(0)
+
+    async def wait_idle(self, timeout: Optional[float] = None) -> bool:
+        """Block until this client's backlog is empty (tests / diagnostics)."""
+        if self.closed:
+            return True
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout)
+        except asyncio.TimeoutError:
+            return False
+        return True
+
+    def close(self) -> None:
+        self.closed = True
+        self._queue.clear()
+        self._bytes = 0
+        self._idle.set()
+        self._task.cancel()
+
+
 class UiHub:
     """Owner-scoped fan-out hub for web-frontend WebSocket clients.
 
@@ -1219,6 +1411,14 @@ class UiHub:
     that has not yet wired authentication): a ``None`` client receives the
     unfiltered stream, exactly as before multi-tenancy existed.
 
+    Delivery is per-client and QUEUED: a fan-out renders each distinct payload
+    once, hands it to each target's :class:`_UiClientChannel`, and returns
+    without ever awaiting a browser socket — because the coroutine it runs on is
+    frequently the daemon's receive loop, which must keep reading. A client that
+    cannot drain loses its own relay frames (bounded queue, oldest sheddable
+    first) and repairs itself from the cursor the next frame carries; it can no
+    longer cost the daemon its connection.
+
     The hub is also the single point that knows the exact browser connection
     count, so it doubles as the *presence* source (protocol revision 4): when
     that count crosses the 0↔non-0 boundary, the injected *on_presence_edge*
@@ -1231,9 +1431,14 @@ class UiHub:
         self,
         metrics: Optional[WireMetrics] = None,
         on_presence_edge: Optional[Any] = None,
+        *,
+        handoff_turns: int = UI_FANOUT_HANDOFF_TURNS,
     ) -> None:
         # websocket -> owner_id (None == unscoped/admin view)
         self._clients: Dict[Any, Optional[str]] = {}
+        # websocket -> its outbound queue + drain task. Created on register so
+        # no asyncio primitive is bound to a loop at construction time.
+        self._channels: Dict[Any, "_UiClientChannel"] = {}
         self._lock = asyncio.Lock()
         # Per-frame-type sent-byte accounting for the server→browser leg,
         # recorded under a ``ui:<type>`` key so the /ws/ui fan-out shows up
@@ -1245,6 +1450,10 @@ class UiHub:
         # nothing about what the edge drives (the daemon broadcast lives in
         # ConnectionManager).
         self._on_presence_edge = on_presence_edge
+        # How many loop turns one fan-out gives a client to accept a frame
+        # before leaving it to that client's own drain task (see
+        # :data:`UI_FANOUT_HANDOFF_TURNS`).
+        self._handoff_turns = handoff_turns
 
     async def register(self, websocket: Any, owner: Optional[str] = None) -> None:
         # The edge decision is computed under the lock (from the counts before
@@ -1255,6 +1464,8 @@ class UiHub:
         async with self._lock:
             before = len(self._clients)
             self._clients[websocket] = owner
+            if websocket not in self._channels:
+                self._channels[websocket] = _UiClientChannel(self, websocket)
             after = len(self._clients)
         logger.info("UI client connected (%d total)", len(self._clients))
         if before == 0 and after > 0:
@@ -1264,10 +1475,45 @@ class UiHub:
         async with self._lock:
             before = len(self._clients)
             self._clients.pop(websocket, None)
+            channel = self._channels.pop(websocket, None)
             after = len(self._clients)
+        if channel is not None:
+            channel.close()
         logger.info("UI client disconnected (%d total)", len(self._clients))
         if before > 0 and after == 0:
             await self._fire_presence_edge(0)
+
+    async def _client_failed(self, websocket: Any) -> None:
+        """Retire a client whose socket raised while its channel was sending.
+
+        Called from the channel's own task, which is the only place a send
+        failure is now observable — the fan-out no longer touches the socket.
+        The presence edge is detected HERE for the same reason the fan-out used
+        to detect it: a client pruned on a failed send is gone before its
+        connection handler's ``unregister`` runs, so that unregister would see
+        no count change and fire no edge, leaving the daemons in the full-speed
+        gear until the PING level self-healed.
+        """
+        async with self._lock:
+            before = len(self._clients)
+            self._clients.pop(websocket, None)
+            channel = self._channels.pop(websocket, None)
+            after = len(self._clients)
+        if channel is not None:
+            channel.closed = True
+        if before > 0 and after == 0:
+            await self._fire_presence_edge(0)
+
+    async def wait_drained(self, timeout: Optional[float] = None) -> bool:
+        """Block until every connected client's outbound backlog is empty.
+
+        For tests and diagnostics only — nothing on the serving path waits for a
+        browser (that is the whole point of :class:`_UiClientChannel`).
+        """
+        async with self._lock:
+            channels = list(self._channels.values())
+        results = [await channel.wait_idle(timeout) for channel in channels]
+        return all(results)
 
     async def _fire_presence_edge(self, count: int) -> None:
         """Await the injected presence-edge callback, swallowing its failures.
@@ -1381,35 +1627,35 @@ class UiHub:
         #
         # Fan-out ORDER is unchanged: rendering is a separate pass, and the send
         # loop below still walks *targets* in the order it was given.
-        rendered: Dict[int, str] = {}
+        rendered: Dict[int, Tuple[str, int]] = {}
         for _client, payload in targets:
             if id(payload) not in rendered:
-                rendered[id(payload)] = await _dump_ui_frame(payload)
+                text = await _dump_ui_frame(payload)
+                rendered[id(payload)] = (text, len(text.encode("utf-8")))
 
-        dead = []
+        # Hand each frame to its client's own outbound queue instead of awaiting
+        # the client's socket here. WHY: this method runs on whatever coroutine
+        # produced the frame — and for relayed history that is the DAEMON's
+        # receive loop, which must keep reading (see :class:`_UiClientChannel`).
+        # The turn budget below preserves the old "returned means delivered"
+        # behaviour for every client that can keep up.
+        channels = []
         for client, payload in targets:
-            text = rendered[id(payload)]
-            try:
-                await client.send_text(text)
-                if self._metrics is not None:
-                    ptype = payload.get("type") if isinstance(payload, dict) else ""
-                    self._metrics.record(
-                        f"ui:{ptype or 'unknown'}", len(text.encode("utf-8"))
-                    )
-            except Exception:  # pragma: no cover - best effort
-                dead.append(client)
-        if dead:
-            async with self._lock:
-                before = len(self._clients)
-                for client in dead:
-                    self._clients.pop(client, None)
-                after = len(self._clients)
-            # A client pruned here is gone before its handler's unregister
-            # runs, so that unregister sees no count change and fires no edge.
-            # Detect the non0→0 transition at the prune itself, or the daemons
-            # would stay in the full-speed gear until the PING level self-heals.
-            if before > 0 and after == 0:
-                await self._fire_presence_edge(0)
+            text, nbytes = rendered[id(payload)]
+            channel = self._channels.get(client)
+            if channel is None:  # pragma: no cover - unregistered target
+                continue
+            ptype = payload.get("type") if isinstance(payload, dict) else ""
+            channel.offer(ptype or "unknown", text, nbytes)
+            channels.append(channel)
+        if len(channels) == 1:
+            await channels[0].handoff(self._handoff_turns)
+        elif channels:
+            # Concurrently, so the budget is per fan-out and not per client:
+            # three consoles must not cost three budgets in series.
+            await asyncio.gather(
+                *(channel.handoff(self._handoff_turns) for channel in channels)
+            )
 
 
 async def _push_state(hub: Optional["UiHub"], state: ServerState, kind: str) -> None:
@@ -1978,6 +2224,17 @@ async def _serve_loop(
                 manager=manager,
                 connection=websocket,
             )
+            # Hand the loop back between frames. One frame's work is bounded
+            # (the daemon caps every HISTORY_DATA at MAX_BYTES_PER_REPORT), but a
+            # drain is ~150 of them and nothing inside applying one is guaranteed
+            # to suspend — an uncontended lock, a queue that already holds the
+            # next frame — so the whole reply could otherwise run as one
+            # uninterrupted stretch of loop time: 1.7 s measured over this repo's
+            # 20260831-095750_23865927 (see
+            # ``scripts/measure_history_relay_backpressure.py``), during which no
+            # other request is served. This caps the uninterrupted stretch at one
+            # frame; it costs a scheduler round-trip per inbound frame.
+            await asyncio.sleep(0)
 
     async def heartbeat() -> None:
         seq = 0
@@ -2176,9 +2433,45 @@ async def _handle_message(
                     await state.get_history(flow_id, touch=False),
                     machine_id=machine_id,
                 )
-            # Decide whether to broadcast this frame to ``/ws/ui``. The only
-            # frame that must be suppressed is a ``mode: full`` reply that
-            # answered an on-demand cache-miss pull: the parked REST handler(s)
+            # Accounted for EVERY frame that arrives, relayed or not, and
+            # BEFORE the self-heal below can arm a pull of its own: a reply's
+            # ``full`` head is suppressed from the fan-out whenever a REST caller
+            # is parked on the pull, and a frame the cache discarded still cost
+            # the daemon a chunk of its reply — so skipping either, or letting
+            # this frame consume the marker for the pull it just triggered, would
+            # leave the marker out of step with the reply it tracks and release
+            # the rest of a recovery to ship whole. ``cursor_base`` goes along so
+            # an append that raced an outstanding pull's dispatch — anchored at
+            # the daemon's push水位, hence PAST the cursor we asked from — is not
+            # mistaken for that pull's head.
+            verdict = await state.take_history_replay_verdict(
+                flow_id,
+                mode_full=mode == protocol.HISTORY_MODE_FULL,
+                chunk_bounded=lambda: _frame_is_chunk_bounded(records),
+                cursor_base=cursor_base if isinstance(cursor_base, dict) else {},
+            )
+            replay = verdict.replay
+            if verdict.from_pull and resolved_pull:
+                # This frame of the reply woke the parked REST handler, so the
+                # records of the WHOLE reply are on their way back over REST.
+                # Carry that forward to the tails still to come — they are the
+                # same conversation, and relaying them is the duplicate download
+                # (see ServerState.mark_history_reply_served).
+                await state.mark_history_reply_served(flow_id)
+            # Anything the pull markers do not name came off the live
+            # tail-append path, so the whole frame rides to every subscriber
+            # untouched (``_push_history_data``). The verdict is ONE per frame
+            # and identical for all browsers: it reads the mechanism that
+            # produced the frame and nothing else — not a record's own creation
+            # stamp (a naive daemon-local string a timezone apart reads hours
+            # off), not a browser's subscription instant (a push loop that lags
+            # one tick makes a genuine append look older than a console that
+            # just opened). Both readings lazified real-time increments and made
+            # one frame leave the server in two shapes.
+            # Decide whether to broadcast this frame to ``/ws/ui``.
+            #
+            # A ``mode: full`` reply that answered an on-demand cache-miss pull
+            # is suppressed: the parked REST handler(s)
             # re-read the populated cache and return the full records plus a
             # fresh ``progress`` token to exactly the clients that requested
             # them; re-broadcasting the same ``mode: full`` frame over
@@ -2188,19 +2481,33 @@ async def _handle_message(
             # another full fetch + full DOM rebuild despite an unchanged cache
             # generation.
             #
-            # A ``mode: append`` frame, by contrast, carries a real-time
-            # increment and MUST always be broadcast to already-subscribed
-            # ``/ws/ui`` clients — even when it happens to ``resolve`` a pull
-            # waiter. After a ``respond``/``interject`` the frontend may
-            # concurrently fire a REST pull whose waiter is resolved by the very
-            # ``append`` that also carries the new conversation records; if we
-            # suppressed that append, every *other* subscribed console (and the
-            # live view itself, until it re-enters and triggers a full snapshot)
-            # would silently stop receiving new records. The REST-initiating
-            # client de-duplicates the overlap via ``dedupeAppendRecords``, so
-            # broadcasting the append is safe. ``mode: append`` therefore always
-            # broadcasts; only a resolved ``mode: full`` pull reply is
-            # suppressed.
+            # A LIVE ``mode: append`` — one the pull markers do not name — carries
+            # a real-time increment and MUST always be broadcast to
+            # already-subscribed ``/ws/ui`` clients, even when it happens to
+            # ``resolve`` a pull waiter. After a ``respond``/``interject`` the
+            # frontend may concurrently fire a REST pull whose waiter is resolved
+            # by the very ``append`` that also carries the new conversation
+            # records; if we suppressed that append, every *other* subscribed
+            # console (and the live view itself, until it re-enters and triggers a
+            # full snapshot) would silently stop receiving new records. The
+            # REST-initiating client de-duplicates the overlap via
+            # ``dedupeAppendRecords``, so broadcasting it is safe.
+            #
+            # WHY the tails of a REST-SERVED pull reply are suppressed too: that
+            # rule used to read one frame at a time, and only the head of a reply
+            # knows a REST caller is parked on it — so a cache-miss open of a big
+            # flow suppressed its ``full`` head and then relayed all 146
+            # chunk-bounded ``append`` tails of the SAME reply, records the same
+            # browser was already receiving through the REST body and its
+            # token-pinned polls. Measured on this repo's own
+            # ``20260831-095750_23865927``: 103.9 MB pushed down ``/ws/ui`` for
+            # one open whose REST body was 18.9 MB gzipped (reproduce with
+            # ``scripts/measure_history_relay_backpressure.py``). A reply is one
+            # delivery, so the whole of it is suppressed once any frame of it has
+            # woken a REST waiter (``ReplayVerdict.rest_served``), and the
+            # consoles are told the bundle moved by the records-less
+            # ``history_cursor`` advisory below — the same signal they already
+            # act on for the suppressed head.
             #
             # WHY (#287) the second suppression: a ``full`` frame the cache
             # layer REJECTED as destructive (``rejected_full`` — same machine,
@@ -2237,36 +2544,10 @@ async def _handle_message(
             # server does not itself vouch for.
             suppress_broadcast = (
                 (resolved_pull and mode == protocol.HISTORY_MODE_FULL)
+                or (verdict.from_pull and (resolved_pull or verdict.rest_served))
                 or outcome.rejected_full
                 or not applied
             )
-            # Accounted for EVERY frame that arrives, relayed or not, and
-            # BEFORE the self-heal below can arm a pull of its own: a reply's
-            # ``full`` head is suppressed from the fan-out whenever a REST caller
-            # is parked on the pull, and a frame the cache discarded still cost
-            # the daemon a chunk of its reply — so skipping either, or letting
-            # this frame consume the marker for the pull it just triggered, would
-            # leave the marker out of step with the reply it tracks and release
-            # the rest of a recovery to ship whole. ``cursor_base`` goes along so
-            # an append that raced an outstanding pull's dispatch — anchored at
-            # the daemon's push水位, hence PAST the cursor we asked from — is not
-            # mistaken for that pull's head.
-            replay = await state.take_history_replay(
-                flow_id,
-                mode_full=mode == protocol.HISTORY_MODE_FULL,
-                chunk_bounded=lambda: _frame_is_chunk_bounded(records),
-                cursor_base=cursor_base if isinstance(cursor_base, dict) else {},
-            )
-            # Anything the pull markers do not name came off the live
-            # tail-append path, so the whole frame rides to every subscriber
-            # untouched (``_push_history_data``). The verdict is ONE per frame
-            # and identical for all browsers: it reads the mechanism that
-            # produced the frame and nothing else — not a record's own creation
-            # stamp (a naive daemon-local string a timezone apart reads hours
-            # off), not a browser's subscription instant (a push loop that lags
-            # one tick makes a genuine append look older than a console that
-            # just opened). Both readings lazified real-time increments and made
-            # one frame leave the server in two shapes.
             # HOP-4 DEBUG (server → UI fanout decision): whether this frame was
             # applied to the bundle and whether it will be broadcast to /ws/ui.
             # ``applied=False`` on a boundary append means state.append_history
@@ -2363,7 +2644,7 @@ async def _handle_message(
                     hub, state, machine_id, flow_id, mode, records,
                     replay=replay,
                 )
-            elif applied:
+            elif applied and not _mid_reply_tail(verdict):
                 # The frame changed the bundle but its records may not be
                 # relayed (a resolved full pull whose records are already on
                 # their way back over REST, or a rejected truncating full whose
