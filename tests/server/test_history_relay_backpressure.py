@@ -300,7 +300,15 @@ def test_slow_console_never_parks_the_daemon_receive_path(scaled_chunk_bound):
 
 
 def test_lagging_console_backlog_stays_bounded(scaled_chunk_bound):
-    """A console that cannot keep up loses frames rather than memory."""
+    """A console that cannot keep up costs bounded memory — never lost records.
+
+    The backlog of a slow console is bounded, but NOT by shedding the delivery's
+    own frames: a delivery ends with an explicit completeness declaration, and
+    dropping a middle frame would let that declaration reach a console holding a
+    hole. So the frames are kept and the bound that applies is the hard ceiling,
+    past which the client is disconnected instead — the one loss the frontend can
+    see and repair (``ws.onclose`` → stale → reconnect re-reads the bundle).
+    """
     console = _SlowConsole(delay=0.05)
     frames = _frames()
 
@@ -310,14 +318,21 @@ def test_lagging_console_backlog_stays_bounded(scaled_chunk_bound):
         # relayed and the queue is under real pressure.
         await _drain(state, hub, registry, frames)
         channel = hub._channels[console]
-        return len(channel._queue), channel._bytes, channel.dropped
+        return (
+            len(channel._queue), channel._bytes, channel.dropped,
+            channel.overflowed,
+        )
 
-    depth, backlog, dropped = asyncio.run(
+    depth, backlog, dropped, overflowed = asyncio.run(
         asyncio.wait_for(scenario(), timeout=120)
     )
-    assert depth <= ws_module.UI_CLIENT_QUEUE_MAX_FRAMES
-    assert backlog <= ws_module.UI_CLIENT_QUEUE_MAX_BYTES
-    assert dropped > 0, "the slow console kept every frame; the bound did nothing"
+    assert dropped == 0, "a frame of a history delivery is never shed"
+    assert depth <= ws_module.UI_CLIENT_QUEUE_HARD_FRAMES
+    assert backlog <= ws_module.UI_CLIENT_QUEUE_HARD_BYTES
+    assert depth > 0, "the console kept up after all; the case proves nothing"
+    # This console is merely slow, not dead: a whole 147-frame reply of the
+    # sample flow stays well inside the ceiling, so it keeps its socket.
+    assert not overflowed
 
 
 def test_healthy_console_still_has_its_frames_on_return():

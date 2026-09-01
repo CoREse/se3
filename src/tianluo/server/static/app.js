@@ -254,6 +254,34 @@ const state = {
   backfillInFlight: {},
   backfillAttempts: {},
   backfillUnfillable: {},
+  // Interrupted-delivery recovery bookkeeping, `"<view>|<flowId>" -> …`.
+  //   incompleteRecoveryTimers  — the armed setTimeout handle, at most one per
+  //     view+flow, so a burst of frames all declaring `incomplete` schedules ONE
+  //     re-read rather than one per signal.
+  //   incompleteRecoveryAttempts — how many re-reads this streak has fired,
+  //     which picks the (lengthening) delay from INCOMPLETE_RECOVERY_DELAYS_MS
+  //     and is capped by INCOMPLETE_RECOVERY_MAX_ATTEMPTS.
+  //   incompleteRecoverySignals — how many completeness STATEMENTS this
+  //     view+flow has observed. A re-read that comes back with neither
+  //     `incomplete: true` nor `incomplete: false` (a 5xx, an unparseable body,
+  //     a timeout, a dropped connection) leaves this counter where it was, which
+  //     is how the attempt tells "the server answered" from "the request never
+  //     landed" and re-arms itself for the latter.
+  //   bundleCompleteness — the last statement itself (`true` = the server
+  //     declared this bundle settled), which is what lets a consumer stop
+  //     re-reading a delivery already declared whole.
+  //
+  // WHY this is a separate mechanism from the cursor self-check above: the
+  // self-check compares the records held against what the cursor DECLARES, and
+  // an interrupted delivery leaves a bundle whose cursor declares exactly the
+  // prefix that survived — there is no numbered gap for it to find. The server's
+  // `incomplete` flag is the only statement that contradicts that prefix, so it
+  // needs its own repair loop. Reset when a reply finally declares the bundle
+  // settled, and when the view closes.
+  incompleteRecoveryTimers: {},
+  incompleteRecoveryAttempts: {},
+  incompleteRecoverySignals: {},
+  bundleCompleteness: {},
   // History-detail counterpart of `flowConversationEpoch`.
   historyEpoch: 0,
   // The open history session's backend usage payload (the `usage` field of the
@@ -2465,6 +2493,19 @@ function isFlowResumable(flow) {
   return RESUMABLE_STATUSES.includes(
     String(flow.status || "").toLowerCase()
   );
+}
+
+// Whether the open view's flow has reached a terminal state, read from whichever
+// face knows: the per-flow detail snapshot (`/api/flows/{id}`, the freshest) or,
+// before it lands, the machine snapshot. Both are consulted because they refresh
+// on different clocks, and a caller asking "can this flow still produce a record?"
+// must not answer "yes" merely because the face it happened to read is stale.
+function flowIsTerminalById(flowId) {
+  if (!flowId) return false;
+  const detail = state.flowDetail;
+  if (detail && detail.flow_id === flowId && isTerminalFlow(detail)) return true;
+  const found = findFlow(flowId);
+  return !!(found && isTerminalFlow(found.flow));
 }
 
 function findFlow(flowId) {
@@ -5205,9 +5246,13 @@ function openFlowView(flowId) {
   updateFlowUsageBadge([]);
   resetReplyBox();
 
+  // Same reason as the History view: this open is a new delivery, so it starts
+  // with no completeness statement and a full repair budget.
+  cancelIncompleteRecoveryForView("flow");
+
   // The periodic self-heal becomes the conversation's correctness source while
   // this view is open (see maybeRefreshConversationOnProgression); it runs every
-  // tick until the view closes, regardless of terminal status.
+  // tick until the server declares the (terminal) flow's bundle settled.
   state.periodicSnapshotActive = true;
 
   refreshFlowDetail();
@@ -5240,6 +5285,9 @@ function doCloseFlowView() {
   state.flowConversationRecords = [];
   state.flowConversationProgress = null;
   state.flowConversationSignature = null;
+  // Same reason as the History view: a recovery timer armed for this flow has
+  // nothing left to repair once the view is gone.
+  cancelIncompleteRecoveryForView("flow");
   // Clear the progression baseline so a later openFlowView starts fresh.
   state.flowProgressionMarker = null;
   // Cancel any pending grace timer so a closed flow never fires a fallback
@@ -5636,6 +5684,10 @@ async function loadFlowConversation(flowId, opts) {
       // echoes the fresh cursor and resyncs no more.
       resetRepairStateForResync("flow", flowId);
     }
+    // Before any render branch: an interrupted delivery is a fact about the
+    // BUNDLE, and every branch below (including the two early returns) leaves it
+    // just as unrepaired.
+    noteBundleCompleteness("flow", flowId, result.incomplete);
     if (result.render === "noop") {
       // Nothing to REPAINT: a `not_modified` reply (the server has nothing more
       // to send) or an incremental delivery that, after dedup, added nothing new
@@ -6055,28 +6107,38 @@ function pollFlowView() {
 // sameRenderedConversation still guard against any repaint when a full reply
 // happens to match what is held.
 //
-// Terminal STATUS is deliberately NOT a stop condition. An earlier version
+// Terminal STATUS alone is deliberately NOT a stop condition. An earlier version
 // latched the self-heal off after one post-terminal catch-up pull, but the
 // daemon/server can flip a flow to completed/failed BEFORE the history cache
 // holds the final commit / code-index result — so that single catch-up pull can
-// capture a stale snapshot, and if the WS append carrying the commit result was
-// also dropped, the right side would freeze without ever showing the commit
-// result. No purely front-end signal can reliably tell "content is temporarily
-// static because the cache is still catching up" from "content is final", so we
-// do not try to guess: matching the left-side detail poll (refreshFlowDetail,
-// which likewise runs every tick for the whole open view regardless of status),
-// the self-heal keeps pulling on every tick while the view is open. The pull
-// stops only when the view closes (endFlowDetailPolling clears the timer).
-// loadFlowConversation's silent path is a cheap no-op — it skips the DOM rebuild
-// whenever the pulled snapshot matches what is already held (see
-// sameRenderedConversation) — so re-pulling a genuinely static terminal
-// conversation costs one fetch per tick and never repaints, while a late commit
-// result (cache catches up after the status flip) is picked up at the next tick
-// and rendered. Correctness is thus the periodic full snapshot, never a timing
-// guess about when the history became final.
+// capture a stale snapshot, and the right side would freeze without ever showing
+// the commit result. What the front end lacked was any way to tell "content is
+// temporarily static because the cache is still catching up" from "content is
+// final", so it did not try to guess and simply kept pulling forever.
+//
+// It now HAS that signal, and it is the server's, not a guess: every REST reply
+// and every pushed frame carries `incomplete` — the one statement about a bundle
+// that is not derived from the records it holds — and a delivery is whole only
+// when the server says so. So the pull stops on the CONJUNCTION of two facts:
+// the flow is terminal (no new record can be produced) AND the server has
+// explicitly declared this bundle settled (nothing already produced is still
+// missing). Either one alone still pulls: a live flow keeps its 3 s snapshot, and
+// a terminal flow whose bundle is still a prefix hands the repair to the bounded
+// recovery loop (which walks a backoff instead of hammering every 3 s). Re-reading
+// a delivery the server has declared complete repairs nothing by construction —
+// it is the redundant traffic the completeness statement exists to retire.
 function selfHealFlowConversation() {
   const flowId = state.selectedFlowId;
   if (!flowId) return;
+  const settled = declaredBundleCompleteness("flow", flowId);
+  if (settled !== undefined && flowIsTerminalById(flowId)) {
+    // `false` — the server says this bundle is still missing a delivery's tail.
+    // The poll is the wrong instrument for that (it cannot make the daemon
+    // answer any faster), so the bounded recovery loop owns it from here; arming
+    // is idempotent, so re-asserting it every tick costs nothing.
+    if (settled === false) scheduleIncompleteRecovery("flow", flowId);
+    return;
+  }
   loadFlowConversation(flowId, { silent: true });
 }
 
@@ -7963,6 +8025,9 @@ function closeHistory() {
   state.historyProgress = null;
   state.historySignature = null;
   state.historySelectedProjectRoot = null;
+  // An armed interrupted-delivery re-read must not outlive the view that armed
+  // it: the flow is no longer displayed, so nothing would consume the repair.
+  cancelIncompleteRecoveryForView("history");
   // Clear the per-session header so a stale flow_id / usage total can't bleed
   // into the next opened session.
   $("history-detail-flow-id").textContent = "";
@@ -8544,6 +8609,10 @@ async function openHistorySession(flowId, opts) {
   // switch can never briefly show the previous session's blocks; a reconnect
   // refresh keeps the existing blocks until the load settles.
   if (!incremental) {
+    // A fresh open is a fresh delivery: whatever the previous session's bundle
+    // was declared to be says nothing about this one, and a streak carried over
+    // would spend a new session's repair budget on the old one's failures.
+    cancelIncompleteRecoveryForView("history");
     const meta = $("history-meta");
     if (meta) meta.innerHTML = "";
     const usageRegion = $("history-usage-region");
@@ -8646,6 +8715,10 @@ async function openHistorySession(flowId, opts) {
       // dead generation's repair state (see resetRepairStateForResync).
       resetRepairStateForResync("history", flowId);
     }
+    // See loadFlowConversation: read before the render branches, because the
+    // completeness of the bundle is independent of whether there is anything new
+    // to paint — an interrupted session is answered `not_modified` forever.
+    noteBundleCompleteness("history", flowId, result.incomplete);
     if (result.render === "noop") {
       // A `not_modified` reply, or a delta that added nothing new after dedup —
       // nothing to repaint. As in loadFlowConversation this is not evidence of
@@ -10992,6 +11065,12 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   // tokens are null and must not be adopted, so a resync off it would strand the
   // held cursor at null and force a needless full next poll.
   merged.resync = !!(response && response.resync) && !merged.preserveTokens;
+  // The server's statement that this bundle is missing the tail of a delivery
+  // already in progress. It is the ONE field not derived from the records, so —
+  // unlike `cursor` — it is read straight off the response on EVERY branch,
+  // including a merge-rejected frame: the rejection says nothing about whether
+  // the bundle behind it is whole.
+  merged.incomplete = !!(response && response.incomplete);
   return merged;
 }
 
@@ -11351,6 +11430,202 @@ function resetRepairStateForResync(view, flowId) {
     flowId, view);
 }
 
+//: Delays between successive interrupted-delivery re-reads, in ms. The first is
+//: above the server's own 5 s repair-pull floor (`_HISTORY_FULL_PULL_MIN_INTERVAL`)
+//: so the very first retry can actually dispatch a repair rather than being
+//: throttled into serving the same prefix back; the rest lengthen so a flow whose
+//: daemon never returns settles at one cheap request a minute instead of a poll
+//: storm on a view that otherwise has NO timer at all.
+const INCOMPLETE_RECOVERY_DELAYS_MS = [5000, 8000, 12000, 20000, 30000, 60000];
+
+//: Ceiling on one recovery streak. WHY there is one at all: the recovery is a
+//: BOUNDED repair, not a poll timer. A flow whose daemon is gone for the day is
+//: answered `incomplete` from cache indefinitely, and a view left open on it
+//: would otherwise re-read once a minute for as long as the tab lives — an
+//: unbounded loop that repairs nothing, since every reply is the same prefix.
+//: With the delays above, the streak spans ~12 minutes, which covers a daemon
+//: restart / reconnect (the case a repair can actually win) and stops there.
+//: A streak is per view+flow and is forgotten when the bundle is declared
+//: settled or the view closes, so re-opening the session tries again.
+const INCOMPLETE_RECOVERY_MAX_ATTEMPTS = 16;
+
+function incompleteRecoveryKey(view, flowId) {
+  return `${view}|${flowId}`;
+}
+
+// Cancel any armed recovery for one view+flow and forget its streak, so the next
+// interruption starts again at the shortest delay.
+function cancelIncompleteRecovery(view, flowId) {
+  const key = incompleteRecoveryKey(view, flowId);
+  const timer = state.incompleteRecoveryTimers[key];
+  if (timer) clearTimeout(timer);
+  delete state.incompleteRecoveryTimers[key];
+  delete state.incompleteRecoveryAttempts[key];
+  // The signal counter is deliberately NOT reset here: an attempt awaiting a
+  // reply reads it before and after, and zeroing it under that attempt would
+  // make the statement that just settled the bundle look like no statement at
+  // all. It goes with the view (see cancelIncompleteRecoveryForView).
+}
+
+// Drop every armed recovery. Called when a view closes: a timer that outlives
+// its view would fire a re-read for a flow nobody is looking at.
+function cancelIncompleteRecoveryForView(view) {
+  const prefix = `${view}|`;
+  Object.keys(state.incompleteRecoveryTimers).forEach((key) => {
+    if (key.indexOf(prefix) !== 0) return;
+    clearTimeout(state.incompleteRecoveryTimers[key]);
+    delete state.incompleteRecoveryTimers[key];
+  });
+  [
+    state.incompleteRecoveryAttempts,
+    state.incompleteRecoverySignals,
+    // The completeness statement goes with the view too: it describes what the
+    // server said about a bundle this view was holding, and the next open
+    // re-reads it from that open's own reply.
+    state.bundleCompleteness,
+  ].forEach((map) => {
+    Object.keys(map).forEach((key) => {
+      if (key.indexOf(prefix) === 0) delete map[key];
+    });
+  });
+}
+
+// The server's last explicit statement about this bundle: `true` (settled),
+// `false` (still missing the tail of a delivery), or `undefined` when it has not
+// said yet. `undefined` is deliberately NOT read as either: a consumer that
+// treated silence as "settled" would stop repairing an interrupted bundle, and
+// one that treated it as "incomplete" would repair a bundle nothing is wrong
+// with.
+function declaredBundleCompleteness(view, flowId) {
+  return state.bundleCompleteness[incompleteRecoveryKey(view, flowId)];
+}
+
+// Act on the server's `incomplete` statement for a bundle (REST reply or WS
+// frame — both carry it, from the one source `get_history_bundle_meta`).
+//
+// `incomplete` means the cached bundle is missing the TAIL of a delivery the
+// daemon declared unfinished: a socket that died mid-drain leaves a perfectly
+// self-consistent PREFIX behind (its cursor names exactly the step files that
+// landed, its pending window is empty), so no amount of client-side checking can
+// see the loss — this flag is the only evidence there is. Ask again while the
+// server keeps saying so (each ask is what makes it dispatch its repair pull,
+// see `history_delivery_repair_due`) and STOP the moment it declares the
+// delivery whole: a settled delivery has nothing left to recover, so any further
+// re-read would be pure redundant traffic.
+function noteBundleCompleteness(view, flowId, incomplete) {
+  if (!flowId) return;
+  // A frame that carries NO statement (the key is absent — a pushed frame whose
+  // bundle the cache no longer holds, an advisory from a server too old to carry
+  // the field) is SILENCE, and silence is neither answer. Leave the last
+  // statement, and any streak running on it, exactly where they are.
+  //
+  // WHY this guard is load-bearing: `!incomplete` reads an absent key as an
+  // explicit "settled" — the strongest thing the server can say — so it cancels
+  // the armed recovery and latches the bundle whole. A view with no poll timer
+  // of its own (History) is then left with no repair path at all, and a tail
+  // lost to an interrupted drain stays invisible until the session is re-opened.
+  // Only a real statement may end a repair; see `declaredBundleCompleteness`,
+  // which reports exactly this "not said yet" state as `undefined`.
+  if (incomplete === undefined || incomplete === null) return;
+  const key = incompleteRecoveryKey(view, flowId);
+  // Counted before the branch, and for BOTH answers: what this counter records
+  // is that the server answered at all, which is what an attempt that got no
+  // answer needs in order to tell itself apart (see `runIncompleteRecovery`).
+  state.incompleteRecoverySignals[key] =
+    (state.incompleteRecoverySignals[key] || 0) + 1;
+  if (!incomplete) {
+    cancelIncompleteRecovery(view, flowId);
+    // `cancel` forgets the streak; the statement itself outlives it — it is what
+    // stops the running-flow poll from re-reading a delivery already declared
+    // whole (see `selfHealFlowConversation`).
+    state.bundleCompleteness[key] = true;
+    return;
+  }
+  state.bundleCompleteness[key] = false;
+  scheduleIncompleteRecovery(view, flowId);
+}
+
+function scheduleIncompleteRecovery(view, flowId) {
+  const key = incompleteRecoveryKey(view, flowId);
+  // One armed timer per view+flow: a drain declaring `incomplete` on every one
+  // of its frames must not stack a hundred re-reads.
+  if (state.incompleteRecoveryTimers[key]) return;
+  // While the flow is still LIVE the running-flow view re-reads this bundle
+  // every 3 s anyway (`pollFlowView` → `selfHealFlowConversation`), and that poll
+  // takes the exact same path the recovery would, so a second timer would only
+  // double the request rate. Once the flow is terminal that poll hands the repair
+  // over (it stops re-reading a bundle no new record can extend), and this
+  // bounded loop becomes the only repair path — so the hand-over must not leave
+  // both sides thinking the other has it.
+  if (
+    view === "flow"
+    && state.periodicSnapshotActive
+    && !flowIsTerminalById(flowId)
+  ) return;
+  const attempt = state.incompleteRecoveryAttempts[key] || 0;
+  if (attempt >= INCOMPLETE_RECOVERY_MAX_ATTEMPTS) {
+    if (attempt === INCOMPLETE_RECOVERY_MAX_ATTEMPTS) {
+      state.incompleteRecoveryAttempts[key] = attempt + 1;  // log once
+      // eslint-disable-next-line no-console
+      console.warn(
+        "history delivery still incomplete after %d re-reads; giving up on "
+        + "flow=%s (view=%s) — re-open the session to try again",
+        attempt, flowId, view);
+    }
+    return;
+  }
+  const delay = INCOMPLETE_RECOVERY_DELAYS_MS[
+    Math.min(attempt, INCOMPLETE_RECOVERY_DELAYS_MS.length - 1)];
+  state.incompleteRecoveryAttempts[key] = attempt + 1;
+  state.incompleteRecoveryTimers[key] = setTimeout(() => {
+    delete state.incompleteRecoveryTimers[key];
+    if (!viewIsCurrent(view, flowId)) {
+      delete state.incompleteRecoveryAttempts[key];
+      delete state.incompleteRecoverySignals[key];
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.debug(
+      "history delivery incomplete: re-reading flow=%s (view=%s, attempt %d)",
+      flowId, view, attempt + 1);
+    void runIncompleteRecovery(view, flowId);
+  }, delay);
+}
+
+// One bounded incremental re-read. Both paths echo the held progress token, so
+// the request is a delta (or a `not_modified` receipt) rather than a fresh pull
+// of the whole conversation — and both end by re-reading `incomplete` off the
+// reply, which re-arms this loop while the bundle is still a prefix.
+//
+// WHY the attempt re-arms itself when no statement came back: both loaders
+// SWALLOW a transient failure (a 5xx, an unparseable body, a `authedFetch`
+// timeout, a dropped connection) — an incremental re-read deliberately keeps the
+// rendered conversation rather than replacing it with an error — so a failed
+// attempt is indistinguishable, from the outside, from one that simply had
+// nothing to say. Without this the very first re-read to hit a hiccup would end
+// the streak for good, and a bundle whose only remaining signal is the server's
+// `incomplete` statement would stay a prefix with nothing left to ask again.
+// Counting statements rather than inspecting the reply keeps this true for every
+// path that produces one, WS frames included.
+async function runIncompleteRecovery(view, flowId) {
+  const key = incompleteRecoveryKey(view, flowId);
+  const before = state.incompleteRecoverySignals[key] || 0;
+  try {
+    await (view === "history"
+      ? openHistorySession(flowId, { incremental: true })
+      : loadFlowConversation(flowId, { silent: true }));
+  } catch (_) {
+    // Both loaders own their error rendering; a throw that escapes one is still
+    // just "no statement", handled below.
+  }
+  if (!viewIsCurrent(view, flowId)) return;
+  if ((state.incompleteRecoverySignals[key] || 0) !== before) return;
+  // The request never produced an answer. Re-arm on the same bounded backoff —
+  // the streak counter already advanced, so a server that stays unreachable
+  // still walks the delays out and stops.
+  scheduleIncompleteRecovery(view, flowId);
+}
+
 async function reconcileCursorCompleteness(view, flowId, cursor, generation, pending) {
   if (!flowId || !cursor || typeof cursor !== "object") return;
   if (!viewIsCurrent(view, flowId)) return;
@@ -11483,7 +11758,19 @@ async function reconcileCursorCompleteness(view, flowId, cursor, generation, pen
 // get_history_bundle_meta), so a push-driven self-check draws the pending line
 // identically to a poll-driven one.
 function applyHistoryCursor(msg) {
-  if (!msg || !msg.flow_id || !msg.cursor) return;
+  if (!msg || !msg.flow_id) return;
+  // Read BEFORE the cursor guard: `incomplete` is a statement about the bundle,
+  // not about the cursor, and a frame that carries one carries the other from the
+  // same read (`get_history_bundle_meta`). A push-only console — the History
+  // view has no poll timer of its own — learns here, and only here, that what it
+  // is showing is a prefix.
+  if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
+    noteBundleCompleteness("history", msg.flow_id, msg.incomplete);
+  }
+  if (state.selectedFlowId === msg.flow_id) {
+    noteBundleCompleteness("flow", msg.flow_id, msg.incomplete);
+  }
+  if (!msg.cursor) return;
   if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
     void reconcileCursorCompleteness(
       "history", msg.flow_id, msg.cursor, msg.generation, msg.pending);
@@ -20923,6 +21210,15 @@ if (typeof module !== "undefined" && module.exports) {
     encodeMissingParam,
     reconcileCursorCompleteness,
     applyHistoryCursor,
+    // Interrupted-delivery recovery (the `incomplete` statement) — exposed for
+    // tests/frontend/history_incomplete_recovery.test.mjs.
+    noteBundleCompleteness,
+    cancelIncompleteRecovery,
+    cancelIncompleteRecoveryForView,
+    declaredBundleCompleteness,
+    runIncompleteRecovery,
+    INCOMPLETE_RECOVERY_DELAYS_MS,
+    INCOMPLETE_RECOVERY_MAX_ATTEMPTS,
     reconcileLocalEchoes,
     comparableUserText,
     // Optimistic reply echo + send path (G1/G2) — exposed for the DOM-stub

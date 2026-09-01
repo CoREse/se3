@@ -361,6 +361,90 @@ def test_a_live_append_does_not_settle_a_drain_it_raced(scaled_chunk_bound):
     assert asyncio.run(asyncio.wait_for(scenario(), timeout=120)) is True
 
 
+async def _apply_frame(state, frame):
+    """One frame through the exact pair of calls ``ws.py`` makes for it."""
+    outcome = await state.apply_history_frame(
+        FLOW,
+        frame["mode"],
+        frame["records"],
+        cursor=frame["cursor"],
+        cursor_base=frame["cursor_base"],
+        machine_id=MACHINE,
+    )
+    verdict = await state.take_history_replay_verdict(
+        FLOW,
+        mode_full=frame["mode"] == protocol.HISTORY_MODE_FULL,
+        chunk_bounded=False,
+        cursor_base=frame["cursor_base"],
+        final=frame["final"],
+        machine_id=MACHINE,
+        applied=outcome.resolves_pull and not outcome.rejected_full,
+    )
+    return outcome, verdict
+
+
+def test_frames_the_cache_refused_cannot_settle_the_delivery(scaled_chunk_bound):
+    """What the SENDER declares never outranks what the cache stored.
+
+    The reconnected daemon resumes from ITS OWN cursor, which sits past the water
+    mark of the prefix that survived — so its frames are refused as gapped. They
+    still carry the sender's completeness bits (``final: False`` then
+    ``final: True``), and honouring those would first clear the stall and then
+    retire the marker over a bundle that received not one of their records: the
+    self-consistent prefix would go back to declaring itself whole, which is the
+    precise failure the marker exists to prevent.
+    """
+    frames = _frames()
+
+    async def scenario():
+        state = await _state_with_pull()
+        await _feed(state, [_encode(f) for f in frames[:_CUT_AFTER]])
+        held = len((await state.get_history(FLOW, touch=False))["records"])
+        # Two frames of a push anchored well past the surviving water mark.
+        gapped = [
+            {
+                "mode": protocol.HISTORY_MODE_APPEND,
+                "records": [
+                    {
+                        "step_id": "40_implement_dddd4444",
+                        "step_type": "implement",
+                        "ordinal": ordinal,
+                        "message": {"role": "assistant", "content": "gap"},
+                    }
+                ],
+                "cursor": {"40_implement_dddd4444.jsonl": ordinal + 1},
+                "cursor_base": {"40_implement_dddd4444.jsonl": ordinal},
+                "final": final,
+            }
+            for ordinal, final in ((2, False), (3, True))
+        ]
+        refused = []
+        for frame in gapped:
+            outcome, _verdict = await _apply_frame(state, frame)
+            refused.append(outcome.resolves_pull)
+        return (
+            refused,
+            held,
+            len((await state.get_history(FLOW, touch=False))["records"]),
+            await state.history_delivery_incomplete(FLOW),
+            (await state.get_history_snapshot(FLOW))["incomplete"],
+            await state.history_delivery_repair_due(FLOW),
+        )
+
+    refused, held, after, incomplete, snapshot_says, due = asyncio.run(
+        asyncio.wait_for(scenario(), timeout=120)
+    )
+    assert refused == [False, False], (
+        "the premise: both frames must be REFUSED by the cache as gapped"
+    )
+    assert after == held, "and so the bundle grew by nothing"
+    assert incomplete is True, (
+        "a delivery may only be settled by a frame that reached the bundle"
+    )
+    assert snapshot_says is True, "and every face of the bundle must say so"
+    assert due is True, "the repair the marker exists to trigger is still due"
+
+
 # --------------------------------------------------------------------------
 # a cut delivery is repairable
 # --------------------------------------------------------------------------

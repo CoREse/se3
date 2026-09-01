@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.14.1 - 2026-09-01
+
+- Fix large completed flows loading only part of their conversation in the WebUI — history bundles now reliably deliver through the final record (commit/summarize step visible again)
+- Stop browser backpressure from stalling the daemon connection: each WebUI client now drains its own bounded outbound queue, so a slow tab drops only its own relay frames instead of parking the daemon receive loop into a keepalive ping timeout
+- Suppress duplicate downstream delivery of a history pull's append frames when the same records are already returned over REST, cutting roughly 100MB of redundant traffic each time a large flow is opened
+- Make history delivery completeness authoritative on the server: every delivery now ends with an explicit terminator, and an interrupted drain can no longer publish a cursor that falsely claims to be complete
+- Allow completed (non-worktree-active) flows to re-pull and backfill an interrupted history drain, while preserving the existing add-only floor, shrinking-full guard, and full-pull throttle budget
+- Fix the flow sidebar hanging forever on 'Loading flow details…': detail fetches now time out and abort, polling no longer stacks concurrent full-bundle requests, and genuine failures surface localized retry text instead of a frozen placeholder
+- Declare explicit WebSocket ping interval and timeout for the server, and move history summarization behind the existing offload gate so bundle rendering no longer blocks the event loop
+- Fix a sqlite3.InterfaceError causing intermittent 500/401 responses by locking Store.get_owner like the rest of the store's methods
 ## 12.14.0 - 2026-08-31
 
 - Deliver WebUI history bundles in a collapsed-render summary form so opening a message-heavy session downloads far less data and paints faster

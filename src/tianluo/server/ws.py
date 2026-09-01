@@ -17,6 +17,7 @@ package, so the wire schema has a single source of truth shared by both ends.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import time
@@ -160,15 +161,45 @@ UI_FANOUT_HANDOFF_TURNS = 4
 UI_CLIENT_QUEUE_MAX_FRAMES = 64
 UI_CLIENT_QUEUE_MAX_BYTES = 8 * 1024 * 1024
 
-#: Frame types a lagging client may lose without losing correctness. Every
-#: ``history_data`` frame carries the bundle's post-frame ``cursor`` /
-#: ``signature`` / ``pending``, so a console that misses one detects the hole on
-#: the NEXT frame it does receive (or on its next poll) and repairs it by asking
-#: for exactly the record numbers it lacks — the same self-check the suppressed
-#: ``history_cursor`` advisory drives. Nothing else is dropped preferentially:
-#: one-shot events (spawn failures, interjection lifecycle) have no such repair
-#: path, so they are only ever shed when the backlog is made of nothing else.
-UI_DROPPABLE_FRAME_TYPES = frozenset({"history_data"})
+#: Frame types a lagging client may lose without losing correctness. A
+#: ``status_update`` is the WHOLE machine list, so the newest one supersedes
+#: every older one outright: shedding a superseded copy is a coalesce, not a
+#: loss. (The connect-time ``snapshot`` is deliberately NOT in this set even
+#: though it has the same shape — it is the baseline a console renders before any
+#: update arrives.)
+#:
+#: INVARIANT: NOTHING ELSE IS EVER DROPPED — a frame that belongs to a history
+#: DELIVERY least of all. A ``history_data`` frame used to be shed here on the
+#: reasoning that the next frame's ``cursor`` / ``signature`` / ``pending`` let
+#: the console detect the hole and backfill it. That reasoning does not survive
+#: the delivery contract this module now implements: every delivery ends with an
+#: explicit statement (``incomplete: false`` on its final frame, or on the
+#: records-less ``history_cursor`` advisory that stands in for it), and a shed
+#: middle frame leaves the LATER, completeness-declaring frame to arrive intact —
+#: so the console would be told the delivery is whole while holding records it
+#: never got. A completeness statement that can be false is worth less than none,
+#: because the consumer stops repairing on the strength of it. Losing a frame of
+#: a delivery must therefore be visible: the backlog is kept whole, and a client
+#: too far behind to keep it is DISCONNECTED at :data:`UI_CLIENT_QUEUE_HARD_FRAMES`
+#: (see :meth:`_UiClientChannel._trim`) — the one loss the frontend already
+#: repairs, since ``ws.onclose`` marks the view stale and its reconnect re-reads
+#: the whole bundle. The same holds, for a plainer reason, for the one-shot events
+#: (``spawn_failed``, ``interjection_event``): no cursor carries them and no poll
+#: re-derives them, so a console that loses one stays CONNECTED and simply never
+#: applies it.
+UI_DROPPABLE_FRAME_TYPES = frozenset({"status_update"})
+
+#: Hard ceiling on a backlog that :data:`UI_DROPPABLE_FRAME_TYPES` cannot shrink.
+#: Reaching it means the client has fallen far enough behind that keeping its
+#: unsheddable frames in memory is no longer the lesser evil, so the connection
+#: is dropped and the browser resynchronises from scratch on reconnect. Set well
+#: above the soft bound: the soft bound is the steady-state working set of a
+#: momentarily lagging console, and only a client that is effectively dead
+#: reaches this one. It is also the ceiling a slow console's relayed history now
+#: accumulates against, since none of those frames may be shed — 32 MiB of
+#: already-rendered text per stuck client, freed the moment it is retired.
+UI_CLIENT_QUEUE_HARD_FRAMES = UI_CLIENT_QUEUE_MAX_FRAMES * 8
+UI_CLIENT_QUEUE_HARD_BYTES = UI_CLIENT_QUEUE_MAX_BYTES * 4
 
 
 async def dump_json_chunked(payload: Dict[str, Any], **dumps_kwargs: Any) -> bytes:
@@ -1294,6 +1325,10 @@ class _UiClientChannel:
         self._idle.set()
         self.closed = False
         self.dropped = 0
+        #: Set once the unsheddable backlog breached the hard ceiling and this
+        #: client was scheduled for disconnection (see :meth:`_trim`).
+        self.overflowed = False
+        self._overflow_task: Optional["asyncio.Future"] = None
         self._task = asyncio.ensure_future(self._run())
 
     def offer(self, ptype: str, text: str, nbytes: int) -> None:
@@ -1313,6 +1348,10 @@ class _UiClientChannel:
         a console that receives it learns the widest gap in one shot and repairs
         it with one request, whereas keeping the oldest would hand it a stale
         picture it must then repair twice.
+
+        Only :data:`UI_DROPPABLE_FRAME_TYPES` are ever shed. A backlog with
+        nothing sheddable left in it is kept whole and escalated to
+        :meth:`_overflow` instead — see the invariant on that constant.
         """
         # ``> 1``: the budget bounds a BACKLOG, so a single frame that is itself
         # bigger than the byte budget (a whole-bundle relay of a big flow) is
@@ -1329,8 +1368,13 @@ class _UiClientChannel:
                     for i, (ptype, _text, _n) in enumerate(self._queue)
                     if ptype in UI_DROPPABLE_FRAME_TYPES
                 ),
-                0,
+                None,
             )
+            if index is None:
+                # Nothing here may be lost silently. Stop trimming and let the
+                # backlog stand: it is bounded from above by the hard ceiling
+                # checked below, which disconnects rather than deletes.
+                break
             self._bytes -= self._queue[index][2]
             del self._queue[index]
             self.dropped += 1
@@ -1340,11 +1384,52 @@ class _UiClientChannel:
             before // UI_CLIENT_QUEUE_MAX_FRAMES
         ):
             logger.warning(
-                "UI client is lagging; %d relayed frames dropped (backlog %d "
-                "frames / %.1f MiB). The client repairs itself from the cursor "
-                "carried by the frames it does receive.",
+                "UI client is lagging; %d superseded frames coalesced away "
+                "(backlog %d frames / %.1f MiB). Only whole-state frames a newer "
+                "copy replaces are shed; nothing belonging to a history delivery "
+                "is.",
                 self.dropped, len(self._queue), self._bytes / (1024 * 1024),
             )
+        # ``> 1`` for the same reason the trim loop carries it: one frame is not
+        # a backlog. A single whole-bundle relay can be larger than the hard byte
+        # ceiling on its own, and retiring the client for it would disconnect
+        # every console that opens a big flow — then do it again on reconnect.
+        if len(self._queue) > 1 and (
+            len(self._queue) > UI_CLIENT_QUEUE_HARD_FRAMES
+            or self._bytes > UI_CLIENT_QUEUE_HARD_BYTES
+        ):
+            self._overflow()
+
+    def _overflow(self) -> None:
+        """Retire a client whose unsheddable backlog breached the hard ceiling.
+
+        WHY a disconnect and not one more drop: the frames still queued at this
+        point are the ones that may not be lost silently — a one-shot lifecycle
+        event nothing will ever re-send, or a frame of a history delivery whose
+        later frames would then declare that delivery complete on the console's
+        behalf. Deleting either leaves the console connected and believing it is
+        current. Closing the socket is the one loss the frontend can actually
+        see: ``ws.onclose`` flags the view stale and the reconnect re-reads the
+        machine list, the history index and the open flow — so the console
+        converges instead of silently diverging.
+        """
+        if self.overflowed:
+            return
+        self.overflowed = True
+        logger.warning(
+            "UI client backlog is unsheddable at %d frames / %.1f MiB; "
+            "disconnecting it so the browser resynchronises on reconnect "
+            "(dropping these frames would lose events that have no replay path)",
+            len(self._queue), self._bytes / (1024 * 1024),
+        )
+        self._overflow_task = asyncio.ensure_future(self._retire())
+
+    async def _retire(self) -> None:
+        """Unregister and close this client's socket, then free its backlog."""
+        try:
+            await self._hub._client_overflowed(self.client)
+        finally:
+            self.close()
 
     async def _run(self) -> None:
         while True:
@@ -1503,6 +1588,33 @@ class UiHub:
             channel.closed = True
         if before > 0 and after == 0:
             await self._fire_presence_edge(0)
+
+    async def _client_overflowed(self, websocket: Any) -> None:
+        """Retire and CLOSE a client whose backlog could not be trimmed.
+
+        Called from the channel when the frames it is holding are all
+        unsheddable (see :data:`UI_DROPPABLE_FRAME_TYPES`). Retiring alone would
+        leave the browser holding an open socket that never receives anything
+        again; the explicit close is what turns an invisible divergence into the
+        one signal the frontend already repairs — a reconnect that re-reads
+        everything. Best effort throughout: a socket that is already gone needs
+        no closing.
+        """
+        await self._client_failed(websocket)
+        close = getattr(websocket, "close", None)
+        if close is None:
+            return
+        try:
+            # 1013 "try again later": the client is not at fault and should come
+            # straight back, which is exactly what the frontend's reconnect does.
+            try:
+                result = close(code=1013)
+            except TypeError:  # pragma: no cover - test doubles / older ASGI
+                result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("closing an overflowed UI client failed", exc_info=True)
 
     async def wait_drained(self, timeout: Optional[float] = None) -> bool:
         """Block until every connected client's outbound backlog is empty.
@@ -1783,6 +1895,15 @@ async def _push_history_data(
     # the client should hold once it merges these records — the same values the
     # REST snapshot would hand it at this instant. An older frontend simply
     # ignores the extra keys.
+    #
+    # INVARIANT: when there is no bundle to read (the cache dropped it between
+    # the apply and this read), the frame carries NO ``incomplete`` key at all
+    # rather than a fabricated one. Silence is the honest answer — the server has
+    # nothing to state — and the consumer is required to leave its last
+    # completeness statement standing on a frame that makes none (see
+    # ``noteBundleCompleteness`` in static/app.js). Defaulting the absent key
+    # either way would be a statement: ``false`` retires a live repair streak on
+    # no evidence, ``true`` arms one against a bundle nothing is wrong with.
     meta = await state.get_history_bundle_meta(flow_id)
     if meta is not None:
         frame["cursor"] = meta["cursor"]
@@ -1797,6 +1918,14 @@ async def _push_history_data(
         # the two faces read one bundle via one source. An older frontend ignores
         # the extra key.
         frame["pending"] = meta["pending"]
+        # INVARIANT: every face of the bundle states its completeness the same
+        # way. This is the ONE field a truncated bundle cannot contradict from
+        # its own records (cursor, signature and pending all describe the
+        # self-consistent PREFIX that survived), so a console driven purely by
+        # pushed frames must be told it here or it never learns the tail is
+        # missing — exactly the silent truncation ``_OpenDelivery`` exists to
+        # make visible.
+        frame["incomplete"] = meta["incomplete"]
     # Mirror the daemon-to-server leg: carry the post-frame backend usage
     # payload (same shared backend the REST bundle delivers) so a WS-only
     # history view never freezes at its connect-time usage snapshot and the
@@ -1867,6 +1996,11 @@ async def _push_history_cursor(
             # so an advisory-triggered self-check draws the pending/unfillable line
             # identically (see get_history_bundle_meta).
             "pending": meta["pending"],
+            # …and the same completeness statement, for the same one-source rule:
+            # this advisory is the ONLY signal a console gets for a frame whose
+            # records are suppressed, so if the delivery it belongs to is still
+            # unfinished, the advisory is where that has to be said.
+            "incomplete": meta["incomplete"],
         },
         owner,
     )
@@ -1892,6 +2026,19 @@ async def _push_history_cursor_advisory(
     pending against. Declaring an empty window makes the client treat a gap as a
     real hole and repair it — which is the intended outcome here, since the
     repair read re-admits the flow.
+
+    INVARIANT: this advisory states the delivery ``incomplete``, unconditionally.
+    It is emitted in place of a frame whose RECORDS the cache threw away, and a
+    delivery whose records went nowhere is by construction unfinished — the
+    server holds no bundle for this flow at all, so there is nothing it could be
+    complete with respect to. WHY it must be said rather than left out: this
+    advisory is the only signal a push-driven console gets for the suppressed
+    frame, and its consumer latches the LAST statement it was given; staying
+    silent leaves an earlier ``incomplete: true`` (from the drain this eviction
+    interrupted) as the standing statement, which is at least not a lie, but says
+    nothing about the frame just dropped. Saying it here is what keeps the
+    bounded recovery streak armed across the eviction, and that streak's re-read
+    is exactly the REST read that re-admits the flow to the cache.
     """
     if hub is None or hub.client_count == 0 or not cursor:
         return
@@ -1902,6 +2049,7 @@ async def _push_history_cursor_advisory(
             "flow_id": flow_id,
             "cursor": cursor,
             "pending": {},
+            "incomplete": True,
         },
         owner,
     )
@@ -2472,6 +2620,13 @@ async def _handle_message(
                     else None
                 ),
                 machine_id=machine_id,
+                # …and whether the bundle actually GREW by it. ``final`` is what
+                # the daemon read; this is what the cache stored, and only the
+                # latter may make a bundle look more complete. A rejected full
+                # counts as not applied for this purpose even though it resolves
+                # a waiter: its records were refused, so it brought the bundle no
+                # closer to the sender's water mark.
+                applied=applied and not outcome.rejected_full,
             )
             replay = verdict.replay
             if verdict.from_pull and resolved_pull:

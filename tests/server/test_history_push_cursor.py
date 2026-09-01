@@ -540,6 +540,56 @@ def test_evicted_flow_pushes_a_cursor_advisory_instead_of_records():
     # No bundle exists to sign, so no generation/signature is claimed.
     assert "signature" not in advisories[0]
     assert advisories[0]["pending"] == {}
+    # …but the delivery's completeness IS claimed, and it is unfinished: this
+    # advisory stands in for a frame whose records went nowhere, so the console
+    # must not read it as the settled declaration that would retire its bounded
+    # repair. Every other field here describes a self-consistent prefix; this is
+    # the only one that can contradict it.
+    assert advisories[0]["incomplete"] is True
+
+
+def test_the_cold_advisory_keeps_an_armed_repair_armed():
+    """A dropped frame may never look like the end of a delivery.
+
+    The sequence that used to weld the truncation shut: an interrupted drain
+    leaves the bundle a prefix (the server answers ``incomplete: true``, so the
+    console's bounded recovery is running), the budget then evicts the flow, and
+    the advisory that replaces the next suppressed frame said nothing about
+    completeness at all. A consumer reading an absent key as "settled" stops
+    repairing — so the statement has to survive the eviction on the wire.
+    """
+
+    async def scenario():
+        state = ServerState(history_cache_budget_bytes=1)
+        await state.register_machine("m1", "host", "9.9.9", owner_id="owner-A")
+        hub = UiHub()
+        ui = _UiWS()
+        await hub.register(ui, "owner-A")
+        registry = HistoryRequestRegistry()
+
+        await _handle_message(
+            _msg(protocol.HISTORY_MODE_FULL, [HEAD], {CURSOR_KEY: 1}),
+            state, "m1", hub, registry,
+        )
+        await state.report_history_cache()
+        ui.sent.clear()
+        await _handle_message(
+            _msg(
+                protocol.HISTORY_MODE_APPEND,
+                [TAIL],
+                {CURSOR_KEY: 2},
+                cursor_base={CURSOR_KEY: 1},
+            ),
+            state, "m1", hub, registry,
+        )
+        return ui
+
+    ui = asyncio.run(scenario())
+    frames = ui.frames("history_cursor")
+    assert len(frames) == 1
+    # The one key whose ABSENCE the console cannot safely interpret.
+    assert "incomplete" in frames[0]
+    assert frames[0]["incomplete"] is True
 
 
 def test_the_cold_advisory_is_scoped_to_the_owning_console():

@@ -436,6 +436,23 @@ class DaemonClient:
         # points, so a plain set (checked/mutated synchronously) is sufficient — no
         # lock is needed.
         self._history_draining: Set[str] = set()
+        # Flows whose LAST push frame declared ``final=False`` — a byte/record
+        # bounded chunk with backlog behind it — and so left an unfinished
+        # delivery open on the server (``ServerState._OpenDelivery``).
+        #
+        # INVARIANT: a delivery this daemon opened is always closed by a frame
+        # this daemon sends. WHY the set is needed to keep that promise: the
+        # reader caps a read AFTER appending the record that crosses the bound
+        # (see MAX_RECORDS_PER_REPORT / MAX_BYTES_PER_REPORT), so a flow whose
+        # final record lands exactly ON the cap reports ``truncated`` with
+        # nothing left behind it. The next read confirms EOF with an EMPTY
+        # record list — and the push path ships no frame for an empty read, so
+        # without this set the closing declaration is never sent: the server
+        # keeps the delivery open, reports a COMPLETE bundle as ``incomplete``,
+        # and fires a pointless repair pull once the stall grace expires (and
+        # stays wrong if that pull fails). Tracking the open delivery lets the
+        # EOF-confirming read go out as an empty ``final=True`` terminator.
+        self._history_push_open: Set[str] = set()
         # Last active-flow disk signature seen by the push loop; an unchanged
         # signature means there is nothing new to push (debounce).
         self._last_history_signature: Dict[str, Any] = {}
@@ -2193,6 +2210,11 @@ class DaemonClient:
             # manufacture a gap.
             if drain_completed and drain_cursor is not None:
                 self._history_cursors[flow_id] = dict(drain_cursor)
+                # The drain's own closing frame settled the bundle, so any push
+                # delivery this flow had open is closed too — drop the marker
+                # rather than have the next push tick send a redundant
+                # terminator for a delivery that no longer exists.
+                self._history_push_open.discard(flow_id)
         finally:
             self._history_draining.discard(flow_id)
         logger.info(
@@ -2577,13 +2599,16 @@ class DaemonClient:
             if self._history_draining
             else set()
         )
-        # A flow with an empty delta ships no frame, so its candidate cursor is
-        # committed unconditionally — there is no delivery that could fail. A
-        # draining flow is exempt: its cursor is owned by the drain until it ends.
+        # A flow with an empty delta and NO open delivery ships no frame, so its
+        # candidate cursor is committed unconditionally — there is no delivery
+        # that could fail. A flow whose last frame said "more is coming" ships an
+        # empty terminator instead (see ``_history_push_open``), and is therefore
+        # committed on the send path like any other frame. A draining flow is
+        # exempt either way: its cursor is owned by the drain until it ends.
         for read in reads:
             if read.flow_id in draining_now:
                 continue
-            if not read.records:
+            if not read.records and read.flow_id not in self._history_push_open:
                 committed[read.flow_id] = read.cursor
 
         def _keep_old(flow_id: str) -> None:
@@ -2624,8 +2649,37 @@ class DaemonClient:
         pending = [
             read
             for read in reads
-            if read.records and read.flow_id not in draining_now
+            if (read.records or read.flow_id in self._history_push_open)
+            and read.flow_id not in draining_now
         ]
+        # Close deliveries whose flow left the read set entirely. A flow that
+        # went TERMINAL is surfaced by ``read_active_flows`` only while its final
+        # flush still has records, so the tick after a final flush that ended
+        # exactly ON the chunk bound produces no read for it at all — and that is
+        # precisely the flow whose delivery is open. Synthesize the empty
+        # terminator at the water mark we last committed for it: it carries no
+        # records, declares the empty window ``[cursor, cursor)`` so the server's
+        # gap check reads it as contiguous by construction, and says ``final`` so
+        # the bundle settles. Without it a COMPLETE bundle stays flagged
+        # incomplete for the rest of the server's uptime.
+        seen = {read.flow_id for read in reads}
+        for flow_id in sorted(self._history_push_open - seen - draining_now):
+            cursor = previous.get(flow_id)
+            if cursor is None:
+                # Nothing left to anchor a terminator to (the cursor was pruned):
+                # the flow's next sighting is a full snapshot, which settles the
+                # bundle on its own.
+                self._history_push_open.discard(flow_id)
+                continue
+            pending.append(
+                history.FlowRead(
+                    flow_id=flow_id,
+                    mode=protocol.HISTORY_MODE_APPEND,
+                    records=[],
+                    cursor=dict(cursor),
+                    cursor_base=dict(cursor),
+                )
+            )
         for position, read in enumerate(pending):
             # Re-check drain state immediately before THIS flow's send. WHY: the
             # tick's ``draining_now`` was frozen before the send loop; a server
@@ -2685,6 +2739,14 @@ class DaemonClient:
                     _keep_old(unsent.flow_id)
                 _commit_history_cursors()
                 return
+            # The frame is on the wire, so the server now holds exactly what its
+            # ``final`` bit declared: a bounded chunk leaves a delivery open (and
+            # obliges the next tick to close it — an empty read for this flow is
+            # then shipped as the terminator above), an unbounded one settles it.
+            if read.truncated:
+                self._history_push_open.add(read.flow_id)
+            else:
+                self._history_push_open.discard(read.flow_id)
             committed[read.flow_id] = read.cursor
         _commit_history_cursors()
         # A bounded chunk was emitted for at least one flow that still has

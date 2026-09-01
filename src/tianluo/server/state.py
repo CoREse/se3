@@ -1812,6 +1812,7 @@ class ServerState:
         cursor_base: Optional[Dict[str, Any]] = None,
         final: Optional[bool] = None,
         machine_id: str = "",
+        applied: bool = True,
     ) -> ReplayVerdict:
         """Account one inbound ``HISTORY_DATA`` frame and classify its origin.
 
@@ -1854,6 +1855,16 @@ class ServerState:
         outright, in place of the *chunk_bounded* heuristic below — the sender's
         own read is authoritative where the receiver's size estimate only infers
         — and the estimate stays as the fallback for the ``None`` case.
+
+        *applied* says the frame's records actually reached the bundle
+        (:meth:`apply_history_frame` left the cache authoritative AND did not
+        reject them). INVARIANT: a frame the cache REFUSED may not close a
+        delivery. *final* is the SENDER's statement — it describes what the
+        daemon read off disk, not what this server managed to store — so a
+        gapped or ``requires_full``-blocked frame declaring ``final: True``
+        would otherwise retire the marker while the bundle it claims to complete
+        never received a record of it, publishing a settled cursor over a hole.
+        See :meth:`_note_delivery_locked` for the exact per-case rule.
 
         *chunk_bounded* says the frame reached the daemon's per-frame chunk bound
         (:data:`~tianluo.daemon.history.MAX_BYTES_PER_REPORT` /
@@ -1903,7 +1914,8 @@ class ServerState:
                 # unambiguous one — it describes the delivery this frame belongs
                 # to, and that is the only delivery in progress.
                 incomplete = self._note_delivery_locked(
-                    flow_id, machine_id, finished=final, now=now
+                    flow_id, machine_id, finished=final, now=now,
+                    applied=applied,
                 )
                 return ReplayVerdict(
                     mode_full, delivery_incomplete=incomplete
@@ -1935,6 +1947,7 @@ class ServerState:
                         machine_id,
                         finished=(False if final is False else None),
                         now=now,
+                        applied=applied,
                     )
                     return ReplayVerdict(
                         mode_full, delivery_incomplete=incomplete
@@ -1963,6 +1976,7 @@ class ServerState:
                 finished=not bounded,
                 now=now,
                 from_pull=True,
+                applied=applied,
             )
             if not bounded:
                 # Under the chunk bound: this is the reply's LAST frame, so the
@@ -1990,6 +2004,7 @@ class ServerState:
         finished: Optional[bool],
         now: float,
         from_pull: bool = False,
+        applied: bool = True,
     ) -> bool:
         """Record what one frame said about its delivery. Returns "still open".
 
@@ -2009,8 +2024,23 @@ class ServerState:
         tail the bundle is still missing — letting it clear that marker would
         hand back a bundle that calls itself whole while a hole from an earlier
         reply remains. Only a reply that ran to its declared end brings the
-        bundle up to the sender's water mark, so only that may settle it. Caller
-        must hold ``self._lock``.
+        bundle up to the sender's water mark, so only that may settle it.
+
+        INVARIANT: only a frame the cache ACCEPTED (*applied*) may make a bundle
+        look more complete than it was. What a frame states is what the SENDER
+        read; whether the bundle grew is what the cache decided, and the two part
+        company precisely in the case this marker exists for — a reconnected
+        daemon resuming from ITS cursor sends frames the cache refuses as gapped
+        (or refuses outright while the flow is latched ``requires_full``), and
+        those frames still carry ``final: False`` then ``final: True``. Letting
+        them through would clear the stall and then retire the marker over a
+        bundle that received nothing, which is exactly the self-consistent
+        prefix presenting itself as whole. So a refused frame may only ever ADD
+        incompleteness: it opens a marker (its records are missing from the
+        bundle by definition) and never closes or un-stalls one. The repair is
+        unaffected — the ``requires_full`` self-heal pull that such a frame arms
+        answers with an ACCEPTED reply, and that is what settles the marker.
+        Caller must hold ``self._lock``.
         """
         open_delivery = self._history_deliveries.get(flow_id)
         if finished is False:
@@ -2021,14 +2051,30 @@ class ServerState:
                 self._prune_history_deliveries()
             else:
                 open_delivery.last_frame_at = now
-                # A delivery that is arriving again is not stalled, whatever a
-                # previous disconnect concluded: the repair this marker exists to
-                # trigger is exactly what is now in progress.
-                open_delivery.stalled = False
+                if applied:
+                    # A delivery that is arriving again is not stalled, whatever
+                    # a previous disconnect concluded: the repair this marker
+                    # exists to trigger is exactly what is now in progress. A
+                    # REFUSED frame is not that — nothing of it landed — so the
+                    # stall stands and the repair stays due.
+                    open_delivery.stalled = False
                 if machine_id:
                     open_delivery.machine_id = machine_id
             return True
         if finished is True:
+            if not applied:
+                # The frame that claims to end the delivery never made it into
+                # the bundle, so the delivery did not end here for US. Open a
+                # marker if there is none: the records this frame carried are
+                # missing, which is the definition of an incomplete bundle.
+                if open_delivery is None:
+                    self._history_deliveries[flow_id] = _OpenDelivery(
+                        machine_id=machine_id, last_frame_at=now
+                    )
+                    self._prune_history_deliveries()
+                else:
+                    open_delivery.last_frame_at = now
+                return True
             if (
                 open_delivery is not None
                 and open_delivery.stalled

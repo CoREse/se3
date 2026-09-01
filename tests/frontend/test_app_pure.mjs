@@ -4173,6 +4173,20 @@ const flowDetailStallMod = await import("./flow_detail_stall.test.mjs");
 await flowDetailStallMod.registerFlowDetailStallTests({ app, check, checkAsync, findOne, findAll });
 
 // ---------------------------------------------------------------------------
+// Interrupted history delivery: the `incomplete` statement and its repair loop
+// ---------------------------------------------------------------------------
+//
+// A big completed session is delivered as ~150 frames; a socket that dies
+// mid-drain leaves a self-consistent PREFIX (its cursor names exactly the step
+// files that landed, `pending` is empty), so the numbered self-check above finds
+// nothing to repair. The server's `incomplete` flag is the only contradiction of
+// that prefix — it must reach the client over BOTH faces (REST reply and WS
+// frame) and drive a bounded incremental re-read until the bundle is settled,
+// because the History view has no poll timer of its own.
+const incompleteRecoveryMod = await import("./history_incomplete_recovery.test.mjs");
+await incompleteRecoveryMod.registerHistoryIncompleteRecoveryTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
 //
@@ -6546,37 +6560,46 @@ await checkAsync("G3 convergence: an active periodic poll demotes the progressio
   }
 });
 
-await checkAsync("G3 poll: a terminal flow keeps self-healing every tick (never latched off by status)", async () => {
+await checkAsync("G3 poll: the 3s history pull stops only on `terminal AND declared complete`", async () => {
   const saved = globalThis.fetch;
   const savedMachines = app.state.machines;
+  const savedDelays = app.INCOMPLETE_RECOVERY_DELAYS_MS.slice();
   app.state.selectedFlowId = "F1";
   app.state.flowConversationRecords = [asstRecord("final", 1, "s9", "commit")];
   app.state.flowConversationProgress = null;
-  app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+  app.state.flowDetail = null;
+  app.state.machines = [{ flows: [{ flow_id: "F1", status: "running" }] }];
+  // The view is open, so its 3s poll owns the re-reads (which is what keeps the
+  // live phase below from also arming the backoff loop).
+  const savedPeriodic = app.state.periodicSnapshotActive;
+  app.state.periodicSnapshotActive = true;
+  app.cancelIncompleteRecoveryForView("flow");
   const c = document.getElementById("flow-conversation");
   c.innerHTML = ""; c.__convState = null;
   try {
     const calls = [];
+    let settled = false;
     globalThis.fetch = (url) => {
       calls.push(String(url));
       return Promise.resolve({
         ok: true, status: 200,
         json: () => Promise.resolve({
-          records: [asstRecord("final", 1, "s9", "commit")], progress: "p", delivery: "full",
+          records: [asstRecord("final", 1, "s9", "commit")],
+          progress: "p", delivery: "full",
+          // The server keeps saying this bundle is still missing a delivery's
+          // tail, until the case flips it.
+          incomplete: !settled,
         }),
       });
     };
-    // Terminal STATUS never stops the self-heal — it mirrors the left-side detail
-    // poll, running a full pull on every tick while the view is open. Re-pulling
-    // a static conversation is a cheap silent no-op (no DOM repaint), but the pull
-    // itself must keep firing so a late-arriving commit/index result is never
-    // frozen out. Each tick therefore issues exactly one history pull.
+    // A LIVE flow pulls on every tick, exactly as before: neither of the two
+    // stop conditions holds.
     for (let i = 0; i < 4; i++) {
       app.selfHealFlowConversation();
       await flushTicks();
     }
     assert.equal(calls.length, 4,
-      "a terminal flow issues a self-heal pull on every tick, not just once: " + calls.length);
+      "a live flow issues a self-heal pull on every tick: " + calls.length);
     assert.ok(calls.every((u) => u.includes("/api/history/")),
       "every self-heal pull hits the history endpoint");
     // G5: the first pull is a bare baseline (no token held yet), but once the
@@ -6586,9 +6609,51 @@ await checkAsync("G3 poll: a terminal flow keeps self-healing every tick (never 
       "the first self-heal (no token held) is a full baseline pull: " + calls[0]);
     assert.ok(calls.slice(1).every((u) => u.includes("after=")),
       "later self-heal pulls echo the held progress token (signature-check pull)");
+
+    // The flow reaches a terminal state while its bundle is STILL declared a
+    // prefix. The fixed 3s pull is the wrong instrument for that — it cannot
+    // make the daemon answer sooner and would hammer forever — so it hands the
+    // repair to the bounded backoff loop rather than stopping outright.
+    app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+    const beforeHandover = calls.length;
+    app.selfHealFlowConversation();
+    await flushTicks();
+    assert.equal(calls.length, beforeHandover,
+      "a terminal flow's fixed-cadence pull yields to the bounded recovery loop");
+    assert.ok(app.state.incompleteRecoveryTimers["flow|F1"],
+      "…and it must actually hand over: an incomplete bundle is never left with "
+      + "no repair path at all");
+
+    // That loop keeps re-reading until the server declares the delivery whole.
+    // Re-arm it on a compressed cadence (the production first delay sits above
+    // the server's own 5s repair-pull floor, which no unit test can wait out).
+    for (let i = 0; i < app.INCOMPLETE_RECOVERY_DELAYS_MS.length; i++) {
+      app.INCOMPLETE_RECOVERY_DELAYS_MS[i] = 1;
+    }
+    app.cancelIncompleteRecovery("flow", "F1");
+    app.selfHealFlowConversation();
+    settled = true;
+    await flushTicks(40);
+    assert.ok(calls.length > beforeHandover,
+      "the recovery loop must actually re-read the bundle: " + calls.length);
+    const afterRepair = calls.length;
+    assert.equal(app.state.incompleteRecoveryTimers["flow|F1"], undefined,
+      "a settled bundle leaves no armed re-read");
+
+    // Both stop conditions now hold: no new record can be produced and nothing
+    // already produced is missing. Re-reading repairs nothing by construction.
+    for (let i = 0; i < 3; i++) {
+      app.selfHealFlowConversation();
+      await flushTicks();
+    }
+    assert.equal(calls.length, afterRepair,
+      "a delivery the server declared complete must not be re-read: " + calls.length);
   } finally {
     app.state.machines = savedMachines;
     globalThis.fetch = saved;
+    savedDelays.forEach((v, i) => { app.INCOMPLETE_RECOVERY_DELAYS_MS[i] = v; });
+    app.state.periodicSnapshotActive = savedPeriodic;
+    app.cancelIncompleteRecoveryForView("flow");
   }
 });
 
@@ -6602,7 +6667,10 @@ await checkAsync("G3 poll: a commit result landing AFTER the terminal status fli
   // This is the exact race the old one-post-terminal-pull latch could not survive.
   app.state.flowConversationRecords = [asstRecord("running-tail", 1, "s9", "commit")];
   app.state.flowConversationProgress = null;
+  app.state.flowDetail = null;
   app.state.machines = [{ flows: [{ flow_id: "F1", status: "completed" }] }];
+  app.cancelIncompleteRecoveryForView("flow");
+  const savedDelays = app.INCOMPLETE_RECOVERY_DELAYS_MS.slice();
   const c = document.getElementById("flow-conversation");
   c.innerHTML = ""; c.__convState = null;
   try {
@@ -6621,12 +6689,25 @@ await checkAsync("G3 poll: a commit result landing AFTER the terminal status fli
         : [asstRecord("running-tail", 1, "s9", "commit")];
       return Promise.resolve({
         ok: true, status: 200,
-        json: () => Promise.resolve({ records, progress: "p" + served, delivery: "full" }),
+        // While the commit record has not been delivered the flow's history
+        // delivery is still open, and the server says so on every reply — which
+        // is exactly what keeps the post-terminal poll alive long enough to see
+        // the record land.
+        json: () => Promise.resolve({
+          records, progress: "p" + served, delivery: "full",
+          incomplete: served < 4,
+        }),
       });
     };
+    // The first tick pulls; from there the terminal flow's still-open delivery
+    // is re-read by the bounded recovery loop (compressed cadence) until the
+    // cache catches up and the commit record lands.
+    for (let i = 0; i < app.INCOMPLETE_RECOVERY_DELAYS_MS.length; i++) {
+      app.INCOMPLETE_RECOVERY_DELAYS_MS[i] = 1;
+    }
     for (let i = 0; i < 6; i++) {
       app.selfHealFlowConversation();
-      await flushTicks();
+      await flushTicks(20);
     }
     assert.equal(app.state.flowConversationRecords.length, 2,
       "the late-arriving commit result was pulled into the conversation");
@@ -6637,6 +6718,8 @@ await checkAsync("G3 poll: a commit result landing AFTER the terminal status fli
   } finally {
     app.state.machines = savedMachines;
     globalThis.fetch = saved;
+    savedDelays.forEach((v, i) => { app.INCOMPLETE_RECOVERY_DELAYS_MS[i] = v; });
+    app.cancelIncompleteRecoveryForView("flow");
   }
 });
 
