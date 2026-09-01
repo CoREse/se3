@@ -366,6 +366,83 @@ def decode_progress(
 # (``generation`` rolled) or re-pulled from a different daemon (``machine_id``),
 # which is precisely the "no new records" vs "new records" distinction the
 # not-modified fast path needs.
+def record_step_id(record: Any) -> str:
+    """The physical step-block id a delivery record belongs to.
+
+    The daemon stamps every record with the per-physical-file display step id
+    (see ``_display_step_id``), which is exactly the unit the WebUI renders as
+    one step section — so it is also the unit a window is measured in. A record
+    with no id degrades to ``""`` and forms its own (unnamed) block rather than
+    being folded into its neighbour's, so a malformed record can never make two
+    real blocks look like one.
+    """
+    if isinstance(record, dict):
+        return str(record.get("step_id") or "")
+    return ""
+
+
+def _step_block_spans(records: Any) -> Tuple[List[str], Dict[str, Tuple[int, int]]]:
+    """Split *records* into step blocks, in bundle order.
+
+    Returns ``(step_ids, {step_id: (start, end)})`` — half-open index spans into
+    *records*. A step whose records are NOT contiguous (two roots' clones
+    interleaved by a merge) still yields ONE block spanning from its first to
+    its last record, so a window is always a contiguous record slice and a page
+    can never straddle a block boundary halfway.
+    """
+    order: List[str] = []
+    spans: Dict[str, Tuple[int, int]] = {}
+    for index, record in enumerate(records or ()):
+        step = record_step_id(record)
+        prev = spans.get(step)
+        if prev is None:
+            order.append(step)
+            spans[step] = (index, index + 1)
+        else:
+            spans[step] = (prev[0], index + 1)
+    return order, spans
+
+
+def _window_block_range(
+    steps: List[str], count: Any, before_step: Optional[str]
+) -> Tuple[int, int]:
+    """The half-open ``[start, end)`` block range one window request selects.
+
+    *before_step* is exclusive; when it names no block of this flow the range is
+    empty rather than silently degrading to the tail — a page-up answered with
+    the page the reader already holds looks to them like the history simply
+    stops, whereas an empty window is visible and recoverable (the reply still
+    carries the authoritative block index).
+
+    INVARIANT: an unresolvable anchor collapses the range at the flow's END
+    (``len(steps)``), never at 0. The two coordinates the reply derives from
+    this range — ``first_index`` and ``has_earlier`` — are the client's page-up
+    affordance and the scope of its completeness self-check. Collapsing at 0
+    would say "the reader is standing on the first block and nothing precedes
+    it": the 'load earlier steps' control is retired and the self-check is
+    un-scoped onto a head the client never loaded, which reports every unloaded
+    block as a hole and drives the backfill / full re-pull escalation this
+    windowing exists to prevent. Collapsing at the end says "empty, but not
+    exhausted" — the same answer the daemon-relay leg gives for the identical
+    condition (``tianluo.server.app._window_payload_from_daemon``). The anchor
+    is unresolvable exactly when the CACHED bundle holds fewer blocks than the
+    reader does (a mid-drain bundle, a full head whose append tails have not
+    landed), so "not exhausted" is also the truth.
+    """
+    try:
+        blocks = max(1, int(count))
+    except (TypeError, ValueError):
+        blocks = 10
+    if before_step:
+        try:
+            end = steps.index(str(before_step))
+        except ValueError:
+            return (len(steps), len(steps))
+    else:
+        end = len(steps)
+    return (max(0, end - blocks), end)
+
+
 def bundle_signature(generation: int, total: int, machine_id: str) -> str:
     """Return the short content-version signature for a bundle snapshot."""
     raw = f"{int(generation)}:{int(total)}:{machine_id}".encode("utf-8")
@@ -855,6 +932,13 @@ class ServerState:
     #: repeated-miss storm collapses onto one in-flight pull.
     _HISTORY_FULL_PULL_MIN_INTERVAL: float = 5.0
 
+    #: Upper bound on how long a dispatched pull may pin its flow against
+    #: eviction. A pull whose caller died without releasing the pin (a cancelled
+    #: request, a crashed task) must not make its flow permanently unevictable,
+    #: so the pin ages out on its own. Comfortably above ``HISTORY_PULL_TIMEOUT``
+    #: so it never expires under a pull that is still legitimately running.
+    _HISTORY_PULL_PIN_TTL: float = 300.0
+
     #: Default total budget for all cached history bundles (bytes). Mirrors
     #: ``tianluo.config.DEFAULT_HISTORY_CACHE_BUDGET_MB``; duplicated as a plain
     #: constant so a bare ``ServerState()`` (unit tests, tooling) is bounded too
@@ -1020,6 +1104,21 @@ class ServerState:
         #: :meth:`_note_history_view`) clears the marker, and the resulting cache
         #: miss rebuilds the bundle through the ordinary cursorless full pull.
         self._history_cold: Dict[str, float] = {}
+        #: flow_id -> monotonic time a UI-driven daemon pull for it was
+        #: dispatched. While a pull is in flight the flow is UNEVICTABLE.
+        #:
+        #: WHY the hot-view marker is not enough: a large flow's drain arrives as
+        #: a ``full`` head plus dozens of ``append`` tails and takes far longer
+        #: than :attr:`_HISTORY_VIEW_HOT_WINDOW`. Nothing re-reads during it (the
+        #: browser is parked on the REST reply), so the flow goes cold MID-DRAIN,
+        #: the budget evicts the bundle the drain is still filling, and the
+        #: reply the browser finally gets is a prefix — whose next read misses,
+        #: re-pulls, and is evicted again. That eviction⇄整量回源 loop is exactly
+        #: what makes a flow bigger than the budget un-browsable. Pinning for the
+        #: duration of the pull cannot grow without bound: an entry is cleared on
+        #: every exit path and, failing that, ages out of
+        #: :attr:`_HISTORY_PULL_PIN_TTL`.
+        self._history_pull_pinned: Dict[str, float] = {}
         #: flow_id -> monotonic time of the last cold-flow cursor advisory, so a
         #: backlog drain against an evicted flow cannot turn one advisory per
         #: bounded chunk into a fan-out storm (see :meth:`_claim_cold_advisory`).
@@ -1296,6 +1395,24 @@ class ServerState:
             if record is None or not _owned(record, owner):
                 return False
             return protocol.supports_traffic_reduction(record.protocol_version)
+
+    async def machine_supports_history_window(
+        self, machine_id: str, *, owner: Optional[str] = None
+    ) -> bool:
+        """Whether *machine_id*'s daemon understands the step-window read.
+
+        Returns ``True`` only for a known (owner-visible) machine advertising
+        protocol revision 9+. An older daemon silently drops the unknown frame,
+        so the windowed history route must degrade to the cursorless full pull
+        rather than park the browser on a reply that will never come — the
+        fallback is available, just not memory-frugal. An unknown machine reads
+        ``False`` (fail-closed to the full pull).
+        """
+        async with self._lock:
+            record = self._machines.get(machine_id)
+            if record is None or not _owned(record, owner):
+                return False
+            return protocol.supports_history_window(record.protocol_version)
 
     async def get_machines_full(
         self, *, owner: Optional[str] = None
@@ -2361,6 +2478,36 @@ class ServerState:
         current = time.monotonic() if now is None else now
         return (current - read_at) < self._HISTORY_VIEW_HOT_WINDOW
 
+    def _history_pull_is_pinned(
+        self, flow_id: str, *, now: Optional[float] = None
+    ) -> bool:
+        """Whether a UI-driven daemon pull for *flow_id* is still in flight.
+
+        See :attr:`_history_pull_pinned`. Caller must hold ``self._lock``.
+        """
+        pinned_at = self._history_pull_pinned.get(flow_id)
+        if pinned_at is None:
+            return False
+        current = time.monotonic() if now is None else now
+        if (current - pinned_at) >= self._HISTORY_PULL_PIN_TTL:
+            self._history_pull_pinned.pop(flow_id, None)
+            return False
+        return True
+
+    async def pin_history_pull(self, flow_id: str) -> None:
+        """Mark a UI-driven daemon pull for *flow_id* as in flight.
+
+        The route calls this around the whole pull so the budget cannot evict
+        the bundle the drain is filling (see :attr:`_history_pull_pinned`).
+        """
+        async with self._lock:
+            self._history_pull_pinned[flow_id] = time.monotonic()
+
+    async def release_history_pull(self, flow_id: str) -> None:
+        """Drop *flow_id*'s pull pin. Idempotent; safe on every exit path."""
+        async with self._lock:
+            self._history_pull_pinned.pop(flow_id, None)
+
     def _note_history_view(self, flow_id: str) -> None:
         """Record a UI-driven read of *flow_id* and lift any cold suppression.
 
@@ -2408,6 +2555,7 @@ class ServerState:
             self._history_read_at,
             self._history_cold,
             self._history_cold_advised_at,
+            self._history_pull_pinned,
         ):
             excess = len(markers) - limit
             if excess <= 0:
@@ -2533,6 +2681,8 @@ class ServerState:
             if flow_id == protect:
                 continue
             if self._history_view_is_hot(flow_id, now=now):
+                continue
+            if self._history_pull_is_pinned(flow_id, now=now):
                 continue
             total -= self._evict_history_bundle(flow_id)
             evicted += 1
@@ -4450,6 +4600,122 @@ class ServerState:
                 "usage": self._bundle_usage(cached),
             }
 
+    async def get_history_window_snapshot(
+        self,
+        flow_id: str,
+        *,
+        count: int,
+        before_step: Optional[str] = None,
+        expected_machine_id: Optional[str] = None,
+        expected_owner: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Read ONE step-block window of the cached bundle for *flow_id*.
+
+        Same ownership validation and same atomic (single lock hold) discipline
+        as :meth:`get_history_snapshot`, and the same detached payload — see the
+        INVARIANT there for why the returned lists may not alias the bundle.
+        Returns ``None`` on the same cache-miss conditions.
+
+        The reply's ``delivery`` is ``"window"`` and it carries an extra
+        ``window`` block describing what was served:
+
+        * ``mode`` — ``"tail"`` (no *before_step*: the flow's LAST *count*
+          blocks, the shape an open wants) or ``"before"`` (the *count* blocks
+          immediately preceding that block id, the shape a page-up wants).
+        * ``steps`` — EVERY block id of the flow in bundle order. Tiny (one
+          short string per step file) and carried whole so the browser can page
+          backwards and bound its own completeness check without a round trip
+          per hop.
+        * ``loaded`` — the block ids this reply covers.
+        * ``first_index`` / ``last_index`` — their span within ``steps``.
+        * ``has_earlier`` — whether any block precedes the window.
+
+        A *before_step* this bundle does not contain answers with an EMPTY but
+        NOT-exhausted window (``first_index = len(steps)``, ``has_earlier``
+        true) rather than one claiming the head — see the INVARIANT on
+        :func:`_window_block_range` for why the distinction is what keeps a
+        page-up from collapsing into a full re-pull.
+
+        WHY ``progress`` is still minted at the bundle's FULL record count
+        rather than at the window's edge: the token means "records of this
+        bundle the server has sent", and a windowed client deliberately does not
+        want the head re-sent. Minting it at the full count makes the client's
+        ordinary delta poll an append-only tail read — live follow keeps working
+        unchanged — while the head it has not loaded stays unrequested. The
+        client's completeness self-check is scoped to the blocks it HAS loaded
+        (``window.loaded`` / ``first_index``), which is what stops an unloaded
+        head from reading as a hole.
+        """
+        async with self._lock:
+            self._note_history_view(flow_id)
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return None
+            bundle_machine = str(cached.get("machine_id") or "")
+            if (
+                expected_machine_id is not None
+                and bundle_machine != expected_machine_id
+            ):
+                return None
+            if expected_owner is not None:
+                resolved_machine = self._find_machine_for_history_flow_locked(
+                    flow_id, owner=expected_owner
+                )
+                if (
+                    resolved_machine is None
+                    or resolved_machine != expected_machine_id
+                ):
+                    return None
+            records = cached["records"]
+            generation = self._ensure_generation(cached)
+            total = len(records)
+            steps, spans = _step_block_spans(records)
+            start_block, end_block = _window_block_range(
+                steps, count, before_step
+            )
+            if start_block >= end_block:
+                out_records: List[Any] = []
+            else:
+                lo = spans[steps[start_block]][0]
+                hi = spans[steps[end_block - 1]][1]
+                out_records = list(records[lo:hi])
+            return {
+                "flow_id": cached["flow_id"],
+                "machine_id": bundle_machine,
+                "mode": cached.get("mode", ""),
+                "delivery": "window",
+                "records": out_records,
+                "progress": encode_progress(
+                    generation,
+                    total,
+                    bundle_machine,
+                    secret=self._history_progress_secret,
+                ),
+                "signature": bundle_signature(generation, total, bundle_machine),
+                "cursor": dict(cached.get("cursor") or {}),
+                "generation": generation,
+                "unfillable": {},
+                "pending": {
+                    k: list(v)
+                    for k, v in self._pending_positions_for(cached).items()
+                },
+                "incomplete": flow_id in self._history_deliveries,
+                "resync": False,
+                "updated_at": cached.get("updated_at"),
+                "usage": self._bundle_usage(cached),
+                "window": {
+                    "mode": "before" if before_step else "tail",
+                    "steps": list(steps),
+                    "loaded": list(steps[start_block:end_block]),
+                    "first_index": start_block,
+                    "last_index": end_block - 1,
+                    "has_earlier": start_block > 0,
+                    "total_records": total,
+                    "block_size": max(1, int(count or 1)),
+                    "source": "cache",
+                },
+            }
+
     async def get_history_record_detail(
         self,
         flow_id: str,
@@ -4472,7 +4738,8 @@ class ServerState:
         identity plus the ``tool_use_id`` within it — never by ``tool_use_id``
         alone, which repeats across a flow (codex synthesizes ``codex_tool_1``
         per call), so a flow-wide scan would answer one chip with another call's
-        body.
+        body. The ``step`` source is the one exception to the id half: an engine
+        step event holds no tool call, so the record address alone names it.
 
         Ownership is validated exactly as in :meth:`get_history_snapshot` and
         under the same lock, so a flow that has moved daemons (or belongs to
@@ -4895,6 +5162,63 @@ class ServerState:
                     root = str(flow.project_root or "")
                     if root:
                         return root
+            return None
+
+        async with self._lock:
+            return _resolve(True) or _resolve(False)
+
+    async def get_history_flow_usage_summary(
+        self, flow_id: str, *, owner: Optional[str] = None
+    ) -> Optional[Dict[str, Any]]:
+        """The compact records-free usage summary the index reports for a flow.
+
+        WHY this exists beside :meth:`_bundle_usage`: the windowed daemon-relay
+        leg deliberately builds NO bundle (that is what makes a flow larger than
+        the whole cache budget browsable), so there is nothing for
+        ``_bundle_usage`` to aggregate — yet the session's usage/cost surface
+        must keep rendering, exactly as it did when the same open went through
+        the whole-flow pull. The daemon already computes this summary from the
+        flow's engine state (the same backend the CLI history view uses) and
+        relays it on every index push, so the server can answer from data it
+        already holds instead of paying the whole-flow record parse the
+        windowing exists to avoid. It carries the flow totals, not the per-call
+        table — the frontend renders either shape.
+
+        Resolution mirrors :meth:`get_history_flow_project_root` — the reported
+        history index first, then the live flow set, each pass reachable-machine
+        first and owner-scoped throughout — so the summary describes the same
+        machine's view of the flow that the window read is routed to.
+
+        Returns ``None`` when no owner-visible source reports usage for the flow
+        (a history-only flow whose engine state is gone), so the caller omits
+        the field rather than sending a misleading zero summary.
+        """
+
+        def _accept(machine_id: str, online_only: bool) -> bool:
+            record = self._machines.get(machine_id)
+            if owner is not None and (record is None or not _owned(record, owner)):
+                return False
+            if not online_only:
+                return True
+            return self._machine_is_reachable(machine_id, record)
+
+        def _resolve(online_only: bool) -> Optional[Dict[str, Any]]:
+            for machine_id, sessions in self._history_index.items():
+                if not _accept(machine_id, online_only):
+                    continue
+                for session in sessions:
+                    if str(session.get("flow_id") or "") != flow_id:
+                        continue
+                    usage = session.get("usage_summary")
+                    if isinstance(usage, dict) and usage:
+                        return usage
+            for _machine_id, record in self._iter_owned_machines_online_first(
+                owner, online_only=online_only
+            ):
+                flow = record.flows.get(flow_id)
+                if flow is not None and isinstance(flow.usage_summary, dict):
+                    if flow.usage_summary:
+                        return flow.usage_summary
             return None
 
         async with self._lock:

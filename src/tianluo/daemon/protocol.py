@@ -188,7 +188,13 @@ from typing import Any, Dict, FrozenSet, List, Optional
 # plan_granularity pair (the strategy axis was retired in favour of PLAN's own
 # decomposition decision). Same refusal rule, same reason; the retired field
 # remains accepted for one version and is mapped on the daemon side.
-PROTOCOL_VERSION = "8"
+# Revision "9" added the history step-window channel
+# (MSG_HISTORY_WINDOW_REQUEST / MSG_HISTORY_WINDOW_DATA): a by-step-block range
+# read that lets the server answer a windowed WebUI open without pulling — and
+# caching — a whole multi-hundred-MB flow. A daemon advertising "8" or older
+# knows no such request, so the server must degrade to the existing cursorless
+# full pull rather than wait one out (see :func:`supports_history_window`).
+PROTOCOL_VERSION = "9"
 
 #: Minimum peer ``protocol_version`` that understands the revision-3
 #: traffic-reduction messages. When a peer advertises a value below this in its
@@ -357,6 +363,29 @@ def supports_spawn_plan_mode(peer_version: Any) -> bool:
         return False
 
 
+#: Minimum peer ``protocol_version`` that understands the revision-9 history
+#: step-window channel (:data:`MSG_HISTORY_WINDOW_REQUEST` /
+#: :data:`MSG_HISTORY_WINDOW_DATA`).
+#:
+#: WHY the server must check rather than just try: an older daemon silently
+#: ignores an unknown frame, so an unguarded window request would park the
+#: browser on the pull timeout for every page-up. Below this the server falls
+#: back to the existing cursorless full pull and serves the window out of the
+#: resulting bundle — available, just not memory-frugal.
+MIN_HISTORY_WINDOW_PROTOCOL_VERSION = 9
+
+
+def supports_history_window(peer_version: Any) -> bool:
+    """Return whether *peer_version* understands the step-window read."""
+    try:
+        return (
+            int(str(peer_version).strip())
+            >= MIN_HISTORY_WINDOW_PROTOCOL_VERSION
+        )
+    except (TypeError, ValueError):
+        return False
+
+
 # Default TCP port for the central server. This is the *single source of
 # truth* for the default port: ``tianluo-server`` binds it when ``--port`` is
 # omitted, and the daemon client fills it in when ``--server-url`` carries no
@@ -434,6 +463,19 @@ MSG_HISTORY_INDEX_DELTA = "history_index_delta"
 #: the echoed ``request_id`` so the server can correlate it to the waiting
 #: REST request, plus ``ok`` / ``detail`` / ``error``. Revision 3.
 MSG_DETAIL_DATA = "detail_data"
+
+#: daemon → server: deliver one chunk of a :data:`MSG_HISTORY_WINDOW_REQUEST`.
+#: Carries ``request_id`` (echoed), ``ok`` and, on success, ``records`` plus the
+#: window description: ``steps`` (EVERY step block id of the flow, in flow
+#: order — a few dozen short strings, so the server can hand the browser a
+#: complete block index without a second round trip), ``window`` (the block ids
+#: this reply covers), ``counts`` (the cursor-shaped per-file physical line
+#: counts, for the client's window-aware completeness self-check) and ``final``.
+#: A window whose records exceed one frame's byte budget is split across several
+#: frames, all but the last carrying ``final=false``; only the ``final`` frame
+#: settles the request. On failure it carries ``ok=false`` plus a human
+#: ``error``. Revision 9.
+MSG_HISTORY_WINDOW_DATA = "history_window_data"
 #: daemon → server: report that a server-requested spawn / resume / project
 #: init failed *after* the SPAWN_FLOW was dispatched. ``POST /api/flows``
 #: replies ``202 dispatched`` immediately (the daemon spawns asynchronously),
@@ -576,6 +618,21 @@ MSG_FETCH_RESULT = "fetch_result"
 #: Revision 3; only used when the daemon advertises support.
 MSG_DETAIL_REQUEST = "detail_request"
 
+#: server → daemon: read ONE window of a flow's history, addressed by STEP BLOCK
+#: rather than by byte cursor. Carries ``request_id`` (echoed back on the reply),
+#: ``flow_id``, ``project_root``, ``count`` (how many step blocks to read) and an
+#: optional ``before_step`` (read the ``count`` blocks immediately preceding that
+#: step id; absent means "the TAIL ``count`` blocks").
+#:
+#: WHY this exists next to :data:`MSG_HISTORY_REQUEST`: that one is a whole-flow
+#: read whose reply the server caches as a bundle. For a flow whose history is
+#: larger than the server's entire history-cache budget that is a
+#: eviction⇄re-pull storm — the bundle cannot be held, so every browser page
+#: re-pulls the whole thing. A window read serves the browser directly and is
+#: never cached, so a flow of any size can be browsed block by block.
+#: Revision 9; only used when the daemon advertises support.
+MSG_HISTORY_WINDOW_REQUEST = "history_window_request"
+
 # -- detail-request kinds -------------------------------------------------
 # The ``kind`` field of a MSG_DETAIL_REQUEST / MSG_DETAIL_DATA payload names
 # which on-demand full-text artifact is being fetched, so the daemon knows
@@ -703,6 +760,7 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
         MSG_HISTORY_DATA,
         MSG_KEEPALIVE,
         MSG_DETAIL_DATA,
+        MSG_HISTORY_WINDOW_DATA,
         MSG_ISSUE_RESULT,
         MSG_PROJECT_RESULT,
         MSG_SPAWN_FAILED,
@@ -723,6 +781,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_ISSUE_COMMAND,
         MSG_PROJECT_COMMAND,
         MSG_DETAIL_REQUEST,
+        MSG_HISTORY_WINDOW_REQUEST,
         MSG_END_SESSION,
         MSG_VIEWERS,
         MSG_UPLOAD_COMMAND,
@@ -1671,6 +1730,123 @@ def make_history_index_delta(
         },
         seq=seq,
     )
+
+
+def make_history_window_request(
+    flow_id: str,
+    *,
+    request_id: str,
+    project_root: str = "",
+    count: int = 10,
+    before_step: str = "",
+    steps: Any = (),
+    if_signature: str = "",
+    seq: int = 0,
+) -> Message:
+    """server → daemon: read one STEP-BLOCK window of *flow_id*'s history.
+
+    *count* is how many step blocks to read; *before_step* names the block to
+    read BACKWARDS from (exclusive) and, when empty, asks for the flow's TAIL
+    blocks — the shape a WebUI open wants. *steps*, when given, names the blocks
+    to read EXACTLY and overrides both — the shape the on-demand detail lookup
+    wants, which needs one named block and nothing around it. *request_id*
+    correlates the :data:`MSG_HISTORY_WINDOW_DATA` frames back to the waiting
+    REST request.
+
+    *if_signature* is a conditional-read probe: the ``signature`` a previous
+    reply for the SAME window shape carried. When it still describes the flow
+    on disk, the daemon answers ``not_modified`` with no records at all — the
+    steady state a relayed (never-cached) window needs, since its consumer has
+    no bundle to compare against and would otherwise re-read and re-ship the
+    whole window on every poll. It is optional in BOTH directions: a daemon
+    that does not know the field simply answers with the window, which is what
+    every caller already handles.
+
+    Raises :class:`ProtocolError` on an empty *flow_id* / *request_id* or a
+    non-positive *count*: unlike a cursor, a window request that names nothing
+    has no sensible degenerate reading, and answering one would hand the browser
+    an empty window it would read as "this flow has no history".
+    """
+    flow = str(flow_id or "").strip()
+    rid = str(request_id or "").strip()
+    if not flow:
+        raise ProtocolError("history window request requires a flow_id")
+    if not rid:
+        raise ProtocolError("history window request requires a request_id")
+    try:
+        blocks = int(count)
+    except (TypeError, ValueError):
+        raise ProtocolError(f"history window count must be an int, got {count!r}")
+    if blocks <= 0:
+        raise ProtocolError(f"history window count must be positive, got {blocks}")
+    payload: Dict[str, Any] = {
+        "flow_id": flow,
+        "request_id": rid,
+        "count": blocks,
+    }
+    if project_root:
+        payload["project_root"] = project_root
+    if before_step:
+        payload["before_step"] = str(before_step)
+    if steps:
+        payload["steps"] = [str(step) for step in steps]
+    if if_signature:
+        payload["if_signature"] = str(if_signature)
+    return Message(type=MSG_HISTORY_WINDOW_REQUEST, payload=payload, seq=seq)
+
+
+def make_history_window_data(
+    flow_id: str,
+    *,
+    request_id: str,
+    records: Any = (),
+    steps: Any = (),
+    window: Any = (),
+    counts: Optional[Dict[str, int]] = None,
+    signature: str = "",
+    not_modified: bool = False,
+    ok: bool = True,
+    final: bool = True,
+    error: str = "",
+    seq: int = 0,
+) -> Message:
+    """daemon → server: one chunk of a :data:`MSG_HISTORY_WINDOW_REQUEST` reply.
+
+    *steps* is the flow's COMPLETE ordered block index and *window* the block
+    ids this reply covers; *counts* is the cursor-shaped per-file physical line
+    count map. All three describe the whole window and are repeated on every
+    chunk, so a consumer can act on the first frame it sees and a chunk lost to
+    a reconnect costs no descriptive state.
+
+    *final* is ``False`` on every chunk but the last: a window larger than one
+    frame's byte budget is split, and only the closing frame settles the waiting
+    request (mirroring the ``final`` bit of :data:`MSG_HISTORY_DATA`, and for the
+    same reason — a reply cut mid-drain must be detectable rather than leave a
+    self-consistent prefix behind).
+
+    *signature* fingerprints what this window read answered; a caller that
+    echoes it as the next request's ``if_signature`` is answered with
+    *not_modified* (records, steps, window and counts all empty — the reply is
+    "keep what you hold") while the flow is unchanged. It rides every chunk for
+    the same reason the descriptive fields do.
+    """
+    payload: Dict[str, Any] = {
+        "flow_id": str(flow_id or ""),
+        "request_id": str(request_id or ""),
+        "ok": bool(ok),
+        "final": bool(final),
+        "records": list(records),
+        "steps": list(steps),
+        "window": list(window),
+        "counts": dict(counts or {}),
+    }
+    if signature:
+        payload["signature"] = str(signature)
+    if not_modified:
+        payload["not_modified"] = True
+    if error:
+        payload["error"] = error
+    return Message(type=MSG_HISTORY_WINDOW_DATA, payload=payload, seq=seq)
 
 
 def make_detail_request(

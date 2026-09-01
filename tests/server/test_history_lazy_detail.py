@@ -830,10 +830,23 @@ def client_and_app():
         yield client, app
 
 
-def _seed(client, app, records=BUNDLE, flow=FLOW):
+def _seed(client, app, records=BUNDLE, flow=FLOW, protocol_version=""):
+    """Connect a daemon and get *flow*'s bundle cached.
+
+    *protocol_version* pins the peer's advertised wire revision. The cache-miss
+    tests below pass ``"8"`` on purpose: since revision 9 the detail route
+    prefers a single-step WINDOW read against a capable daemon, and these cases
+    exist to pin the whole-flow pull that remains the fallback for every older
+    daemon (its multi-frame follow, its single deadline, its 404 promptness).
+    The window path has its own coverage in ``test_history_step_window.py``.
+    """
     daemon = client.websocket_connect("/ws")
     sock = daemon.__enter__()
-    sock.send_text(authed_hello(app, MACHINE, "host", "6.4.0"))
+    sock.send_text(
+        authed_hello(
+            app, MACHINE, "host", "6.4.0", protocol_version=protocol_version
+        )
+    )
     protocol.decode(sock.receive_text())  # WELCOME
     # The index is what makes the flow *addressable* after its bundle has been
     # evicted — the exact state the on-demand detail path has to survive.
@@ -1084,7 +1097,7 @@ def test_detail_endpoint_gives_up_when_the_daemon_send_stalls(
     from tianluo.server import app as server_app
 
     client, app = client_and_app
-    daemon, _sock, _resp = _seed(client, app)
+    daemon, _sock, _resp = _seed(client, app, protocol_version="8")
     try:
         app.state.server_state._history_data.pop(FLOW, None)
 
@@ -1122,7 +1135,7 @@ def test_detail_endpoint_bounds_the_whole_round_trip_not_just_the_wait(
     from tianluo.server import app as server_app
 
     client, app = client_and_app
-    daemon, _sock, _resp = _seed(client, app)
+    daemon, _sock, _resp = _seed(client, app, protocol_version="8")
     try:
         app.state.server_state._history_data.pop(FLOW, None)
 
@@ -1155,7 +1168,7 @@ def test_detail_endpoint_bounds_the_whole_round_trip_not_just_the_wait(
 def test_detail_endpoint_repulls_from_the_daemon_on_a_cache_miss(client_and_app):
     """A miss goes back to the owning daemon, whose jsonl is authoritative."""
     client, app = client_and_app
-    daemon, sock, _resp = _seed(client, app)
+    daemon, sock, _resp = _seed(client, app, protocol_version="8")
     try:
         state = app.state.server_state
         state._history_data.pop(FLOW, None)
@@ -1211,7 +1224,7 @@ def test_detail_endpoint_follows_a_multi_frame_pull(client_and_app):
     read as "still coming", never as completion.
     """
     client, app = client_and_app
-    daemon, sock, _resp = _seed(client, app)
+    daemon, sock, _resp = _seed(client, app, protocol_version="8")
     try:
         state = app.state.server_state
         state._history_data.pop(FLOW, None)
@@ -1276,7 +1289,7 @@ def test_detail_404s_promptly_once_the_bundle_settles_the_line(client_and_app):
     cursor it declared counts that line as read.
     """
     client, app = client_and_app
-    daemon, sock, _resp = _seed(client, app)
+    daemon, sock, _resp = _seed(client, app, protocol_version="8")
     try:
         state = app.state.server_state
         state._history_data.pop(FLOW, None)

@@ -3917,6 +3917,15 @@ roundUsageMod.registerRoundUsageTests({ app, check, findOne, findAll });
 // Register the history flow_id display tests (Parts 1 & 2): the list-card meta
 // flow_id span and the detail-header dedicated full flow_id line. Async because
 // the detail-line check drives openHistorySession through a canned fetch.
+// -- step-event held-back payload (source=step lazy detail) -----------------
+//
+// A step_completed / step_failed / step_output record no longer ships its
+// StepState snapshot's `inputs`; the report card and usage chip must render
+// unchanged, and the "查看原始" chip must fetch the original on expand.
+const stepPayloadLazyMod = await import("./step_payload_lazy.test.mjs");
+await stepPayloadLazyMod.registerStepPayloadLazyTests(
+  { app, check, checkAsync, findOne, findAll });
+
 const historyFlowIdMod = await import("./history_flow_id.test.mjs");
 await historyFlowIdMod.registerHistoryFlowIdTests({ app, check, checkAsync, findOne, findAll });
 
@@ -4185,6 +4194,20 @@ await flowDetailStallMod.registerFlowDetailStallTests({ app, check, checkAsync, 
 // because the History view has no poll timer of its own.
 const incompleteRecoveryMod = await import("./history_incomplete_recovery.test.mjs");
 await incompleteRecoveryMod.registerHistoryIncompleteRecoveryTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
+// Tail-first, step-block windowed history delivery
+// ---------------------------------------------------------------------------
+//
+// Flow 20260829-224712_878b4fc9 is 222 MB of jsonl — 554 MiB as a server bundle,
+// against a 256 MiB cache budget — so "fetch it all, then render" could not
+// terminate: the bundle was evicted, the next poll missed, the whole flow was
+// pulled again, and the console repeated `history delivery incomplete` while the
+// pane showed a prefix. The view now opens on the LAST step blocks and pages
+// backwards on demand, and its completeness self-check is scoped to the blocks
+// it has loaded so an unloaded head is never mistaken for a hole.
+const stepWindowMod = await import("./history_step_window.test.mjs");
+await stepWindowMod.registerHistoryStepWindowTests({ app, check, checkAsync, findOne, findAll });
 
 // ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns

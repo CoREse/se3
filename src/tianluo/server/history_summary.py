@@ -34,6 +34,19 @@ bundle produced. Two detail sources feed it and both are handled here.
   tail-first instead of as a prefix (:data:`VERBATIM_INPUT_KEYS`) are exempt
   from elision entirely.
 
+The same argument reaches the ENGINE's step events (``step_completed`` /
+``step_failed`` / ``step_output``), which is where the bulk of a long flow
+actually is: the record carries a full StepState snapshot whose ``inputs`` is
+the machine input handed TO the step — a whole ``scope_diff``, ``test_results``,
+``fix_history``, the task description repeated under three names — while the
+default render reads only ``outputs``' structured result fields plus status,
+error_message and token_usage. So ``inputs`` is reduced to
+:data:`STEP_INPUT_INLINE_KEYS` (the handful of scalars the card really does
+read) and the record is marked :data:`STEP_INPUTS_LAZY_KEY`; "View raw" fetches
+the original message back under source :data:`DETAIL_SOURCE_STEP`, which is
+addressed by the record alone since a step event holds no tool call.
+``outputs`` is never touched — that IS the collapsed view.
+
 A ``tool_result``'s content is collapsed STRUCTURALLY rather than string by
 string: the header reads it only through ``_toolExtractText`` (line count plus,
 for an unregistered tool, a 60-char preview), so the whole value — a block
@@ -109,8 +122,12 @@ __all__ = [
     "VERBATIM_INPUT_KEYS",
     "DETAIL_SOURCE_PROGRESS",
     "DETAIL_SOURCE_RAW",
+    "DETAIL_SOURCE_STEP",
     "DETAIL_VERSION_KEY",
     "LAZY_BODY_MASK_KEY",
+    "STEP_EVENT_TYPES",
+    "STEP_INPUTS_LAZY_KEY",
+    "STEP_INPUT_INLINE_KEYS",
     "elide_string",
     "record_address",
     "summarize_history_records",
@@ -193,6 +210,41 @@ _SAVING_PROBE = 1024
 #: reported as unavailable rather than silently answered from the other one.
 DETAIL_SOURCE_PROGRESS = "progress"
 DETAIL_SOURCE_RAW = "raw"
+
+#: The third detail source: a step event's held-back ``data.step.inputs``. It is
+#: addressed by the record alone — a step event carries no ``tool_use_id`` — so
+#: the endpoint takes an empty one for this source only.
+DETAIL_SOURCE_STEP = "step"
+
+#: The engine event types whose record carries a full StepState snapshot.
+STEP_EVENT_TYPES = frozenset({"step_completed", "step_failed", "step_output"})
+
+#: Marker saying this record's step snapshot is missing its ``inputs``. Placed
+#: on the message holder beside ``detail_flow`` rather than inside the stubbed
+#: object: the step event's whole "View raw" payload IS that message, so the
+#: restore swaps the marked container for the original the endpoint returns and
+#: the printed record comes back byte-identical.
+STEP_INPUTS_LAZY_KEY = "step_inputs_lazy"
+
+#: INVARIANT: every ``inputs`` key the DEFAULT step render reads, kept inline.
+#: The rest of a step snapshot's inputs is the machine input handed TO the step
+#: (a full ``scope_diff``, ``test_results``, ``fix_history``, and the task
+#: description repeated under three names) — 10.8 MB against 38 KB of outputs on
+#: the record that motivated this — and the report card reads NONE of it: it
+#: renders ``outputs``' structured result fields plus status / error_message /
+#: token_usage. What is listed here is what does reach the card:
+#: ``fix_iteration`` / ``is_fix_iteration`` tell an implement fix round apart
+#: from round one (``implementFixIteration``), and the confirm card falls back
+#: to ``reviewer`` / ``step_to_review_*`` when the verdict dict omits them
+#: (``renderConfirmReport``). All are small scalars, so keeping them costs
+#: nothing the hold-back exists to save.
+STEP_INPUT_INLINE_KEYS = frozenset({
+    "fix_iteration",
+    "is_fix_iteration",
+    "reviewer",
+    "step_to_review_type",
+    "step_to_review_id",
+})
 
 #: Cap on how deep the elision walk descends into a tool input/result value.
 #: Beyond this the value is passed through untouched — a pathological nesting is
@@ -771,7 +823,10 @@ def _feed_digest(hasher: Any, value: Any, depth: int = 0) -> None:
 
 
 def _detail_version(
-    raw_json: Any, lazy_ids: Sequence[str], progress_detail: Any
+    raw_json: Any,
+    lazy_ids: Sequence[str],
+    progress_detail: Any,
+    step_inputs: Any = None,
 ) -> str:
     """A digest of exactly the bodies this record is holding back.
 
@@ -782,6 +837,9 @@ def _detail_version(
     leaves byte-identical) is what makes the two compare unequal.
     """
     hasher = hashlib.blake2b(digest_size=6)
+    if step_inputs is not None:
+        hasher.update(b"i")
+        _feed_digest(hasher, step_inputs)
     if progress_detail is not None:
         hasher.update(b"p")
         _feed_digest(hasher, progress_detail)
@@ -877,6 +935,93 @@ def record_address(record: Any) -> Optional[Tuple[str, int]]:
     if not isinstance(step_id, str) or not step_id:
         return None
     return step_id, ordinal
+
+
+#: What the per-record ``"step_inputs_lazy": true, `` marker costs on the wire,
+#: under the spaced encoder (see :func:`_rough_wire_len`).
+_STEP_INPUTS_MARKER_COST = len('"step_inputs_lazy": true, ')
+
+
+def _step_inputs_target(record: dict):
+    """Locate a step event's effective ``inputs`` and how to replace it.
+
+    Returns ``(inputs, rebuild)`` — where ``rebuild(new_inputs)`` yields the
+    single ``(container, key, value)`` edit that puts *new_inputs* in place — or
+    ``None`` when this record is not a step event carrying a dict ``inputs``.
+
+    INVARIANT: the resolution order mirrors ``normalizeRecord``'s step-event
+    branch exactly (``data.step.inputs`` → ``message.step.inputs`` →
+    ``data.inputs`` → the record's own ``inputs``). Shaping one container while
+    the browser reads another would hand it a record still carrying the megabyte
+    it was told had been held back, and a detail request for a body nothing
+    took.
+    """
+    event_type = _pick(record, "type")
+    if not isinstance(event_type, str):
+        return None
+    if event_type.lower() not in STEP_EVENT_TYPES:
+        return None
+    message, _has_envelope = _holder_of(record)
+    data_owner = _owner_of(record, "data")
+    data = data_owner.get("data") if data_owner is not None else None
+    if not isinstance(data, dict):
+        data = None
+        data_owner = None
+
+    inner_step = None
+    inner_owner = None
+    if data is not None and isinstance(data.get("step"), dict):
+        inner_step, inner_owner = data["step"], "data"
+    elif isinstance(message.get("step"), dict):
+        inner_step, inner_owner = message["step"], "message"
+
+    if inner_step is not None and isinstance(inner_step.get("inputs"), dict):
+        inputs = inner_step["inputs"]
+        if inner_owner == "data":
+            def rebuild(new_inputs, _data=data, _step=inner_step,
+                        _owner=data_owner):
+                new_step = dict(_step)
+                new_step["inputs"] = new_inputs
+                new_data = dict(_data)
+                new_data["step"] = new_step
+                return _owner, "data", new_data
+        else:
+            def rebuild(new_inputs, _step=inner_step, _owner=message):
+                new_step = dict(_step)
+                new_step["inputs"] = new_inputs
+                return _owner, "step", new_step
+        return inputs, rebuild
+
+    if data is not None and isinstance(data.get("inputs"), dict):
+        inputs = data["inputs"]
+
+        def rebuild(new_inputs, _data=data, _owner=data_owner):
+            new_data = dict(_data)
+            new_data["inputs"] = new_inputs
+            return _owner, "data", new_data
+
+        return inputs, rebuild
+
+    owner = _owner_of(record, "inputs")
+    if owner is not None and isinstance(owner.get("inputs"), dict):
+        inputs = owner["inputs"]
+
+        def rebuild(new_inputs, _owner=owner):
+            return _owner, "inputs", new_inputs
+
+        return inputs, rebuild
+    return None
+
+
+def _stub_step_inputs(inputs: Dict[str, Any]) -> Dict[str, Any]:
+    """What of a step snapshot's ``inputs`` still rides inline.
+
+    An allowlist rather than a size filter: which keys the card reads is a fixed
+    property of the renderers (:data:`STEP_INPUT_INLINE_KEYS`), and a
+    size-driven rule would drop a small key the card DOES read as soon as some
+    record happened to make it big.
+    """
+    return {k: v for k, v in inputs.items() if k in STEP_INPUT_INLINE_KEYS}
 
 
 def _progress_detail_saving(detail: Dict[str, Any]) -> int:
@@ -989,23 +1134,49 @@ def _summarize_record(record: Any, flow_id: str) -> Any:
         else:
             raw_saved = 0
 
-    # Benefit rule (b), decided on the COMPLETE replacement cost: the two
-    # candidates share the per-record markers, so whichever combination actually
-    # shrinks the response wins and an unprofitable one is simply not taken.
+    # (3) step events: the StepState snapshot's ``inputs`` is the machine input
+    # handed TO the step, not its conclusion, and the default render reads only
+    # the handful of scalars :data:`STEP_INPUT_INLINE_KEYS` names. On a
+    # check-class step it is where a whole ``scope_diff`` lives — megabytes of
+    # payload the report card never touches, inlined on every delivery.
+    step_target = _step_inputs_target(record)
+    step_inputs: Any = None
+    new_step_inputs: Any = None
+    step_rebuild = None
+    step_saved = 0
+    if step_target is not None:
+        step_inputs, step_rebuild = step_target
+        new_step_inputs = _stub_step_inputs(step_inputs)
+        step_saved = (
+            _wire_saving(step_inputs, new_step_inputs) - _STEP_INPUTS_MARKER_COST
+        )
+
+    # Benefit rule (b), decided on the COMPLETE replacement cost: the candidates
+    # share the per-record markers, so whichever combination actually shrinks
+    # the response wins and an unprofitable one is simply not taken.
     best = 0
-    use_progress = use_raw = False
-    for want_progress, want_raw in ((True, True), (True, False), (False, True)):
-        if want_progress and progress_saved <= 0:
-            continue
-        if want_raw and raw_saved <= 0:
-            continue
-        net = (progress_saved if want_progress else 0)
-        net += raw_saved if want_raw else 0
-        net -= _record_marker_cost(str(flow_id or ""))
-        if net > best:
-            best = net
-            use_progress, use_raw = want_progress, want_raw
-    if not use_progress and not use_raw:
+    use_progress = use_raw = use_step = False
+    for want_progress in (True, False):
+        for want_raw in (True, False):
+            for want_step in (True, False):
+                if not (want_progress or want_raw or want_step):
+                    continue
+                if want_progress and progress_saved <= 0:
+                    continue
+                if want_raw and raw_saved <= 0:
+                    continue
+                if want_step and step_saved <= 0:
+                    continue
+                net = (progress_saved if want_progress else 0)
+                net += raw_saved if want_raw else 0
+                net += step_saved if want_step else 0
+                net -= _record_marker_cost(str(flow_id or ""))
+                if net > best:
+                    best = net
+                    use_progress, use_raw, use_step = (
+                        want_progress, want_raw, want_step
+                    )
+    if not use_progress and not use_raw and not use_step:
         return record
 
     if use_progress:
@@ -1015,6 +1186,10 @@ def _summarize_record(record: Any, flow_id: str) -> Any:
         edit(raw_holder, "raw_json", new_raw)
         edit(raw_holder, "lazy_tool_use_ids", lazy_ids)
         edit(raw_holder, LAZY_BODY_MASK_KEY, lazy_mask)
+    if use_step:
+        container, key, value = step_rebuild(new_step_inputs)
+        edit(container, key, value)
+        edit(message, STEP_INPUTS_LAZY_KEY, True)
 
     # The browser addresses a lazy detail by (flow_id, step_id, ordinal,
     # tool_use_id); step_id and ordinal already ride the record's envelope, so
@@ -1032,6 +1207,7 @@ def _summarize_record(record: Any, flow_id: str) -> Any:
             raw_json if use_raw else None,
             lazy_ids if use_raw else (),
             progress_detail if use_progress else None,
+            step_inputs if use_step else None,
         ),
     )
 
@@ -1133,6 +1309,28 @@ def _raw_pair_detail(raw_json: Any, tool_use_id: str) -> Optional[Dict[str, Any]
     }
 
 
+def _step_event_detail(record: dict) -> Optional[Dict[str, Any]]:
+    """One step event's held-back payload, straight out of the cached record.
+
+    ``record`` is the message holder as the daemon delivered it, so the browser
+    can print the "View raw" payload byte-identically by swapping the marked
+    container for this one — no second server-side renderer to drift from, the
+    same argument that makes :func:`_raw_pair_detail` return blocks rather than
+    a rendered panel. ``inputs`` rides beside it so a consumer that only wants
+    the snapshot's machine input does not have to re-walk the record.
+    """
+    target = _step_inputs_target(record)
+    if target is None:
+        return None
+    inputs, _rebuild = target
+    message, _has_envelope = _holder_of(record)
+    return {
+        "source": DETAIL_SOURCE_STEP,
+        "record": message,
+        "inputs": inputs,
+    }
+
+
 def _detail_of_record(
     record: dict, tool_use_id: str, source: str
 ) -> Optional[Dict[str, Any]]:
@@ -1146,6 +1344,8 @@ def _detail_of_record(
     different panel than the chip promised, so a missing source is reported as
     unavailable instead.
     """
+    if source == DETAIL_SOURCE_STEP:
+        return _step_event_detail(record)
     if source == DETAIL_SOURCE_RAW:
         raw_json = _pick(record, "raw_json")
         if not isinstance(raw_json, list) or not raw_json:
@@ -1195,7 +1395,11 @@ def locate_record_detail(
     summarized rather than reading as absent.
     """
     out: Dict[str, Any] = {"detail": None, "record_found": False, "passed": False}
-    if not tool_use_id or not isinstance(records, (list, tuple)):
+    if not isinstance(records, (list, tuple)):
+        return out
+    # A step event carries no tool call, so its address is the whole request;
+    # every other source names one call inside the addressed record.
+    if not tool_use_id and source != DETAIL_SOURCE_STEP:
         return out
     if not step_id or isinstance(ordinal, bool) or not isinstance(ordinal, int):
         return out

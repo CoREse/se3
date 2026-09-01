@@ -1045,6 +1045,132 @@ class DetailRequestRegistry:
             }
 
 
+class HistoryWindowRegistry:
+    """Tracks in-flight step-window history reads awaiting their daemon reply.
+
+    The windowed WebUI open asks the owning daemon for a few STEP BLOCKS of a
+    flow (:data:`~tianluo.daemon.protocol.MSG_HISTORY_WINDOW_REQUEST`) and parks
+    an :class:`asyncio.Future` here keyed by ``request_id``. The daemon may
+    answer in several :data:`~tianluo.daemon.protocol.MSG_HISTORY_WINDOW_DATA`
+    frames — a window can be tens of megabytes — so frames ACCUMULATE and only
+    the one flagged ``final`` settles the waiter.
+
+    WHY there is no leader/follower coalescing here (unlike
+    :class:`HistoryRequestRegistry` / :class:`DetailRequestRegistry`): those two
+    coalesce whole-flow pulls, which several viewers of the same flow issue
+    simultaneously and which cost megabytes each. A window read is
+    scroll-driven, its key would have to include the anchor block (two readers
+    at different scroll positions want different windows), and its results are
+    never cached — so the shared-pull machinery would add a keyspace and a
+    cross-owner leakage surface to buy nothing.
+
+    Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, "asyncio.Future"] = {}
+        #: request_id -> the frames accumulated so far for that request.
+        self._chunks: Dict[str, Dict[str, Any]] = {}
+
+    def begin(self, request_id: str) -> "asyncio.Future":
+        """Park a waiter for *request_id* and return its future."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters[request_id] = fut
+        self._chunks[request_id] = {
+            "ok": True,
+            "error": "",
+            "records": [],
+            "steps": [],
+            "window": [],
+            "counts": {},
+            "signature": "",
+            "not_modified": False,
+        }
+        return fut
+
+    def accumulate(self, request_id: str, payload: Dict[str, Any]) -> None:
+        """Fold one reply frame in; resolve the waiter on the ``final`` frame.
+
+        A frame for an unknown / already-settled request is dropped: it is the
+        residue of a waiter that timed out, and re-creating its accumulator here
+        would be a slow leak keyed by a request nobody is waiting on.
+        """
+        acc = self._chunks.get(request_id)
+        if acc is None:
+            return
+        if not payload.get("ok", True):
+            acc["ok"] = False
+            acc["error"] = str(payload.get("error") or "history window read failed")
+        records = payload.get("records")
+        if isinstance(records, list):
+            acc["records"].extend(records)
+        # The window description rides every frame (see make_history_window_data)
+        # so a first frame lost to a reconnect costs no descriptive state; take
+        # the latest non-empty one.
+        for key in ("steps", "window"):
+            value = payload.get(key)
+            if isinstance(value, list) and value:
+                acc[key] = value
+        counts = payload.get("counts")
+        if isinstance(counts, dict) and counts:
+            acc["counts"] = counts
+        signature = payload.get("signature")
+        if isinstance(signature, str) and signature:
+            acc["signature"] = signature
+        # A conditional read that matched is a single ``final`` frame carrying
+        # nothing else; it is latched (never un-set by a later frame) so the
+        # caller reads one unambiguous verdict off the settled accumulator.
+        if payload.get("not_modified"):
+            acc["not_modified"] = True
+        if not payload.get("final", True):
+            return
+        fut = self._waiters.pop(request_id, None)
+        self._chunks.pop(request_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(acc)
+
+    def discard(self, request_id: str) -> None:
+        """Drop a waiter and its accumulator (timeout / cancellation)."""
+        self._waiters.pop(request_id, None)
+        self._chunks.pop(request_id, None)
+
+
+async def request_history_window(
+    manager: ConnectionManager,
+    machine_id: str,
+    flow_id: str,
+    request_id: str,
+    *,
+    project_root: str = "",
+    count: int = 10,
+    before_step: str = "",
+    steps: Any = (),
+    if_signature: str = "",
+) -> bool:
+    """Send a ``MSG_HISTORY_WINDOW_REQUEST`` to *machine_id*.
+
+    Returns ``False`` when the machine has no live connection, so the caller can
+    fall back to the cursorless full pull rather than park on a reply that will
+    never come.
+
+    *if_signature* makes the read CONDITIONAL: a daemon that recognises it and
+    finds the flow unchanged answers ``not_modified`` instead of re-reading and
+    re-shipping the window (see :func:`~tianluo.daemon.protocol.make_history_window_request`).
+    """
+    if not manager.is_connected(machine_id):
+        return False
+    message = protocol.make_history_window_request(
+        flow_id,
+        request_id=request_id,
+        project_root=project_root,
+        count=count,
+        before_step=before_step,
+        steps=steps,
+        if_signature=if_signature,
+    )
+    return await manager.send_to(machine_id, message)
+
+
 async def broadcast_index_refresh(
     manager: ConnectionManager,
     registry: "IndexRefreshRegistry",
@@ -2143,6 +2269,7 @@ async def handle_daemon_connection(
     identity: Optional["IdentityService"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    window_registry: Optional["HistoryWindowRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
     fetch_registry: Optional["UploadRequestRegistry"] = None,
@@ -2281,6 +2408,7 @@ async def handle_daemon_connection(
             interjection_tracker,
             issue_registry,
             detail_registry,
+            window_registry,
             project_registry,
             upload_registry,
             fetch_registry,
@@ -2340,6 +2468,7 @@ async def _serve_loop(
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    window_registry: Optional["HistoryWindowRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
     fetch_registry: Optional["UploadRequestRegistry"] = None,
@@ -2366,6 +2495,7 @@ async def _serve_loop(
                 interjection_tracker,
                 issue_registry,
                 detail_registry,
+                window_registry,
                 project_registry,
                 upload_registry,
                 fetch_registry,
@@ -2452,6 +2582,7 @@ async def _handle_message(
     interjection_tracker: Optional["InterjectionEventTracker"] = None,
     issue_registry: Optional["IssueCommandRegistry"] = None,
     detail_registry: Optional["DetailRequestRegistry"] = None,
+    window_registry: Optional["HistoryWindowRegistry"] = None,
     project_registry: Optional["ProjectCommandRegistry"] = None,
     upload_registry: Optional["UploadRequestRegistry"] = None,
     fetch_registry: Optional["UploadRequestRegistry"] = None,
@@ -2537,6 +2668,17 @@ async def _handle_message(
         request_id = str(message.payload.get("request_id") or "")
         if request_id and detail_registry is not None:
             detail_registry.resolve(request_id, message.payload)
+    elif message.type == protocol.MSG_HISTORY_WINDOW_DATA:
+        # One chunk of a step-window read. Unlike MSG_HISTORY_DATA this is NEVER
+        # applied to the bundle cache: the whole point of the window leg is that
+        # a flow larger than the cache budget can be served straight through to
+        # the browser without a bundle for it ever existing (which is what the
+        # eviction⇄full-pull storm was). The registry accumulates the chunks and
+        # settles the parked REST request on the ``final`` one.
+        await state.touch(machine_id)
+        request_id = str(message.payload.get("request_id") or "")
+        if request_id and window_registry is not None:
+            window_registry.accumulate(request_id, message.payload)
     elif message.type == protocol.MSG_HISTORY_DATA:
         # History records — either an on-demand pull's reply or an active
         # flow's incremental append. Cache them, resolve any waiting REST

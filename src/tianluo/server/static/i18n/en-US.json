@@ -303,6 +303,8 @@
   "history.refreshing": "Refreshing history…",
   "history.connecting": "Connecting / waiting for history data…",
   "history.emptyConfirmed": "No history sessions reported.",
+  "history.loadEarlierSteps": "Load earlier steps",
+  "history.loadingEarlierSteps": "Loading earlier steps…",
   "history.loadingRecords": "Loading records…",
   "history.loadError": "Could not load history for this session ({status}).",
   "history.networkError": "Network error loading session history.",

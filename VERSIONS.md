@@ -1,5 +1,15 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.15.0 - 2026-09-01
+
+- Open the WebUI flow history view at the tail, rendering only the last 10 step blocks and loading earlier step blocks on demand as the user scrolls up, so very large sessions become browsable instead of stalling mid-load
+- Make history windowing real at the transport layer: the history REST endpoint gains tail anchoring and step-block range reads, so the browser no longer needs the full record set before it can render
+- Make the frontend delivery completeness check window-aware, ending the repeating `history delivery incomplete: re-reading flow=…` refetch loop while still detecting and repairing genuine gaps inside the loaded window
+- Withhold the oversized step-event payloads that default rendering never shows (`data.step.inputs`, notably scope_diff / test_results / fix_history, plus raw payloads) from inline delivery and fetch them on demand when the user opens the 'view raw' chip; report cards and usage chips render exactly as before
+- Extend the history detail endpoint with a new source class that addresses withheld step-event payloads by (step_id, ordinal), leaving the existing tool-body semantics, parameters, and response shape unchanged
+- Add per-step and range history reads to the daemon protocol with a version bump and capability negotiation, falling back to the existing full-pull path against older daemons without reintroducing the endless refetch loop
+- Stop the server-side history cache from thrashing: browsing a flow larger than the whole cache budget no longer alternates between eviction and full daemon re-pulls, and such a flow can still be paged back to its first record; the 256 MB `server.history_cache.budget_mb` default and eviction reporting are unchanged
+- Localize the new history-loading strings in zh-CN and en-US, and add server, daemon, and frontend regression tests covering tail windowing, upward paging, over-budget browsing, live append and follow-to-bottom, and on-demand raw payload retrieval
 ## 12.14.1 - 2026-09-01
 
 - Fix large completed flows loading only part of their conversation in the WebUI — history bundles now reliably deliver through the final record (commit/summarize step visible again)

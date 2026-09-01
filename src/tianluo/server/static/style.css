@@ -2675,6 +2675,22 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .history-detail .history-step-header { margin-top: 4px; }
 .history-detail .history-step-header:first-child { margin-top: 0; }
 
+/* -- windowed history: the page-up affordance ------------------------ */
+/*
+ * A windowed conversation opens on its LAST step blocks; this row sits at the
+ * very top of the pane and pages the earlier ones in. Centred and low-contrast
+ * so it reads as a boundary marker rather than as a message in the transcript.
+ */
+.history-load-earlier {
+  display: flex;
+  justify-content: center;
+  padding: 8px 0 12px;
+}
+.history-load-earlier button {
+  font-size: 12px;
+  padding: 4px 14px;
+}
+
 /* -- step report card ----------------------------------------------- */
 /*
  * Default-expanded report card mirroring the CLI's per-step Rich Panel.

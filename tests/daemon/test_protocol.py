@@ -57,21 +57,22 @@ from tianluo.daemon.protocol import (
 # -- version bump ----------------------------------------------------------
 
 
-def test_protocol_version_bumped_to_8():
+def test_protocol_version_bumped_to_9():
     # Revision 5 added the upload channel, revision 6 the fetch channel that
     # reads those files back, revision 7 the optional spawn
-    # ``implementation_strategy`` field, and revision 8 the
-    # ``plan_decomposition`` / ``plan_granularity`` pair that replaced it. Each
-    # bump is what lets the server tell "this daemon can serve the frame" from
-    # "this daemon will ignore it", so a paste (or a thumbnail, or an explicit
-    # plan mode) against an old daemon fails immediately with an explainable
-    # error instead of waiting out a timeout — or, for the plan-mode fields,
-    # silently running a different flow shape than the operator requested.
-    assert protocol.PROTOCOL_VERSION == "8"
+    # ``implementation_strategy`` field, revision 8 the ``plan_decomposition`` /
+    # ``plan_granularity`` pair that replaced it, and revision 9 the history
+    # step-window channel. Each bump is what lets the server tell "this daemon
+    # can serve the frame" from "this daemon will ignore it", so a paste (or a
+    # thumbnail, or an explicit plan mode, or a windowed history open) against
+    # an old daemon degrades on the spot instead of waiting out a timeout — or,
+    # for the plan-mode fields, silently running a different flow shape than the
+    # operator requested.
+    assert protocol.PROTOCOL_VERSION == "9"
 
 
-def test_revision_8_does_not_regress_earlier_gates():
-    # A revision-8 peer must still satisfy every older gate — a bump adds a
+def test_revision_9_does_not_regress_earlier_gates():
+    # A revision-9 peer must still satisfy every older gate — a bump adds a
     # capability, it never withdraws one.
     assert supports_traffic_reduction("6") is True
     assert supports_presence("6") is True
@@ -82,6 +83,7 @@ def test_revision_8_does_not_regress_earlier_gates():
     assert supports_fetch(protocol.PROTOCOL_VERSION) is True
     assert supports_spawn_strategy(protocol.PROTOCOL_VERSION) is True
     assert supports_spawn_plan_mode(protocol.PROTOCOL_VERSION) is True
+    assert protocol.supports_history_window(protocol.PROTOCOL_VERSION) is True
 
 
 # -- spawn plan-mode capability gate ----------------------------------------
@@ -239,9 +241,9 @@ def test_project_management_did_not_bump_protocol_version():
     # not know the type just ignores the frame, and nothing existing degrades —
     # so it rode on revision 4 without a bump of its own. The revision has since
     # advanced to 5/6/7/8 for the (unrelated) upload, fetch, spawn-strategy and
-    # spawn-plan-mode channels, so pin only the fact that these types exist
-    # below the current revision.
-    assert protocol.PROTOCOL_VERSION == "8"
+    # spawn-plan-mode channels and to 9 for the history step-window channel, so
+    # pin only the fact that these types exist below the current revision.
+    assert protocol.PROTOCOL_VERSION == "9"
     assert supports_presence(protocol.PROTOCOL_VERSION) is True
 
 

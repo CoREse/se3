@@ -30,9 +30,12 @@ def test_protocol_version_current():
     # back to full-frame semantics. Revision 4 later added the (unrelated)
     # presence signalling, revision 5 the (likewise unrelated) upload channel,
     # revision 6 its fetch counterpart, revision 7 the optional spawn
-    # implementation_strategy field, and revision 8 the plan_decomposition /
-    # plan_granularity pair that replaced it; pin the current revision here.
-    assert protocol.PROTOCOL_VERSION == "8"
+    # implementation_strategy field, revision 8 the plan_decomposition /
+    # plan_granularity pair that replaced it, and revision 9 the history
+    # step-window channel — the by-step-block range read that lets the server
+    # answer a windowed WebUI open without pulling (and caching) a whole
+    # multi-hundred-MB flow; pin the current revision here.
+    assert protocol.PROTOCOL_VERSION == "9"
 
 
 def test_history_message_types_registered():

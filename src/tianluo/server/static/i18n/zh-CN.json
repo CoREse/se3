@@ -303,6 +303,8 @@
   "history.refreshing": "正在刷新历史…",
   "history.connecting": "正在连接 / 正在等待历史数据…",
   "history.emptyConfirmed": "未报告历史会话。",
+  "history.loadEarlierSteps": "加载更早的步骤",
+  "history.loadingEarlierSteps": "正在加载更早的步骤…",
   "history.loadingRecords": "加载记录…",
   "history.loadError": "无法加载该 session 的历史（{status}）。",
   "history.networkError": "加载会话历史时网络错误。",

@@ -54,12 +54,25 @@ def login(client, username: str = "admin", password: str = "pw"):
 
 
 def authed_hello(
-    app, machine_id: str = "m1", hostname: str = "host", version: str = "6.4.0"
+    app,
+    machine_id: str = "m1",
+    hostname: str = "host",
+    version: str = "6.4.0",
+    protocol_version: str = "",
 ) -> str:
-    """Build an authenticated daemon HELLO carrying the app's issued daemon key."""
-    return protocol.make_hello(
+    """Build an authenticated daemon HELLO carrying the app's issued daemon key.
+
+    *protocol_version* overrides the wire revision the HELLO advertises. It
+    exists so a test can pin the server's LEGACY-peer branch — the paths a
+    daemon older than the current revision still has to be served through —
+    without waiting for the revision to age out of the tree.
+    """
+    message = protocol.make_hello(
         machine_id, hostname, version, key=app.state.test_daemon_key
-    ).to_json()
+    )
+    if protocol_version:
+        message.payload["protocol_version"] = protocol_version
+    return message.to_json()
 
 
 def recv_daemon_frame(sock):

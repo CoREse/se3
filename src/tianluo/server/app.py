@@ -19,9 +19,11 @@ daemons and exposes it to the web frontend:
   directory (the inline-thumbnail path), via the same daemon socket;
 * ``GET /api/history`` — the aggregated history-session index;
 * ``GET /api/history/{id}`` — one flow's history records (pulled on demand),
-  shaped for the collapsed render: tool-call detail bodies are held back;
-* ``GET /api/history/{id}/detail`` — one tool call's detail body, fetched when
-  the user expands its chip;
+  shaped for the collapsed render: tool-call detail bodies and a step event's
+  StepState ``inputs`` snapshot are held back;
+* ``GET /api/history/{id}/detail`` — one held-back body, fetched when the user
+  expands its chip: a tool call's detail (``source=raw`` / ``progress``) or a
+  step event's original record (``source=step``);
 * ``/`` and ``/static`` — the bundled web frontend (static files).
 
 The heavy web dependencies (``fastapi``, ``uvicorn``) are isolated in the
@@ -71,6 +73,8 @@ from .auth.session import CookieConfig, SessionStore, read_cookie
 from .history_summary import (
     DETAIL_SOURCE_PROGRESS,
     DETAIL_SOURCE_RAW,
+    DETAIL_SOURCE_STEP,
+    locate_record_detail,
     summarize_history_records,
 )
 from .identity import IdentityService
@@ -87,6 +91,7 @@ from .ws import (
     ConnectionManager,
     DetailRequestRegistry,
     HistoryRequestRegistry,
+    HistoryWindowRegistry,
     IndexRefreshRegistry,
     InterjectionEventTracker,
     IssueCommandRegistry,
@@ -101,6 +106,7 @@ from .ws import (
     handle_ui_connection,
     request_detail,
     request_history,
+    request_history_window,
 )
 
 logger = logging.getLogger(__name__)
@@ -148,6 +154,12 @@ def _discover_ui_languages() -> list:
 #: still takes real time on a multi-MB session); a shorter window risks 504s
 #: even when the daemon is healthy and still reading.
 HISTORY_PULL_TIMEOUT = 30.0
+
+#: Hard ceiling on how many step blocks one windowed history request may ask
+#: for. The WebUI asks for 10; the cap exists so a hand-crafted
+#: ``?window=100000`` cannot turn the windowed route back into the whole-flow
+#: read it was introduced to replace.
+HISTORY_WINDOW_MAX_BLOCKS = 200
 
 #: How often the on-demand detail endpoint re-reads the bundle while following a
 #: daemon pull's later frames. A pull larger than the daemon's per-frame byte
@@ -524,6 +536,120 @@ async def _history_response(payload: dict, request: Request) -> Response:
     return Response(
         content=body, media_type="application/json", headers=headers
     )
+
+
+def _window_payload_from_daemon(
+    flow_id: str,
+    machine_id: str,
+    reply: Dict[str, Any],
+    *,
+    count: int,
+    before_step: str,
+    usage: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Shape a daemon window reply into the REST snapshot contract.
+
+    The reply is served straight through and never cached, so this payload
+    carries NO ``progress`` / ``signature`` — there is no bundle for a token to
+    pin, and minting one would have the client's next poll present a cursor the
+    server cannot bind, which the snapshot path answers with a whole-flow
+    rebuild: precisely the pull this leg exists to avoid.
+
+    What the client polls with instead is ``window.signature``: the daemon's own
+    constant-cost fingerprint of the read, echoed back as ``wsig`` and answered
+    ``not_modified`` while the flow is unchanged (see
+    :func:`_window_not_modified_payload`). WHY the leg needs one at all: a
+    windowed view holds no token, so its 3 s self-heal poll would otherwise
+    re-request the tail every tick — the daemon re-reading tens of MB of jsonl
+    and the server re-shaping and re-gzipping the whole window — for as long as
+    the flow is merely watched. The signature is bound STATELESSLY: the server
+    stores nothing, it only relays the probe to the daemon that minted it.
+
+    ``incomplete`` is ``False`` rather than absent: the read is a direct,
+    complete answer for the blocks it names, so declaring it settled is the
+    truth — and a windowed view must never inherit the interrupted-delivery
+    repair loop of a bundle that does not exist.
+
+    *usage* is the flow's usage/cost payload, supplied by the caller from the
+    reported session index (:meth:`ServerState.get_history_flow_usage_summary`).
+    WHY it cannot be derived here: the cached legs answer with
+    ``_bundle_usage``, but this leg has no bundle by design, and aggregating the
+    window's own records would report the cost of ten blocks as the session's
+    total — worse than reporting none. The index summary is the whole flow's,
+    computed by the daemon from engine state, so the usage surface renders the
+    same numbers the whole-flow pull used to deliver.
+
+    An EMPTY ``window`` (the daemon resolved the anchor to no block) reports
+    ``first_index = len(steps)``, i.e. "nothing loaded, and NOT at the head":
+    ``has_earlier`` stays true so the client keeps its page-up and keeps its
+    completeness self-check scoped to the blocks it actually holds. The cached
+    leg answers the same condition the same way (``_window_block_range``).
+    """
+    steps = [str(x) for x in (reply.get("steps") or [])]
+    loaded = [str(x) for x in (reply.get("window") or [])]
+    if loaded:
+        first_index = steps.index(loaded[0]) if loaded[0] in steps else 0
+        last_index = steps.index(loaded[-1]) if loaded[-1] in steps else first_index
+    else:
+        first_index, last_index = len(steps), len(steps) - 1
+    return {
+        "machine_id": machine_id,
+        "mode": protocol.HISTORY_MODE_FULL,
+        "delivery": "window",
+        "records": list(reply.get("records") or []),
+        "progress": None,
+        "signature": None,
+        "cursor": dict(reply.get("counts") or {}),
+        "generation": None,
+        "unfillable": {},
+        "pending": {},
+        "incomplete": False,
+        "resync": False,
+        "usage": usage if isinstance(usage, dict) and usage else None,
+        "window": {
+            "mode": "before" if before_step else "tail",
+            "steps": steps,
+            "loaded": loaded,
+            "first_index": first_index,
+            "last_index": last_index,
+            "has_earlier": first_index > 0,
+            "block_size": count,
+            "source": "daemon",
+            # Empty when the daemon predates the conditional read; the client
+            # then simply polls unconditionally, exactly as before.
+            "signature": str(reply.get("signature") or ""),
+        },
+    }
+
+
+def _window_not_modified_payload(flow_id: str, machine_id: str) -> Dict[str, Any]:
+    """The reply to a windowed poll whose ``wsig`` still describes the flow.
+
+    Deliberately carries NO ``window`` block and NO ``cursor``: the client keeps
+    the window description and the block index it already holds (a reply with no
+    window block is inert to ``adoptWindowMeta``), and there is nothing new to
+    self-check against. ``incomplete: False`` for the same reason the full
+    relayed window says so — the read is a complete answer, and a windowed view
+    must never inherit the repair loop of a bundle that does not exist.
+
+    The confirmed signature is not echoed back: it is by construction the one
+    the client just sent, so the value it already holds IS the current one.
+    """
+    return {
+        "flow_id": flow_id,
+        "cached": False,
+        "machine_id": machine_id,
+        "mode": protocol.HISTORY_MODE_FULL,
+        "delivery": "not_modified",
+        "records": [],
+        "progress": None,
+        "signature": None,
+        "generation": None,
+        "unfillable": {},
+        "pending": {},
+        "incomplete": False,
+        "resync": False,
+    }
 
 
 #: When the daemon ack does not arrive within :data:`ISSUE_COMMAND_TIMEOUT`,
@@ -947,6 +1073,7 @@ def create_app(
     # The bookkeeping is identical, hence the shared class.
     fetch_command_registry = UploadRequestRegistry()
     detail_registry = DetailRequestRegistry()
+    window_registry = HistoryWindowRegistry()
     interjection_tracker = InterjectionEventTracker()
     # Grace the daemon-offline transition by 60s so a lossy-link reconnect
     # (keepalive churn on node007-class networks) does not flap the WebUI
@@ -985,6 +1112,7 @@ def create_app(
     app.state.upload_command_registry = upload_command_registry
     app.state.fetch_command_registry = fetch_command_registry
     app.state.detail_registry = detail_registry
+    app.state.history_window_registry = window_registry
     app.state.wire_metrics = wire_metrics
     app.state.interjection_tracker = interjection_tracker
     app.state.presence_debouncer = presence_debouncer
@@ -1024,6 +1152,7 @@ def create_app(
             identity=identity,
             issue_registry=issue_command_registry,
             detail_registry=detail_registry,
+            window_registry=window_registry,
             project_registry=project_command_registry,
             upload_registry=upload_command_registry,
             fetch_registry=fetch_command_registry,
@@ -3396,6 +3525,202 @@ def create_app(
                     # already-dispatched request.
                     history_registry.discard(flow_id, fut, owner_machine)
 
+    async def _pull_history_window_from_daemon(
+        flow_id: str,
+        owner_machine: str,
+        project_root: str,
+        *,
+        blocks: int,
+        before_step: str = "",
+        steps: Optional[List[str]] = None,
+        if_signature: str = "",
+    ) -> Optional[Dict[str, Any]]:
+        """Read one step-block window straight from the owning daemon.
+
+        Returns the daemon's accumulated reply, or ``None`` when the daemon is
+        unreachable / declined / timed out — every one of which the caller
+        answers by degrading to the cursorless full pull, never by failing the
+        request.
+
+        *if_signature*, when the daemon honours it and the flow is unchanged,
+        comes back as ``{"not_modified": True}`` with no records — the caller
+        must answer that with :func:`_window_not_modified_payload` rather than
+        treating it as an empty window.
+
+        INVARIANT: this reply is served to the browser and then DROPPED — it is
+        never installed as a bundle. That is the whole point of the leg: a flow
+        whose history exceeds the server's entire history-cache budget cannot be
+        held, and caching it anyway is what produced the eviction⇄整量回源 storm
+        (the bundle is evicted, the next page misses, the whole flow is pulled
+        again, ad infinitum). Serving windows statelessly makes a flow of any
+        size browsable to its first block at a bounded, constant cost per page.
+        """
+        request_id = uuid.uuid4().hex
+        fut = window_registry.begin(request_id)
+        try:
+            sent = await asyncio.wait_for(
+                request_history_window(
+                    manager,
+                    owner_machine,
+                    flow_id,
+                    request_id,
+                    project_root=project_root or "",
+                    count=blocks,
+                    before_step=before_step,
+                    steps=steps or (),
+                    if_signature=if_signature,
+                ),
+                timeout=HISTORY_PULL_TIMEOUT,
+            )
+            if not sent:
+                return None
+            reply = await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
+        except asyncio.TimeoutError:
+            # A daemon that did not answer in time is a reason to DEGRADE, not
+            # to fail: the caller falls back to the whole-flow pull. Cancellation
+            # is deliberately NOT caught — the client is gone, and swallowing it
+            # would leave this task running past its request.
+            return None
+        finally:
+            window_registry.discard(request_id)
+        if not isinstance(reply, dict) or not reply.get("ok", True):
+            return None
+        return reply
+
+    async def _history_window_reply(
+        request: Request,
+        flow_id: str,
+        *,
+        blocks: int,
+        before_step: str,
+        if_signature: str,
+        owner_machine: str,
+        target_owner: Optional[str],
+    ) -> Response:
+        """Serve one step-block window of *flow_id*, cache-first then daemon.
+
+        Three sources, in order:
+
+        1. the cached bundle, sliced by step block — free, and the common case
+           for any flow small enough to be cached at all;
+        2. a direct daemon window read, served through without ever creating a
+           bundle — the path that makes a flow larger than the whole cache
+           budget browsable;
+        3. the existing cursorless full pull, then (1) again — the compatibility
+           fallback for a daemon too old to know the window request.
+
+        WHY (3) cannot reintroduce the defect: it is reached only for a
+        pre-revision-9 daemon, and while its pull runs the flow is PINNED against
+        eviction (see ``ServerState.pin_history_pull``), so the bundle the drain
+        fills survives to be sliced instead of being swept away mid-drain and
+        re-pulled by the next page.
+
+        *if_signature* (the client's ``wsig``) only ever reaches leg (2): it is a
+        probe against the DAEMON's own view of the files, so the cached leg —
+        which already mints a real progress token and is compared by bundle
+        signature — ignores it and answers as it always did.
+        """
+        try:
+            count = max(1, min(int(blocks), HISTORY_WINDOW_MAX_BLOCKS))
+        except (TypeError, ValueError):
+            count = 10
+        cached = await state.get_history_window_snapshot(
+            flow_id,
+            count=count,
+            before_step=before_step or None,
+            expected_machine_id=owner_machine,
+            expected_owner=target_owner,
+        )
+        if cached is not None:
+            return await _history_response(
+                {"flow_id": flow_id, "cached": True, **cached}, request
+            )
+        owner_connection = await manager.get_connection(owner_machine)
+        if owner_connection is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no connected daemon owns history for flow '{flow_id}'",
+            )
+        flow_project_root = await state.get_history_flow_project_root(
+            flow_id, owner=target_owner
+        )
+        if await state.machine_supports_history_window(
+            owner_machine, owner=target_owner
+        ):
+            reply = await _pull_history_window_from_daemon(
+                flow_id,
+                owner_machine,
+                flow_project_root or "",
+                blocks=count,
+                before_step=before_step,
+                if_signature=if_signature,
+            )
+            if reply is not None and reply.get("not_modified"):
+                # The steady state of a watched over-budget flow: nothing was
+                # read on the daemon, nothing is shaped here, and the browser
+                # keeps the window it already holds.
+                return await _history_response(
+                    _window_not_modified_payload(flow_id, owner_machine),
+                    request,
+                )
+            if reply is not None:
+                # The relayed window builds no bundle, so the usage/cost surface
+                # has to be answered from the index the daemon already pushes —
+                # otherwise the flows this leg exists for (the big ones) would be
+                # the only ones opening with the usage region hidden.
+                usage = await state.get_history_flow_usage_summary(
+                    flow_id, owner=target_owner
+                )
+                return await _history_response(
+                    {
+                        "flow_id": flow_id,
+                        "cached": False,
+                        **_window_payload_from_daemon(
+                            flow_id, owner_machine, reply,
+                            count=count, before_step=before_step,
+                            usage=usage,
+                        ),
+                    },
+                    request,
+                )
+        # Legacy daemon (or a window read that failed): fall back to the
+        # whole-flow pull and slice the resulting bundle. Throttled and pinned
+        # exactly like the unwindowed miss path.
+        if not await state.full_pull_throttled(flow_id):
+            await state.mark_full_pull(flow_id)
+            await state.pin_history_pull(flow_id)
+            try:
+                await _pull_history_from_daemon(
+                    flow_id, owner_machine, owner_connection,
+                    flow_project_root or "",
+                )
+            except HTTPException:
+                # Availability over freshness: a failed fallback pull still gets
+                # one more cache read below, and an empty window reply is a state
+                # the client can retry from — a 5xx here would instead wedge the
+                # view on an error for a transient daemon hiccup.
+                pass
+            finally:
+                await state.release_history_pull(flow_id)
+        rebuilt = await state.get_history_window_snapshot(
+            flow_id,
+            count=count,
+            before_step=before_step or None,
+            expected_machine_id=owner_machine,
+            expected_owner=target_owner,
+        )
+        if rebuilt is not None:
+            return await _history_response(
+                {"flow_id": flow_id, "cached": False, **rebuilt}, request
+            )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "history for flow "
+                f"'{flow_id}' is not available yet; retry shortly"
+            ),
+        )
+
     @app.get("/api/history/{flow_id}")
     async def history_detail(
         request: Request,
@@ -3404,6 +3729,9 @@ def create_app(
         after: Optional[str] = None,
         sig: Optional[str] = None,
         missing: Optional[str] = None,
+        window: Optional[int] = None,
+        before: Optional[str] = None,
+        wsig: Optional[str] = None,
     ) -> Response:
         # ``missing`` names the records the client's own cursor self-check found
         # it does not hold (``stepId:ord,ord;…``). Any unparseable value degrades
@@ -3425,6 +3753,31 @@ def create_app(
         # another owner reads as absent even when its records are cached here.
         scope = _scope_for(identity_)
         owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
+
+        # WINDOWED READ. ``window`` asks for N STEP BLOCKS rather than the whole
+        # flow: the tail N on an open, the N before ``before`` on a page-up. It
+        # is a wholly separate delivery from the progress-token dialect below and
+        # deliberately shares none of its state — a window is addressed by step
+        # id, not by a cursor offset, so there is no token to honour, invalidate
+        # or resync. An older client never sends the parameter and reaches the
+        # unchanged path below.
+        #
+        # ``wsig`` is the windowed dialect's conditional-read probe (the
+        # ``window.signature`` of the reply the client is polling from). It is
+        # NOT a cursor and pins nothing here: the server holds no state for it
+        # and merely relays it to the daemon that minted it, which answers
+        # ``not_modified`` while the flow's blocks are untouched. It is what
+        # gives a token-less windowed view a cheap steady-state poll.
+        if window is not None:
+            return await _history_window_reply(
+                request,
+                flow_id,
+                blocks=window,
+                before_step=before or "",
+                if_signature=wsig or "",
+                owner_machine=owner_machine,
+                target_owner=target_owner,
+            )
 
         async def _pull_from_daemon(
             connection: Any,
@@ -3658,6 +4011,15 @@ def create_app(
                     {"flow_id": flow_id, "cached": True, **throttled}, request
                 )
         await state.mark_full_pull(flow_id)
+        # Pin the flow against eviction for the DURATION of the pull. A large
+        # flow drains as a ``full`` head plus dozens of ``append`` tails and
+        # takes far longer than ``_HISTORY_VIEW_HOT_WINDOW``; nothing re-reads
+        # meanwhile (this request is the reader, and it is parked here), so the
+        # flow went cold MID-DRAIN and the budget evicted the very bundle the
+        # drain was filling — the reply the browser finally got was a prefix,
+        # whose next read missed and re-pulled, and so on. See
+        # ``ServerState.pin_history_pull``.
+        await state.pin_history_pull(flow_id)
         # Concurrent cache-miss requests for the same flow/machine (e.g. the
         # running-flow view and the history-detail view reconnecting at once)
         # share ONE in-flight daemon pull via ``_pull_from_daemon``: only the
@@ -3666,7 +4028,10 @@ def create_app(
         # waiters were already resolved by the first — which, finding no waiter,
         # would replace the cache generation and broadcast ``mode: full`` to every
         # UI consumer, clearing the progress tokens REST just handed back.
-        await _pull_from_daemon(owner_connection, flow_project_root or "")
+        try:
+            await _pull_from_daemon(owner_connection, flow_project_root or "")
+        finally:
+            await state.release_history_pull(flow_id)
         # Re-read the just-populated cache as a full snapshot so the response
         # carries ``delivery: "full"`` plus a fresh ``progress`` token the
         # client can use for its next reconnect. ``get_history_snapshot`` with
@@ -3725,7 +4090,11 @@ def create_app(
         payload and the final record's ``raw_json`` render visibly different
         panels (the daemon-built one can carry a pre-write diff the browser
         cannot reconstruct), so a source the bundle does not hold is reported
-        unavailable rather than silently substituted.
+        unavailable rather than silently substituted. ``step`` is the third
+        source — an engine step event's held-back ``data.step.inputs``, returned
+        as the original message so "View raw" prints the record unchanged. It is
+        the one source that takes no ``tool_use_id``: a step event carries no
+        tool call, so the record address is the whole request.
 
         Status codes are what the frontend's "detail unavailable" state reads:
         503 the owning daemon is not reachable, 504 it did not answer in time,
@@ -3733,7 +4102,18 @@ def create_app(
         """
         tool_use_id = (tool_use_id or "").strip()
         step_id = (step_id or "").strip()
-        if not tool_use_id:
+        # Anything but an explicitly named source reads as the stream_progress
+        # payload, so an unknown value degrades to the common case rather than
+        # 4xx-ing a browser that is merely newer or older.
+        wanted = (
+            DETAIL_SOURCE_RAW if source == DETAIL_SOURCE_RAW
+            else DETAIL_SOURCE_STEP if source == DETAIL_SOURCE_STEP
+            else DETAIL_SOURCE_PROGRESS
+        )
+        # A step event holds no tool call: its record address IS the whole
+        # request. Every other source names one call inside the addressed
+        # record, so a missing id there is still the ambiguous request it was.
+        if not tool_use_id and wanted != DETAIL_SOURCE_STEP:
             raise HTTPException(
                 status_code=422, detail="tool_use_id is required"
             )
@@ -3742,13 +4122,6 @@ def create_app(
                 status_code=422,
                 detail="step_id and a non-negative ordinal are required",
             )
-        # Anything but the explicit raw-record source reads as the
-        # stream_progress payload, so an unknown value degrades to the common
-        # case rather than 4xx-ing a browser that is merely newer or older.
-        wanted = (
-            DETAIL_SOURCE_RAW if source == DETAIL_SOURCE_RAW
-            else DETAIL_SOURCE_PROGRESS
-        )
         scope = _scope_for(identity_)
         owner_machine, target_owner = await _resolve_history_owner(flow_id, scope)
 
@@ -3856,6 +4229,49 @@ def create_app(
             flow_project_root = await state.get_history_flow_project_root(
                 flow_id, owner=target_owner
             )
+            # Prefer a single-BLOCK window read when the daemon knows one: the
+            # addressed record's step file is the smallest unit that can hold
+            # it, and reading it directly answers the chip without pulling — and
+            # then having to evict — a whole flow whose history may exceed the
+            # entire cache budget. The reply is never cached (same invariant as
+            # the windowed snapshot leg), so the record is located in the reply
+            # itself rather than by re-reading the bundle.
+            if await state.machine_supports_history_window(
+                owner_machine, owner=target_owner
+            ):
+                block = await _pull_history_window_from_daemon(
+                    flow_id,
+                    owner_machine,
+                    flow_project_root or "",
+                    blocks=1,
+                    steps=[step_id],
+                )
+                if block is not None:
+                    located = locate_record_detail(
+                        block.get("records") or [],
+                        step_id=step_id,
+                        ordinal=ordinal,
+                        tool_use_id=tool_use_id,
+                        source=wanted,
+                    )
+                    if located["detail"] is not None:
+                        return {
+                            "flow_id": flow_id,
+                            "tool_use_id": tool_use_id,
+                            **located["detail"],
+                        }
+                    if located["record_found"] or located["passed"]:
+                        # The block IS the authoritative copy of this step, so a
+                        # miss here is a genuine 404 — falling through to a whole
+                        # flow pull could only re-learn the same answer.
+                        raise HTTPException(
+                            status_code=404,
+                            detail=(
+                                f"no detail for step record '{step_id}#{ordinal}'"
+                                if wanted == DETAIL_SOURCE_STEP
+                                else f"no detail for tool call '{tool_use_id}'"
+                            ),
+                        )
             try:
                 await _pull_history_from_daemon(
                     flow_id,
@@ -3883,7 +4299,11 @@ def create_app(
         if detail is None:
             raise HTTPException(
                 status_code=404,
-                detail=f"no detail for tool call '{tool_use_id}'",
+                detail=(
+                    f"no detail for step record '{step_id}#{ordinal}'"
+                    if wanted == DETAIL_SOURCE_STEP
+                    else f"no detail for tool call '{tool_use_id}'"
+                ),
             )
         return {"flow_id": flow_id, "tool_use_id": tool_use_id, **detail}
 

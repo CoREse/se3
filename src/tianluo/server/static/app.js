@@ -282,6 +282,31 @@ const state = {
   incompleteRecoveryAttempts: {},
   incompleteRecoverySignals: {},
   bundleCompleteness: {},
+  // Step-block WINDOW state per view, `null` while the view is unwindowed.
+  //
+  // A windowed view holds only a SUFFIX of the flow's step blocks: the tail
+  // HISTORY_WINDOW_STEP_BLOCKS on open, extended one page at a time as the
+  // reader scrolls up. `{ steps, loaded, firstIndex, hasEarlier, blockSize,
+  // source }` — `steps` is the flow's complete ordered block index (the server
+  // sends it whole; it is a handful of short strings), `firstIndex` the earliest
+  // block this view has loaded.
+  //
+  // WHY the view has to know: everything downstream that asks "do I hold the
+  // whole conversation?" would otherwise answer NO for a windowed view and try
+  // to repair it. The cursor self-check is scoped to the loaded blocks
+  // (`windowLoadedStepIds`) so an unloaded HEAD is never counted as a hole, and
+  // the load-earlier affordance is driven off `hasEarlier`. Reset on a fresh
+  // open; a server that sends no `window` block leaves it null and every path
+  // behaves exactly as it did before windowing existed.
+  flowWindow: null,
+  historyWindow: null,
+  // `"<view>|<flowId>"` keys with a page-up request in flight, so a reader
+  // scrolling hard at the top cannot stack one request per scroll event.
+  windowPageInFlight: {},
+  // `flowId -> epoch-ms` of the last SILENT tail re-fetch issued by the periodic
+  // self-heal for a token-less (daemon-relayed) window. See
+  // `WINDOW_TAIL_REFETCH_MIN_MS`.
+  flowWindowTailPolledAt: {},
   // History-detail counterpart of `flowConversationEpoch`.
   historyEpoch: 0,
   // The open history session's backend usage payload (the `usage` field of the
@@ -5557,6 +5582,16 @@ async function loadFlowConversation(flowId, opts) {
     // Drop any reconciliation state left by a previously-open flow so a stray
     // append for this flow can't merge into the prior flow's detached sections.
     container.__convState = null;
+    // A fresh open re-opens on the TAIL window: whatever span the reader had
+    // paged open in the previously-selected flow says nothing about this one,
+    // and carrying it over would scope this flow's completeness self-check to
+    // another flow's step ids.
+    state.flowWindow = null;
+    // A fresh open re-arms the tail-refetch floor: whatever this flow's window
+    // last cost, the reader is starting over and the first self-heal tick must
+    // not be silently skipped.
+    delete state.flowWindowTailPolledAt[flowId];
+    container.__convLoadEarlier = null;
     container.appendChild(el("p", "empty", tf("flow.loadingConversation", "Loading conversation…")));
   } else if (silent) {
     // SILENT signature-check refresh (G5): no destructive pre-clear and no
@@ -5594,9 +5629,24 @@ async function loadFlowConversation(flowId, opts) {
     // held token + signature so the server can answer not_modified/delta instead
     // of a full bundle. Only a first-open (neither flag) sends the bare no-token
     // URL that forces a `delivery:"full"`.
+    // A first open asks for the TAIL WINDOW rather than the whole flow (see
+    // HISTORY_WINDOW_STEP_BLOCKS). A reconnect / self-heal poll echoes the held
+    // token for a delta — but a windowed view served straight from the daemon
+    // holds NO token (there is no bundle for one to pin), so it re-asks for the
+    // tail window instead, CONDITIONALLY: the window's `signature` rides along
+    // as `wsig`, and an unchanged flow is answered `not_modified` without the
+    // daemon re-reading a block or the server re-shipping one. The merge is
+    // idempotent either way (records reconcile by `stepId#ordinal`), but
+    // idempotence alone only saves the repaint — the signature is what saves
+    // the transfer.
     const url = (incremental || silent)
-      ? historySnapshotUrl(flowId, heldProgress, heldSignature)
-      : `/api/history/${encodeURIComponent(flowId)}`;
+      ? (heldProgress
+        ? historySnapshotUrl(flowId, heldProgress, heldSignature)
+        : (state.flowWindow
+          ? historyWindowUrl(flowId, state.flowWindow.blockSize, "",
+            state.flowWindow.signature)
+          : historySnapshotUrl(flowId, heldProgress, heldSignature)))
+      : historyWindowUrl(flowId, HISTORY_WINDOW_STEP_BLOCKS);
     const resp = await authedFetch(url, undefined,
       { scope: "flow", timeoutMs: FETCH_TIMEOUTS.historyBundle });
     // The user may have opened another flow while this was in flight.
@@ -5688,7 +5738,13 @@ async function loadFlowConversation(flowId, opts) {
     // BUNDLE, and every branch below (including the two early returns) leaves it
     // just as unrepaired.
     noteBundleCompleteness("flow", flowId, result.incomplete);
+    // The window description is a fact about the DELIVERY, so it is adopted on
+    // every branch below (the early returns included): a no-op reply still tells
+    // the view which blocks the server considers loaded, and the completeness
+    // self-check that runs on those early returns needs that scope.
+    adoptWindowMeta("flow", result.window);
     if (result.render === "noop") {
+      refreshLoadEarlierControl("flow", flowId);
       // Nothing to REPAINT: a `not_modified` reply (the server has nothing more
       // to send) or an incremental delivery that, after dedup, added nothing new
       // (the WS append for the same batch beat this fetch in). It is NOT proof
@@ -5722,6 +5778,7 @@ async function loadFlowConversation(flowId, opts) {
     // still holds the pre-merge array. Only the silent path opts in — a first-open
     // / reconnect must always render its authoritative result.
     if (silent && sameRenderedConversation(reconciled, state.flowConversationRecords)) {
+      refreshLoadEarlierControl("flow", flowId);
       await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation, result.pending);
       return;
     }
@@ -5739,6 +5796,7 @@ async function loadFlowConversation(flowId, opts) {
       container.__convState = null;
     }
     renderConversation(container, state.flowConversationRecords, appendRender);
+    refreshLoadEarlierControl("flow", flowId);
     refreshFlowStickyHeader();
     updateFlowUsageBadge(state.flowConversationRecords);
     if (stick) {
@@ -6127,6 +6185,37 @@ function pollFlowView() {
 // recovery loop (which walks a backoff instead of hammering every 3 s). Re-reading
 // a delivery the server has declared complete repairs nothing by construction —
 // it is the redundant traffic the completeness statement exists to retire.
+//: Floor on how often the periodic self-heal may re-fetch the TAIL WINDOW of a
+//: view that holds no progress token — i.e. one served straight from the daemon
+//: because the flow is too big to cache. Every other view polls with a token and
+//: is answered `not_modified` for a few hundred bytes; this one has no token to
+//: present, so each re-fetch costs the daemon a re-read and the browser the
+//: whole window. On an actively-written flow its `wsig` genuinely differs every
+//: tick, so the conditional read alone cannot bound the cost — the WS append
+//: stream is already delivering those records live, and this floor is what keeps
+//: the poll from re-shipping the same blocks alongside it.
+const WINDOW_TAIL_REFETCH_MIN_MS = 30000;
+
+// True while the periodic self-heal must skip its silent tail re-fetch.
+//
+// Deliberately narrow: it fires ONLY for a windowed view that holds no token AND
+// already holds records AND still has a live WS. With the WS down the poll is
+// the only delivery path left, so it keeps the full cadence — the re-fetch cost
+// is then the price of not freezing, which is the trade the self-heal exists to
+// make. Explicit repairs (`runIncompleteRecovery`, `forceFullHistoryReload`) go
+// straight to the loader and are never throttled here.
+function windowTailRefetchThrottled(flowId) {
+  if (!state.flowWindow) return false;
+  if (state.flowConversationProgress) return false;
+  if (!state.flowConversationRecords.length) return false;
+  if (state.connStale) return false;
+  const now = Date.now();
+  const last = state.flowWindowTailPolledAt[flowId] || 0;
+  if (now - last < WINDOW_TAIL_REFETCH_MIN_MS) return true;
+  state.flowWindowTailPolledAt[flowId] = now;
+  return false;
+}
+
 function selfHealFlowConversation() {
   const flowId = state.selectedFlowId;
   if (!flowId) return;
@@ -6139,6 +6228,7 @@ function selfHealFlowConversation() {
     if (settled === false) scheduleIncompleteRecovery("flow", flowId);
     return;
   }
+  if (windowTailRefetchThrottled(flowId)) return;
   loadFlowConversation(flowId, { silent: true });
 }
 
@@ -8587,6 +8677,9 @@ async function openHistorySession(flowId, opts) {
     // bundle. A reconnect re-fetch of the *same* session repopulates it.
     state.historyProgress = null;
     state.historySignature = null;
+    // Re-open on the tail window (see loadFlowConversation for why the span must
+    // not survive a session switch).
+    state.historyWindow = null;
     // A different session must never show the previous session's usage payload
     // (the badge + usage region reset with it until this load lands).
     state.historyUsage = null;
@@ -8644,6 +8737,7 @@ async function openHistorySession(flowId, opts) {
     detail.innerHTML = "";
     // Drop reconciliation state from the previously-selected session.
     detail.__convState = null;
+    detail.__convLoadEarlier = null;
     detail.appendChild(el("p", "empty", tf("history.loadingRecords", "Loading records…")));
   }
   const requestEpoch = state.historyEpoch;
@@ -8659,9 +8753,18 @@ async function openHistorySession(flowId, opts) {
     const heldProgress = state.historyRecords.length
       ? state.historyProgress : null;
     const heldSignature = heldProgress ? state.historySignature : null;
+    // Same windowed shape as the running-flow loader: a first open reads the
+    // tail blocks; a reconnect echoes its token, or re-asks for the tail window
+    // when the view holds none (a daemon-served window has no bundle to pin a
+    // token to).
     const url = incremental
-      ? historySnapshotUrl(flowId, heldProgress, heldSignature)
-      : `/api/history/${encodeURIComponent(flowId)}`;
+      ? (heldProgress
+        ? historySnapshotUrl(flowId, heldProgress, heldSignature)
+        : (state.historyWindow
+          ? historyWindowUrl(flowId, state.historyWindow.blockSize, "",
+            state.historyWindow.signature)
+          : historySnapshotUrl(flowId, heldProgress, heldSignature)))
+      : historyWindowUrl(flowId, HISTORY_WINDOW_STEP_BLOCKS);
     const resp = await authedFetch(url, undefined,
       { timeoutMs: FETCH_TIMEOUTS.historyBundle });
     // The user may have clicked another session while this was in flight.
@@ -8719,7 +8822,9 @@ async function openHistorySession(flowId, opts) {
     // completeness of the bundle is independent of whether there is anything new
     // to paint — an interrupted session is answered `not_modified` forever.
     noteBundleCompleteness("history", flowId, result.incomplete);
+    adoptWindowMeta("history", result.window);
     if (result.render === "noop") {
+      refreshLoadEarlierControl("history", flowId);
       // A `not_modified` reply, or a delta that added nothing new after dedup —
       // nothing to repaint. As in loadFlowConversation this is not evidence of
       // completeness, so the cursor self-check still runs.
@@ -8732,6 +8837,7 @@ async function openHistorySession(flowId, opts) {
     state.historyRecords = result.records;
     // Delta delivery → incremental append render; full fallback → full rebuild.
     renderHistoryRecords(flowId, state.historyRecords, result.render === "delta");
+    refreshLoadEarlierControl("history", flowId);
     refreshHistoryStickyHeader();
     // Strategy/scope meta and the backend usage region ride the same records /
     // payload the conversation just rendered, so they refresh in lockstep.
@@ -10060,6 +10166,16 @@ function normalizeRecord(rec) {
       raw: { raw_json: [msg], raw_ndjson: null },
       attempt: null,
       agentName: null, modelName: null, ordinal: ordinal,
+      // Lazy-detail address for the step snapshot's held-back `inputs`
+      // (`history_summary.STEP_INPUTS_LAZY_KEY`). The report card never reads
+      // that payload, so it is the "查看原始" chip alone that comes back for it
+      // -- and it can only do so if this branch, which returns before the
+      // generic path computes them, carries the address too.
+      detailFlow: typeof pick("detail_flow") === "string" && pick("detail_flow")
+        ? pick("detail_flow") : null,
+      detailVersion:
+        typeof pick("detail_version") === "string" && pick("detail_version")
+          ? pick("detail_version") : null,
     };
   }
 
@@ -10838,7 +10954,7 @@ function stepIdFromCursorKey(filename) {
 // belong to no server bundle, carry no ordinal, and would otherwise read as
 // either surplus or un-numbered records), as are records whose step is absent
 // from the cursor.
-function findMissingOrdinals(records, cursor, unfillable, pending) {
+function findMissingOrdinals(records, cursor, unfillable, pending, loadedSteps) {
   const missing = {};
   let surplus = false;
   let unkeyable = false;
@@ -10846,6 +10962,14 @@ function findMissingOrdinals(records, cursor, unfillable, pending) {
   if (!cursor || typeof cursor !== "object") {
     return { missing, surplus, unkeyable, pendingGap };
   }
+  // `loadedSteps` (optional) is the set of step blocks a WINDOWED view holds.
+  // The cursor always describes the WHOLE flow, so without this scope every
+  // block the reader has not paged back to reads as a hole — the view would
+  // demand a backfill for records it deliberately did not ask for, fail (they
+  // are not in any window it holds), escalate to a full re-pull of the very
+  // conversation windowing exists to avoid, and repeat. Null means "the view
+  // holds the whole flow", which is the unwindowed behaviour, unchanged.
+  const scope = (loadedSteps instanceof Set) ? loadedSteps : null;
   const held = new Map();     // stepId -> { ords: Set, count, legacy: bool }
   for (const rec of (Array.isArray(records) ? records : [])) {
     if (rec && rec.__localEcho) continue;
@@ -10869,6 +10993,7 @@ function findMissingOrdinals(records, cursor, unfillable, pending) {
     if (typeof total !== "number" || !Number.isInteger(total) || total < 0) continue;
     const stepId = stepIdFromCursorKey(key);
     if (!stepId) continue;
+    if (scope && !scope.has(stepId)) continue;
     const entry = held.get(stepId) || { ords: new Set(), count: 0, legacy: false };
     if (entry.legacy) unkeyable = true;
     const retired = new Set(Array.isArray(known[stepId]) ? known[stepId] : []);
@@ -10908,6 +11033,193 @@ function encodeMissingParam(missing) {
     groups.push(`${stepId}:${ords.join(",")}`);
   }
   return groups.length ? groups.join(";") : null;
+}
+
+// ---------------------------------------------------------------------------
+// Step-block windowing
+// ---------------------------------------------------------------------------
+//
+// A flow's history can be hundreds of megabytes — larger than the server's whole
+// history cache — so "fetch it all, then render" is not a shape that terminates:
+// the bundle is evicted, the next read misses, the whole flow is pulled again,
+// and the browser never gets past the prefix it already had. The view therefore
+// opens on the TAIL of the conversation, measured in STEP BLOCKS (the unit it
+// already renders as one step section), and pages backwards on demand.
+//
+// The windowing lives on the WIRE, not in the renderer: the server sends only
+// the windowed blocks. Everything that follows from that — which records the
+// completeness self-check may reason about, which token the next poll presents,
+// how a page-up merges — is decided from the `window` block the server attaches
+// to a windowed reply.
+
+//: Step blocks a windowed open loads, and how many more each page-up adds.
+//: Ten is what the flow view shows above the fold on a tall screen for a
+//: typical step size, so the reader lands on a full pane rather than on a
+//: fragment they immediately have to page.
+const HISTORY_WINDOW_STEP_BLOCKS = 10;
+
+// Build the windowed `GET /api/history/{flow_id}` URL. `beforeStep` (optional)
+// makes it a PAGE-UP: the `blocks` step blocks immediately preceding that block
+// id. Without it the request is the tail window an open wants.
+//
+// `signature` (optional) makes the read CONDITIONAL — it is the `signature` the
+// server attached to the window this view is polling from, and an unchanged
+// flow answers `not_modified` with no records instead of re-shipping the whole
+// window. A windowed view served straight from the daemon holds no progress
+// token, so this is the only thing standing between its 3 s self-heal poll and
+// a full window re-read + re-transfer on every single tick.
+function historyWindowUrl(flowId, blocks, beforeStep, signature) {
+  const params = new URLSearchParams();
+  params.set("window", String(blocks || HISTORY_WINDOW_STEP_BLOCKS));
+  if (beforeStep) params.set("before", beforeStep);
+  if (signature) params.set("wsig", signature);
+  return `/api/history/${encodeURIComponent(flowId)}?${params.toString()}`;
+}
+
+// Normalize a reply's `window` block into the shape the view state holds, or
+// null when the reply carries none (an older server, or an unwindowed reply).
+// Null is the "windowing is off" signal every consumer branches on, so a server
+// that never learned the parameter leaves the whole client on its prior path.
+function normalizeWindowMeta(meta) {
+  if (!meta || typeof meta !== "object") return null;
+  const steps = Array.isArray(meta.steps) ? meta.steps.map(String) : [];
+  const loaded = Array.isArray(meta.loaded) ? meta.loaded.map(String) : [];
+  const firstIndex = Number.isInteger(meta.first_index)
+    ? meta.first_index : (steps.length ? 0 : 0);
+  return {
+    mode: meta.mode === "before" ? "before" : "tail",
+    steps,
+    loaded,
+    firstIndex,
+    hasEarlier: !!meta.has_earlier,
+    blockSize: Number.isInteger(meta.block_size)
+      ? meta.block_size : HISTORY_WINDOW_STEP_BLOCKS,
+    source: typeof meta.source === "string" ? meta.source : "",
+    // The conditional-read probe for the next poll of this same window shape.
+    // Empty for a cached-leg reply (which carries a real progress token, so the
+    // poll never takes the window URL) and for a server that predates it.
+    signature: typeof meta.signature === "string" ? meta.signature : "",
+  };
+}
+
+// Fold a fresh reply's window meta into what the view already holds. A PAGE-UP
+// only ever extends the loaded span BACKWARDS, so its `firstIndex` wins; a tail
+// reply must NOT reset the span the reader has already paged open, which is why
+// the merged `firstIndex` is the minimum of the two.
+function mergeWindowMeta(held, next) {
+  if (!next) return held || null;
+  if (!held) return next;
+  // A reply that loaded NO block is inert here. Its `firstIndex` says where the
+  // read stopped, not what is rendered — an empty window means the server could
+  // not resolve the page-up anchor (a bundle mid-drain that does not hold the
+  // block the reader is standing on), and letting it move the boundary would
+  // claim blocks nobody loaded. That claim is what un-scopes the completeness
+  // self-check onto an unloaded head and restarts the backfill/full-re-pull
+  // escalation this windowing exists to prevent.
+  const firstIndex = next.loaded.length
+    ? Math.min(held.firstIndex, next.firstIndex)
+    : held.firstIndex;
+  // The block index is authoritative in the freshest reply: a live flow grows
+  // new blocks at the tail, and holding the open-time list would hide them. The
+  // one exception is a SHORTER list that is a prefix of the held one: a flow's
+  // blocks are append-only, so that reply describes a partial server-side view
+  // (a bundle whose drain has not finished), not blocks that went away.
+  let steps = next.steps.length ? next.steps : held.steps;
+  if (
+    steps !== held.steps
+    && steps.length < held.steps.length
+    && steps.every((s, i) => s === held.steps[i])
+  ) {
+    steps = held.steps;
+  }
+  return {
+    mode: next.mode,
+    steps,
+    loaded: next.loaded,
+    firstIndex,
+    hasEarlier: firstIndex > 0,
+    blockSize: next.blockSize || held.blockSize,
+    source: next.source || held.source,
+    // Only a TAIL reply refreshes the probe. The server folds the request shape
+    // into the signature, so a page-up's would never match the tail read the
+    // poll issues — adopting it would silently retire the conditional poll and
+    // put the every-tick window re-transfer back.
+    signature: next.mode === "before"
+      ? (held.signature || "") : (next.signature || ""),
+  };
+}
+
+// The step ids a windowed view has loaded: every block from `firstIndex` to the
+// end of the flow. This is the scope its completeness self-check runs in — a
+// block the reader has not paged to is NOT a hole, and counting it as one is
+// exactly what turned an open on a huge flow into an endless
+// `history delivery incomplete` re-read loop. Returns null when the view is
+// unwindowed, which the self-check reads as "check everything" (its prior,
+// unchanged behaviour).
+function windowLoadedStepIds(meta) {
+  if (!meta || !Array.isArray(meta.steps) || !meta.steps.length) return null;
+  if (meta.firstIndex <= 0) return null;   // the whole flow is loaded
+  return new Set(meta.steps.slice(meta.firstIndex));
+}
+
+// The block id a page-up must anchor on: the EARLIEST block the view holds.
+// Returns "" when there is nothing earlier to ask for.
+function windowEarlierAnchor(meta) {
+  if (!meta || !meta.hasEarlier) return "";
+  const anchor = meta.steps[meta.firstIndex];
+  return typeof anchor === "string" ? anchor : "";
+}
+
+// Order records the way the server's bundle orders them: by step block, then by
+// physical line within the block. DOM-free.
+//
+// WHY windowed deliveries are ordered by BLOCK rather than by timestamp (which
+// is what the delta/backfill merges use): a page-up brings records that are
+// OLDER than everything held, and a timestamp merge would be at the mercy of
+// clock skew and of records whose timestamp is absent. The block index the
+// server sends is the same ordering the on-disk jsonl has, so sorting by it
+// reproduces the conversation exactly — which the position-based partial-segment
+// grouping and the per-step cumulative usage both depend on.
+//
+// Records whose block is unknown (a local echo, a step the index does not name)
+// sort after the known ones, keeping their relative order.
+//
+// WHY each unknown STEP gets its own synthetic index rather than one shared
+// "END": a reply's block index can legitimately be a PREFIX of the flow (a
+// cached bundle whose daemon drain has not finished), so the blocks the reader
+// already holds may all be unknown to it. Collapsing them onto one index would
+// leave the ordinal as the only tiebreak and interleave whole step blocks by
+// line number — the conversation reordered by a reply that carried no records
+// at all. First-appearance order keeps each block's records together and in the
+// order the view already had them.
+function sortRecordsByBlock(records, meta) {
+  const steps = (meta && Array.isArray(meta.steps)) ? meta.steps : [];
+  const blockOf = new Map();
+  for (let i = 0; i < steps.length; i++) {
+    if (!blockOf.has(steps[i])) blockOf.set(steps[i], i);
+  }
+  let unknownSeq = steps.length;
+  // A record with no ordinal (a local echo) sorts last within its block.
+  const END = Number.MAX_SAFE_INTEGER;
+  return (Array.isArray(records) ? records : [])
+    .map((rec, idx) => {
+      let stepId = "";
+      try { stepId = normalizeRecord(rec).stepId || ""; } catch (_) { stepId = ""; }
+      if (!blockOf.has(stepId)) blockOf.set(stepId, unknownSeq++);
+      const blk = blockOf.get(stepId);
+      const ord = recordOrdinal(rec);
+      return { rec, idx, blk, ord: (ord == null) ? END : ord };
+    })
+    .sort((a, b) => (a.blk - b.blk) || (a.ord - b.ord) || (a.idx - b.idx))
+    .map((t) => t.rec);
+}
+
+// True when two arrays hold the same record objects at the same positions.
+function sameRecordSequence(a, b) {
+  if (a === b) return true;
+  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
 }
 
 // Build the `GET /api/history/{flow_id}` URL, appending the opaque progress
@@ -11071,6 +11383,13 @@ function mergeHistoryResponse(response, existing, requestBaseline) {
   // including a merge-rejected frame: the rejection says nothing about whether
   // the bundle behind it is whole.
   merged.incomplete = !!(response && response.incomplete);
+  // The server's window description, when the reply carried one. Absent on every
+  // unwindowed delivery (and on every reply from a server that predates
+  // windowing), which is what keeps the whole windowing path opt-in.
+  if (merged.window === undefined) {
+    merged.window = (response && response.window)
+      ? normalizeWindowMeta(response.window) : null;
+  }
   return merged;
 }
 
@@ -11097,6 +11416,51 @@ function mergeHistoryDelivery(response, existing, requestBaseline) {
     // `cursor` against the records it holds; `noop` now means only "nothing to
     // render".
     return { records: base, progress, signature, cursor, render: "noop" };
+  }
+  if (response && response.delivery === "window") {
+    // A STEP-BLOCK window: the tail blocks on an open, the preceding blocks on a
+    // page-up. Both merge the SAME way — an idempotent reconcile by
+    // `stepId#ordinal` followed by a re-sort into bundle (block, line) order —
+    // so a page-up prepends, a re-fetched tail is a no-op, and a live append
+    // that landed during the request keeps its place.
+    //
+    // WHY this must NOT fall through to the full branch below: that branch
+    // treats the reply as the whole authoritative generation and discards every
+    // held record the reply does not carry. For a window that is every earlier
+    // block the reader has already paged open — the pane would collapse back to
+    // the tail on the very next poll.
+    const meta = normalizeWindowMeta(response.window);
+    const rec = reconcileAppendRecords(base, records);
+    const combined = rec.fresh.length ? rec.rebased.concat(rec.fresh) : rec.rebased;
+    const ordered = sortRecordsByBlock(combined, meta);
+    // A page-up's reply describes a bundle that may have grown since the token
+    // we hold was minted, so its progress/signature must NOT be adopted: doing
+    // so would jump the cursor past records the view never received. The tail
+    // reply is the one that advances the cursor.
+    const preserveTokens = !!(meta && meta.mode === "before");
+    if (sameRecordSequence(ordered, base)) {
+      return {
+        records: base,
+        progress: preserveTokens ? null : progress,
+        signature: preserveTokens ? null : signature,
+        cursor,
+        window: meta,
+        render: "noop",
+        preserveTokens,
+      };
+    }
+    return {
+      records: ordered,
+      progress: preserveTokens ? null : progress,
+      signature: preserveTokens ? null : signature,
+      cursor,
+      window: meta,
+      // Always a full repaint: a window merge can insert records ABOVE what is
+      // already rendered, which the append-only incremental path cannot place.
+      render: "full",
+      updatedInPlace: rec.updatedInPlace,
+      preserveTokens,
+    };
   }
   if (response && response.delivery === "backfill") {
     // The numbered records this client's cursor self-check found it lacked,
@@ -11293,6 +11657,177 @@ function viewIsCurrent(view, flowId) {
 
 function heldHistoryRecords(view) {
   return view === "flow" ? state.flowConversationRecords : state.historyRecords;
+}
+
+// The step-block window state of one view (`null` while unwindowed).
+function windowStateFor(view) {
+  return view === "flow" ? state.flowWindow : state.historyWindow;
+}
+
+function setWindowStateFor(view, meta) {
+  if (view === "flow") state.flowWindow = meta;
+  else state.historyWindow = meta;
+}
+
+// Fold a reply's window description into the view's held one and return the
+// result. A reply with no `window` block leaves the held state alone — an older
+// server, or an unwindowed delta poll of an already-windowed view, must not be
+// read as "windowing was turned off" (which would un-scope the completeness
+// self-check and put the re-read loop straight back).
+function adoptWindowMeta(view, meta) {
+  if (!meta) return windowStateFor(view);
+  const merged = mergeWindowMeta(windowStateFor(view), meta);
+  setWindowStateFor(view, merged);
+  return merged;
+}
+
+// The scroll container a view's conversation lives in.
+function viewScrollContainer(view) {
+  return view === "flow" ? $("flow-conversation") : historyScrollContainer();
+}
+
+function viewContentContainer(view) {
+  return view === "flow" ? $("flow-conversation") : $("history-detail");
+}
+
+// Mount / refresh / remove the "load earlier steps" control at the very top of a
+// windowed conversation. It is the reader's explicit handle on the page-up the
+// scroll listener also triggers automatically — an affordance, and the fallback
+// for a pane too short to scroll. Inserted as the container's first child; every
+// renderer that walks `container.children` skips nodes without its own bubble
+// metadata, so it never disturbs bubble ordering, step headers or the sticky
+// header's offsets.
+function refreshLoadEarlierControl(view, flowId) {
+  const container = viewContentContainer(view);
+  if (!container) return;
+  const existing = container.__convLoadEarlier;
+  const meta = windowStateFor(view);
+  // Gated on a resolvable ANCHOR, not merely on `hasEarlier`: a view whose
+  // block index does not (yet) name the block below its own boundary has
+  // nothing to ask for, and a button whose click is a no-op is worse than no
+  // button.
+  const wanted = !!(meta && meta.hasEarlier && windowEarlierAnchor(meta));
+  if (!wanted) {
+    if (existing && existing.parentNode === container) {
+      container.removeChild(existing);
+    }
+    container.__convLoadEarlier = null;
+    return;
+  }
+  let row = existing;
+  if (!row) {
+    row = el("div", "history-load-earlier");
+    const btn = el("button", "btn-secondary");
+    btn.type = "button";
+    btn.addEventListener("click", () => {
+      void loadEarlierStepBlocks(view, flowId);
+    });
+    row.appendChild(btn);
+    row.__button = btn;
+    container.__convLoadEarlier = row;
+  }
+  const busy = !!state.windowPageInFlight[`${view}|${flowId}`];
+  row.__button.textContent = busy
+    ? tf("history.loadingEarlierSteps", "Loading earlier steps…")
+    : tf("history.loadEarlierSteps", "Load earlier steps");
+  row.__button.disabled = busy;
+  // Placed immediately above the earliest bubble / step header rather than at
+  // the container's literal first position: the sticky step-header float is
+  // mounted as the scroller's first child (an overlay, not content), and
+  // fighting it for that slot would move both nodes on every render.
+  // `children` is a live HTMLCollection in the browser (no array methods), so
+  // it is materialised before any index arithmetic.
+  const kids = Array.from(container.children || []);
+  let target = null;
+  for (const child of kids) {
+    if (child === row) continue;
+    const isContent = child.__convIdx !== undefined
+      || (child.classList && child.classList.contains("history-step-header"));
+    if (isContent) { target = child; break; }
+  }
+  const already = target
+    ? kids.indexOf(row) >= 0 && kids.indexOf(row) === kids.indexOf(target) - 1
+    : row.parentNode === container;
+  if (!already) container.insertBefore(row, target);
+}
+
+// Fetch the step blocks immediately BEFORE the earliest one this view holds and
+// fold them in above what is already rendered.
+//
+// The reader's viewport is anchored across the prepend (`captureScrollAnchor` /
+// `restoreScrollAnchor`, the same pair the silent rebuild uses) so inserting
+// content above them does not move the bubble they are reading — the #217
+// constraint, which a naive prepend violates by exactly the height of the new
+// page.
+async function loadEarlierStepBlocks(view, flowId) {
+  const key = `${view}|${flowId}`;
+  if (state.windowPageInFlight[key]) return;
+  const meta = windowStateFor(view);
+  const anchorStep = windowEarlierAnchor(meta);
+  if (!anchorStep) return;
+  if (!viewIsCurrent(view, flowId)) return;
+  state.windowPageInFlight[key] = true;
+  refreshLoadEarlierControl(view, flowId);
+  const scroller = viewScrollContainer(view);
+  const container = viewContentContainer(view);
+  const held = heldHistoryRecords(view);
+  const anchor = captureScrollAnchor(container, held);
+  const preserveScrollTop = scroller ? scroller.scrollTop : null;
+  try {
+    const resp = await authedFetch(
+      historyWindowUrl(flowId, meta.blockSize || HISTORY_WINDOW_STEP_BLOCKS,
+        anchorStep),
+      undefined,
+      { timeoutMs: FETCH_TIMEOUTS.historyBundle },
+    );
+    if (!resp.ok || !viewIsCurrent(view, flowId)) return;
+    const data = await resp.json();
+    if (!viewIsCurrent(view, flowId)) return;
+    const result = mergeHistoryResponse(
+      data, heldHistoryRecords(view), held);
+    adoptWindowMeta(view, result.window);
+    if (result.render === "noop") return;
+    if (view === "flow") {
+      state.flowConversationRecords = result.records;
+      container.__convState = null;
+      renderConversation(container, state.flowConversationRecords, false);
+      refreshFlowStickyHeader();
+      updateFlowUsageBadge(state.flowConversationRecords);
+    } else {
+      state.historyRecords = result.records;
+      renderHistoryRecords(flowId, state.historyRecords, false);
+      refreshHistoryStickyHeader();
+    }
+    restoreScrollAnchor(
+      container, heldHistoryRecords(view), anchor, preserveScrollTop);
+  } catch (_) {
+    // A page-up is a purely additive read: a transient failure leaves the
+    // rendered conversation exactly as it was, and the control stays available
+    // for the reader to try again.
+  } finally {
+    delete state.windowPageInFlight[key];
+    if (viewIsCurrent(view, flowId)) refreshLoadEarlierControl(view, flowId);
+  }
+}
+
+//: How close to the top of the scroller a windowed reader must come before the
+//: next page loads on its own. Generous enough that the page is usually in
+//: place by the time they reach the current top, small enough that merely
+//: opening a short conversation does not page.
+const WINDOW_PAGE_UP_TRIGGER_PX = 240;
+
+// Scroll-driven page-up. Wired into the conversation scroll listener; a no-op
+// for an unwindowed view, for a view already at the first block, and while a
+// page is already in flight.
+function maybeLoadEarlierOnScroll(view) {
+  const meta = windowStateFor(view);
+  if (!meta || !meta.hasEarlier) return;
+  const flowId = view === "flow" ? state.selectedFlowId : state.selectedHistoryId;
+  if (!flowId) return;
+  const scroller = viewScrollContainer(view);
+  if (!scroller) return;
+  if ((scroller.scrollTop || 0) > WINDOW_PAGE_UP_TRIGGER_PX) return;
+  void loadEarlierStepBlocks(view, flowId);
 }
 
 // Adopt a repair reply's records into `view` and repaint from scratch. A
@@ -11639,7 +12174,8 @@ async function reconcileCursorCompleteness(view, flowId, cursor, generation, pen
   // delivery-livelock backlog crossing many short connection windows), not a
   // hole, so it must not provoke a backfill nor a giving-up.
   const probe = findMissingOrdinals(
-    held, cursor, retiredOrdinals(flightKey, generation), pending);
+    held, cursor, retiredOrdinals(flightKey, generation), pending,
+    windowLoadedStepIds(windowStateFor(view)));
   const spent = repairBudget(flightKey, generation);
   const progress = view === "flow"
     ? state.flowConversationProgress : state.historyProgress;
@@ -13265,6 +13801,11 @@ function ensureStickyHeaderMounted(scroller, content) {
       if (scroller.id === "flow-conversation") {
         state.flowConversationFollowingBottom = isNearBottom(scroller);
       }
+      // Scrolling to the top of a WINDOWED conversation pages the next block of
+      // history in. Inert for an unwindowed view and for one already showing its
+      // first block, so a reader who never scrolls up pays nothing.
+      maybeLoadEarlierOnScroll(
+        scroller.id === "flow-conversation" ? "flow" : "history");
     };
     scroller.addEventListener("scroll", onScroll);
     scroller.__convStickyOnScroll = onScroll;
@@ -13672,6 +14213,17 @@ function rehydrateElidedValue(v) {
 // asks for the source it would have rendered inline.
 const DETAIL_SOURCE_PROGRESS = "progress";
 const DETAIL_SOURCE_RAW = "raw";
+// The third source: an engine step event's held-back `data.step.inputs`
+// (`history_summary.DETAIL_SOURCE_STEP`). Unlike the other two it names no tool
+// call -- a step event holds none -- so the record address IS the whole request
+// and the reply hands back the original message for "View raw" to print.
+const DETAIL_SOURCE_STEP = "step";
+
+// Marker the server puts on a record whose step snapshot lost its `inputs`
+// (`history_summary.STEP_INPUTS_LAZY_KEY`). It sits on the message holder, and
+// that holder IS the step event's whole raw payload, so the restore swaps the
+// marked container for the original rather than splicing a field back into it.
+const STEP_INPUTS_LAZY_KEY = "step_inputs_lazy";
 
 // `lazy_body_mask` characters (mirrors `history_summary.LAZY_BODY_*`): which of
 // a lazy call's two bodies the server actually replaced with a stub.
@@ -13701,14 +14253,18 @@ function makeLazyDetail(ref) {
   const ord = ref ? ref.ordinal : null;
   const ordinal =
     typeof ord === "number" && isFinite(ord) && ord >= 0 ? Math.floor(ord) : null;
-  if (!flow || !stepId || !toolUseId || ordinal === null) return null;
+  const source = (ref && ref.source) || DETAIL_SOURCE_PROGRESS;
+  if (!flow || !stepId || ordinal === null) return null;
+  // A step event carries no tool call, so `stepId#ordinal` alone names exactly
+  // one record; every other source needs the id to pick a call INSIDE it.
+  if (!toolUseId && source !== DETAIL_SOURCE_STEP) return null;
   const out = {
     __lazy__: true,
     flow: flow,
     stepId: stepId,
     ordinal: ordinal,
     toolUseId: toolUseId,
-    source: (ref && ref.source) || DETAIL_SOURCE_PROGRESS,
+    source: source,
     // The server's `detail_version` for this record: a digest of the bodies it
     // held back. The ADDRESS is deliberately stable across a retry's in-place
     // rewrite, so without this a rewritten line — one whose new summary is
@@ -13809,8 +14365,13 @@ function lazyDetailCacheKey(ref) {
 
 function lazyDetailUrl(ref) {
   return "/api/history/" + encodeURIComponent(ref.flow) + "/detail"
-    + "?tool_use_id=" + encodeURIComponent(ref.toolUseId)
-    + "&step_id=" + encodeURIComponent(ref.stepId)
+    // Omitted rather than sent empty for the step source: the endpoint's
+    // "tool_use_id is required" guard is what keeps an ambiguous tool request
+    // a 422, and only this source is exempt from it.
+    + (ref.toolUseId
+        ? "?tool_use_id=" + encodeURIComponent(ref.toolUseId) + "&"
+        : "?")
+    + "step_id=" + encodeURIComponent(ref.stepId)
     + "&ordinal=" + encodeURIComponent(String(ref.ordinal))
     + "&source=" + encodeURIComponent(ref.source || DETAIL_SOURCE_PROGRESS);
 }
@@ -15573,7 +16134,7 @@ const _MAX_RAW_RESTORE_DEPTH = 64;
 // a restored payload drops them again.
 const _LAZY_WIRE_KEYS = [
   "tool_detail_lazy", "lazy_tool_use_ids", "lazy_body_mask",
-  "detail_flow", "detail_version",
+  "detail_flow", "detail_version", STEP_INPUTS_LAZY_KEY,
 ];
 
 function containsElidedStub(value, depth) {
@@ -15630,6 +16191,9 @@ function collectLazyRawRefs(value, out, depth) {
       typeof value.tool_use_id === "string" && value.tool_use_id) {
     out.progress.add(value.tool_use_id);
   }
+  // A step event's held-back snapshot inputs. There is at most one per record
+  // (the marker rides the message holder), so it is a flag, not a set.
+  if (value[STEP_INPUTS_LAZY_KEY] === true) out.step = true;
   for (const k of Object.keys(value)) {
     collectLazyRawRefs(value[k], out, d + 1);
   }
@@ -15648,9 +16212,10 @@ function lazyRawRefsFor(norm, payload) {
     version: norm ? norm.detailVersion : null,
     raw: new Set(),
     progress: new Set(),
+    step: false,
   };
   collectLazyRawRefs(payload, out, 0);
-  if (!out.raw.size && !out.progress.size) return null;
+  if (!out.raw.size && !out.progress.size && !out.step) return null;
   return out;
 }
 
@@ -15663,6 +16228,17 @@ function spliceLazyRawBodies(value, bodies, depth) {
   if (d > _MAX_RAW_RESTORE_DEPTH) return value;
   if (Array.isArray(value)) {
     return value.map((item) => spliceLazyRawBodies(item, bodies, d + 1));
+  }
+  // A step event's raw payload IS this container, so the whole thing is
+  // replaced by the record the endpoint returned rather than having `inputs`
+  // spliced back into the summary: that also drops the wire-only markers the
+  // shaping added, leaving the printed record byte-identical to the original.
+  if (value[STEP_INPUTS_LAZY_KEY] === true) {
+    const held = bodies.get(_lazyBodyKey(DETAIL_SOURCE_STEP, ""));
+    if (held && held.source === DETAIL_SOURCE_STEP &&
+        held.record && typeof held.record === "object") {
+      return held.record;
+    }
   }
   const out = {};
   for (const k of Object.keys(value)) {
@@ -15720,6 +16296,7 @@ function restoreLazyRawPayload(refs, payload) {
   ]);
   refs.raw.forEach((id) => push(DETAIL_SOURCE_RAW, id));
   refs.progress.forEach((id) => push(DETAIL_SOURCE_PROGRESS, id));
+  if (refs.step) push(DETAIL_SOURCE_STEP, "");
   // A record that lost bodies but carries no usable address cannot be restored
   // at all. Rejecting routes it to the caller's "unavailable" branch, which is
   // the honest answer -- printing the stubs there would pass the summary off as
@@ -16487,6 +17064,40 @@ function renderIndexProgressRecord(norm) {
 // Step event records (step_completed / step_failed)
 // ---------------------------------------------------------------------------
 
+// The on-demand "查看原始" body for a step event's chip.
+//
+// A step event's raw payload is the record's own message, and the summary
+// shaping holds back the heaviest thing in it — the StepState snapshot's
+// `inputs` (a whole `scope_diff`, `test_results`, `fix_history`), which the
+// default report card reads none of. So the chip no longer prints what it was
+// handed: on first expand it asks the detail endpoint for the original record,
+// through the same `paintRawInto` path (and the same cache) every other raw
+// view uses, which also owns the localized loading / unavailable states.
+//
+// Failure leaves `rendered` false so a later expand retries — the same recovery
+// affordance `makeRawToggle` gives a lazy chip, and the reason the <pre> is
+// created once and repainted rather than rebuilt.
+function stepEventRawPainter(detailEl, norm) {
+  const payload = norm && norm.raw ? norm.raw.raw_json : null;
+  const pre = el("pre", "raw-json");
+  let attached = false;
+  let rendered = false;
+  let rendering = false;
+  return () => {
+    if (!attached) {
+      detailEl.appendChild(pre);
+      attached = true;
+    }
+    if (rendered || rendering) return;
+    rendering = true;
+    paintRawInto(pre, norm, payload, null).then((ok) => {
+      rendering = false;
+      rendered = ok;
+    });
+  };
+}
+
+
 // Build the conversation-row form of a `step_started` event — a lightweight
 // "进行中" status row marking that the step has entered RUNNING. It is
 // intentionally affordance-free: a single status line carrying BOTH an icon and
@@ -16555,16 +17166,14 @@ function renderStepEventRecord(norm) {
   const chip = el("button", "msg-chip step-event-chip-button", "▸ " + label);
   chip.type = "button";
   const detail = el("div", "msg-chip-detail");
-  let chipBuilt = false;
+  // The step snapshot's `inputs` is held back by the summary shaping (the card
+  // below reads none of it), so the raw view fetches the original record on
+  // expand instead of printing the stub.
+  const paintRaw = stepEventRawPainter(detail, norm);
   let chipExpanded = false;
   chip.addEventListener("click", () => {
     chipExpanded = !chipExpanded;
-    if (chipExpanded && !chipBuilt) {
-      detail.appendChild(
-        el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
-      );
-      chipBuilt = true;
-    }
+    if (chipExpanded) paintRaw();
     chipWrap.classList.toggle("collapsed", !chipExpanded);
     chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
     if (chipExpanded) {
@@ -16624,15 +17233,10 @@ function renderStepOutputUsageRecord(norm) {
       "▸ " + inProgress());
     chip.type = "button";
     const detail = el("div", "msg-chip-detail");
-    let chipBuilt = false;
+    const paintRaw = stepEventRawPainter(detail, norm);
     chip.addEventListener("click", () => {
-      if (!chipBuilt) {
-        detail.appendChild(
-          el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
-        );
-        chipBuilt = true;
-      }
       chipWrap.classList.toggle("collapsed");
+      if (!chipWrap.classList.contains("collapsed")) paintRaw();
       chip.textContent = (chipWrap.classList.contains("collapsed") ? "▸ " : "▾ ")
         + inProgress();
       if (!chipWrap.classList.contains("collapsed")) {
@@ -16650,15 +17254,10 @@ function renderStepOutputUsageRecord(norm) {
   const chip = el("button", "msg-chip step-event-chip-button", "▸ " + label);
   chip.type = "button";
   const detail = el("div", "msg-chip-detail");
-  let chipBuilt = false;
+  const paintRaw = stepEventRawPainter(detail, norm);
   chip.addEventListener("click", () => {
-    if (!chipBuilt) {
-      detail.appendChild(
-        el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
-      );
-      chipBuilt = true;
-    }
     chipWrap.classList.toggle("collapsed");
+    if (!chipWrap.classList.contains("collapsed")) paintRaw();
     chip.textContent = chipWrap.classList.contains("collapsed")
       ? "▸ " + label
       : "▾ " + label;
@@ -21160,6 +21759,14 @@ if (typeof module !== "undefined" && module.exports) {
     dropLazyDetailCacheForFlow,
     noteLazyDetailBundle,
     lazyDetailEpoch,
+    // The three detail sources + the step-event marker — exposed for the
+    // DOM-stub tests in tests/frontend/history_lazy_detail.test.mjs.
+    DETAIL_SOURCE_PROGRESS,
+    DETAIL_SOURCE_RAW,
+    DETAIL_SOURCE_STEP,
+    STEP_INPUTS_LAZY_KEY,
+    lazyRawRefsFor,
+    paintRawInto,
     chipDetailForFragment,
     lazyOptsForRecord,
     renderToolDetailPanel,
@@ -21203,6 +21810,19 @@ if (typeof module !== "undefined" && module.exports) {
     stableMergeByTimestamp,
     historySnapshotUrl,
     mergeHistoryResponse,
+    HISTORY_WINDOW_STEP_BLOCKS,
+    historyWindowUrl,
+    normalizeWindowMeta,
+    mergeWindowMeta,
+    windowLoadedStepIds,
+    windowEarlierAnchor,
+    sortRecordsByBlock,
+    loadEarlierStepBlocks,
+    scrollFlowConversationToBottom,
+    refreshLoadEarlierControl,
+    maybeLoadEarlierOnScroll,
+    WINDOW_TAIL_REFETCH_MIN_MS,
+    windowTailRefetchThrottled,
     // Cursor completeness self-check + numbered backfill (head-loss repair) —
     // exposed for tests/frontend/history_cursor_backfill.test.mjs.
     stepIdFromCursorKey,

@@ -527,6 +527,143 @@ class FlowRead:
     usage_catalog: Optional[Dict[str, Any]] = None
 
 
+@dataclass
+class FlowStepWindow:
+    """The result of one :meth:`DaemonHistoryReader.read_flow_window` call.
+
+    Attributes:
+        flow_id: The flow this window belongs to.
+        steps: EVERY step block id of the flow, in flow order. Carried whole
+            (not just the window's slice) because it is tiny — one short string
+            per step file — and it is what lets the browser show a block index
+            and page backwards without a round trip per hop.
+        counts: ``{physical-filename: physical-line-count}`` for every block,
+            the same shape as :attr:`FlowRead.cursor`. It is the client's
+            completeness reference: a windowed view checks only the blocks it
+            has loaded against these counts, so an unloaded head is never
+            mistaken for a hole.
+        first_index: Index into :attr:`steps` of the window's FIRST block, so a
+            consumer can tell whether earlier blocks remain without matching
+            step ids. An EMPTY window (an anchor / selection this flow does not
+            contain) reports ``len(steps)`` — "nothing loaded, and not at the
+            head"; 0 would instead read as "the head IS loaded" and retire the
+            consumer's page-up.
+        window: The block ids this read actually covers.
+        records: The records of those blocks, in block then line order.
+        signature: A constant-cost fingerprint of what this read would answer
+            (see :func:`_window_read_signature`). A caller that echoes it back
+            as ``if_signature`` on its next read is answered ``not_modified``
+            when nothing changed, which is what gives a relayed (uncached)
+            window a cheap steady-state poll instead of re-shipping the whole
+            window on every tick.
+        not_modified: True when *if_signature* matched, in which case NOTHING
+            else on this object is populated — no counts were computed and no
+            block was read. The caller must keep the window it already holds.
+    """
+
+    flow_id: str
+    steps: List[str] = field(default_factory=list)
+    counts: Dict[str, int] = field(default_factory=dict)
+    first_index: int = 0
+    window: List[str] = field(default_factory=list)
+    records: List[Dict[str, Any]] = field(default_factory=list)
+    signature: str = ""
+    not_modified: bool = False
+
+
+def _consumable_lines(path: Path):
+    """Yield ``(ordinal, text, on_disk_byte_len)`` for each consumable line.
+
+    Ordinals are 0-based PHYSICAL line numbers — the same identity
+    :meth:`DaemonHistoryReader.read_flow` assigns — so a record fetched through a
+    window read and one fetched through a cursor read reconcile as ONE record on
+    the client. That is the whole reason this mirrors the cursor read's
+    end-of-file rule rather than picking a simpler one: an UNTERMINATED final
+    line is consumed when it parses as a complete record (the writer finished the
+    object but not the newline) and left alone when it does not (a line caught
+    mid-write). A window that disagreed with the drain about that last line would
+    make the same physical line arrive under two different ordinals.
+    """
+    try:
+        with open(path, "rb") as fh:
+            ordinal = 0
+            for raw in fh:
+                if raw.endswith(b"\n"):
+                    yield ordinal, raw[:-1].decode("utf-8", "replace"), len(raw) - 1
+                    ordinal += 1
+                    continue
+                stripped = raw.strip()
+                if not stripped:
+                    break
+                try:
+                    parsed = json.loads(stripped.decode("utf-8", "replace"))
+                except (ValueError, TypeError):
+                    break
+                if not isinstance(parsed, dict):
+                    break
+                yield ordinal, raw.decode("utf-8", "replace"), len(raw)
+                ordinal += 1
+    except OSError:
+        return
+
+
+def _count_lines(path: Path) -> int:
+    """Count the lines a cursor read would report as consumed for *path*.
+
+    The window's ``counts`` and a bundle's ``cursor`` must be the SAME statement
+    — the client checks the blocks it holds against one using ordinals minted by
+    the other — so this counts exactly what :func:`_consumable_lines` yields.
+    """
+    return sum(1 for _ in _consumable_lines(path))
+
+
+def _window_read_signature(
+    files: List[Path],
+    blocks: int,
+    before_step: Optional[str],
+    steps: Optional[List[str]],
+) -> str:
+    """A constant-cost fingerprint of the answer a window read would produce.
+
+    WHY it is derived from ``stat`` rather than from the ``counts`` the read
+    already computes: counting lines walks every byte of every block, i.e. the
+    whole flow — hundreds of megabytes for the sessions windowing exists for —
+    so using it as the change probe would make "nothing changed" cost the same
+    as "everything changed". One ``stat`` per block is a few dozen syscalls and
+    is enough: history files are append-only, so a block that has neither grown
+    nor been re-timestamped cannot have gained a record.
+
+    The request SHAPE (block count, page-up anchor, explicit block selection) is
+    folded in as well, so a signature minted for a page-up can never be
+    presented against a tail read and be honoured.
+
+    Returns ``""`` when any block cannot be stat'ed — an empty signature never
+    compares equal to an echoed one, so an unreadable flow degrades to the full
+    read rather than to a false "unchanged".
+    """
+    hasher = hashlib.sha256()
+    hasher.update(
+        (
+            "%d|%s|%s"
+            % (
+                int(blocks),
+                str(before_step or ""),
+                ",".join(str(step) for step in (steps or ())),
+            )
+        ).encode("utf-8")
+    )
+    for jsonl in files:
+        try:
+            stat = jsonl.stat()
+        except OSError:
+            return ""
+        hasher.update(
+            ("\x00%s\x00%d\x00%d" % (jsonl.name, stat.st_size, stat.st_mtime_ns))
+            .encode("utf-8")
+        )
+    return hasher.hexdigest()[:16]
+
+
 def _hash_span(
     path: Path, start: int, end: int, hasher: "hashlib._Hash"
 ) -> Optional[bool]:
@@ -2665,6 +2802,153 @@ class DaemonHistoryReader:
         return (
             build_usage_payload(records_by_step, catalog, call_id=flow_id),
             catalog_dict,
+        )
+
+    def read_flow_window(
+        self,
+        flow_id: str,
+        *,
+        project_root: Optional[str] = None,
+        count: int = 10,
+        before_step: Optional[str] = None,
+        steps: Optional[List[str]] = None,
+        if_signature: Optional[str] = None,
+    ) -> "FlowStepWindow":
+        """Read ONE step-block window of *flow_id*'s history.
+
+        A *step block* is one physical history file — the same unit the WebUI
+        already renders as a step section, and the same unit
+        :func:`_display_step_id` names. ``count`` blocks are returned: the TAIL
+        blocks when *before_step* is ``None``, otherwise the blocks immediately
+        preceding it.
+
+        WHY this sits beside :meth:`read_flow` rather than inside it: the cursor
+        read is a whole-flow, forward-only drain whose consumer caches the
+        result. This one is a *random-access* read whose consumer streams it
+        straight to a browser and keeps nothing — the only shape that lets a
+        flow bigger than the server's whole history-cache budget be browsed at
+        all. Sharing the offset table between the two would be actively wrong:
+        the window read jumps backwards through the flow, and writing its
+        position into the incremental reader's table would rewind the drain.
+        So it reads its blocks whole, straight off disk, and touches no
+        read-offset state.
+
+        The returned :class:`FlowStepWindow` always carries the flow's COMPLETE
+        ordered block index (``steps``) and its cursor-shaped per-file line
+        counts (``counts``) — a few dozen short strings and integers — so one
+        round trip gives the browser both the window and everything it needs to
+        page through the rest and to run its own completeness self-check.
+
+        *if_signature* is a signature this reader minted for an EARLIER read of
+        the same shape. When it still describes the flow, the read stops before
+        touching a single block and answers ``not_modified`` — the cheap
+        steady-state a relayed window needs, because its consumer holds no
+        server-side bundle and would otherwise have to re-ship the whole window
+        on every poll of a flow that is merely being watched.
+        """
+        try:
+            blocks = max(1, int(count))
+        except (TypeError, ValueError):
+            blocks = 10
+        flow_dirs = self._resolve_flow_dirs(flow_id, project_root)
+        if not flow_dirs and project_root:
+            # Same authoritative-root fallback as read_flow: a root that resolves
+            # to no history directory is a resolution failure, and answering it
+            # as "this flow has no steps" would hand the browser an empty window.
+            legacy = self._resolve_flow_dir(flow_id, None)
+            if legacy is not None:
+                fallback_root = legacy.parent.parent.parent
+                flow_dirs = self._resolve_flow_dirs(
+                    flow_id, str(fallback_root)
+                ) or [legacy]
+        if not flow_dirs:
+            logger.warning(
+                "history: window read resolved no history directory for flow %s "
+                "(project_root=%s)",
+                flow_id, project_root or "<registry>",
+            )
+            return FlowStepWindow(flow_id=flow_id)
+
+        files = self._merge_flow_jsonl(flow_dirs)
+        signature = _window_read_signature(files, blocks, before_step, steps)
+        if if_signature and signature and str(if_signature) == signature:
+            # Answered BEFORE the counts pass: that pass reads every byte of the
+            # flow, so doing it first would defeat the whole point of the probe.
+            return FlowStepWindow(
+                flow_id=flow_id, signature=signature, not_modified=True
+            )
+        step_ids = [_display_step_id(jsonl.name) for jsonl in files]
+        counts: Dict[str, int] = {}
+        for jsonl in files:
+            counts[jsonl.name] = _count_lines(jsonl)
+
+        total = len(files)
+        if steps:
+            # Explicit block selection: read exactly what was named, in flow
+            # order, ignoring anything this flow does not have. ``first_index``
+            # still points at the earliest selected block so the caller can tell
+            # where the selection sits in the flow.
+            wanted = {str(step) for step in steps}
+            selected = [
+                (index, jsonl)
+                for index, jsonl in enumerate(files)
+                if _display_step_id(jsonl.name) in wanted
+            ]
+            # An empty selection anchors at the flow's END, not at 0: see the
+            # unknown-anchor branch below for why "empty" must never also read
+            # as "and you are standing on the first block".
+            start = selected[0][0] if selected else total
+            window_files = [jsonl for _index, jsonl in selected]
+        else:
+            if before_step:
+                try:
+                    end = step_ids.index(str(before_step))
+                except ValueError:
+                    # The anchor names no block of this flow (a stale client
+                    # holding a previous generation's ids). Reading the tail
+                    # would silently answer a page-up with the page the reader
+                    # already has, so an unknown anchor yields an EMPTY window
+                    # instead: the caller can see it reached nothing and
+                    # resynchronise from the block index that rides along.
+                    # INVARIANT: ``first_index`` is the flow's END, never 0 —
+                    # an empty window must not simultaneously declare the reader
+                    # has reached the first block, which would retire their
+                    # page-up affordance and un-scope their completeness check
+                    # onto blocks they never loaded (the same rule the server's
+                    # cached leg follows in ``_window_block_range``).
+                    return FlowStepWindow(
+                        flow_id=flow_id, steps=step_ids, counts=counts,
+                        first_index=total, window=[], records=[],
+                        signature=signature,
+                    )
+            else:
+                end = total
+            start = max(0, end - blocks)
+            window_files = files[start:end]
+
+        records: List[Dict[str, Any]] = []
+        for jsonl in window_files:
+            step_id = _display_step_id(jsonl.name)
+            step_type = parse_step_type_from_step_id(_logical_step_id(jsonl.name))
+            for ordinal, line, raw_len in _consumable_lines(jsonl):
+                try:
+                    message = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(message, dict):
+                    continue
+                record, _billed = self._build_record(
+                    flow_id, step_id, step_type, ordinal, message, raw_len
+                )
+                records.append(record)
+        return FlowStepWindow(
+            flow_id=flow_id,
+            steps=step_ids,
+            counts=counts,
+            first_index=start,
+            window=[_display_step_id(f.name) for f in window_files],
+            records=records,
+            signature=signature,
         )
 
     def read_active_flows(

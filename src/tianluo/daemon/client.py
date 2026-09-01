@@ -68,6 +68,16 @@ _HISTORY_POLL_INTERVAL = 1.0
 _IDLE_FAST_INTERVAL = 30.0
 _IDLE_STATUS_INTERVAL = 60.0
 
+#: Wire-byte budget of ONE ``MSG_HISTORY_WINDOW_DATA`` frame.
+#:
+#: WHY it is far above the push loop's ``MAX_BYTES_PER_REPORT`` (256 KB): that
+#: cap paces a background drain that must not starve status/heartbeat traffic,
+#: while a window read is a foreground answer a browser is parked on. Chunking a
+#: 40 MB window at 256 KB would spend ~160 round trips before the reader sees
+#: their step block. A megabyte keeps a frame writable in one go while still
+#: bounding a single write.
+HISTORY_WINDOW_FRAME_BYTES = 1024 * 1024
+
 #: Type of the snapshot provider — returns a JSON-serializable machine snapshot.
 SnapshotProvider = Callable[[], Dict[str, Any]]
 #: Type of the spawn handler — called with
@@ -1060,6 +1070,8 @@ class DaemonClient:
             await self._handle_history_index_request(ws)
         elif message.type == protocol.MSG_DETAIL_REQUEST:
             await self._handle_detail_request(ws, message.payload)
+        elif message.type == protocol.MSG_HISTORY_WINDOW_REQUEST:
+            await self._handle_history_window_request(ws, message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
@@ -2220,6 +2232,126 @@ class DaemonClient:
         logger.info(
             "HISTORY_REQUEST answered for flow %s (%d record(s) across %d frame(s))",
             flow_id, records_sent, frames_sent,
+        )
+
+    async def _handle_history_window_request(
+        self, ws: Any, payload: Dict[str, Any]
+    ) -> None:
+        """Answer a server HISTORY_WINDOW_REQUEST with HISTORY_WINDOW_DATA.
+
+        The windowed WebUI open asks for the LAST few step blocks of a flow and
+        pages backwards from there. Unlike :meth:`_handle_history_request` this
+        reply is never cached by the server — it is relayed straight to the
+        browser — so a flow larger than the server's whole history-cache budget
+        can be browsed block by block without a bundle ever existing for it.
+
+        A failure is always reported as an ``ok=false`` frame rather than
+        silence: the server parks a REST request on this reply, and a dropped
+        answer would cost the browser the full pull timeout instead of an
+        immediate, recoverable fallback.
+        """
+        provider = self._history_provider
+        request_id = str(payload.get("request_id") or "").strip()
+        flow_id = str(payload.get("flow_id") or "").strip()
+
+        async def _reply(**kwargs: Any) -> None:
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_history_window_data(
+                        flow_id, request_id=request_id, seq=self._next_seq(),
+                        **kwargs,
+                    ),
+                )
+            except Exception:
+                logger.debug("HISTORY_WINDOW_DATA send failed", exc_info=True)
+
+        if not request_id:
+            logger.warning("Ignoring HISTORY_WINDOW_REQUEST with no request_id")
+            return
+        if provider is None:
+            await _reply(ok=False, error="no history provider configured")
+            return
+        if not flow_id:
+            await _reply(ok=False, error="empty flow_id")
+            return
+        project_root = str(payload.get("project_root") or "") or None
+        before_step = str(payload.get("before_step") or "") or None
+        wanted_steps = payload.get("steps")
+        if not isinstance(wanted_steps, list) or not wanted_steps:
+            wanted_steps = None
+        if_signature = str(payload.get("if_signature") or "") or None
+        try:
+            count = int(payload.get("count") or 10)
+        except (TypeError, ValueError):
+            count = 10
+        try:
+            # Off-thread for the same reason the cursor read is: a window of a
+            # large flow is tens of MB of jsonl, and parsing it on the event loop
+            # would stall the heartbeat past the server's offline threshold.
+            window = await asyncio.to_thread(
+                provider.read_flow_window,
+                flow_id,
+                project_root=project_root,
+                count=count,
+                before_step=before_step,
+                steps=wanted_steps,
+                if_signature=if_signature,
+            )
+        except Exception:
+            logger.exception(
+                "HISTORY_WINDOW_REQUEST read failed for flow %s", flow_id
+            )
+            await _reply(ok=False, error="history window read failed")
+            return
+
+        if window.not_modified:
+            # The conditional read matched: nothing was parsed and nothing is
+            # shipped. This is the steady state of a watched flow served by the
+            # relay leg — the alternative is re-reading tens of MB of jsonl and
+            # re-sending the whole window on every 3 s browser poll.
+            await _reply(
+                signature=window.signature, not_modified=True, final=True
+            )
+            logger.debug(
+                "HISTORY_WINDOW_REQUEST unchanged for flow %s (before=%s)",
+                flow_id, before_step or "<tail>",
+            )
+            return
+
+        # Chunk by wire bytes, not by block: one step block can be a single
+        # multi-MB step_completed record, so a block-per-frame rule would still
+        # emit frames far past what a socket should carry in one write. Every
+        # chunk repeats the window description (it is a handful of short
+        # strings) so the server can act on the first frame that lands.
+        chunk: List[Dict[str, Any]] = []
+        chunk_bytes = 0
+        frames = 0
+        for record in window.records:
+            size = len(json.dumps(record, ensure_ascii=False))
+            # The >= guard is on the ALREADY-accumulated chunk so a single record
+            # over the cap still travels — alone in its own frame — rather than
+            # being dropped or stalling the window forever.
+            if chunk and chunk_bytes + size > HISTORY_WINDOW_FRAME_BYTES:
+                await _reply(
+                    records=chunk, steps=window.steps, window=window.window,
+                    counts=window.counts, signature=window.signature,
+                    final=False,
+                )
+                frames += 1
+                chunk, chunk_bytes = [], 0
+            chunk.append(record)
+            chunk_bytes += size
+        await _reply(
+            records=chunk, steps=window.steps, window=window.window,
+            counts=window.counts, signature=window.signature, final=True,
+        )
+        frames += 1
+        logger.info(
+            "HISTORY_WINDOW_REQUEST answered for flow %s (%d block(s), "
+            "%d record(s) across %d frame(s), before=%s)",
+            flow_id, len(window.window), len(window.records), frames,
+            before_step or "<tail>",
         )
 
     async def _handle_history_index_request(self, ws: Any) -> None:

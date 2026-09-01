@@ -197,11 +197,15 @@ def test_both_views_share_the_lazy_render_path():
     start = src.index("function renderHistoryRecords(")
     body = src[start:src.index("\n}", start)]
     assert "renderConversation(" in body
-    # Both loaders read the same summarized bundle endpoint.
+    # Both loaders read the same summarized bundle endpoint, through the SAME
+    # pair of URL builders — the windowed open and the token-echoing poll. Named
+    # rather than pattern-matched on the literal path so the two views cannot
+    # drift onto different request shapes (only one of which would be windowed).
     for fn in ("async function loadFlowConversation(", "async function openHistorySession("):
         if fn in src:
-            seg = src[src.index(fn):]
-            assert "/api/history/" in seg[:12000], fn
+            seg = src[src.index(fn):][:12000]
+            assert "historyWindowUrl(" in seg, fn
+            assert "historySnapshotUrl(" in seg, fn
 
 
 def test_view_raw_restores_what_the_summary_held_back():

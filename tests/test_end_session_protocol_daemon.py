@@ -44,10 +44,10 @@ def test_protocol_version_current():
     version later advanced to "3" for the (unrelated) traffic-reduction
     messages, to "4" for the (also unrelated) presence signalling, to "5" for
     the (likewise unrelated) upload channel, to "6" for its fetch counterpart,
-    to "7" for the (likewise unrelated) spawn-strategy field and to "8" for the
-    plan-mode fields that replaced it, so simply pin the current revision
-    here."""
-    assert protocol.PROTOCOL_VERSION == "8"
+    to "7" for the (likewise unrelated) spawn-strategy field, to "8" for the
+    plan-mode fields that replaced it and to "9" for the history step-window
+    channel, so simply pin the current revision here."""
+    assert protocol.PROTOCOL_VERSION == "9"
 
 
 def test_make_end_session_roundtrip():
