@@ -4367,6 +4367,617 @@ check("makeStructuredAssistantRenderer: narrative falls back to bare bracket chi
     "fallback bare bracket chip has no detail panel");
 });
 
+// ---------------------------------------------------------------------------
+// Unescaped double quotes inside JSON string values (WebUI ↔ engine parity)
+// ---------------------------------------------------------------------------
+//
+// Real failure (flow 20260901-160137_177d653b, discovery round): the LLM's
+// final answer wrote ASCII double quotes inside the `content` string value
+// without escaping them. The engine's `json_parser.py` recovers that payload
+// via `_repair_unescaped_quotes`, so the flow advanced normally — but the
+// WebUI's `tryParseJsonLenient` had only the trailing-comma repair, so
+// `JSON.parse` failed, `collectJsonRegions` registered nothing,
+// `extractResultJson` returned null, and the discovery renderer fell back to
+// `renderToolMarkers` + markdown, printing the whole fenced JSON as a raw code
+// block. Every step type that identifies its result through
+// STEP_RESULT_FIELDS / extractResultJson shares that path, so the checks below
+// cover discovery AND a non-discovery step.
+
+check("tryParseJsonLenient: escapes unescaped double quotes inside a string value", () => {
+  const broken = '{"content": "根因是 LLM 把 "裸引号" 写进了 content。", "n": 1}';
+  assert.equal(JSON.parse === undefined, false);
+  assert.throws(() => JSON.parse(broken), "payload is genuinely invalid strict JSON");
+  const value = app.tryParseJsonLenient(broken);
+  assert.ok(value, "lenient parse recovers the payload");
+  assert.equal(value.content, '根因是 LLM 把 "裸引号" 写进了 content。',
+    "the interior quotes survive as literal content characters");
+  assert.equal(value.n, 1);
+});
+
+check("tryParseJsonLenient: already-escaped quotes and structural quotes are untouched", () => {
+  // A strictly-valid payload must never reach the repair pass at all.
+  const valid = '{"a": "say \\"hi\\"", "b": ["x", "y"]}';
+  assert.deepEqual(app.tryParseJsonLenient(valid), { a: 'say "hi"', b: ["x", "y"] });
+  assert.equal(app.repairUnescapedJsonStringQuotes(valid), valid,
+    "repair is a no-op on well-formed JSON (structural quotes are not content)");
+  // Mixed: escaped quotes kept verbatim while the bare ones get escaped.
+  const mixed = '{"a": "he said \\"ok\\" then "run" now"}';
+  assert.deepEqual(app.tryParseJsonLenient(mixed), { a: 'he said "ok" then "run" now' });
+});
+
+check("tryParseJsonLenient: trailing-comma repair still works and unrepairable input stays undefined", () => {
+  assert.deepEqual(app.tryParseJsonLenient('{"a": 1,}'), { a: 1 });
+  assert.deepEqual(app.tryParseJsonLenient('{"a": [1, 2,],}'), { a: [1, 2] });
+  // Not a quote problem — the repair must not manufacture a value.
+  assert.equal(app.tryParseJsonLenient('{"a": undefinedValue}'), undefined);
+  assert.equal(app.tryParseJsonLenient("{oops"), undefined);
+  assert.equal(app.tryParseJsonLenient("just prose"), undefined);
+  assert.equal(app.tryParseJsonLenient(""), undefined);
+});
+
+// A `,}` / `,]` sequence sitting inside a string VALUE is user-visible content,
+// not a trailing comma. A context-free strip would delete it silently — worst of
+// all after the quote repair, which legitimately turns stray quotes into content
+// and can leave such a sequence inside the repaired value.
+check("tryParseJsonLenient: trailing-comma strip never edits string content", () => {
+  assert.deepEqual(app.tryParseJsonLenient('{"a": "x,} y",}'), { a: "x,} y" });
+  assert.deepEqual(app.tryParseJsonLenient('{"a": ["p,] q",],}'), { a: ["p,] q"] });
+  // The self-check payload: quote repair + comma strip must compose without
+  // eating the comma the quote repair just moved inside the string value.
+  assert.deepEqual(
+    app.tryParseJsonLenient('{"content":"hello "x,} y",}'),
+    { content: 'hello "x,} y' },
+    "repaired content must keep its comma verbatim");
+  // The helper itself: structural commas go, in-string ones stay.
+  assert.equal(app.stripStructuralTrailingCommas('{"a": "x,} y",}'), '{"a": "x,} y"}');
+  assert.equal(app.stripStructuralTrailingCommas('{"a": "esc \\", ] still in"}'),
+               '{"a": "esc \\", ] still in"}',
+               "an escaped quote must not end string state");
+});
+
+// The production shape: a ```json fence whose `content` value carries BOTH
+// unescaped ASCII quotes and escaped newlines (`\n`).
+const brokenQuotesDiscoveryContent = [
+  "先复现了一遍现场。",
+  "",
+  "```json",
+  "{",
+  '  "content": "根因是 LLM 终稿把 "裸引号" 直接写进了 content 字段。\\n引擎侧能修，WebUI 侧不能。",',
+  '  "questions": ["要不要同步补 fence 回退?", "非 discovery 步骤也要覆盖吗?"]',
+  "}",
+  "```",
+].join("\n");
+
+check("renderDiscoveryAssistant: structured result renders when content holds unescaped quotes", () => {
+  const frag = app.renderDiscoveryAssistant(brokenQuotesDiscoveryContent, {});
+  assert.ok(frag,
+    "renderer returns a fragment instead of falling back to the raw-JSON code block");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const contentWrap = findOne(wrap, "discovery-content");
+  assert.ok(contentWrap, "content field rendered as markdown");
+  assert.ok(contentWrap.textContent.includes("裸引号"),
+    "the literal interior quotes survive into the rendered content");
+  assert.ok(contentWrap.textContent.includes("引擎侧能修"),
+    "the escaped \\n split the content into further markdown text, not a parse abort");
+  const list = findOne(wrap, "discovery-questions__list");
+  assert.ok(list, "questions rendered as an ordered list");
+  assert.equal(list.tagName, "OL");
+  assert.equal(list.children.length, 2);
+  assert.ok(list.children[0].textContent.includes("fence 回退"));
+  // The fenced JSON must not leak into the Layer-1 narrative.
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative, "the prose prefix still renders above the result");
+  assert.ok(narrative.textContent.includes("先复现了一遍现场"));
+  assert.equal(narrative.textContent.includes("questions"), false,
+    "the JSON region is excised from the narrative");
+  assert.equal(narrative.textContent.includes("```"), false);
+});
+
+// Desync shape: an ODD number of stray quotes flips `findBalancedJsonEnd`'s
+// string state, so a `}` sitting inside the prose of the `content` value is
+// counted as structural and the balanced scan closes the region at the wrong
+// offset — no region is ever offered to the parser. Only the ```json fence
+// fallback can locate the payload here.
+const desyncFenceDiscoveryContent = [
+  "扫描器在这里失步了。",
+  "",
+  "```json",
+  "{",
+  '  "content": "解析器报了 "Expecting , delimiter} 这样一行，\\n于是整段被裸显。",',
+  '  "questions": ["确认这条回退路径?"]',
+  "}",
+  "```",
+].join("\n");
+
+check("extractResultJson: falls back to the fence body when the balanced scan desyncs", () => {
+  // Precondition of the check: the balanced scanner really does find nothing.
+  const regions = app.collectJsonRegions(desyncFenceDiscoveryContent);
+  assert.equal(regions.filter((r) => app.isDiscoveryResultDict(r.value)).length, 0,
+    "balanced scan yields no result region for the desynced payload");
+  const extracted = app.extractResultJson(
+    desyncFenceDiscoveryContent, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the fence-body fallback recovers the result");
+  assert.ok(extracted.value.content.includes("整段被裸显"));
+  assert.equal(extracted.narrative.includes("```"), false,
+    "the whole fence region (markers included) is excised from the narrative");
+  assert.equal(extracted.narrative.includes("questions"), false);
+  assert.equal(extracted.narrative, "扫描器在这里失步了。");
+});
+
+check("renderDiscoveryAssistant: renders structured result via the fence fallback", () => {
+  const frag = app.renderDiscoveryAssistant(desyncFenceDiscoveryContent, {});
+  assert.ok(frag, "renderer no longer falls back to the bare code-block path");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  assert.ok(findOne(wrap, "discovery-content").textContent.includes("整段被裸显"));
+  const list = findOne(wrap, "discovery-questions__list");
+  assert.ok(list);
+  assert.equal(list.children.length, 1);
+});
+
+check("extractResultJson: a turn with no result JSON still returns null after the fence fallback", () => {
+  // Only a tool-call JSON — no discovery result field anywhere. The fallback
+  // must not widen this into a false positive, or the thinking process would
+  // be folded behind an empty toggle.
+  const toolOnly =
+    "先读一下文件。\n\n```json\n" +
+    '{"file_path": "src/foo.py", "note": "含 "裸引号" 的工具参数"}' +
+    "\n```";
+  assert.equal(app.extractResultJson(toolOnly, app.isDiscoveryResultDict), null);
+});
+
+check("makeStructuredAssistantRenderer: analyze result with unescaped quotes renders structured", () => {
+  // Same defect, non-discovery step: `analyze` reaches extractResultJson
+  // through the shared STEP_RESULT_FIELDS path.
+  const content = [
+    "先看了 app.js 的解析链。",
+    "",
+    "```json",
+    "{",
+    '  "task_type": "bugfix",',
+    '  "complexity": "medium",',
+    '  "scope": "src/tianluo/server/static/app.js 的 "tryParseJsonLenient" 与 extractResultJson",',
+    '  "reasoning": "修的是既有错误行为，\\n因此归类为 bugfix。"',
+    "}",
+    "```",
+  ].join("\n");
+  const renderer = app.makeStructuredAssistantRenderer("analyze");
+  const frag = renderer(content, {});
+  assert.ok(frag,
+    "analyze renderer returns a fragment instead of the raw-JSON fallback");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const structured = findOne(wrap, "assistant-structured");
+  assert.ok(structured, "structured report body rendered");
+  assert.ok(structured.textContent.includes("bugfix"));
+  assert.ok(structured.textContent.includes("tryParseJsonLenient"),
+    "the scope value keeps its literal interior quotes' content");
+  assert.ok(structured.textContent.includes("因此归类为 bugfix"));
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative);
+  assert.equal(narrative.textContent.includes("```"), false,
+    "the JSON region is excised from the narrative on the generic path too");
+});
+
+// ---------------------------------------------------------------------------
+// Multi-fence shapes the fence fallback must handle per-fence (not per-sweep)
+// ---------------------------------------------------------------------------
+//
+// A turn routinely carries several ```json fences: tool-call arguments first,
+// then the result. Each opener is recovered on its OWN complete body — the text
+// up to the FIRST following ``` marker, wherever that marker sits — with
+// exactly one parse attempt:
+//   (a) a body carrying BOTH an unescaped quote AND a literal ``` inside a
+//       string value ends its one attempt at that embedded marker, which cuts
+//       the string open, so nothing parses and the fence must stay RAW. Walking
+//       on to the next ``` would repair the longer span into a plausible object
+//       — but the fallback exists precisely because string state is desynced
+//       here, so nothing tells that object apart from a silent truncation. Its
+//       neighbours are unaffected either way;
+//   (b) BOTH fences are quote-desynced but otherwise repairable, so the
+//       balanced scan sees neither — the non-result one must still be excised
+//       from the Layer-1 narrative.
+
+// (a) valid tool-call fence, then a result fence whose `content` carries an
+// unescaped quote AND a literal ``` — the shape where an alternative-closer
+// search would manufacture a result.
+const embeddedFenceDiscoveryContent = [
+  "先跑了一次工具确认现场。",
+  "",
+  "```json",
+  '{"tool": "Read", "file_path": "src/tianluo/server/static/app.js"}',
+  "```",
+  "",
+  "然后给出结论。",
+  "",
+  "```json",
+  '{"content": "解析器说 "Expecting \',\' delimiter ``` 这段标记仍留在正文里", "questions": ["会被截断吗?"]}',
+  "```",
+].join("\n");
+
+check("collectFenceJsonRegions: a body with an embedded ``` is left raw, not truncated", () => {
+  const fences = app.collectFenceJsonRegions(embeddedFenceDiscoveryContent);
+  assert.equal(fences.length, 1,
+    "only the tool-call fence is recovered; the composite body yields no region");
+  assert.equal(fences[0].value.tool, "Read");
+  assert.equal(fences[0].value.content, undefined,
+    "no prefix of the result body is accepted as a region");
+  // Guard against an alternative-closer search coming back: reading on to the
+  // line-starting ``` *does* repair into a valid object, so a fallback that
+  // tried that farther marker would report a second region here.
+  assert.notEqual(
+    app.tryParseJsonLenient(
+      '{"content": "解析器说 "Expecting \',\' delimiter ``` 这段标记仍留在正文里", ' +
+      '"questions": ["会被截断吗?"]}'),
+    undefined,
+    "precondition: the body read past the embedded marker would parse — the " +
+    "first marker is still the only closer tried");
+});
+
+check("extractResultJson: an unrepairable result fence falls through to the raw path", () => {
+  const regions = app.collectJsonRegions(embeddedFenceDiscoveryContent);
+  assert.equal(regions.filter((r) => app.isDiscoveryResultDict(r.value)).length, 0,
+    "precondition: the balanced scan finds no result region for the desynced payload");
+  assert.equal(
+    app.extractResultJson(embeddedFenceDiscoveryContent, app.isDiscoveryResultDict),
+    null,
+    "no truncated structured result is manufactured");
+  assert.equal(app.renderDiscoveryAssistant(embeddedFenceDiscoveryContent, {}), null,
+    "the renderer takes the raw fallback path, keeping the payload visible");
+});
+
+// The same shape reduced to its essentials: the embedded ``` sits mid-line and a
+// well-formed closer follows on its own line. Only the mid-line marker may end
+// the body; the line-starting one must never be reached as a second candidate,
+// or the fence yields a structured result whose content stops at "x ".
+check("collectFenceJsonRegions: the embedded marker ends the body, not a later one", () => {
+  const text = [
+    "```json",
+    '{"content":"x "bare} y ``` z","questions":["q"]}',
+    "```",
+  ].join("\n");
+  assert.equal(app.collectFenceJsonRegions(text).length, 0,
+    "the body ending at the embedded marker leaves an open string — no region");
+  assert.equal(app.extractResultJson(text, app.isDiscoveryResultDict), null);
+  assert.equal(app.renderDiscoveryAssistant(text, {}), null,
+    "the payload stays raw instead of being recovered past the embedded marker");
+});
+
+// (b) tool-call fence AND result fence both quote-desynced: the balanced scan
+// finds neither, and the fallback must excise both even though only one of them
+// satisfies the result predicate.
+const twoDesyncedFencesContent = [
+  "先查了一下解析链。",
+  "",
+  "```json",
+  '{"command": "grep -a "tryParseJsonLenient} src/tianluo/server/static/app.js", "description": "定位解析链"}',
+  "```",
+  "",
+  "结论如下。",
+  "",
+  "```json",
+  "{",
+  '  "content": "两处围栏都被 "裸引号} 打乱了，\\n所以平衡扫描一个都定位不到。",',
+  '  "questions": ["工具调用围栏也要一并剔除吗?"]',
+  "}",
+  "```",
+].join("\n");
+
+check("extractResultJson: non-result fences recovered only by the quote repair are excised too", () => {
+  const regions = app.collectJsonRegions(twoDesyncedFencesContent);
+  assert.equal(regions.length, 0,
+    "precondition: the balanced scan locates neither desynced fence");
+  const fences = app.collectFenceJsonRegions(twoDesyncedFencesContent);
+  assert.equal(fences.length, 2, "the fallback recovers both fences");
+  assert.equal(fences[0].value.description, "定位解析链");
+  assert.equal(app.isDiscoveryResultDict(fences[0].value), false,
+    "the tool-call fence is not a result");
+  const extracted = app.extractResultJson(
+    twoDesyncedFencesContent, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the result fence is chosen");
+  assert.ok(extracted.value.content.includes("平衡扫描一个都定位不到"));
+  assert.equal(extracted.narrative.includes("grep -a"), false,
+    "the tool-call fence must not stay visible in the Layer-1 narrative");
+  assert.equal(extracted.narrative.includes("command"), false);
+  assert.equal(extracted.narrative.includes("```"), false);
+  assert.deepEqual(extracted.narrative.split(/\n+/), ["先查了一下解析链。", "结论如下。"]);
+});
+
+check("renderDiscoveryAssistant: two desynced fences render structured with a clean narrative", () => {
+  const frag = app.renderDiscoveryAssistant(twoDesyncedFencesContent, {});
+  assert.ok(frag, "renderer no longer falls back to the raw code-block path");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  assert.ok(findOne(wrap, "discovery-content").textContent
+    .includes("平衡扫描一个都定位不到"));
+  assert.equal(findOne(wrap, "discovery-questions__list").children.length, 1);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative);
+  assert.equal(narrative.textContent.includes("grep -a"), false,
+    "the tool-call JSON stays out of the rendered narrative");
+});
+
+// (c) an unrecoverable fence whose body still contains a well-formed JSON line:
+// the balanced scan registers that inner object, but the fence around it was
+// left raw, so excising the inner object alone would carve the fence in half and
+// leave a dangling ```json opener in the narrative.
+const unrecoverableFenceWithInnerJson = [
+  "```json",
+  "not json",
+  '{"command": "ls"}',
+  "```",
+  "",
+  "```json",
+  '{"content": "后一段仍然要被 "识别} 出来。", "questions": ["还在吗?"]}',
+  "```",
+].join("\n");
+
+check("extractResultJson: a failed fence keeps its inner balanced-scan region intact", () => {
+  const regions = app.collectJsonRegions(unrecoverableFenceWithInnerJson);
+  assert.ok(regions.some((r) => r.value && r.value.command === "ls"),
+    "precondition: the balanced scan registers the object inside the failed fence");
+  const fences = app.collectFenceJsonRegions(unrecoverableFenceWithInnerJson);
+  assert.equal(fences.length, 1, "only the quote-desynced result fence is recovered");
+  const extracted = app.extractResultJson(
+    unrecoverableFenceWithInnerJson, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the later fence still supplies the result");
+  assert.ok(extracted.value.content.includes("识别"));
+  assert.ok(extracted.narrative.includes("not json"),
+    "the failed fence stays in the narrative");
+  assert.ok(extracted.narrative.includes('{"command": "ls"}'),
+    "its inner JSON is NOT excised out from under it");
+  assert.equal((extracted.narrative.match(/```/g) || []).length, 2,
+    "the failed fence keeps BOTH its markers — no dangling opener");
+  assert.equal(extracted.narrative.includes("后一段"), false,
+    "the recovered result fence is still excised");
+});
+
+check("collectFenceJsonRegions: an unrecoverable fence does not swallow its neighbours", () => {
+  const text = [
+    "```json",
+    "{ 这根本不是 JSON",
+    "```",
+    "",
+    "```json",
+    '{"content": "后一段仍然要被 "识别} 出来。"}',
+    "```",
+  ].join("\n");
+  const fences = app.collectFenceJsonRegions(text);
+  assert.equal(fences.length, 1, "only the recoverable fence is returned");
+  assert.ok(fences[0].value.content.includes("识别"));
+  const extracted = app.extractResultJson(text, app.isDiscoveryResultDict);
+  assert.ok(extracted);
+  assert.equal(extracted.narrative.includes("后一段"), false,
+    "the recovered fence is excised");
+  assert.ok(extracted.narrative.includes("这根本不是 JSON"),
+    "an unparseable fence is left in the narrative rather than silently dropped");
+});
+
+// (d) a failed fence whose CLOSER is immediately followed by a bare JSON
+// object. `collectJsonRegions` absorbs that closing marker into the bare
+// object's region as its "opening fence"; excising the region verbatim would
+// carry the marker away and leave a dangling ```json opener behind. The failed
+// fence must survive whole, markers included, while the bare object — real JSON
+// that no fence owns — is still kept out of the Layer-1 narrative.
+const failedFenceThenBareJson = [
+  "```json",
+  "not json",
+  "```",
+  '{"command":"ls"}',
+  "",
+  "中间的说明文字。",
+  "",
+  "```json",
+  '{"content": "结果这段被 "裸引号} 打乱了。", "questions": ["还在吗?"]}',
+  "```",
+].join("\n");
+
+check("extractResultJson: a failed fence keeps its closing marker when bare JSON follows", () => {
+  const regions = app.collectJsonRegions(failedFenceThenBareJson);
+  const bare = regions.find((r) => r.value && r.value.command === "ls");
+  assert.ok(bare, "precondition: the balanced scan registers the bare object");
+  assert.ok(bare.startIndex < failedFenceThenBareJson.indexOf('{"command":"ls"}'),
+    "precondition: the region absorbed the preceding fence marker");
+  const extracted = app.extractResultJson(
+    failedFenceThenBareJson, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the later quote-desynced fence still supplies the result");
+  assert.ok(extracted.value.content.includes("裸引号"));
+  assert.ok(extracted.narrative.includes("not json"),
+    "the failed fence body stays in the narrative");
+  assert.equal((extracted.narrative.match(/```/g) || []).length, 2,
+    "the failed fence keeps BOTH markers — no dangling opener");
+  assert.ok(/```json\nnot json\n```/.test(extracted.narrative),
+    "the failed fence survives verbatim, closer included");
+  assert.equal(extracted.narrative.includes('"command"'), false,
+    "the bare JSON next to it is still excised from Layer-1");
+  assert.ok(extracted.narrative.includes("中间的说明文字"),
+    "the prose between the fences is untouched");
+  assert.equal(extracted.narrative.includes("结果这段"), false,
+    "the recovered result fence is excised");
+});
+
+// (d2) the same invariant when the failed fence is left UNCLOSED and the next
+// ```json opener follows it directly: that opener's backtick run is the first
+// ``` after the failed body, so it is at once the failed fence's authoritative
+// closer and the start of the recovered fence's span. Excising the recovered
+// span verbatim would carry the shared marker away, stranding a dangling opener
+// that swallows every later narrative line into a code block.
+const unclosedFenceThenRecoveredFence = [
+  "```json",
+  '{"broken "quote',
+  "```json",
+  '{"content": "结果这段被 "裸引号} 打乱了。", "questions": ["还在吗?"]}',
+  "```",
+  "",
+  "后续说明。",
+].join("\n");
+
+check("extractResultJson: an unclosed fence keeps the marker it shares with the recovered fence", () => {
+  const fences = app.collectFenceJsonRegions(unclosedFenceThenRecoveredFence);
+  assert.equal(fences.length, 1,
+    "precondition: only the second fence body parses");
+  assert.equal(fences[0].startIndex,
+    unclosedFenceThenRecoveredFence.indexOf("```json", 1),
+    "precondition: the recovered span starts at the shared backtick run");
+  const extracted = app.extractResultJson(
+    unclosedFenceThenRecoveredFence, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the second fence supplies the result");
+  assert.ok(extracted.value.content.includes("裸引号"));
+  assert.ok(/```json\n\{"broken "quote\n```/.test(extracted.narrative),
+    "the failed fence survives whole — body and BOTH markers");
+  assert.equal((extracted.narrative.match(/```/g) || []).length, 2,
+    "no dangling opener: the markers stay balanced");
+  assert.equal(extracted.narrative.includes("结果这段"), false,
+    "the recovered fence is still excised");
+  assert.ok(extracted.narrative.endsWith("后续说明。"),
+    "the prose after the recovered fence is untouched and outside the code block");
+});
+
+// (d3) the same shared-marker adjacency, but with the FIRST fence parsing
+// cleanly: the tool-call body is well-formed and unclosed, so the next ```json
+// opener's backtick run is at once that fence's authoritative closer and the
+// result fence's opener. Every opener is owed exactly one attempt, whichever
+// way its predecessor went — a scan that resumed past the closer would step
+// over the result opener's start and leave the step rendering raw even though
+// its body carries nothing worse than unescaped quotes.
+const parsedFenceSharingMarkerWithResult = [
+  "```json",
+  '{"command": "ls"}',
+  "```json",
+  '{"content": "结果这段被 "裸引号} 打乱了。", "questions": ["还在吗?"]}',
+  "```",
+  "",
+  "后续说明。",
+].join("\n");
+
+check("collectFenceJsonRegions: an opener sharing the previous fence's closer still gets its attempt", () => {
+  const fences = app.collectFenceJsonRegions(parsedFenceSharingMarkerWithResult);
+  assert.equal(fences.length, 2,
+    "both the tool-call fence and the marker-sharing result fence are recovered");
+  assert.equal(fences[0].value.command, "ls");
+  assert.ok(fences[1].value.content.includes("裸引号"));
+  assert.equal(fences[1].startIndex,
+    parsedFenceSharingMarkerWithResult.indexOf("```json", 1),
+    "the recovered span starts at the shared backtick run");
+});
+
+check("extractResultJson: a marker shared by two recovered fences is excised exactly once", () => {
+  const extracted = app.extractResultJson(
+    parsedFenceSharingMarkerWithResult, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the marker-sharing fence supplies the result");
+  assert.ok(extracted.value.content.includes("裸引号"));
+  assert.deepEqual(extracted.value.questions, ["还在吗?"]);
+  assert.equal(extracted.narrative.includes('"command"'), false,
+    "the tool-call fence is excised too — no JSON leaks into Layer-1");
+  assert.equal(extracted.narrative.includes("```"), false,
+    "the shared marker leaves no dangling fence behind");
+  assert.equal(extracted.narrative.trim(), "后续说明。",
+    "the two overlapping-marker spans excise cleanly, leaving only the prose");
+});
+
+check("renderDiscoveryAssistant: a marker-sharing result fence renders structured", () => {
+  const frag = app.renderDiscoveryAssistant(parsedFenceSharingMarkerWithResult, {});
+  assert.ok(frag, "renderer no longer falls back to the raw code-block path");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  assert.ok(findOne(wrap, "discovery-content").textContent.includes("裸引号"));
+  assert.equal(findOne(wrap, "discovery-questions__list").children.length, 1);
+  const narrative = findOne(wrap, "assistant-narrative");
+  if (narrative) {
+    assert.equal(narrative.textContent.includes("command"), false,
+      "the tool-call JSON stays out of the rendered narrative");
+  }
+});
+
+// (d4) the same shared-marker adjacency as d3, but the result body's unescaped
+// quotes enclose NO `}` / `]`, so `findBalancedJsonEnd` keeps its string state
+// in sync and the balanced scan itself recovers the region through the new
+// quote repair — the fence fallback (whose clip reconciles shared markers)
+// never runs. Both balanced regions then absorb the same backtick run, so the
+// two excision spans overlap and a tail-first splice with no reconciliation
+// deletes the head of the prose that follows the fences.
+const overlappingBalancedRegionsWithProse = [
+  "```json",
+  '{"command": "ls"}',
+  "```json",
+  '{"content": "有 "引号" 的内容", "questions": ["q1"]}',
+  "```",
+  "",
+  "这是结论后的说明文字。",
+].join("\n");
+
+check("extractResultJson: overlapping balanced-scan regions do not eat the following prose", () => {
+  const regions = app.collectJsonRegions(overlappingBalancedRegionsWithProse);
+  assert.equal(regions.length, 2,
+    "precondition: the balanced scan itself registers both fences");
+  assert.ok(regions[0].endIndex > regions[1].startIndex,
+    "precondition: the two regions overlap on the shared backtick run");
+  const extracted = app.extractResultJson(
+    overlappingBalancedRegionsWithProse, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the quote repair lets the balanced scan supply the result");
+  assert.equal(extracted.value.content, '有 "引号" 的内容');
+  assert.deepEqual(extracted.value.questions, ["q1"]);
+  assert.equal(extracted.narrative, "这是结论后的说明文字。",
+    "the shared run is excised once — no character of the prose is eaten");
+  assert.equal(extracted.narrative.includes("```"), false,
+    "no dangling fence marker survives either");
+});
+
+check("renderDiscoveryAssistant: overlapping regions still render the full narrative", () => {
+  const frag = app.renderDiscoveryAssistant(overlappingBalancedRegionsWithProse, {});
+  assert.ok(frag, "renderer no longer falls back to the raw code-block path");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  assert.ok(findOne(wrap, "discovery-content").textContent.includes("引号"));
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative, "the trailing prose is rendered as narrative");
+  assert.ok(narrative.textContent.includes("这是结论后的说明文字。"),
+    "the narrative keeps its leading characters");
+  assert.equal(narrative.textContent.includes("command"), false,
+    "the tool-call JSON stays out of the rendered narrative");
+});
+
+// (e) a failed fence whose body ends at a MID-LINE ``` marker. That first
+// marker is the authoritative closer, so the protected span stops right after
+// it: the bare `{"command":"ls"}` on the following line belongs to nobody and
+// must still be excised. Protecting on to the later line-starting ``` would
+// annex it and leak plain tool-call JSON into Layer-1.
+const midLineCloserThenBareJson = [
+  "```json",
+  '{"content":"卡在这里 "裸引号} 然后正文里嵌了 ``` 一段',
+  '{"command":"ls"}',
+  "```",
+  "",
+  "接着往下说。",
+  "",
+  "```json",
+  '{"content": "这段被 "裸引号} 打乱了。", "questions": ["还在吗?"]}',
+  "```",
+].join("\n");
+
+check("extractResultJson: a mid-line closer ends the protected span, bare JSON after it is still excised", () => {
+  const regions = app.collectJsonRegions(midLineCloserThenBareJson);
+  assert.ok(regions.some((r) => r.value && r.value.command === "ls"),
+    "precondition: the balanced scan registers the bare object after the closer");
+  const fences = app.collectFenceJsonRegions(midLineCloserThenBareJson);
+  assert.equal(fences.length, 1,
+    "the mid-line marker closes the first fence and its body does not parse");
+  assert.ok(fences[0].value.content.includes("打乱"));
+  const extracted = app.extractResultJson(
+    midLineCloserThenBareJson, app.isDiscoveryResultDict);
+  assert.ok(extracted, "the later quote-desynced fence supplies the result");
+  assert.ok(extracted.value.content.includes("打乱"));
+  assert.ok(extracted.narrative.includes("卡在这里"),
+    "the failed fence body stays in the narrative");
+  assert.equal(extracted.narrative.includes('"command"'), false,
+    "the bare JSON past the authoritative closer is NOT protected — it is excised");
+  assert.ok(extracted.narrative.includes("接着往下说"),
+    "the prose between the fences is untouched");
+  assert.equal(extracted.narrative.includes("这段被"), false,
+    "the recovered result fence is excised");
+});
+
 // Production-shape regression: in real history records the assistant message's
 // raw_json content is a single `text` block carrying the FULL assistant body
 // (narrative prose + the trailing ```json fenced result literal), with NO

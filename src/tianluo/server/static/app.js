@@ -15501,26 +15501,140 @@ function registerAssistantRenderer(stepType, renderer) {
 // regex. See `collectJsonRegions` below for the algorithm.
 //
 // `tryParseJsonLenient` is the per-slice parser: strict JSON first, then a
-// repair pass that strips a single trailing comma before `}` / `]` (the
-// most common LLM quirk that strict `JSON.parse` rejects). If both passes
-// fail the helper returns undefined; the scanner advances one character and
-// continues, so a stray `{` in prose never derails extraction. The legacy
-// single-shot helpers `extractFencedJson` / `extractTrailingBareJson` /
-// `extractStructuredJson` remain exported as compatibility surface but are
-// no longer consumed internally by `collectJsonRegions`.
+// repair pass that strips structural trailing commas before `}` / `]` (the
+// most common LLM quirk that strict `JSON.parse` rejects), then a repair
+// pass that escapes unescaped double quotes sitting inside JSON string
+// values. If all passes fail the helper returns undefined; the scanner
+// advances one character and continues, so a stray `{` in prose never
+// derails extraction. The legacy single-shot helpers `extractFencedJson` /
+// `extractTrailingBareJson` / `extractStructuredJson` remain exported as
+// compatibility surface but are no longer consumed internally by
+// `collectJsonRegions`.
+
+// WHY: LLM final answers regularly write ASCII double quotes inside a JSON
+// string value without escaping them (Chinese-style quoting — 变为"继续" — or
+// quoting an identifier mid-sentence). The engine-side parser
+// (`json_parser.py::_repair_unescaped_quotes`) already recovers those payloads,
+// so the flow advances normally while the WebUI, having only the trailing-comma
+// repair, failed `JSON.parse`, registered no region, and dumped the whole fenced
+// block as a raw code block. This pass restores web/CLI parity for that shape.
+//
+// INVARIANT: the repair must be browser-independent — it may NOT read
+// `JSON.parse`'s error message or `position`, whose text and offset semantics
+// differ across engines. It is therefore a deterministic JSON-string-state
+// scan: inside a string, a `"` whose next non-whitespace character is not a
+// legal string terminator context (`,` `}` `]` `:` or end of input) is content,
+// not a delimiter, and gets escaped. Backslash escapes are copied verbatim
+// (an already-escaped `\"` is never touched) and quotes outside string state
+// are structural and left alone.
+//
+// Deliberately NARROWER than the engine repair chain: no single-quote→double
+// -quote conversion and no truncation closing. Both rewrite far more of the
+// payload, and the frontend runs this parser on every `{` / `[` the scanner
+// walks past in arbitrary prose — a broad rewrite there would manufacture
+// plausible-but-wrong "JSON regions" out of narrative and excise them from the
+// Layer-1 view. Failing closed (undefined) is the safe outcome here.
+function repairUnescapedJsonStringQuotes(text) {
+  let out = "";
+  let inString = false;
+  let changed = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (!inString) {
+      out += ch;
+      if (ch === '"') inString = true;
+      continue;
+    }
+    if (ch === "\\") {
+      // Copy the escape pair verbatim: the escaped character can be a `"` and
+      // must not be re-examined as a delimiter candidate.
+      out += ch;
+      if (i + 1 < text.length) { out += text[i + 1]; i += 1; }
+      continue;
+    }
+    if (ch !== '"') { out += ch; continue; }
+    let j = i + 1;
+    while (j < text.length && (text[j] === " " || text[j] === "\t" ||
+                               text[j] === "\n" || text[j] === "\r")) {
+      j += 1;
+    }
+    const next = j < text.length ? text[j] : "";
+    if (next === "" || next === "," || next === "}" || next === "]" ||
+        next === ":") {
+      out += ch;
+      inString = false;
+    } else {
+      out += '\\"';
+      changed = true;
+    }
+  }
+  return changed ? out : text;
+}
+
+// WHY: the trailing-comma repair must be JSON-string-aware for the same reason
+// the quote repair is: a `,}` / `,]` sequence occurring inside a string VALUE is
+// user-visible content, and a context-free `/,(\s*[}\]])/g` would silently
+// delete that comma from the rendered result. The hazard is not hypothetical —
+// the quote repair escapes stray quotes and hands on a payload whose string
+// values may now legitimately contain `,}`, so the two passes compose directly.
+// Only a comma in structural position (outside any string, with `}` or `]` as
+// its next non-whitespace character) is dropped; everything else is copied
+// verbatim, so a payload we cannot repair without mangling content fails closed.
+function stripStructuralTrailingCommas(text) {
+  let out = "";
+  let inString = false;
+  let changed = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      out += ch;
+      if (ch === "\\") {
+        // Copy the escape pair verbatim so an escaped `\"` never ends the string.
+        if (i + 1 < text.length) { out += text[i + 1]; i += 1; }
+        continue;
+      }
+      if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { out += ch; inString = true; continue; }
+    if (ch === ",") {
+      let j = i + 1;
+      while (j < text.length && (text[j] === " " || text[j] === "\t" ||
+                                 text[j] === "\n" || text[j] === "\r")) {
+        j += 1;
+      }
+      if (j < text.length && (text[j] === "}" || text[j] === "]")) {
+        changed = true;
+        continue;
+      }
+    }
+    out += ch;
+  }
+  return changed ? out : text;
+}
 
 // Try parsing `text` as JSON, returning the parsed value or `undefined` on
-// failure. A small repair pass strips a single trailing comma before `}` /
-// `]` which is the most common LLM quirk that strict `JSON.parse` rejects.
+// failure. Repair passes, in order: strip structural trailing commas before `}`
+// / `]`, then escape unescaped double quotes inside string values (see
+// `repairUnescapedJsonStringQuotes`), the latter also combined with the
+// trailing-comma strip since a payload can carry both quirks at once.
 function tryParseJsonLenient(text) {
   if (typeof text !== "string") return undefined;
   const trimmed = text.trim();
   if (!trimmed) return undefined;
   try { return JSON.parse(trimmed); } catch (_) { /* fall through */ }
-  try {
-    const repaired = trimmed.replace(/,(\s*[}\]])/g, "$1");
-    return JSON.parse(repaired);
-  } catch (_) { /* fall through */ }
+  const commaRepaired = stripStructuralTrailingCommas(trimmed);
+  if (commaRepaired !== trimmed) {
+    try { return JSON.parse(commaRepaired); } catch (_) { /* fall through */ }
+  }
+  const quoteRepaired = repairUnescapedJsonStringQuotes(trimmed);
+  if (quoteRepaired !== trimmed) {
+    try { return JSON.parse(quoteRepaired); } catch (_) { /* fall through */ }
+    const bothRepaired = stripStructuralTrailingCommas(quoteRepaired);
+    if (bothRepaired !== quoteRepaired) {
+      try { return JSON.parse(bothRepaired); } catch (_) { /* fall through */ }
+    }
+  }
   return undefined;
 }
 
@@ -15764,10 +15878,18 @@ function collectJsonRegions(text) {
             let endIndex = end + 1;
             if (beforeMatch) startIndex -= beforeMatch[0].length;
             if (afterMatch) endIndex += afterMatch[0].length;
+            // `jsonStart` / `jsonEnd` bound the JSON value itself, excluding
+            // any absorbed fence markers. The absorption is opportunistic —
+            // the marker it swallows may belong to a fence the fence fallback
+            // decided to leave raw — so the caller needs to tell "the payload"
+            // from "borrowed delimiters" to trim the region back instead of
+            // excising a marker out of a fence that must stay whole.
             regions.push({
               value: value,
               startIndex: startIndex,
               endIndex: endIndex,
+              jsonStart: i,
+              jsonEnd: end + 1,
             });
             // Resume past the JSON closer (NOT past the absorbed trailing
             // fence) so a stray subsequent ``` cannot be misread as
@@ -15784,6 +15906,224 @@ function collectJsonRegions(text) {
   return regions;
 }
 
+// WHY: last-resort locator used only when the balanced scan produced no
+// predicate-satisfying region. Unescaped double quotes inside a string value
+// desynchronise `findBalancedJsonEnd`'s string state — a `}` or `]` sitting in
+// the prose of a `content` field then counts toward depth — so the scanner can
+// close the region at the wrong offset (or never), and the payload is never
+// offered to the parser at all. The fence markers are the one delimiter that
+// survives that desync, so here (and ONLY here, after the string-aware scan has
+// already failed) we fall back to fence boundaries and re-parse the bodies
+// through `tryParseJsonLenient`, whose quote repair recovers them.
+//
+// INVARIANT: every ```json fence in the turn is recovered INDEPENDENTLY, and
+// each opener gets exactly ONE attempt — on its OWN complete body, defined
+// uniquely as the text up to the FIRST following ``` marker, wherever that
+// marker sits. Scanning past that marker to a farther ``` is FORBIDDEN, even
+// though it would rescue a few more payloads. The reason is that the search
+// cannot tell "this ``` is content inside a string value" from "this ``` closes
+// the block" without trusting the very string state that unescaped quotes have
+// already desynced — that is exactly why we are in this fallback. A heuristic
+// such as "only a ``` starting its own line closes the block" looks safe only
+// while the payload is well-formed; on a desynced body it silently reopens the
+// alternative-closer search, extends the body past embedded backticks, and can
+// repair the longer span into a plausible object whose relationship to the real
+// payload is unverifiable. One marker, one attempt, keeps the recovered span
+// tied to a delimiter we did not have to guess at.
+//
+// Fail closed: a body that does not parse yields NO region — its text stays in
+// the narrative and takes the existing raw path. Either way, parsed or not, the
+// scan resumes just past the OPENER rather than past the closer, so every later
+// opener still gets its own independent chance — including one whose backtick
+// run doubled as this fence's authoritative first-``` closer. A marker can be
+// closer and opener at once; skipping past it would silently cost the following
+// fence the single attempt this invariant grants it.
+// The accepted cost is that a body carrying BOTH unescaped quotes AND an
+// embedded literal ``` may stay raw, exactly as it was before this fallback
+// existed.
+//
+// Returns ALL recovered regions (in text order, non-overlapping) as
+// `{value, startIndex, endIndex}` with the indices spanning the fence markers
+// themselves, ALONGSIDE the spans of the fence pairs whose bodies did NOT
+// parse. The caller picks the result among the recovered regions and — per the
+// "no JSON region leaks into Layer-1" invariant — excises every one of them,
+// including the non-result tool-call fences that only this repair could parse.
+//
+// INVARIANT: a fence whose body failed its single parse attempt must survive in
+// the narrative WHOLE — body AND both markers. The failed spans exist for
+// exactly that, and a balanced-scan region can collide with one in two distinct
+// ways, which must NOT be conflated:
+//   * its JSON value itself lies inside the failed body (a bare
+//     `{"command":"ls"}` line sitting after unparseable prose inside the fence).
+//     Excising it would carve the middle out of a fence we deliberately left
+//     raw, so the region is dropped from the excision set entirely.
+//   * only the fence markers `collectJsonRegions` opportunistically absorbed
+//     collide — typically a bare JSON object one line below the failed fence's
+//     closer, which absorbed that closer as its "opening fence". Dropping the
+//     whole region would leak JSON into Layer-1, while excising it verbatim
+//     would delete the closer and leave a dangling ```json opener. The region is
+//     therefore CLIPPED back to its own `jsonStart`/`jsonEnd` core and excised.
+// A RECOVERED fence region collides the same way, and for the same reason is
+// clipped rather than excised verbatim: when one fence's body ends and the next
+// ```json opener follows it directly, that opener's backtick run IS the first
+// ``` marker after the preceding body, so it is simultaneously that fence's one
+// authoritative closer and the start of the following fence's span. This holds
+// whichever way the preceding fence went — unclosed and left raw, or parsed and
+// recovered. Excising the later span whole would carry the shared marker away
+// and strand a dangling ```json opener, putting every later narrative line
+// inside an unterminated code block. Recovered regions therefore carry their
+// body as the `jsonStart`/`jsonEnd` core, so the clip trims their span forward
+// past the preceding fence's end — its protected end when it stayed raw, its
+// excision end when it was recovered — and never overlaps it. A fence is thus
+// all-or-nothing — never half-removed — while independent JSON next to it is
+// still excised, and no two excision spans overlap.
+function isFenceMarkerAtLineStart(text, index) {
+  for (let i = index - 1; i >= 0; i--) {
+    const ch = text[i];
+    if (ch === "\n") return true;
+    if (ch !== " " && ch !== "\t" && ch !== "\r") return false;
+  }
+  return true;
+}
+
+// INVARIANT: the "leave this text alone" span for a fence whose single parse
+// attempt failed ends immediately after the FIRST ``` marker — the very marker
+// that bounded the parse attempt — wherever that marker sits, mid-line or not.
+// The span and the body must agree on one authoritative closer: extending the
+// span to a later line-starting marker re-imports, for excision purposes, the
+// alternative-closer guess this fallback deliberately refuses, and it also
+// annexes whatever follows the real closer. Anything after that closer —
+// notably a bare JSON object the balanced scan recovered on its own — is not
+// part of the failed fence and stays eligible for narrative excision; treating
+// it as protected leaked plain tool-call JSON into the Layer-1 view.
+// The span runs PAST the marker's backtick run rather than up to it because
+// `collectJsonRegions` absorbs an immediately-preceding fence marker into a
+// bare JSON object's region: leaving the closer outside every failed span let
+// that neighbouring excision carry the closer away and strand a dangling
+// ```json opener in the narrative.
+function failedFenceProtectedEnd(text, closeAt) {
+  return closeAt + text.slice(closeAt).match(/^`+[ \t]*/)[0].length;
+}
+
+// Core of the fence fallback: returns `{regions, failedSpans}` (see the block
+// comment above). `collectFenceJsonRegions` is the regions-only view kept as the
+// exported/testable surface.
+function scanFenceJsonBodies(text) {
+  const regions = [];
+  const failedSpans = [];
+  if (typeof text !== "string" || !text) return { regions, failedSpans };
+  const openRe = /```json[ \t]*\r?\n/gi;
+  let cursor = 0;
+  while (cursor < text.length) {
+    openRe.lastIndex = cursor;
+    const open = openRe.exec(text);
+    if (!open) break;
+    if (!isFenceMarkerAtLineStart(text, open.index)) {
+      // ```json written inside a line of prose (or inside a string value) is
+      // not an opener; skip it without consuming the rest of the text.
+      cursor = open.index + 3;
+      continue;
+    }
+    const bodyStart = open.index + open[0].length;
+    const closeAt = text.indexOf("```", bodyStart);
+    if (closeAt === -1) {
+      // Unclosed opener: there is no fence pair, so there is no body to trust.
+      cursor = bodyStart;
+      continue;
+    }
+    const value = tryParseJsonLenient(text.slice(bodyStart, closeAt));
+    if (value === undefined) {
+      // Record the fence pair (opener through the closing marker we stopped
+      // at) so the caller keeps the whole thing verbatim in the narrative. The
+      // span covers exactly the text the single parse attempt saw, plus that
+      // one marker — it is a "hands off this text" boundary for the excision
+      // filter only, never a second closer candidate.
+      failedSpans.push({
+        startIndex: open.index,
+        endIndex: failedFenceProtectedEnd(text, closeAt),
+      });
+      cursor = bodyStart;
+      continue;
+    }
+    const closeRun = text.slice(closeAt).match(/^`+[ \t]*/)[0];
+    regions.push({
+      value: value,
+      startIndex: open.index,
+      endIndex: closeAt + closeRun.length,
+      // The body alone is this region's non-negotiable core: the surrounding
+      // markers may be shared with a NEIGHBOURING fence (see the INVARIANT
+      // block) and are given up by the clip when they are.
+      jsonStart: bodyStart,
+      jsonEnd: closeAt,
+    });
+    // Resume just past the OPENER, not past the closer: when the closing
+    // backtick run is itself the head of the next ```json opener, resuming
+    // past it would step over that opener's start and deny it the one attempt
+    // every opener is owed. A body that parsed cannot hide a line-starting
+    // ```json inside it (the whole body had to be one JSON value), so the next
+    // opener this finds is never one already consumed.
+    cursor = bodyStart;
+  }
+  return { regions, failedSpans };
+}
+
+function collectFenceJsonRegions(text) {
+  return scanFenceJsonBodies(text).regions;
+}
+
+// Reconcile one balanced-scan region with the fence spans the fallback owns
+// (recovered fences plus the ones left raw). Returns the region trimmed to a
+// span that touches no fence span, or null when its JSON value itself sits
+// inside one. See the INVARIANT block above for why the two outcomes differ.
+function clipRegionToFenceSpans(region, spans) {
+  const jsonStart = region.jsonStart === undefined
+    ? region.startIndex : region.jsonStart;
+  const jsonEnd = region.jsonEnd === undefined
+    ? region.endIndex : region.jsonEnd;
+  let startIndex = region.startIndex;
+  let endIndex = region.endIndex;
+  for (const f of spans) {
+    if (f.endIndex <= startIndex || f.startIndex >= endIndex) continue;
+    if (f.endIndex > jsonStart && f.startIndex < jsonEnd) return null;
+    if (f.endIndex > startIndex && f.endIndex <= jsonStart) startIndex = f.endIndex;
+    if (f.startIndex < endIndex && f.startIndex >= jsonEnd) endIndex = f.startIndex;
+  }
+  if (startIndex >= endIndex) return null;
+  return { value: region.value, startIndex: startIndex, endIndex: endIndex };
+}
+
+// INVARIANT: the spans handed to the narrative splice must be disjoint, so
+// every stretch of text is removed exactly once and no character outside a
+// JSON region is ever removed. Two NEIGHBOURING regions can lay claim to the
+// same backtick run: `collectJsonRegions` opportunistically absorbs an
+// adjacent fence marker on both sides, so a tool-call fence whose closer is
+// simultaneously the next ```json opener's own run yields two regions that
+// overlap on that run. Splicing them tail-first without reconciliation applies
+// the earlier cut to offsets the later cut already invalidated, deleting as
+// many characters of the FOLLOWING narrative prose as the two spans shared —
+// silently, leaving the user a sentence with its head bitten off and no signal
+// that anything was dropped. Overlapping spans are wholly fence/JSON material
+// (a region's absorbed marker never reaches past its neighbour's JSON core),
+// so collapsing them into their union removes exactly that material and
+// nothing else. The fallback path clips its spans apart for a stricter reason
+// (a fence left raw must survive WHOLE, so a colliding region is dropped or
+// trimmed rather than merged); this pass is what guarantees disjointness on
+// the balanced-scan path, where every span is a region the scan itself parsed
+// and there is no raw fence to protect.
+function mergeExcisionSpans(spans) {
+  const merged = [];
+  const sorted = spans.slice().sort((a, b) => a.startIndex - b.startIndex);
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last && s.startIndex <= last.endIndex) {
+      if (s.endIndex > last.endIndex) last.endIndex = s.endIndex;
+      continue;
+    }
+    merged.push({ startIndex: s.startIndex, endIndex: s.endIndex });
+  }
+  return merged;
+}
+
 // Pick the JSON region from `text` whose value satisfies `predicate` — i.e. the
 // step's real result among possibly several tool-call JSON segments. The LAST
 // matching region wins, because a result conventionally follows the tool calls
@@ -15798,14 +16138,52 @@ function extractResultJson(text, predicate) {
   for (const r of regions) {
     if (predicate(r.value)) chosen = r;
   }
-  if (!chosen) return null;
+  // Regions to excise from the narrative. The fence fallback's regions join
+  // this list rather than replacing it — INVARIANT: whatever region supplied
+  // the result, no JSON region may leak into the Layer-1 narrative, or the
+  // clean view would show the raw payload the structured card already renders.
+  // That covers the fallback's NON-result fences too (an intermediate tool call
+  // whose own unescaped quotes made it invisible to the balanced scan): they
+  // fail the predicate but are still JSON, so they are excised alongside the
+  // chosen one. A balanced-scan region touching a fence span is reconciled by
+  // `clipRegionToFenceSpans`: dropped when its JSON value lies inside the fence
+  // (a recovered fence's own span already covers it; a raw fence must not be
+  // gutted), and otherwise trimmed to its JSON core so an absorbed fence marker
+  // belonging to that fence stays in the narrative.
+  let excise = regions;
+  if (!chosen) {
+    const fallback = scanFenceJsonBodies(text);
+    for (const r of fallback.regions) {
+      if (predicate(r.value)) chosen = r;
+    }
+    if (!chosen) return null;
+    const spans = fallback.regions.concat(fallback.failedSpans);
+    // Recovered fences are clipped against the raw ones AND against the
+    // recovered fences already resolved before them: a backtick run shared
+    // with a neighbour belongs to that neighbour — to a failed fence because
+    // it must stay whole, and to an earlier recovered fence because it is that
+    // fence's closer, already inside its excision span. Without the second
+    // clip the two spans would overlap and the tail-first splice below would
+    // cut the narrative twice over the same offsets.
+    const recovered = [];
+    for (const r of fallback.regions) {
+      const clipped = clipRegionToFenceSpans(
+        r, fallback.failedSpans.concat(recovered));
+      if (clipped) recovered.push(clipped);
+    }
+    excise = regions
+      .map((r) => clipRegionToFenceSpans(r, spans))
+      .filter(Boolean)
+      .concat(recovered);
+  }
   // Narrative = the prose with EVERY JSON region removed (not just the chosen
   // one), so intermediate tool-call JSON segments do not leak into the clean
   // Layer-1 view; the full original content (incl. all JSON) remains available
   // in the Layer-2 "展开全部" process area, which re-renders `content` verbatim.
-  // Splice from the tail so earlier indices stay valid.
+  // Reconcile overlaps first (see `mergeExcisionSpans`), then splice from the
+  // tail so earlier indices stay valid.
   let narrative = text;
-  const sorted = regions.slice().sort((a, b) => b.startIndex - a.startIndex);
+  const sorted = mergeExcisionSpans(excise).sort((a, b) => b.startIndex - a.startIndex);
   for (const r of sorted) {
     narrative = narrative.slice(0, r.startIndex) + narrative.slice(r.endIndex);
   }
@@ -21730,6 +22108,10 @@ if (typeof module !== "undefined" && module.exports) {
     extractStructuredJson,
     extractResultJson,
     collectJsonRegions,
+    collectFenceJsonRegions,
+    tryParseJsonLenient,
+    repairUnescapedJsonStringQuotes,
+    stripStructuralTrailingCommas,
     isStepResultDict,
     isDiscoveryResultDict,
     STEP_RESULT_FIELDS,
