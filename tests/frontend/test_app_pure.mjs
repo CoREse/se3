@@ -4161,6 +4161,18 @@ const pendingGapMod = await import("./pending_gap_no_wedge.test.mjs");
 await pendingGapMod.registerPendingGapNoWedgeTests({ app, check, checkAsync, findOne, findAll });
 
 // ---------------------------------------------------------------------------
+// Flow-view connection-pool starvation + hung requests (G3)
+// ---------------------------------------------------------------------------
+//
+// Opening a large completed flow left the sidebar on "Loading flow details…"
+// forever: the 3s poll stacked bare full-bundle pulls with no in-flight guard
+// until the browser's per-origin connection pool was full, and `authedFetch`
+// had no deadline, so a request the browser never put on the wire produced
+// neither `!resp.ok` nor a `catch` and the failure copy never appeared.
+const flowDetailStallMod = await import("./flow_detail_stall.test.mjs");
+await flowDetailStallMod.registerFlowDetailStallTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
 // Narrative chip rendering inside structured-result assistant turns
 // ---------------------------------------------------------------------------
 //

@@ -86,6 +86,23 @@ const state = {
   // Monotonic view-local epoch used to invalidate an in-flight REST snapshot
   // when a WS `mode: full` push replaces the authoritative bundle.
   flowConversationEpoch: 0,
+  // Token of the conversation pull currently on the wire for the flow view
+  // (null = none). WHY: `flowConversationEpoch` only supersedes a RESPONSE — it
+  // never stops a REQUEST — so the unconditional 3s poll used to stack a second
+  // (and third, and tenth) bundle pull on top of one still in flight. While the
+  // held record set is empty those "silent" polls ask for the BARE full bundle,
+  // which for a large flow is tens of MB and seconds of server work: past
+  // ~6 x 3s of per-response wall time the browser's per-origin connection pool
+  // is saturated, `/api/flows/{id}` is queued behind them and the sidebar never
+  // gets its answer. The self-heal poll therefore skips while a pull is already
+  // outstanding; a first open / reconnect refresh is user- or event-driven and
+  // still runs unconditionally.
+  flowConversationInFlight: null,
+  // Set when a self-heal poll was skipped by the guard above, so the pull that
+  // was holding the wire fires one catch-up self-heal as it completes instead of
+  // silently dropping the tick (the 3s cadence is the conversation's
+  // correctness source — a skipped tick must be made up, not lost).
+  flowConversationDeferredSelfHeal: false,
   // Persistent "the reader is following the bottom" intent for the open flow —
   // the reliable source the silent progression rebuild uses to decide stickiness
   // instead of the point-in-time frozen-DOM isNearBottom (issue #260). At the
@@ -1630,7 +1647,7 @@ async function performUpload(inputEl, file, target, stripId) {
       headers: { "Content-Type": "application/octet-stream" },
       body: file,
       signal: controller ? controller.signal : undefined,
-    });
+    }, { timeoutMs: FETCH_TIMEOUTS.upload });
   } catch (_) {
     // An abort lands here too, and both aborters have already settled the row:
     // the timeout painted its error, and a cancel took the whole row away. Only
@@ -3952,17 +3969,131 @@ function setStale(stale) {
   }
 }
 
+// --- Fetch deadlines and view-scoped cancellation ---------------------------
+//
+// WHY: a bare `fetch()` never gives up. A browser opens ~6 HTTP/1.1 connections
+// per origin, so once a view puts more slow requests on the wire than complete
+// per poll window, the later ones are QUEUED INSIDE THE BROWSER and never reach
+// the server: they neither resolve nor reject. A caller then gets no `!resp.ok`
+// and no `catch`, so its failure path never runs — the flow sidebar sat on
+// "Loading flow details…" forever, stuck rather than errored. A wall-clock
+// ceiling converts that silent wedge into a real failure, and the AbortController
+// hands the connection slot back instead of leaking it for the life of the page.
+const FETCH_TIMEOUTS = {
+  // Small JSON endpoints (flow list, issues, users, daemon keys, …).
+  default: 20000,
+  // The 3s poll's flow-detail read. Small by construction, so a slow one is a
+  // sick one; it must fail long before a human reads the placeholder as final.
+  flowDetail: 15000,
+  // A history bundle is legitimately tens of MB, and the server's own daemon
+  // pull budget (HISTORY_PULL_TIMEOUT) is 30s, so this ceiling has to sit well
+  // above that budget or a healthy cold pull would be cancelled on principle.
+  historyBundle: 90000,
+  // 0 = no ceiling. The upload path carries its own UPLOAD_REQUEST_TIMEOUT_MS
+  // abort and its duration is user-data-sized rather than server-sized.
+  upload: 0,
+};
+
+// Controllers for the fetches issued on behalf of the OPEN FLOW VIEW. Switching
+// or closing the flow aborts them: those requests answer a view the user has
+// left, and letting them sit in the browser queue keeps occupying the very
+// connection slots the newly-opened flow needs. A deliberate abort is not a
+// failure — see refreshFlowDetail — so it must never move a failure counter.
+const flowViewFetchControllers = new Set();
+
+function abortFlowViewFetches() {
+  if (!flowViewFetchControllers.size) return;
+  const pending = Array.from(flowViewFetchControllers);
+  flowViewFetchControllers.clear();
+  for (const controller of pending) {
+    try {
+      controller.abort();
+    } catch (_) { /* already settled — nothing left to hang up */ }
+  }
+}
+
+// True for a request cancelled by us (flow switch / close) or by the browser,
+// as opposed to one that ran out its deadline (`err.isTimeout`).
+function isAbortError(err) {
+  return !!err && !err.isTimeout && (err.name === "AbortError" || err.__aborted === true);
+}
+
+function fetchTimeoutError(input, timeoutMs) {
+  const err = new Error(`request timed out after ${timeoutMs}ms: ${String(input)}`);
+  err.name = "FetchTimeoutError";
+  err.isTimeout = true;
+  return err;
+}
+
 // fetch() wrapper that intercepts session-expiry. Any /api/* call that comes
 // back 401 means the cookie session is gone (logout elsewhere / expiry); we
 // kick the SPA back to the login gate so the user can re-authenticate instead
 // of staring at a silently-empty dashboard. Same-origin cookies ride along
 // automatically, so no Authorization header is needed.
-async function authedFetch(input, init) {
-  const resp = await fetch(input, init);
-  if (isUnauthorizedStatus(resp.status)) {
-    handleUnauthorized();
+//
+// `opts.timeoutMs` overrides FETCH_TIMEOUTS.default (0 disables the deadline);
+// `opts.scope === "flow"` enlists the request in the flow view's cancellation
+// set. The deadline is raced against the fetch rather than left to the signal
+// alone, so a caller still gets a rejection even where the request is queued
+// before the platform (or a test double) observes the abort.
+async function authedFetch(input, init, opts) {
+  const options = opts || {};
+  const timeoutMs = options.timeoutMs != null ? options.timeoutMs : FETCH_TIMEOUTS.default;
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let fetchInit = init;
+  if (controller) {
+    fetchInit = Object.assign({}, init || {}, { signal: controller.signal });
+    // A caller with its own signal (the upload row's cancel button) keeps it:
+    // chain it onto ours rather than replacing it.
+    const outer = init && init.signal;
+    if (outer) {
+      if (outer.aborted) controller.abort();
+      else if (typeof outer.addEventListener === "function") {
+        outer.addEventListener("abort", () => {
+          try { controller.abort(); } catch (_) { /* already settled */ }
+        });
+      }
+    }
+    if (options.scope === "flow") flowViewFetchControllers.add(controller);
   }
-  return resp;
+  let timer = null;
+  let timedOut = false;
+  try {
+    const call = fetch(input, fetchInit);
+    let resp;
+    if (timeoutMs > 0) {
+      // Swallow a late rejection of the losing branch so an aborted request
+      // cannot surface as an unhandled rejection after the race is decided.
+      if (call && typeof call.catch === "function") call.catch(() => {});
+      resp = await Promise.race([call, new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          if (controller) {
+            try { controller.abort(); } catch (_) { /* already settled */ }
+          }
+          reject(fetchTimeoutError(input, timeoutMs));
+        }, timeoutMs);
+        // A pending deadline must never be the only thing keeping the host
+        // runtime alive (Node's `unref`; absent in a browser, where it is moot).
+        if (timer && typeof timer.unref === "function") timer.unref();
+      })]);
+    } else {
+      resp = await call;
+    }
+    if (isUnauthorizedStatus(resp.status)) {
+      handleUnauthorized();
+    }
+    return resp;
+  } catch (err) {
+    // Aborting the request is HOW the deadline is enforced, so the abort's own
+    // rejection can win the race against the deadline's. The caller must still
+    // see a timeout: an AbortError means "someone deliberately cancelled this"
+    // and is deliberately NOT counted as a failure (see refreshFlowDetail).
+    throw timedOut ? fetchTimeoutError(input, timeoutMs) : err;
+  } finally {
+    if (timer != null) clearTimeout(timer);
+    if (controller) flowViewFetchControllers.delete(controller);
+  }
 }
 
 // Drop back to the login gate after a 401 / explicit logout. Idempotent: a
@@ -4982,6 +5113,18 @@ function isFlowViewOpen() {
 }
 
 function openFlowView(flowId) {
+  // Cancel whatever the previously-open flow still had on the wire before this
+  // one issues anything: those responses can no longer be applied (the epoch /
+  // view-generation guards drop them), and leaving them queued would make the
+  // freshly-opened flow wait behind requests nobody wants. Aborts land in the
+  // callers' catch as an AbortError, which is explicitly NOT counted as a
+  // detail-fetch failure.
+  abortFlowViewFetches();
+  // The aborted pull's release cannot clear a marker it no longer owns (the
+  // token check in releaseFlowConversationLoad), so reset the guard here for the
+  // fresh lifecycle rather than waiting for the old request to settle.
+  state.flowConversationInFlight = null;
+  state.flowConversationDeferredSelfHeal = false;
   state.selectedFlowId = flowId;
   state.flowDetail = null;
   state.flowConversationUsage = null;
@@ -5084,6 +5227,11 @@ function openFlowView(flowId) {
 // popstate handler — both the ✕ button and the browser back button funnel
 // through it, so there is no risk of push-back loops or double-pop drift.
 function doCloseFlowView() {
+  // The view is going away: hand its connection slots back instead of leaving
+  // requests queued for a flow nobody is looking at.
+  abortFlowViewFetches();
+  state.flowConversationInFlight = null;
+  state.flowConversationDeferredSelfHeal = false;
   state.flowConversationEpoch += 1;
   state.selectedFlowId = null;
   state.flowDetail = null;
@@ -5274,6 +5422,13 @@ function autoGrowReplyTextarea() {
   input.__autoGrowApplied = true;
 }
 
+// Monotonic id for each conversation pull, so a late-settling request can only
+// release the guard it actually claimed. A flow switch aborts the outgoing pull
+// AND starts a new one synchronously, so the aborted request's release lands
+// after the fresh one has already claimed the wire — clearing the marker
+// unconditionally there would re-open the door the guard exists to hold shut.
+let flowConversationLoadSeq = 0;
+
 // Fetch the initial conversation snapshot for the open flow. Mirrors the
 // history view: a one-shot `/api/history/{flow_id}` pull, after which the WS
 // `history_data` push keeps an active flow's conversation up to date.
@@ -5315,6 +5470,23 @@ function autoGrowReplyTextarea() {
 async function loadFlowConversation(flowId, opts) {
   const incremental = !!(opts && opts.incremental);
   const silent = !!(opts && opts.silent);
+  // IN-FLIGHT GUARD (connection-pool starvation). The 3s poll fires this
+  // silent self-heal unconditionally, and nothing below stops a REQUEST — the
+  // epoch only invalidates a RESPONSE. On a large flow one bundle pull takes
+  // longer than the poll period, so every tick used to add another outstanding
+  // request; the browser's ~6 per-origin connection slots filled with bundle
+  // pulls and `/api/flows/{id}` was queued behind them indefinitely, leaving the
+  // sidebar on its "Loading flow details…" placeholder for good. A tick skipped
+  // here is not lost: `flowConversationDeferredSelfHeal` makes the pull that is
+  // holding the wire fire one catch-up self-heal as it completes. Only the
+  // silent poll defers — a first open and a reconnect refresh are user- or
+  // event-driven, must not be dropped, and do not repeat on a timer.
+  if (silent && state.flowConversationInFlight != null) {
+    state.flowConversationDeferredSelfHeal = true;
+    return;
+  }
+  const inFlightToken = ++flowConversationLoadSeq;
+  state.flowConversationInFlight = inFlightToken;
   const container = $("flow-conversation");
   // Every new request supersedes every older request for this view. This is
   // required on reconnect too: unstable connectivity can start overlapping
@@ -5377,7 +5549,8 @@ async function loadFlowConversation(flowId, opts) {
     const url = (incremental || silent)
       ? historySnapshotUrl(flowId, heldProgress, heldSignature)
       : `/api/history/${encodeURIComponent(flowId)}`;
-    const resp = await authedFetch(url);
+    const resp = await authedFetch(url, undefined,
+      { scope: "flow", timeoutMs: FETCH_TIMEOUTS.historyBundle });
     // The user may have opened another flow while this was in flight.
     if (
       state.selectedFlowId !== flowId ||
@@ -5534,15 +5707,37 @@ async function loadFlowConversation(flowId, opts) {
     // receipt says is outstanding), so the cursor check runs on every delivery,
     // not just the no-op ones.
     await reconcileCursorCompleteness("flow", flowId, result.cursor, result.generation, result.pending);
-  } catch (_) {
+  } catch (err) {
+    // A deliberate cancel (the user opened another flow) is not a failure to
+    // report: the guards below drop it anyway, but say so explicitly.
+    if (isAbortError(err)) return;
+    const timedOut = !!(err && err.isTimeout);
     if (
       state.selectedFlowId !== flowId ||
       state.flowConversationEpoch !== requestEpoch
     ) return;
     if (incremental || silent) return;  // keep the existing conversation
     container.innerHTML = "";
-    container.appendChild(el("p", "empty", tf("flow.networkError", "Network error loading conversation.")));
+    container.appendChild(el("p", "empty", timedOut
+      ? tf("flow.conversationTimeout", "Loading this flow's conversation timed out.")
+      : tf("flow.networkError", "Network error loading conversation.")));
+  } finally {
+    releaseFlowConversationLoad(inFlightToken);
   }
+}
+
+// Hand the wire back and, if a self-heal tick was skipped while this pull held
+// it, make that tick up now rather than waiting for the next 3s edge. The
+// catch-up is deliberately fire-and-forget (never awaited by the caller) and can
+// only run one at a time, so it cannot re-create the stacking this guards.
+function releaseFlowConversationLoad(token) {
+  if (state.flowConversationInFlight !== token) return;
+  state.flowConversationInFlight = null;
+  if (!state.flowConversationDeferredSelfHeal) return;
+  state.flowConversationDeferredSelfHeal = false;
+  const flowId = state.selectedFlowId;
+  if (!flowId) return;
+  loadFlowConversation(flowId, { silent: true });
 }
 
 function scrollFlowConversationToBottom() {
@@ -5899,7 +6094,8 @@ async function refreshFlowDetail() {
   // reopened (where the selectedFlowId check alone would let it through).
   const reqGen = state.flowDetailViewGen;
   try {
-    const resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}`);
+    const resp = await authedFetch(`/api/flows/${encodeURIComponent(flowId)}`,
+      undefined, { scope: "flow", timeoutMs: FETCH_TIMEOUTS.flowDetail });
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
     if (!resp.ok) {
       noteDetailFetchFailure(tf("flow.detailLoadError", `Could not load flow details (${resp.status}).`, { status: resp.status }));
@@ -5937,9 +6133,18 @@ async function refreshFlowDetail() {
     // The backend usage summary rides this snapshot; refresh the badge so a
     // mid-run usage change is reflected even when no new record landed.
     updateFlowUsageBadge(state.flowConversationRecords);
-  } catch (_) {
+  } catch (err) {
+    // A request WE cancelled — the user switched flows or closed the view — is
+    // an expected outcome, not a failure of this flow's detail: counting it
+    // would swap a healthy sidebar for a "Retrying…" placeholder on every
+    // switch. A DEADLINE is the opposite: it is the wedge this poll used to die
+    // in silently (a queued request that never resolved and never rejected), so
+    // it counts like any network error and moves the placeholder.
+    if (isAbortError(err)) return;
     if (state.selectedFlowId !== flowId || state.flowDetailViewGen !== reqGen) return;
-    noteDetailFetchFailure(tf("flow.detailNetworkError", "Network error loading flow details."));
+    noteDetailFetchFailure(err && err.isTimeout
+      ? tf("flow.detailTimeout", "Loading flow details timed out.")
+      : tf("flow.detailNetworkError", "Network error loading flow details."));
   }
 }
 
@@ -8388,7 +8593,8 @@ async function openHistorySession(flowId, opts) {
     const url = incremental
       ? historySnapshotUrl(flowId, heldProgress, heldSignature)
       : `/api/history/${encodeURIComponent(flowId)}`;
-    const resp = await authedFetch(url);
+    const resp = await authedFetch(url, undefined,
+      { timeoutMs: FETCH_TIMEOUTS.historyBundle });
     // The user may have clicked another session while this was in flight.
     if (
       state.selectedHistoryId !== flowId ||
@@ -13379,7 +13585,7 @@ function fetchLazyDetailResponse(ref, attempt) {
   if (hit) return supersede(hit);
   const epoch = lazyDetailEpoch(ref.flow);
   const pending = (async () => {
-    const resp = await authedFetch(lazyDetailUrl(ref));
+    const resp = await authedFetch(lazyDetailUrl(ref), undefined, { scope: "flow" });
     if (!resp.ok) throw new Error("tool detail unavailable: " + resp.status);
     const data = await resp.json();
     if (!data || typeof data !== "object") {
@@ -20744,6 +20950,18 @@ if (typeof module !== "undefined" && module.exports) {
     // Reconnect incremental load paths (G4) — exposed for the DOM-stub load
     // path tests in tests/frontend/test_app_pure.mjs.
     loadFlowConversation,
+    // Fetch deadlines + view-scoped cancellation — exposed for the DOM-stub
+    // tests in tests/frontend/flow_detail_stall.test.mjs, which shorten the
+    // deadlines (the object is read per call, so a test may mutate it) and drive
+    // the abort path directly.
+    authedFetch,
+    FETCH_TIMEOUTS,
+    abortFlowViewFetches,
+    isAbortError,
+    openFlowView,
+    doCloseFlowView,
+    noteDetailFetchFailure,
+    renderSidebarPlaceholder,
     // Element-anchored scroll preservation for the silent rebuild (issue #209
     // jump fix) — exposed for the DOM-stub tests in
     // tests/frontend/issue217_scroll_anchor.test.mjs.

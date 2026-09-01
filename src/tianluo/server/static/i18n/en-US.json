@@ -227,6 +227,8 @@
   "flow.detailLoadError": "Could not load flow details ({status}).",
   "flow.detailNotAvailable": "This flow is not available on the server yet.",
   "flow.detailNetworkError": "Network error loading flow details.",
+  "flow.detailTimeout": "Loading flow details timed out.",
+  "flow.conversationTimeout": "Loading this flow's conversation timed out.",
   "flow.detailRetrying": "{message} Retrying…",
   "flow.noStepHistory": "No step history reported.",
   "flow.noConversationRecords": "No conversation records for this session.",

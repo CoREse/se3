@@ -588,21 +588,22 @@ export async function registerProgressionRefreshTests(ctx) {
     }
   });
 
-  // -- (13) a failing silent refresh must not strand an in-flight first open ---
+  // -- (13) a silent refresh must not stack on / strand an in-flight first open
   // openFlowView fires a normal full load (shows the Loading placeholder) and a
-  // step advance can fire a SILENT refresh before that first-open resolves. The
-  // silent path must NOT bump the shared conversation epoch up-front: if it did,
-  // the in-flight first-open would be invalidated, and a transient silent-fetch
-  // failure would then leave the conversation stuck on the Loading/empty DOM
-  // (the silent path returns early on failure, and the superseded first-open
-  // also returns early on the epoch mismatch). The deferred epoch bump lets the
-  // first-open complete and render whenever the silent refresh fails.
-  await checkAsync("progression: a failing silent refresh lets the in-flight first-open complete", async () => {
+  // step advance — or the 3s poll — can fire a SILENT refresh before that
+  // first-open resolves. Two rules meet here:
+  //   * the silent path must NOT bump the shared conversation epoch up-front,
+  //     or the in-flight first-open would be invalidated and a failing silent
+  //     fetch would strand the view on the Loading/empty DOM;
+  //   * since the connection-pool fix the silent path does not even ISSUE a
+  //     request while a pull is already in flight — a second bare full-bundle
+  //     request is exactly what saturated the browser's ~6 connection slots and
+  //     left `/api/flows/{id}` queued forever. The skipped tick is remembered
+  //     and made up the moment the in-flight pull completes.
+  await checkAsync("progression: a silent refresh defers to an in-flight first open and is made up after it", async () => {
     const c = resetProgressionState("F1");
     const saved = globalThis.fetch;
     try {
-      // Two deferred fetches: [0] is the first-open full load, [1] is the silent
-      // refresh, both held at their await so we can control resolution order.
       const resolvers = [];
       globalThis.fetch = (url) =>
         new Promise((resolve) => {
@@ -617,19 +618,17 @@ export async function registerProgressionRefreshTests(ctx) {
       assert.equal(ctx.findAll(c, "empty").length, 1,
         "first-open shows the Loading placeholder while fetching");
 
-      // A step advance fires a silent refresh while first-open is still pending.
-      const silent = app.loadFlowConversation("F1", { silent: true });
+      // A step advance fires a silent refresh while first-open is still pending:
+      // it must not put a second bundle request on the wire.
+      await app.loadFlowConversation("F1", { silent: true });
       await flush();
-      assert.equal(resolvers.length, 2, "the silent refresh fetch is in flight");
+      assert.equal(resolvers.length, 1,
+        "the silent refresh must defer to the in-flight pull, not stack on it");
+      assert.equal(app.state.flowConversationDeferredSelfHeal, true,
+        "the skipped tick is remembered so it can be made up");
 
-      // The silent fetch fails transiently (non-OK). It must return early WITHOUT
-      // having superseded the first-open.
-      resolvers[1]({}, false, 503);
-      await silent;
-      await flush();
-
-      // The first-open now resolves successfully — it must still be live and
-      // render the conversation rather than being discarded by a stale epoch.
+      // The first-open resolves successfully — it must still be live and render
+      // the conversation rather than being discarded by a stale epoch.
       resolvers[0]({
         records: [asstRecord("A", 1, "s1", "discovery"), asstRecord("B", 2, "s1", "discovery")],
         progress: "t0", delivery: "full",
@@ -639,10 +638,21 @@ export async function registerProgressionRefreshTests(ctx) {
       assert.equal(ctx.findAll(c, "empty").length, 0,
         "the Loading placeholder must be gone — the first-open was not stranded");
       assert.equal(ctx.findAll(c, "conv-bubble").length, 2,
-        "the first-open load rendered the conversation despite the silent failure");
+        "the first-open load rendered the conversation");
       assert.equal(app.state.flowConversationRecords.length, 2);
+
+      // ...and the deferred tick was made up on completion, exactly once.
+      assert.equal(resolvers.length, 2, "the skipped self-heal is re-issued once");
+      assert.equal(app.state.flowConversationDeferredSelfHeal, false);
+      resolvers[1]({ records: [], delivery: "not_modified" });
+      await flush();
+      assert.equal(app.state.flowConversationInFlight, null,
+        "the catch-up pull hands the wire back too");
     } finally {
       globalThis.fetch = saved;
+      app.state.flowConversationInFlight = null;
+      app.state.flowConversationDeferredSelfHeal = false;
     }
   });
+
 }

@@ -227,6 +227,8 @@
   "flow.detailLoadError": "无法加载 flow 详情（{status}）。",
   "flow.detailNotAvailable": "该 flow 在服务器上尚不可用。",
   "flow.detailNetworkError": "加载 flow 详情时网络错误。",
+  "flow.detailTimeout": "加载 flow 详情超时。",
+  "flow.conversationTimeout": "加载该 flow 的对话超时。",
   "flow.detailRetrying": "{message} 重试中…",
   "flow.noStepHistory": "未报告步骤历史。",
   "flow.noConversationRecords": "该 session 没有对话记录。",
