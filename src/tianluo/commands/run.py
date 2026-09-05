@@ -49,6 +49,11 @@ try:
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, HistorySink, JsonSink
+    from ..stop_signal import (
+        STOP_REASON_INTERRUPT,
+        InterjectionWatcher,
+        get_stop_signal,
+    )
     from ..i18n import t, t_status
     from ..cli import _read_multiline_input
 except ImportError:
@@ -73,6 +78,11 @@ except ImportError:
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, HistorySink, JsonSink
+    from stop_signal import (
+        STOP_REASON_INTERRUPT,
+        InterjectionWatcher,
+        get_stop_signal,
+    )
     from i18n import t, t_status
     from cli import _read_multiline_input
 
@@ -90,13 +100,47 @@ _interrupt_requested = False
 
 
 def _sigint_handler(signum: int, frame: Any) -> None:
-    """Handle SIGINT by setting a flag and re-raising KeyboardInterrupt.
+    """Route Ctrl-C to the cooperative stop signal, raising only when apt.
 
-    This ensures Ctrl-C is never lost, even during blocking subprocess calls.
+    Two different things have to happen depending on what the process is doing:
+
+    * **An LLM subprocess is in flight.** Publishing on the stop signal is the
+      ONLY correct move. Raising would unwind the runner's supervisor loop
+      before it can wait for a stream message boundary and SIGINT the child's
+      process group, which is what leaves the provider session resumable — and
+      it would not reach a DAG group runner on a worker thread at all.
+    * **The main thread is inside a non-interruptible section** (a multi-
+      command git sequence like the DAG leaf merge-back). Publishing only:
+      the section's exit raises the deferred interrupt itself
+      (:func:`~tianluo.stop_signal.uninterruptible_scope`), so the sequence
+      completes and the dialog opens at the next breakpoint instead of
+      leaving a MERGE_HEAD the step then refuses to re-run.
+    * **Nothing is in flight** (waiting on the merge lock, blocked on a
+      terminal read). There is no child to wind down and the blocking call can
+      only be broken by the exception, so raise as before.
+
+    ``_interrupt_requested`` is kept for existing importers.
     """
     global _interrupt_requested
     _interrupt_requested = True
-    raise KeyboardInterrupt
+    signal_obj = get_stop_signal()
+    signal_obj.request(reason=STOP_REASON_INTERRUPT)
+    if signal_obj.llm_active or signal_obj.uninterruptible:
+        return
+    # Claim before raising: a watcher retry or a scope exit may be delivering
+    # this same request concurrently, and the claim guarantees exactly one
+    # KeyboardInterrupt per request no matter which channel wins the race.
+    #
+    # Losing the claim is not always a stand-down: the watcher's escalation
+    # reaches the main thread THROUGH this handler (``interrupt_main`` only
+    # trips SIGINT, it does not raise), so it claims the delivery and hands the
+    # raise here. Consuming that handoff is what makes a web interjection cut a
+    # non-LLM step short exactly as Ctrl-C does — the one path of decision 5.
+    if (
+        signal_obj.claim_interrupt_delivery()
+        or signal_obj.consume_escalation_handoff()
+    ):
+        raise KeyboardInterrupt
 
 
 def get_project_root() -> Path:
@@ -263,6 +307,13 @@ def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root:
                             'step_to_review_type': current_step.inputs.get('step_to_review_type'),
                         }
 
+                        # The gate resolved (web-answered). A dialog note parked
+                        # at this pause is scoped to a failure gate's Retry and
+                        # dies with any other resolution.
+                        from ..engine.interjection_dialog import discard_gate_note
+
+                        discard_gate_note(flow)
+
                         if approved:
                             current_step.outputs['revision_feedback'] = feedback
                             return StepStatus.COMPLETED
@@ -332,13 +383,24 @@ def _handle_confirm_pause(
     process it on re-run.
 
     Returns:
-        True if response was written, None if user chose to exit.
+        True if the response was written, one of the ``_DIALOG_*`` outcome
+        strings when an interjection dialog decided to restart or exit (the
+        caller re-enters the run loop or leaves), or None if the user chose to
+        exit through the menu.
     """
-    # Drain any web-pushed interjections that arrived while this confirm gate
-    # was waiting. The structured approve/feedback JSON payload is left
-    # unchanged — the history-write + task_description recompose performed
-    # inside the drain is what makes the interjection visible to later steps.
-    _drain_pending_interjections(flow, project_root, persistence)
+    # An interjection that arrived while this gate was waiting opens the same
+    # mid-flow dialog Ctrl-C does — there is no subprocess to interrupt here,
+    # but the operator's question ("why is it proposing this?") is exactly the
+    # one the dialog exists to answer. Its interlocutor is the session of the
+    # step whose output is being reviewed.
+    pending = _collect_pending_dialog_messages(project_root)
+    if pending:
+        outcome = _dialog_at_pause_point(
+            flow, current_step, persistence, project_root, prompt_history,
+            initial_messages=pending, pause_context="confirm",
+        )
+        if outcome != _DIALOG_RESUME_PAUSE:
+            return outcome
 
     step_to_review_id = current_step.inputs.get("step_to_review_id")
     step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
@@ -356,12 +418,56 @@ def _handle_confirm_pause(
         t("cli.run.confirm.opt_exit"),
     ]
     try:
-        choice = prompt_user_choice(
-            t("cli.run.confirm.review_prompt", step_type=step_to_review_type), options
+        # Raced against the interjection queue, not a plain blocking prompt: an
+        # operator who interjects from the web AFTER this menu is on screen must
+        # reach the dialog, and the pre-prompt drain above only catches what had
+        # already arrived. There is no retry_decision-style call file at this
+        # gate (the CONFIRM call has its own response shape), so the web-choice
+        # channel is left unarmed and only the interjection one is polled.
+        gate_interjections: List[str] = []
+        source, choice = _await_terminal_or_web_choice(
+            None,
+            message=t("cli.run.confirm.review_prompt", step_type=step_to_review_type),
+            options=options,
+            interjection_sink=gate_interjections,
+            project_root=project_root,
         )
-    except (KeyboardInterrupt, EOFError):
+        if source == _FAILURE_SRC_INTERJECT:
+            outcome = _dialog_at_pause_point(
+                flow, current_step, persistence, project_root, prompt_history,
+                initial_messages=gate_interjections, pause_context="confirm",
+            )
+            if outcome != _DIALOG_RESUME_PAUSE:
+                return outcome
+            return _handle_confirm_pause(
+                flow, current_step, persistence, project_root, prompt_history
+            )
+        if choice is None:
+            raise KeyboardInterrupt
+    except KeyboardInterrupt:
+        # Ctrl-C AT the gate opens the dialog rather than exiting outright: the
+        # operator interrupting a review is asking about the thing they are
+        # reviewing, and the previous shape gave them nowhere to ask.
+        outcome = _dialog_at_pause_point(
+            flow, current_step, persistence, project_root, prompt_history,
+            pause_context="confirm",
+        )
+        if outcome == _DIALOG_RESUME_PAUSE:
+            return _handle_confirm_pause(
+                flow, current_step, persistence, project_root, prompt_history
+            )
+        return outcome
+    except EOFError:
         persistence.save_flow(flow)
         return None
+
+    # The gate is resolving. A one-shot note parked by a dialog at this pause
+    # has exactly one consumer — a failure gate's Retry — and every CONFIRM
+    # resolution (approve, request changes, exit) is a different one, so the
+    # note is dropped here rather than leaked into the step's next life.
+    from ..engine.interjection_dialog import discard_gate_note
+
+    discard_gate_note(flow)
 
     if choice == 2:
         # Exit
@@ -458,15 +564,79 @@ def find_resumable_snapshot_flows(project_root: Path) -> List[Dict[str, Any]]:
     return flows
 
 
-def prompt_user_choice(message: str, options: List[str]) -> int:
-    """Prompt user to select an option."""
+def _read_choice_line(
+    prompt: str, *, timeout: Optional[float] = None, echo_prompt: bool = True
+) -> Any:
+    """One line of the operator's answer to a menu.
+
+    Off a TTY the read goes through the process-wide stdin funnel instead of
+    ``input()``. WHY: the dual-channel waits also read a non-TTY stdin, and two
+    independent readers on one pipe race for the same bytes — whichever the
+    kernel hands the line to wins, so a menu answer could vanish into a reader
+    nobody is listening to. The funnel is the single owner; ``input()`` stays
+    only for a TTY, where prompt_toolkit-free line editing still matters.
+
+    With *timeout* the funnel read is bounded and may return
+    :data:`~tianluo.stdin_channel.PENDING`, which consumes nothing — that is
+    what lets a caller poll another channel between slices and come back to the
+    same unanswered menu. *echo_prompt* is then set False on the resumed
+    slices so the prompt is written once, not once per slice.
+    """
+    if sys.stdin.isatty():
+        return input(prompt)
+
+    from ..stdin_channel import read_line
+
+    if echo_prompt:
+        print(prompt, end="", flush=True)
+    line = read_line(timeout)
+    if line is None:
+        raise EOFError
+    return line
+
+
+def prompt_user_choice(
+    message: str,
+    options: List[str],
+    *,
+    poll: Optional[Callable[[], bool]] = None,
+    poll_interval: float = 0.4,
+) -> Optional[int]:
+    """Prompt user to select an option.
+
+    Returns the 0-based option index, or ``None`` when *poll* claimed the wait.
+
+    WHY *poll* exists: off a TTY the funnel read returns only on a line or on
+    EOF, and a launcher-held pipe may deliver neither for the life of the gate.
+    A caller racing this menu against another channel (a web decision file, the
+    interjection queue) therefore cannot check that channel only before and
+    after the read — at the CONFIRM gate, which has no decision file to
+    re-check afterwards, a web interjection arriving once the menu was on
+    screen was never seen at all. With *poll* supplied the read is taken in
+    bounded slices and *poll* runs between them; the first truthy result
+    abandons the menu having consumed nothing from stdin.
+    """
+    from ..stdin_channel import PENDING
+
     print(f"\n{message}")
     for i, opt in enumerate(options, 1):
         print(f"  {i}. {opt}")
 
+    echo_prompt = True
     while True:
         try:
-            choice = input(t("cli.run.choice.select")).strip()
+            if poll is not None and poll():
+                return None
+            line = _read_choice_line(
+                t("cli.run.choice.select"),
+                timeout=poll_interval if poll is not None else None,
+                echo_prompt=echo_prompt,
+            )
+            if line is PENDING:
+                echo_prompt = False
+                continue
+            echo_prompt = True
+            choice = str(line).strip()
             idx = int(choice) - 1
             if 0 <= idx < len(options):
                 return idx
@@ -529,6 +699,10 @@ def _cleanup_retry_decision_artifacts(call_path: Path) -> None:
 _FAILURE_SRC_TERMINAL = "terminal"
 _FAILURE_SRC_WEB = "web"
 _FAILURE_SRC_CANCEL = "cancel"
+#: A web interjection arrived while the gate was on screen. Decision 5 makes
+#: that the same event as a Ctrl-C here: it opens the mid-flow dialog rather
+#: than sitting on disk until the gate happens to be resolved some other way.
+_FAILURE_SRC_INTERJECT = "interject"
 
 # Retry / Skip / Abort, in the 0 / 1 / 2 order the failure-handling call site
 # (and the historical prompt_user_choice menu) expects.
@@ -565,6 +739,21 @@ def _read_failure_response_decision(call_file: Path) -> Optional[str]:
         return None
     return _normalize_failure_decision(
         response.get("decision") or response.get("response")
+    )
+
+
+def _peek_failure_gate_decision(project_root: Path, step_id: str) -> Optional[str]:
+    """Peek at how *step_id*'s retry_decision gate was answered, if at all.
+
+    Deliberately non-consuming: the answer still has to reach
+    :func:`_resolve_step_failure_action`, which owns consuming it and tearing
+    down the chip. This is only for the resume path, which needs to know what
+    the answer *entitles* it to do before the step runs again.
+    """
+    from ..engine import interaction_calls
+
+    return _read_failure_response_decision(
+        interaction_calls.retry_decision_call_path(project_root, step_id)
     )
 
 
@@ -644,8 +833,10 @@ def _await_terminal_or_web_choice(
     message: str,
     options: List[str],
     poll_interval: float = 0.4,
+    interjection_sink: Optional[List[str]] = None,
+    project_root: Optional[Path] = None,
 ) -> Tuple[str, Optional[int]]:
-    """Race a CLI Retry/Skip/Abort choice against a webui retry_decision answer.
+    """Race a CLI choice against a webui answer AND an incoming interjection.
 
     The selection-mode sibling of :func:`_await_terminal_or_web`. Returns a
     ``(source, choice)`` tuple where *choice* is the 0-based option index:
@@ -656,62 +847,135 @@ def _await_terminal_or_web_choice(
     * ``(_FAILURE_SRC_TERMINAL, idx)`` — the operator answered at the terminal;
       any concurrent webui call/response is best-effort torn down so the chip
       vanishes.
+    * ``(_FAILURE_SRC_INTERJECT, None)`` — a web interjection arrived while the
+      gate was displayed; its text is appended to *interjection_sink* and the
+      caller opens the mid-flow dialog.
     * ``(_FAILURE_SRC_CANCEL, None)``  — Ctrl+C / EOF with no web answer; the
       caller treats this as abort.
 
-    With no ``call_file`` (or no TTY) there is no web channel to race, so it
-    degrades to a plain :func:`prompt_user_choice` — behavior equivalent to the
-    pre-dual-channel path.
+    Passing *interjection_sink* + *project_root* arms the interjection channel;
+    a gate with no web decision file (the CONFIRM gate) uses that alone. With
+    neither channel — and with no TTY — it degrades to a plain
+    :func:`prompt_user_choice`.
     """
-    # No web channel — terminal only (backward compatible / no call_file).
-    if call_file is None:
+    watch_interjections = interjection_sink is not None and project_root is not None
+    sink_baseline = len(interjection_sink) if interjection_sink is not None else 0
+
+    def _take_interjections() -> bool:
+        if not watch_interjections:
+            return False
+        texts = _collect_pending_dialog_messages(project_root)
+        if not texts:
+            return False
+        interjection_sink.extend(texts)
+        return True
+
+    def _park_stray_interjections() -> None:
+        """Re-park interjections the poller consumed but the caller won't read.
+
+        The caller only consults *interjection_sink* on
+        :data:`_FAILURE_SRC_INTERJECT`; on every other outcome an interjection
+        the poller sealed off disk in the same tick would simply vanish. Parking
+        it hands it to the next dialog / wait instead.
+        """
+        if interjection_sink is None or len(interjection_sink) <= sink_baseline:
+            return
+        stray = interjection_sink[sink_baseline:]
+        del interjection_sink[sink_baseline:]
+        _defer_web_messages(stray)
+
+    # No channel to race at all — terminal only (backward compatible).
+    if call_file is None and not watch_interjections:
         return (_FAILURE_SRC_TERMINAL, prompt_user_choice(message, options))
 
     # Deterministic priority: an answer already waiting on disk wins outright.
-    early = _read_failure_response_decision(call_file)
-    if early is not None:
-        _cleanup_retry_decision_artifacts(call_file)
-        return (_FAILURE_SRC_WEB, _failure_decision_to_choice(early))
-
-    # No interactive terminal to race against (piped stdin / no TTY): block on
-    # the plain choice, then re-check the web file once so a response that
-    # landed during the read is still preferred. Either way clean up so the
-    # chip does not linger.
-    if not sys.stdin.isatty():
-        choice = prompt_user_choice(message, options)
-        late = _read_failure_response_decision(call_file)
-        if late is not None:
+    if call_file is not None:
+        early = _read_failure_response_decision(call_file)
+        if early is not None:
             _cleanup_retry_decision_artifacts(call_file)
-            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
-        _cleanup_retry_decision_artifacts(call_file)
+            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(early))
+    if _take_interjections():
+        return (_FAILURE_SRC_INTERJECT, None)
+
+    # No interactive terminal to race against (piped stdin / no TTY): race the
+    # bounded terminal read against the web channels, exactly as the TTY branch
+    # and :func:`_await_terminal_or_web_non_tty` do. WHY it is a race and not
+    # "block on the choice, then re-check once": with a pipe the launcher holds
+    # open the funnel read returns only at EOF, so the post-read re-check can be
+    # arbitrarily late — and at the CONFIRM gate, where ``call_file`` is None,
+    # there is nothing to re-check at all, which left a web interjection queued
+    # for the whole life of the menu.
+    if not sys.stdin.isatty():
+        raced_web: Dict[str, Optional[str]] = {"decision": None}
+
+        def _poll_channels() -> bool:
+            if call_file is not None:
+                decision = _read_failure_response_decision(call_file)
+                if decision is not None:
+                    raced_web["decision"] = decision
+                    return True
+            try:
+                return _take_interjections()
+            except Exception:  # pragma: no cover - never break the gate
+                logger.exception("Interjection poll at the gate failed")
+                return False
+
+        choice = prompt_user_choice(
+            message, options, poll=_poll_channels, poll_interval=poll_interval
+        )
+        if choice is None:
+            # A web channel won; nothing was consumed from stdin, so the
+            # operator's next line still belongs to whoever asks for it next.
+            raced = raced_web["decision"]
+            if raced is not None:
+                _cleanup_retry_decision_artifacts(call_file)
+                return (_FAILURE_SRC_WEB, _failure_decision_to_choice(raced))
+            return (_FAILURE_SRC_INTERJECT, None)
+        if call_file is not None:
+            late = _read_failure_response_decision(call_file)
+            if late is not None:
+                _cleanup_retry_decision_artifacts(call_file)
+                return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
+            _cleanup_retry_decision_artifacts(call_file)
+        _park_stray_interjections()
         return (_FAILURE_SRC_TERMINAL, choice)
 
-    # Interactive TTY: race the prompt against a background web-response poller.
-    return _await_terminal_or_web_choice_interactive(
+    # Interactive TTY: race the prompt against a background poller.
+    source, choice = _await_terminal_or_web_choice_interactive(
         call_file,
         message=message,
         options=options,
         poll_interval=poll_interval,
+        take_interjections=_take_interjections if watch_interjections else None,
     )
+    if source != _FAILURE_SRC_INTERJECT:
+        _park_stray_interjections()
+    return (source, choice)
 
 
 def _await_terminal_or_web_choice_interactive(
-    call_file: Path,
+    call_file: Optional[Path],
     *,
     message: str,
     options: List[str],
     poll_interval: float,
+    take_interjections: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, Optional[int]]:
-    """TTY dual-wait for the failure decision: a choice prompt raced against a
-    web-response poller.
+    """TTY dual-wait for a gate choice, raced against the web channels.
 
     Mirrors :func:`_await_terminal_or_web_interactive` but reads a numeric
-    Retry/Skip/Abort choice instead of free text. A daemon thread polls
-    ``call_file`` for a sibling response and cancels the prompt the instant one
+    choice instead of free text. A daemon thread polls ``call_file`` for a
+    sibling response and — when *take_interjections* is supplied — the
+    interjection queue as well, cancelling the prompt the instant either
     appears (re-scheduling ``app.exit`` until the app is actually running to
     close the build-race window). Whichever side answers first wins; the loser
     is torn down without consuming anything twice. Any unexpected failure
     degrades to a plain :func:`prompt_user_choice`.
+
+    WHY the interjection is polled here and not only before the prompt: a
+    pre-prompt drain only catches what had already arrived. An operator who
+    interjects from the web AFTER the Retry/Skip/Abort menu is on screen was
+    otherwise ignored until the gate was resolved by some other route.
     """
     import asyncio
     import threading
@@ -731,6 +995,7 @@ def _await_terminal_or_web_choice_interactive(
         loop = asyncio.get_running_loop()
         stop = threading.Event()
         web_holder: Dict[str, Optional[str]] = {"value": None}
+        interjected = threading.Event()
 
         def _cancel_prompt() -> None:
             app = session.app
@@ -739,8 +1004,18 @@ def _await_terminal_or_web_choice_interactive(
 
         def _poll() -> None:
             while not stop.is_set():
-                decision = _read_failure_response_decision(call_file)
-                if decision is not None:
+                decision = (
+                    _read_failure_response_decision(call_file)
+                    if call_file is not None
+                    else None
+                )
+                if decision is None and take_interjections is not None:
+                    try:
+                        if take_interjections():
+                            interjected.set()
+                    except Exception:  # pragma: no cover - never break the gate
+                        logger.exception("Interjection poll at the gate failed")
+                if decision is not None or interjected.is_set():
                     web_holder["value"] = decision
                     # The app may not be running yet on the first try; keep
                     # scheduling the cancel until the prompt tears down.
@@ -774,8 +1049,14 @@ def _await_terminal_or_web_choice_interactive(
         # Web won (sentinel) or the prompt was cancelled — a web answer may
         # also have landed during teardown.
         if web_holder["value"] is not None:
-            _cleanup_retry_decision_artifacts(call_file)
+            if call_file is not None:
+                _cleanup_retry_decision_artifacts(call_file)
             return (_FAILURE_SRC_WEB, _failure_decision_to_choice(web_holder["value"]))
+        if interjected.is_set():
+            # Left for the caller to resolve: the gate is not answered, it is
+            # suspended while the dialog runs, and the artifacts must survive so
+            # the chip is still answerable when the dialog says "continue".
+            return (_FAILURE_SRC_INTERJECT, None)
         return (_FAILURE_SRC_CANCEL, None)
 
     try:
@@ -784,182 +1065,31 @@ def _await_terminal_or_web_choice_interactive(
         # Ctrl+C at the failure prompt is a CLI-side commitment to abort — tear
         # down the concurrent webui call/response so the (FAILED-exempt)
         # retry_decision chip does not keep surfacing on the now-aborted flow.
-        _cleanup_retry_decision_artifacts(call_file)
+        if call_file is not None:
+            _cleanup_retry_decision_artifacts(call_file)
         return (_FAILURE_SRC_CANCEL, None)
     except Exception:  # pragma: no cover - defensive: fall back to plain choice
         logger.exception(
             "Interactive failure dual-wait failed; using a plain choice prompt"
         )
         choice = prompt_user_choice(message, options)
-        late = _read_failure_response_decision(call_file)
-        if late is not None:
+        if call_file is not None:
+            late = _read_failure_response_decision(call_file)
+            if late is not None:
+                _cleanup_retry_decision_artifacts(call_file)
+                return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
             _cleanup_retry_decision_artifacts(call_file)
-            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
-        _cleanup_retry_decision_artifacts(call_file)
         return (_FAILURE_SRC_TERMINAL, choice)
 
     # The CLI committed to a decision — including aborting via Ctrl+C / EOF
     # (_FAILURE_SRC_CANCEL) — so best-effort tear down any concurrent webui
     # call/response, identically for all outcomes, so the chip disappears
     # (mirrors the post-prompt cleanup the non-dual-channel path used to do).
-    # _FAILURE_SRC_WEB already cleaned up inside _race().
-    if source != _FAILURE_SRC_WEB:
+    # _FAILURE_SRC_WEB already cleaned up inside _race(); an interjection
+    # SUSPENDS the gate rather than answering it, so its artifacts stay.
+    if source not in (_FAILURE_SRC_WEB, _FAILURE_SRC_INTERJECT) and call_file is not None:
         _cleanup_retry_decision_artifacts(call_file)
     return (source, choice)
-
-
-def _drain_pending_interjections(
-    flow: FlowInstance,
-    project_root: Path,
-    persistence: PersistenceManager,
-) -> List[str]:
-    """Consume daemon-queued interjection call files.
-
-    The web console pushes mid-flow instructions through the server as
-    ``MSG_INTERJECT_FLOW``; the daemon turns each into an ``interjection``-kind
-    call file under ``tianluo/calls/``. This function drains those files and:
-
-    * folds each into ``flow.state.context["user_interjections"]`` using the
-      same entry shape as a Ctrl-C interjection;
-    * recomposes the current step's ``task_description`` so the instruction
-      takes effect on the next run / iteration;
-    * writes a ``{role: 'user', kind: 'interjection', ...}`` line into the
-      current step's history jsonl so ``luo history show`` and the web
-      console see the user's bubble at the point the interjection arrived;
-    * when the current step is PAUSED (waiting on a prompt response), also
-      buffers each drained text into
-      ``flow.state.context['_pending_paused_interjections']`` so the reply
-      path can prefix it onto the next user message to the LLM.
-
-    Returns the list of drained text strings (oldest first); callers can use
-    the return value to gate display / log messages.
-    """
-    from ..engine import interaction_calls
-
-    try:
-        drained = interaction_calls.drain_interjection_requests(project_root)
-    except Exception:  # pragma: no cover - defensive; never break the flow
-        logger.exception("Failed to drain pending interjection requests")
-        return []
-    if not drained:
-        return []
-
-    from datetime import datetime
-
-    from ..engine.chat_history import record_user_interjection
-    from ..engine.state_machine import _effective_task_description_base
-    from ..engine.task_description import compose_task_description_with_interjections
-
-    interjections = flow.state.context.setdefault("user_interjections", [])
-    current_step = flow.state.get_current_step()
-    step_id = ""
-    step_type_value = ""
-    attempt = 0
-    is_paused = False
-    if current_step is not None:
-        step_id = current_step.step_id
-        step_type_value = (
-            current_step.step_type.value
-            if hasattr(current_step.step_type, "value")
-            else str(current_step.step_type)
-        )
-        try:
-            attempt = int(current_step.inputs.get("retry_count", 0) or 0)
-        except (TypeError, ValueError):
-            attempt = 0
-        is_paused = current_step.status == StepStatus.PAUSED
-
-    # The PAUSED reply-prefix buffer is only populated for DISCOVERY-paused
-    # steps — only discovery reply paths call _consume_paused_interjection_prefix
-    # to read + clear it. CONFIRM-paused interjections already reach the LLM via
-    # task_description recomposition (user_interjections list); buffering them
-    # here would leak into a later DISCOVERY pause's LLM call as a stale prefix.
-    is_discovery_paused = is_paused and current_step.step_type == StepType.DISCOVERY
-    paused_buffer: Optional[List[str]] = (
-        flow.state.context.setdefault("_pending_paused_interjections", [])
-        if is_discovery_paused
-        else None
-    )
-
-    drained_texts: List[str] = []
-    for item in drained:
-        text = item["text"]
-        drained_texts.append(text)
-        interjections.append(
-            {
-                "text": text,
-                "step_id": step_id,
-                "step_type": step_type_value,
-                "timestamp": datetime.now().isoformat(),
-                "source": "web-console",
-            }
-        )
-        if paused_buffer is not None:
-            paused_buffer.append(text)
-        # Persist the user's bubble to the per-step jsonl so history viewers
-        # and the web console see the interjection in chronological order
-        # alongside the LLM turns.
-        if step_id:
-            try:
-                record_user_interjection(
-                    project_root=project_root,
-                    flow_id=flow.flow_id,
-                    step_id=step_id,
-                    step_type=step_type_value,
-                    text=text,
-                    attempt=attempt,
-                    source="web-console",
-                )
-            except Exception:  # pragma: no cover - never break the flow
-                logger.exception(
-                    "Failed to write user interjection to history jsonl"
-                )
-        get_console().print(
-            t("cli.run.interjection_received", text=text[:80])
-        )
-
-    if current_step is not None:
-        current_step.inputs["task_description"] = (
-            compose_task_description_with_interjections(
-                base=_effective_task_description_base(flow),
-                interjections=interjections,
-            )
-        )
-    if StepType.SELF_CHECK in (getattr(flow.state, "selected_steps", None) or []):
-        from ..engine.review_scope import SelfCheckRoundController
-
-        SelfCheckRoundController(flow.state.context).force_full(
-            "effective_requirements_changed"
-        )
-    persistence.save_flow(flow)
-    return drained_texts
-
-
-def _consume_paused_interjection_prefix(flow: FlowInstance) -> str:
-    """Return + clear the buffered ``[interjection: ...]\\n`` prefix.
-
-    PAUSED reply paths (discovery continue, etc.) call this just before
-    handing the user's reply to the LLM as the next user turn. The buffer is
-    populated by :func:`_drain_pending_interjections` only when the current
-    step is PAUSED; entries are joined in arrival order, each rendered as a
-    ``[interjection: <text>]`` line. An empty buffer (or a flow that has no
-    ``state.context`` shape, such as a unit-test stub) yields the empty
-    string so the reply is unchanged.
-    """
-    try:
-        context = flow.state.context
-    except AttributeError:
-        return ""
-    buffer = context.get("_pending_paused_interjections")
-    if not buffer:
-        return ""
-    lines = [f"[interjection: {text}]" for text in buffer if str(text).strip()]
-    # Clear the buffer regardless — even an all-whitespace queue should not
-    # carry over into the next reply.
-    context["_pending_paused_interjections"] = []
-    if not lines:
-        return ""
-    return "\n".join(lines) + "\n"
 
 
 def _reclaim_review_snapshots(flow: FlowInstance) -> None:
@@ -1115,79 +1245,1586 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     return None
 
 
-def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[StepStatus]:
-    """Handle KeyboardInterrupt during step execution.
+# --- Mid-flow interjection dialog -------------------------------------------
+#
+# An interjection is no longer a text box whose content is appended to the
+# step's task description. It is a short read-only conversation held at the
+# breakpoint — with the agent that was doing the work, inside its own provider
+# session whenever that session is reachable — which settles into a structured
+# decision the user confirms. Ctrl-C and a web-pushed interjection enter this
+# same path (decision 5); the only difference is who published the stop signal.
 
-    A non-empty user-typed instruction is persisted to
-    ``flow.state.context["user_interjections"]`` and inlined into the
-    current step's ``inputs["task_description"]`` so the immediate re-run
-    sees it. Downstream steps pick up the same interjections via
-    ``state_machine._build_step_inputs`` (which composes them onto every
-    new step's task_description on construction).
+#: Outcomes of a dialog, returned to the run loop.
+#: How many times one non-interactive dialog round re-drains the calls
+#: directory before publishing. Bounded so a script posting interjections in a
+#: tight loop cannot keep the round from ever reaching the web console.
+_MAX_DIALOG_DRAINS = 20
 
-    Returns:
-        StepStatus to continue, or None to exit
+_DIALOG_CONTINUE_STEP = "continue_step"      # re-run the interrupted step
+_DIALOG_RESUME_PAUSE = "resume_pause"        # go back to the pause point
+_DIALOG_RESTARTED = "restarted"              # flow was rewound; re-enter loop
+_DIALOG_EXIT = "exit"                        # save + leave
+_DIALOG_AWAITING_WEB = "awaiting_web"        # json mode: paused for a web reply
+
+
+def _dialog_rewind_targets(flow: FlowInstance) -> List[Dict[str, str]]:
+    """Steps the operator may restart from, newest last (for the web console).
+
+    Truncated at the CURRENT step: a rewind runs forward from its target, so a
+    later history entry is not a restart target at all — offering one hands the
+    operator a choice that ``resolve_rewind_target`` then rejects, or (before it
+    did) silently left the steps in between un-run.
     """
-    user_input = _read_multiline_input(
-        prompt_title=t("cli.run.interrupt.title"),
-        prompt_message=t("cli.run.interrupt.message"),
-        history=prompt_history,
+    history = list(getattr(flow.state, "step_history", []) or [])
+    current = getattr(flow.state, "current_step_id", None)
+    if current and current in history:
+        history = history[: history.index(str(current)) + 1]
+    targets: List[Dict[str, str]] = []
+    for sid in history:
+        step = flow.state.steps.get(sid)
+        if step is None:
+            continue
+        step_type = (
+            step.step_type.value
+            if hasattr(step.step_type, "value")
+            else str(step.step_type)
+        )
+        targets.append({"step_id": sid, "step_type": step_type})
+    return targets
+
+
+def _reset_preview(flow: FlowInstance, decision: Any, project_root: Optional[Path]) -> Any:
+    """Describe what a ``restart`` + ``workspace: reset`` would throw away.
+
+    INVARIANT: the operator never confirms a reset blind. Returns ``None`` only
+    when the decision is not a reset at all; every reset decision gets a
+    preview object, and one that could not be taken comes back with
+    ``ok=False`` so :func:`_confirm_and_apply_decision` withholds the
+    confirmation. A swallowed failure used to render as "no preview" while the
+    Apply affordance stayed live — i.e. exactly the blind discard this exists
+    to prevent.
+    """
+    from ..engine.flow_workspace import ResetPreview
+    from ..engine.interjection_dialog import ACTION_RESTART, WORKSPACE_RESET
+
+    if decision is None:
+        return None
+    if decision.action != ACTION_RESTART or decision.workspace != WORKSPACE_RESET:
+        return None
+    if project_root is None:
+        return ResetPreview(
+            ok=False, error=t("cli.run.dialog.reset_preview_no_root")
+        )
+    try:
+        from ..engine.flow_workspace import preview_reset
+
+        return preview_reset(flow, Path(project_root))
+    except Exception as exc:  # noqa: BLE001 - reported, never silently dropped
+        logger.exception("Failed to build the workspace reset preview")
+        return ResetPreview(ok=False, error=str(exc))
+
+
+def _group_work_preview(
+    flow: Optional[FlowInstance], decision: Any, project_root: Optional[Path]
+) -> List[Dict[str, Any]]:
+    """What a proposed ``restart`` would delete from the DAG group worktrees.
+
+    INVARIANT: computed for BOTH ``keep`` and ``reset``. ``workspace: keep``
+    only ever meant "leave the flow's own tree alone" — a rewind removes the
+    group worktrees and leaf branches either way, and that work appears in
+    neither the main tree's ``git status`` nor ``baseline..HEAD``. Without this
+    the operator confirms a discard they were never shown.
+    """
+    from ..engine.interjection_dialog import ACTION_RESTART
+
+    if flow is None or decision is None or project_root is None:
+        return []
+    if getattr(decision, "action", "") != ACTION_RESTART:
+        return []
+    try:
+        from ..engine.flow_workspace import preview_group_work
+        from ..engine.rewind import rewind_group_branches
+
+        branches = rewind_group_branches(
+            flow, decision.restart_step_id or None
+        )
+        if not branches:
+            return []
+        previews = preview_group_work(
+            Path(project_root),
+            branches,
+            str(getattr(flow, "baseline_commit", "") or ""),
+        )
+        return [pv.to_dict() for pv in previews]
+    except Exception:  # noqa: BLE001 - a blind spot, never a broken dialog
+        logger.exception("Failed to preview the DAG group work a restart discards")
+        return []
+
+
+def _render_group_work(lines: List[str], group_work: List[Dict[str, Any]]) -> None:
+    """Append the group-work discard summary to a decision panel."""
+    if not group_work:
+        return
+    lines.append("")
+    lines.append(t("cli.run.dialog.group_work_title"))
+    for entry in group_work:
+        lines.append(
+            t(
+                "cli.run.dialog.group_work_branch",
+                branch=entry.get("branch", ""),
+                worktree=entry.get("worktree_path", "") or "-",
+            )
+        )
+        for commit in entry.get("commits") or []:
+            lines.append(f"    {commit}")
+        summary = (entry.get("status_summary") or "").strip()
+        if summary:
+            lines.append("    " + t("cli.run.dialog.group_work_uncommitted"))
+            for line in summary.splitlines():
+                lines.append(f"      {line}")
+
+
+def _render_dialog_decision(
+    decision: Any,
+    flow: Optional[FlowInstance] = None,
+    project_root: Optional[Path] = None,
+) -> None:
+    """Show a proposed decision so the operator can confirm or edit it."""
+    lines = [
+        t("cli.run.dialog.field_action", value=decision.action),
+    ]
+    if decision.action == "restart":
+        lines.append(
+            t(
+                "cli.run.dialog.field_restart_step",
+                value=decision.restart_step_id or t("cli.run.dialog.current_step"),
+            )
+        )
+        lines.append(
+            t("cli.run.dialog.field_workspace", value=decision.workspace)
+        )
+        if flow is not None:
+            targets = _dialog_rewind_targets(flow)
+            if targets:
+                # The editor takes a bare step id, so the panel must say which
+                # ids exist — a mistyped target otherwise fails only AFTER
+                # confirmation.
+                lines.append(
+                    t(
+                        "cli.run.dialog.rewind_targets",
+                        targets=", ".join(
+                            f"{tg['step_id']} ({tg['step_type']})"
+                            for tg in targets
+                        ),
+                    )
+                )
+        preview = _reset_preview(flow, decision, project_root) if flow else None
+        if preview is not None and not preview.ok:
+            # Never render an unavailable preview as a clean tree: an empty
+            # status panel is read as "nothing to lose", which is the opposite
+            # of what a failed `git status` means.
+            lines.append("")
+            lines.append(
+                t("cli.run.dialog.reset_preview_failed", error=preview.error)
+            )
+        elif preview is not None:
+            lines.append("")
+            lines.append(t("cli.run.dialog.reset_preview_title"))
+            lines.append(
+                preview.status_summary or t("cli.run.dialog.reset_preview_clean")
+            )
+            if preview.flow_commits:
+                lines.append("")
+                lines.append(t("cli.run.dialog.reset_preview_commits"))
+                lines.extend(preview.flow_commits)
+            if preview.snapshot_warning:
+                lines.append("")
+                lines.append(t("cli.run.dialog.reset_no_snapshot"))
+        _render_group_work(
+            lines, _group_work_preview(flow, decision, project_root)
+        )
+    if decision.instruction:
+        lines.append(
+            t("cli.run.dialog.field_instruction", value=decision.instruction)
+        )
+    if decision.revised_description:
+        lines.append(
+            t(
+                "cli.run.dialog.field_revised",
+                value=decision.revised_description,
+            )
+        )
+    render_full("\n".join(lines), title=t("cli.run.dialog.decision_title"))
+
+
+# Accepted edit keys → decision attribute. The keys include the LABELS the
+# proposal panel renders ("restart from", "revised description"), because that
+# is what an operator retypes when they edit a field at confirmation time; a
+# label that is shown but rejected sends their edit to the LLM as a new message
+# instead.
+_DIALOG_EDIT_FIELDS = {
+    "action": "action",
+    "workspace": "workspace",
+    "restart_step_id": "restart_step_id",
+    "restart_from": "restart_step_id",
+    "restart_step": "restart_step_id",
+    "instruction": "instruction",
+    "revised_description": "revised_description",
+    "revised": "revised_description",
+}
+
+
+def _apply_decision_edits(decision: Any, text: str) -> bool:
+    """Apply ``field: value`` edit lines to *decision*; report whether any stuck.
+
+    Gives the terminal the same "confirm, but change a field first" affordance
+    the web console gets from its structured reply. A message that is not a
+    pure block of edit lines is left alone and continues the conversation
+    instead — the user's prose must never be silently swallowed as an edit.
+    """
+    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return False
+    parsed: List[Tuple[str, str]] = []
+    for line in lines:
+        if ":" not in line and "=" not in line:
+            return False
+        sep = ":" if (":" in line and (":" < "=" or "=" not in line)) else "="
+        if ":" in line and "=" in line:
+            sep = ":" if line.index(":") < line.index("=") else "="
+        key, value = line.split(sep, 1)
+        key = key.strip().lower().replace(" ", "_")
+        if key not in _DIALOG_EDIT_FIELDS:
+            return False
+        parsed.append((key, value.strip()))
+    from ..engine.interjection_dialog import ACTIONS, WORKSPACES
+
+    for key, value in parsed:
+        if key == "action":
+            if value.lower() not in ACTIONS:
+                return False
+            decision.action = value.lower()
+        elif key == "workspace":
+            if value.lower() not in WORKSPACES:
+                return False
+            decision.workspace = value.lower()
+        else:
+            setattr(decision, _DIALOG_EDIT_FIELDS[key], value)
+    return True
+
+
+def _decision_snapshot(decision: Any) -> Optional[Dict[str, Any]]:
+    """A by-value snapshot of the decision currently on the table.
+
+    Everything that identifies a published round is derived from VALUES, never
+    from object identity: ``_apply_decision_edits`` rewrites a pending proposal
+    IN PLACE, so the same object holds different fields one round later, and a
+    bare web confirmation of the earlier round would be waved through.
+    """
+    if decision is None:
+        return None
+    try:
+        return dict(decision.to_dict())
+    except Exception:  # pragma: no cover - defensive: never break the dialog
+        logger.exception("Failed to snapshot the pending dialog decision")
+        # A snapshot that cannot be taken must not read as "unchanged": a value
+        # that never compares equal — and so hashes to a fresh round id every
+        # time — forces a fresh confirmation rather than applying a proposal
+        # whose published form is unknown.
+        return {"__unsnapshottable__": object()}
+
+
+def _dialog_round_revision(decision: Any) -> str:
+    """Publication id of the decision currently on the table (``""`` if none).
+
+    Delegates to the same helper the call file publishes, so what the terminal
+    compares against is byte-for-byte what a console client was shown.
+    """
+    from ..engine.interaction_calls import dialog_decision_revision
+
+    return dialog_decision_revision(_decision_snapshot(decision))
+
+
+def _record_published_round(
+    rounds: List[Dict[str, Any]],
+    revision: str,
+    call_file: Optional[Path] = None,
+) -> List[Dict[str, Any]]:
+    """Ledger the round just mirrored to the call file.
+
+    WHY a ledger and not just "the last thing published": a bare confirmation
+    ("apply what is shown") carries no fields, so binding it needs the set of
+    rounds that could still have been on the answering client's screen. A
+    republication of the SAME values collapses into the previous entry — it is
+    the same round, and its publication instant must stay the one at which
+    those values became current.
+
+    WHY the publication instant is read back off the call file: the answer it
+    is compared against is timed by the response file's mtime, so both ends
+    have to come off the filesystem's own clock. Linux stamps file times from
+    the COARSE clock — up to a jiffy behind ``time.time()`` — and on a project
+    directory shared between machines the answer is landed by a host whose
+    clock is not synchronised with this one at all; either gap can make a reply
+    written after a round read as one written before it. Where the mirror
+    failed there is no file, and hence no round on any console to be confirmed,
+    so the wall clock stands in.
+    """
+    if not rounds or rounds[-1].get("revision") != revision:
+        at = None
+        if call_file is not None:
+            try:
+                at = call_file.stat().st_mtime
+            except OSError:  # pragma: no cover - defensive
+                at = None
+        rounds.append({"revision": revision, "at": time.time() if at is None else at})
+    return rounds
+
+
+def _seed_published_rounds(
+    prior_state: Optional[Dict[str, Any]], proposal: Any
+) -> List[Dict[str, Any]]:
+    """Recover the ledger of a dialog a previous process published rounds for.
+
+    The round a resumed dialog inherits was put on the console by the process
+    before it, so its publication is invisible here. Recorded at ``0.0`` when
+    the ledger itself did not survive: an unknown publication instant must read
+    as "could have been seen", never as "cannot have been".
+    """
+    if not prior_state:
+        return []
+    rounds = prior_state.get("published_rounds")
+    if isinstance(rounds, list):
+        return [
+            {"revision": str(r.get("revision") or ""), "at": float(r.get("at") or 0.0)}
+            for r in rounds
+            if isinstance(r, dict)
+        ]
+    revision = _dialog_round_revision(proposal)
+    return [{"revision": revision, "at": 0.0}] if revision else []
+
+
+def _bare_confirmation_is_stale(
+    rounds: List[Dict[str, Any]],
+    current_revision: str,
+    *,
+    echoed_revision: str = "",
+    responded_at: Optional[float] = None,
+) -> bool:
+    """Whether a fieldless confirmation can NO LONGER be applied as it stands.
+
+    INVARIANT: a bare confirmation is bound to the round its author actually
+    saw, never to whatever the flow happens to have published by the time the
+    answer is read. The rounds share one call file, so the live proposal can
+    already carry an edit made — at the terminal or from another client — after
+    the round being confirmed was rendered; applying it then executes a
+    decision nobody approved, and for ``restart``+``workspace: reset`` that
+    discards the workspace on an approval never given.
+
+    Two bindings, in order of strength:
+
+    * the client echoed the round's ``decision_revision`` — exact, and the only
+      one that also catches a console left open across a later round;
+    * otherwise the answer's timestamp — rounds published after it provably
+      were not on screen. What remains plausible must be a single round whose
+      values are still the ones on the table; anything else is ambiguous, and
+      ambiguity resolves as "confirm again", never as "apply".
+
+    ``rounds`` is therefore never pruned by a refusal: once two different
+    rounds have been published, a client that cannot echo an id is ambiguous
+    for good — which is the point, since the answer it re-sends after a refusal
+    is the very same one it had already composed against the round it was
+    refused for. The echo is what re-opens the path.
+
+    Rounds that proposed nothing are excluded: they carry no confirm
+    affordance, so no confirmation can be an answer to one. With none plausible
+    at all the confirmation cannot be a confirmation of anything — coherent
+    only where nothing is on the table, where the caller reads the word as the
+    operator's next message instead.
+    """
+    if echoed_revision:
+        return echoed_revision != current_revision
+    seen = {
+        str(entry.get("revision") or "")
+        for entry in rounds
+        if entry.get("revision")
+        and (responded_at is None or float(entry.get("at") or 0.0) <= responded_at)
+    }
+    if not seen:
+        return bool(current_revision)
+    return seen != {current_revision}
+
+
+def _confirm_and_apply_decision(
+    flow: FlowInstance,
+    current_step: Any,
+    decision: Any,
+    dialog: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+    *,
+    pause_context: Optional[str],
+) -> Tuple[Optional[str], str]:
+    """Execute a confirmed decision and translate it into a loop outcome.
+
+    Returns ``(outcome, error)``. ``outcome`` is ``None`` when the decision
+    could NOT be applied (a bad rewind target, a refused rewind, a failed
+    reset) — the confirmation then did not happen, and both front ends keep
+    the operator in the dialog with the fields on the table, rather than
+    silently executing a ``continue`` they never confirmed.
+    """
+    from ..engine.interjection_dialog import (
+        ACTION_EXIT,
+        ACTION_RESTART,
+        apply_decision,
+        summarize_transcript,
     )
-    if user_input is None:
-        # Cancelled (Ctrl+C): save and exit
+
+    # INVARIANT: a reset is executed only after its preview has been
+    # successfully taken AND shown. The decision confirmed here is the EDITED
+    # one — a web operator can turn a proposed ``continue`` into
+    # ``restart``+``reset`` — so the check cannot rely on whatever preview the
+    # proposal happened to carry; it is re-taken and re-rendered for the exact
+    # decision about to run.
+    preview = _reset_preview(flow, decision, project_root)
+    if preview is not None:
+        if not preview.ok:
+            error = t("cli.run.dialog.reset_preview_failed", error=preview.error)
+            display_error(error)
+            return None, error
+        _render_dialog_decision(decision, flow, project_root)
+
+    summary = summarize_transcript(dialog.transcript())
+    outcome = apply_decision(
+        flow, current_step, decision, project_root, dialog_summary=summary,
+        # At a CONFIRM / failure gate ``continue`` means "resume waiting HERE",
+        # so no step status or retry counter may move.
+        continue_reenters_step=not pause_context,
+    )
+
+    # Rendered BEFORE the ok check: once a safety ref exists the tree has
+    # already been changed, and a later failure (the snapshot replay, the
+    # rewind) must not swallow the ref and the recovery command with it — that
+    # is the only handle the operator has on the work just discarded.
+    if outcome.reset is not None and outcome.reset.safe_ref:
+        from ..engine.flow_workspace import describe_reset
+
+        discarded, recovery = describe_reset(outcome.reset)
+        render_full(
+            t(
+                "cli.run.dialog.reset_done",
+                discarded=discarded or t("cli.run.dialog.reset_nothing_discarded"),
+                ref=outcome.reset.safe_ref,
+                recovery=recovery,
+            ),
+            title=t("cli.run.dialog.reset_title"),
+        )
+        if outcome.reset.warning:
+            display_error(outcome.reset.warning)
+
+    # Rendered BEFORE the ok check for the same reason as the reset panel: the
+    # group worktrees are captured and removed while the rewind is planned, so
+    # a restart that then fails on the workspace reset has still discarded them
+    # — and these refs are the operator's only handle on what they held.
+    if outcome.preserved_refs:
+        get_console().print(
+            t(
+                "cli.run.dialog.group_work_saved",
+                refs="\n".join(outcome.preserved_refs),
+            )
+        )
+
+    # Same reason again: the groups this names have already lost their only
+    # working copy, so the flow will re-run them on whatever happens next. That
+    # is a change to what the flow is about to do, and a refusal that reported
+    # only "nothing was applied" would hide it.
+    if outcome.invalidated_group_steps:
+        display_error(
+            t(
+                "cli.run.dialog.group_state_invalidated",
+                steps=", ".join(outcome.invalidated_group_steps),
+            )
+        )
+
+    if not outcome.ok:
+        display_error(t("cli.run.dialog.apply_failed", error=outcome.error))
+        # The flow object may already carry a recorded revision / a half-applied
+        # reset, so persist before handing control back rather than losing it.
         persistence.save_flow(flow)
+        return None, outcome.error
+
+    persistence.save_flow(flow)
+
+    if decision.action == ACTION_EXIT:
         render_full(
             t("cli.run.interrupt.saved_body"),
             title=t("cli.run.interrupt.exit_title"),
         )
-        return None
-    if user_input:
-        from datetime import datetime
-        from ..engine.task_description import compose_task_description_with_interjections
-        from ..engine.state_machine import _effective_task_description_base
-
-        step_type_value = (
-            current_step.step_type.value
-            if hasattr(current_step.step_type, "value")
-            else str(current_step.step_type)
-        )
-        entry = {
-            "text": user_input,
-            "step_id": current_step.step_id,
-            "step_type": step_type_value,
-            "timestamp": datetime.now().isoformat(),
-        }
-        flow.state.context.setdefault("user_interjections", []).append(entry)
-
-        # Mutate the current step's inputs in-place so the immediate re-run
-        # sees the new instruction. Compose from the *un-decorated* base
-        # (refined_description if discovery ran, else flow.task_description)
-        # against the FULL interjections list — never against the step's
-        # already-composed task_description. Snapshotting the latter would
-        # double the ``## Additional Instructions`` section when the user
-        # interrupts a step that was built AFTER an earlier interjection
-        # (its inputs.task_description already carries the section, and
-        # composing on top of it would emit a second one).
-        current_step.inputs["task_description"] = (
-            compose_task_description_with_interjections(
-                base=_effective_task_description_base(flow),
-                interjections=flow.state.context["user_interjections"],
+        return _DIALOG_EXIT, ""
+    if decision.action == ACTION_RESTART:
+        rewound = outcome.rewind
+        get_console().print(
+            t(
+                "cli.run.dialog.restarted",
+                step_id=rewound.target_step_id if rewound else "",
+                count=len(rewound.removed_step_ids) if rewound else 0,
             )
         )
-        if StepType.SELF_CHECK in (getattr(flow.state, "selected_steps", None) or []):
-            from ..engine.review_scope import SelfCheckRoundController
+        return _DIALOG_RESTARTED, ""
+    # continue
+    get_console().print(t("cli.run.dialog.continuing"))
+    return (_DIALOG_RESUME_PAUSE if pause_context else _DIALOG_CONTINUE_STEP), ""
 
-            SelfCheckRoundController(flow.state.context).force_full(
-                "effective_requirements_changed"
-            )
-        get_console().print(t("cli.run.interrupt.recorded"))
+
+def _rearm_resumed_step(step: Any) -> None:
+    """Arm an interrupted/failed step to run again as a retry.
+
+    The single definition behind ``--resume``'s re-arm and the loop's
+    fallback: ``resumed`` plus one ``retry_count`` increment is what makes
+    LLMCaller treat the next attempt as a continuation (and consider a native
+    resume of the interrupted session). Counting it twice would stamp the
+    continuation records with an attempt number no attempt ever produced.
+    """
+    step.status = StepStatus.PENDING
+    # The in-memory body is authoritative once fresh resume inputs are
+    # assigned; see the resume block (issue #244 B3-i).
+    step.cold_loaded = True
+    inputs = step.inputs if step.inputs is not None else {}
+    inputs["resumed"] = True
+    try:
+        inputs["retry_count"] = int(inputs.get("retry_count", 0) or 0) + 1
+    except (TypeError, ValueError):
+        inputs["retry_count"] = 1
+    step.inputs = inputs
+    step.retry_count = 0
+
+
+def _collect_pending_dialog_messages(project_root: Optional[Path]) -> List[str]:
+    """Drain interjection call files that arrived DURING the dialog.
+
+    Decision 5: while a dialog is open a new interjection is simply the next
+    thing the user said — it must not re-trigger an interruption on top of the
+    interruption already in progress.
+
+    Messages parked by a dual-wait that consumed them and then lost the race to
+    a terminal answer come first: they are already off disk, so this drain is
+    the only place left that can deliver them.
+    """
+    messages = _drain_deferred_web_messages()
+    if project_root is None:
+        return messages
+    try:
+        from ..engine import interaction_calls
+
+        messages.extend(
+            str(item.get("text") or "")
+            for item in interaction_calls.drain_interjection_requests(project_root)
+            if str(item.get("text") or "").strip()
+        )
+    except Exception:  # pragma: no cover - never break the dialog
+        logger.exception("Failed to drain interjections during dialog")
+    return messages
+
+
+def _run_interjection_dialog(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Optional[Path],
+    prompt_history: Any = None,
+    *,
+    initial_messages: Optional[List[str]] = None,
+    pause_context: Optional[str] = None,
+    call_step: Any = None,
+    apply_step: Any = None,
+    prior_state: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Drive the interactive interjection dialog to a confirmed decision.
+
+    ``pause_context`` names the pause point the dialog was opened from
+    (``"confirm"`` / ``"failure"``, or ``"completed_step"`` when the request
+    landed as the step was already finishing); it makes ``continue`` mean "go
+    back to waiting there" instead of "re-run the step".
+
+    ``call_step`` is the step the mirrored call file is ATTRIBUTED to, which at
+    a pause point is the gate rather than *current_step* (the producer whose
+    session the dialog talks to). The daemon drops any call whose step is no
+    longer the flow's current one, so a call filed against the completed
+    producer would never reach the web console.
+
+    ``apply_step`` is the step a confirmed decision is APPLIED to, defaulting to
+    *current_step*. It differs only when the interlocutor and the interrupted
+    step are not the same one — a CONFIRM cut off mid-call talks to the
+    producer's session but must itself be the step a ``continue`` re-runs.
+
+    ``prior_state`` resumes a dialog a previous (daemon/json) process paused
+    mid-round: the transcript and a pending proposal are restored so the
+    terminal picks the conversation up where the web left it.
+
+    An empty first message means "change nothing, resume now" and short-circuits
+    without any LLM call — the cheapest and most common answer to an accidental
+    Ctrl-C must not cost a round trip.
+    """
+    from ..engine.interjection_dialog import (
+        DialogDecision,
+        InterjectionDialog,
+        find_dialog_session,
+        parse_direct_decision,
+    )
+
+    root = Path(project_root) if project_root is not None else Path.cwd()
+    call_step = call_step if call_step is not None else current_step
+    prior_state = prior_state if isinstance(prior_state, dict) else None
+    if apply_step is None and prior_state:
+        apply_step = flow.state.steps.get(prior_state.get("apply_step_id") or "")
+    apply_step = apply_step if apply_step is not None else current_step
+    # WHY the key's PRESENCE and not its truthiness (same rule the
+    # non-interactive driver applies): a persisted ``None`` is a SETTLED answer
+    # — that dialog either found no session or watched the provider reject the
+    # one it had, and fell back to the standalone conversation. Re-running the
+    # lookup when the operator takes the paused dialog over at the terminal
+    # would rediscover the rejected id from the earlier session-bearing record,
+    # announce a same-session conversation that cannot happen, and probe the
+    # dead session a second time. A prior binding that IS set is adopted only
+    # if the dialog still accepts it — the agent may have been removed from the
+    # chain while the flow was paused.
+    if prior_state is not None and "binding" in prior_state:
+        binding = prior_state.get("binding")
     else:
-        get_console().print(t("cli.run.interrupt.retry_as_is"))
-    # Reset step to PENDING so it re-runs
-    current_step.status = StepStatus.PENDING
+        binding = find_dialog_session(flow, current_step, root)
+    dialog = InterjectionDialog(flow, current_step, root, binding=binding)
+    if prior_state:
+        # The prior process's turns are already in the step jsonl (it wrote
+        # them as they happened); assigning the list directly — never via
+        # record_user_turn — is what keeps them from being doubled.
+        dialog.turns = list(prior_state.get("transcript") or [])
+
+    # ``dialog.binding`` — not the raw lookup — is what the panel announces:
+    # the dialog drops a binding whose agent is no longer configured or whose
+    # runner cannot resume, and claiming a same-session conversation that will
+    # not happen is worse than saying nothing.
+    render_full(
+        t(
+            "cli.run.dialog.opened_same_session"
+            if dialog.binding
+            else "cli.run.dialog.opened_standalone",
+            agent=(dialog.binding or {}).get("agent_name") or "-",
+            step_type=dialog.context.current_step_type or "-",
+        ),
+        title=t("cli.run.dialog.title"),
+    )
+
+    pending: List[str] = [m for m in (initial_messages or []) if m is not None]
+    proposal = (
+        DialogDecision.from_dict(prior_state.get("decision"))
+        if prior_state
+        else None
+    )
+    # Holds a structured decision that arrived from the web mid-wait; the
+    # dual-wait channel can only carry a string, so the payload is parked here
+    # and the string is a sentinel. A bare confirmation additionally parks what
+    # it can be BOUND to (see ``published_rounds``), so it is never applied to
+    # a round its author never saw.
+    web_decision: Dict[str, Any] = {}
+    call_file: Optional[Path] = None
+    # INVARIANT: every round mirrored to the console is ledgered here, and a
+    # bare web confirmation is bound to the round it answered — never to the
+    # live ``proposal``. The rounds share one call id, so the live object can
+    # already carry a terminal edit made after the console rendered (and the
+    # operator confirmed) an earlier round; reading that edit back as the thing
+    # they approved would, for ``keep`` → ``reset``, discard the workspace on an
+    # approval never given. Seeded from ``prior_state`` because the round a
+    # resumed dialog inherits was published by the process before it.
+    published_rounds: List[Dict[str, Any]] = _seed_published_rounds(
+        prior_state, proposal
+    )
+
+    def _dialog_tick() -> Optional[str]:
+        """Poll the web side: a dialog reply first, then queued interjections.
+
+        A reply on the dialog call file wins over a queued interjection because
+        it is an answer to the question actually on screen. A structured
+        decision is parked in ``web_decision`` and reported as a sentinel, since
+        the dual-wait can only hand back text.
+
+        INVARIANT: the sentinel is a dialog-local control string and is never
+        parked in the process-wide deferred queue — outside this dialog its
+        payload is unreachable, so it would be handed to a later wait (or to the
+        dialog LLM) as if the operator had typed a NUL string. A payload whose
+        sentinel lost the dual-wait race to a terminal answer is therefore
+        re-offered here instead: this dialog is the only place that can still
+        deliver it, and :func:`_discard_unclaimed_web_decision` resolves what is
+        left when the dialog ends.
+        """
+        if web_decision.get("value") is not None:
+            return _DIALOG_WEB_DECISION
+        if call_file is not None:
+            reply = _read_dialog_call_reply(call_file)
+            if reply is not None:
+                text_reply = reply.get("text")
+                # WHY ``"1"`` is routed through the decision channel too: the
+                # call body offers it as "enter 1 to apply", so from the web it
+                # is a bare confirmation like any other and must be bound to
+                # the round it answered. Handed back as plain text it would
+                # confirm whatever the terminal has since edited into place.
+                bare_one = str(text_reply or "").strip() == "1"
+                if "decision" in reply or "confirm" in reply or bare_one:
+                    if bare_one and "decision" not in reply:
+                        reply["confirm"] = True
+                    web_decision["value"] = reply
+                    # What this confirmation can be bound to: the round id it
+                    # echoed, else when it was written. Captured here, at the
+                    # instant the answer is taken off disk, because the round
+                    # published afterwards is by definition not the one its
+                    # author was looking at.
+                    web_decision["revision"] = str(
+                        reply.get("echoed_revision") or ""
+                    )
+                    web_decision["responded_at"] = reply.get("responded_at")
+                    return _DIALOG_WEB_DECISION
+                if text_reply is not None:
+                    return str(text_reply)
+        return _drain_interjection_as_reply(project_root)
+
+    try:
+        while True:
+            if proposal is not None:
+                _render_dialog_decision(proposal, flow, root)
+            # WHY a reply already on disk is consumed BEFORE the round is
+            # republished: the rounds share one call file, so republishing
+            # first replaces the round the pending reply was written against.
+            # The ledger below still binds a bare confirmation correctly, but
+            # draining first keeps the common case out of the "ambiguous, ask
+            # again" branch entirely.
+            queued = _dialog_tick()
+
+            # Mirror the round to a call file so the web console shows the same
+            # conversation the terminal is holding, and can answer it. The call
+            # id is stable per step, so refreshing never orphans an unread
+            # reply — the drain above is what keeps it from being misattributed.
+            call_file = _refresh_dialog_call(
+                flow, call_step, dialog, proposal, project_root,
+            )
+            _record_published_round(
+                published_rounds, _dialog_round_revision(proposal), call_file
+            )
+
+            if queued is None:
+                # The first round has no call file until the refresh above, so
+                # a reply left on disk by a previous process is picked up by
+                # the tick (which understands a structured decision) rather
+                # than by the dual-wait's generic early check, which would
+                # flatten it to a string.
+                queued = _dialog_tick()
+            if queued is not None:
+                pending.append(queued)
+
+            if pending:
+                text: Optional[str] = pending.pop(0)
+            else:
+                title = (
+                    t("cli.run.dialog.confirm_title")
+                    if proposal is not None
+                    else t("cli.run.dialog.input_title")
+                )
+                message = (
+                    t("cli.run.dialog.confirm_message")
+                    if proposal is not None
+                    else t("cli.run.dialog.input_message")
+                )
+                try:
+                    _source, text = _await_terminal_or_web(
+                        call_file,
+                        prompt_title=title,
+                        prompt_message=message,
+                        history=prompt_history,
+                        strip=False,
+                        tick_callback=_dialog_tick,
+                    )
+                except KeyboardInterrupt:
+                    text = None
+                if text is None:
+                    # Ctrl-C at the input box IS the exit decision (decision 3)
+                    # — so it is routed through the very same apply path an
+                    # explicit ``exit`` takes, not short-circuited. Saving and
+                    # returning directly used to skip ``apply_decision``, and
+                    # with it the discard of any one-shot gate note parked by an
+                    # earlier ``continue`` at this same pause: the note then
+                    # outlived the pause it was scoped to and was delivered to a
+                    # later ``--resume``'s run.
+                    from ..engine.interjection_dialog import ACTION_EXIT
+
+                    outcome, _error = _confirm_and_apply_decision(
+                        flow, apply_step, DialogDecision(action=ACTION_EXIT),
+                        dialog, persistence, root, pause_context=pause_context,
+                    )
+                    if outcome is not None:
+                        return outcome
+                    persistence.save_flow(flow)
+                    render_full(
+                        t("cli.run.interrupt.saved_body"),
+                        title=t("cli.run.interrupt.exit_title"),
+                    )
+                    return _DIALOG_EXIT
+
+            stripped = (text or "").strip()
+
+            if stripped == _DIALOG_WEB_DECISION:
+                reply = web_decision.pop("value", {})
+                echoed_revision = str(web_decision.pop("revision", "") or "")
+                responded_at = web_decision.pop("responded_at", None)
+                edited = (
+                    DialogDecision.from_dict(reply["decision"], strict=True)
+                    if isinstance(reply.get("decision"), dict)
+                    else None
+                )
+                if isinstance(reply.get("decision"), dict) and edited is None:
+                    # A user-edited decision with an invalid action/workspace is
+                    # rejected, never coerced: executing it as ``continue``
+                    # would run a decision the operator never made.
+                    display_error(t("cli.run.dialog.invalid_decision"))
+                    continue
+                if edited is None and _bare_confirmation_is_stale(
+                    published_rounds,
+                    _dialog_round_revision(proposal),
+                    echoed_revision=echoed_revision,
+                    responded_at=responded_at,
+                ):
+                    # A bare confirmation carries no fields of its own — it can
+                    # only mean "apply what is on the table". This one cannot be
+                    # bound to the round now on the table (see
+                    # :func:`_bare_confirmation_is_stale`), so applying it would
+                    # execute a decision its author never saw. The current round
+                    # is re-published for a fresh confirmation instead. Nothing
+                    # is lost by dropping it: a bare confirmation's ``text`` is
+                    # the one-click marker ("confirm" / "1"), never prose the
+                    # operator typed.
+                    #
+                    # INVARIANT: the ledger is NOT pruned to the round being
+                    # republished. Doing that made the very next fieldless
+                    # confirmation valid by construction — including the blind
+                    # retry of the one just refused, sent by a client that never
+                    # fetched the new round — and that is how an approval of
+                    # ``keep`` executed a workspace ``reset``. What re-opens the
+                    # path is evidence the client HAS seen the republished
+                    # round: the round id echoed back (or an answer written
+                    # while no other round was ever on the table), never the
+                    # bare word again.
+                    display_error(t("cli.run.dialog.web_decision_superseded"))
+                    continue
+                if edited is None and proposal is None:
+                    # A bare "confirm" with nothing on the table is not a
+                    # confirmation of anything — it is the operator's next
+                    # message, and applying an empty decision here would resume
+                    # the flow behind their back.
+                    text = str(reply.get("text") or "")
+                    stripped = text.strip()
+                    if not stripped:
+                        continue
+                elif reply.get("preview") and edited is not None:
+                    # The operator edited the proposal into one that would
+                    # discard the workspace. Adopt the fields and loop: the next
+                    # turn renders — and re-mirrors to the web console — a
+                    # preview built for THIS decision, so their Apply is
+                    # informed rather than blind.
+                    proposal = edited
+                    continue
+                else:
+                    decided = edited or proposal or DialogDecision()
+                    outcome, _error = _confirm_and_apply_decision(
+                        flow, apply_step, decided, dialog, persistence, root,
+                        pause_context=pause_context,
+                    )
+                    if outcome is None:
+                        # The confirmation failed to apply (bad rewind target,
+                        # refused reset) — the decision stays on the table for
+                        # correction instead of degrading into a continue.
+                        proposal = decided
+                        continue
+                    return outcome
+
+            if not stripped:
+                # INVARIANT: an empty line means "change nothing, continue
+                # immediately" at EVERY point of the dialog, in both front
+                # ends. It is never a confirmation of a pending proposal — the
+                # operator who just wants to resume must not be able to trigger
+                # a restart + workspace reset by pressing Enter — and it never
+                # spends an LLM round.
+                get_console().print(t("cli.run.interrupt.retry_as_is"))
+                outcome, _error = _confirm_and_apply_decision(
+                    flow, apply_step, DialogDecision(), dialog, persistence,
+                    root, pause_context=pause_context,
+                )
+                if outcome is None:
+                    continue
+                return outcome
+
+            if proposal is not None:
+                if stripped == "1":
+                    outcome, _error = _confirm_and_apply_decision(
+                        flow, apply_step, proposal, dialog, persistence, root,
+                        pause_context=pause_context,
+                    )
+                    if outcome is None:
+                        continue  # the proposal stays on the table
+                    return outcome
+                if _apply_decision_edits(proposal, stripped):
+                    get_console().print(t("cli.run.dialog.edits_applied"))
+                    continue
+                proposal = None  # falls through: the next dialog message
+
+            direct = parse_direct_decision(stripped)
+            if direct is not None:
+                dialog.record_user_turn(stripped)
+                proposal = direct
+                continue
+
+            try:
+                turn = dialog.ask(stripped)
+            except KeyboardInterrupt:
+                # Ctrl-C WHILE the agent is replying cancels this round only
+                # and returns to the input box; the conversation is not lost.
+                get_stop_signal().clear()
+                get_console().print(t("cli.run.dialog.round_cancelled"))
+                continue
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Interjection dialog round failed")
+                display_error(t("cli.run.dialog.round_failed", error=str(exc)))
+                continue
+
+            if turn.content:
+                render_full(turn.content, title=t("cli.run.dialog.reply_title"))
+            proposal = turn.decision if turn.is_decision else None
+    finally:
+        _discard_unclaimed_web_decision(web_decision)
+        _cleanup_discovery_call(call_file)
+
+
+def _discard_unclaimed_web_decision(web_decision: Dict[str, Any]) -> None:
+    """Resolve a web payload the dialog consumed off disk but never claimed.
+
+    Reached when the terminal side answered in the same poll tick that consumed
+    a structured reply AND that answer resolved the dialog: the sentinel is
+    dialog-local, so once the dialog returns there is nothing left that could
+    apply the decision — it lost the race outright and is dropped rather than
+    leaking into a later wait. Dropping loses no operator prose: the payload is
+    either a structured decision (no free text at all) or a one-click
+    confirmation whose ``text`` is the literal marker word, and both are answers
+    to a question this dialog no longer asks. The operator is told, so the
+    silence is not mistaken for the decision having been applied.
+    """
+    reply = web_decision.pop("value", None)
+    web_decision.pop("revision", None)
+    web_decision.pop("responded_at", None)
+    if not isinstance(reply, dict):
+        return
+    logger.info("Web dialog decision arrived after the dialog was resolved; dropped")
+    try:
+        get_console().print(t("cli.run.dialog.web_decision_dropped"))
+    except Exception:  # pragma: no cover - never break the dialog teardown
+        logger.exception("Failed to report the dropped web dialog decision")
+
+
+#: Sentinel the dual-wait hands back when a STRUCTURED decision arrived from the
+#: web. The channel can only carry a string, so the payload is parked alongside.
+_DIALOG_WEB_DECISION = "\x00tianluo-dialog-decision"
+
+
+def _read_dialog_call_reply(call_file: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """Consume a reply to the mirrored dialog call file, if one has landed.
+
+    Consuming (rather than peeking) matters: the same file is re-used for every
+    round of the conversation, so a reply left on disk would be re-read as the
+    next round's answer.
+    """
+    if call_file is None:
+        return None
+    try:
+        from ..engine import interaction_calls
+
+        # Read BEFORE the answer is consumed: the binding lives on the response
+        # file itself (when it was written, which round id it echoed), and that
+        # file is gone the moment the reply has been taken.
+        binding = interaction_calls.dialog_response_binding(call_file)
+        reply = interaction_calls.read_dialog_response(call_file)
+    except Exception:  # pragma: no cover - never break the dialog
+        logger.exception("Failed to read the dialog call reply")
+        return None
+    if reply is not None:
+        reply["echoed_revision"] = binding.get("decision_revision") or ""
+        reply["responded_at"] = binding.get("responded_at")
+        _cleanup_discovery_response(call_file)
+    return reply
+
+
+def _reset_preview_payload(
+    flow: FlowInstance, proposal: Any, project_root: Optional[Path]
+) -> Optional[Dict[str, Any]]:
+    """The reset preview as a JSON payload for the web console's dialog card."""
+    preview = _reset_preview(flow, proposal, project_root)
+    if preview is None:
+        return None
+    return {
+        "status_summary": preview.status_summary,
+        "flow_commits": list(preview.flow_commits),
+        "baseline_commit": preview.baseline_commit,
+        "has_dirty_snapshot": preview.has_dirty_snapshot,
+        "snapshot_warning": preview.snapshot_warning,
+        # The web console gates its Apply button on this: a preview that could
+        # not be taken must not read as an empty (clean) one.
+        "ok": bool(preview.ok),
+        "error": preview.error,
+    }
+
+
+def _refresh_dialog_call(
+    flow: FlowInstance,
+    call_step: Any,
+    dialog: Any,
+    proposal: Any,
+    project_root: Optional[Path],
+) -> Optional[Path]:
+    """Mirror the current dialog round to a ``tianluo/calls/`` call file.
+
+    The same reason ``_maybe_write_discovery_call`` exists: an interaction the
+    terminal is blocking on should be visible — and answerable — from the web
+    console too. Returns ``None`` when there is no project root or the write
+    fails, in which case the round degrades to a terminal-only wait.
+
+    ``call_step`` is the flow's CURRENT step, which at a pause point is the
+    gate and not the dialog's subject: the daemon filters out any pending call
+    whose step the flow has already walked past, so filing this against the
+    reviewed producer would hide the whole conversation from the web console.
+    """
+    if project_root is None:
+        return None
+    try:
+        from ..engine import interaction_calls
+
+        return interaction_calls.write_dialog_call(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=call_step.step_id,
+            step_type=dialog.context.current_step_type,
+            prompt=_dialog_call_prompt(dialog, proposal),
+            transcript=dialog.transcript(),
+            decision=proposal.to_dict() if proposal is not None else None,
+            rewind_targets=_dialog_rewind_targets(flow),
+            same_session=dialog.binding is not None,
+            agent_name=(dialog.binding or {}).get("agent_name") or "",
+            subject_step_id=dialog.context.current_step_id,
+            reset_preview=_reset_preview_payload(flow, proposal, project_root),
+            group_work=_group_work_preview(flow, proposal, project_root),
+        )
+    except Exception:  # pragma: no cover - defensive: never block on the mirror
+        logger.exception("Failed to mirror the interjection dialog to a call file")
+        return None
+
+
+def _dialog_subject_step(flow: FlowInstance, current_step: Any) -> Any:
+    """The step whose session the dialog should talk to.
+
+    At a CONFIRM gate or a failure-decision pause the operator is asking about
+    the artefact under review, not about the gate — so the interlocutor is the
+    step that PRODUCED it. That step's session still holds the reasoning behind
+    the output being questioned; the CONFIRM step has no session at all.
+    """
+    try:
+        if current_step.step_type == StepType.CONFIRM:
+            reviewed_id = (current_step.inputs or {}).get("step_to_review_id")
+            reviewed = flow.state.steps.get(reviewed_id) if reviewed_id else None
+            if reviewed is not None:
+                return reviewed
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Failed to resolve dialog subject step", exc_info=True)
+    return current_step
+
+
+def _dialog_at_pause_point(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Optional[Path],
+    prompt_history: Any = None,
+    *,
+    initial_messages: Optional[List[str]] = None,
+    pause_context: Optional[str] = "confirm",
+    output_format: str = "cli",
+) -> str:
+    """Open the interjection dialog from a pause point (CONFIRM / failure).
+
+    There is no LLM subprocess to interrupt here, so the dialog starts
+    immediately. ``continue`` returns :data:`_DIALOG_RESUME_PAUSE`, meaning
+    "go back to waiting at this gate" — the pause is not resolved by the
+    dialog, only informed by it.
+
+    ``pause_context=None`` says the opposite: this is not a gate but a step
+    that was cut off mid-call in a process that has since exited, so
+    ``continue`` re-runs it as a retry (and performs the single retry-count
+    increment the resume path deliberately skipped).
+    """
+    subject = _dialog_subject_step(flow, current_step)
+    # A Ctrl-C at the gate publishes the stop request before raising, and any
+    # text that came with it is the conversation's opening message. Taken (not
+    # merely read) here because the request is level-triggered: leaving it set
+    # would make LLMCaller's pre-spawn check reject the dialog's own first
+    # read-only turn, so the user's opening question would be recorded and
+    # immediately reported as cancelled.
+    request = get_stop_signal().take()
+    messages = list(initial_messages or [])
+    if request is not None:
+        messages.extend(text for text in request.texts if text)
+    if output_format == "json":
+        # No terminal to prompt on: each round travels through a `dialog`
+        # call file and the flow exits PAUSED between them.
+        return _run_interjection_dialog_noninteractive(
+            flow, subject, persistence, Path(project_root or Path.cwd()),
+            initial_messages=messages,
+            pause_context=pause_context,
+            call_step=current_step,
+        )
+    return _run_interjection_dialog(
+        flow, subject, persistence, project_root, prompt_history,
+        initial_messages=messages,
+        pause_context=pause_context,
+        call_step=current_step,
+    )
+
+
+def _dialog_state(flow: FlowInstance) -> Optional[Dict[str, Any]]:
+    """Return the persisted non-interactive dialog state, if one is open."""
+    state = flow.state.context.get("active_dialog")
+    return state if isinstance(state, dict) else None
+
+
+def _gate_call_is_pending(project_root: Optional[Path], step: Any) -> bool:
+    """Whether *step*'s gate still has an unanswered call file on disk.
+
+    INVARIANT: ``continue`` at a gate resolves NOTHING — the gate keeps waiting
+    for its own answer. Across a process boundary the wait IS that call file, so
+    "go back to waiting" can only mean "exit with the gate untouched" while the
+    file is still pending. Re-entering the run loop instead would re-run the
+    CONFIRM handler: the step would flip PAUSED → RUNNING and publish a second
+    confirm call for a gate nobody resolved.
+
+    Returns False when no such call exists (the stop landed before the handler
+    published it) or when it has already been answered — in both cases the gate
+    genuinely has to be (re-)entered.
+    """
+    if project_root is None or step is None:
+        return False
+    try:
+        from ..engine import interaction_calls
+
+        step_id = str(getattr(step, "step_id", "") or "")
+        if not step_id:
+            return False
+        calls_dir = interaction_calls.calls_dir_for(project_root)
+        candidates = [
+            interaction_calls.retry_decision_call_path(project_root, step_id)
+        ]
+        if calls_dir.exists():
+            candidates.extend(sorted(calls_dir.glob(f"confirm_{step_id}_*.json")))
+        for path in candidates:
+            if not path.exists():
+                continue
+            if interaction_calls.read_response(path) is None:
+                return True
+    except Exception:  # pragma: no cover - a probe must never break the resume
+        logger.exception("Failed to probe the pending gate call")
+    return False
+
+
+def _run_interjection_dialog_noninteractive(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+    *,
+    initial_messages: Optional[List[str]] = None,
+    pause_context: Optional[str] = None,
+    call_step: Any = None,
+    apply_step: Any = None,
+) -> str:
+    """Drive one round of the dialog through the ``tianluo/calls/`` channel.
+
+    Mirrors the non-interactive DISCOVERY pause exactly: each round writes a
+    ``dialog`` call file, the flow exits PAUSED, the daemon re-spawns
+    ``--resume`` once the web answers, and the answer is consumed on the way
+    back in. The conversation state lives in ``flow.state.context`` because it
+    has to survive that process boundary.
+    """
+    from ..engine import interaction_calls
+    from ..engine.interjection_dialog import (
+        DialogDecision,
+        InterjectionDialog,
+        find_dialog_session,
+        parse_direct_decision,
+    )
+
+    call_step = call_step if call_step is not None else current_step
+    apply_step = apply_step if apply_step is not None else current_step
+    state = _dialog_state(flow) or {
+        "step_id": current_step.step_id,
+        # The gate the call file is filed against; see _refresh_dialog_call.
+        "call_step_id": call_step.step_id,
+        # The step a confirmed decision is APPLIED to; see the interactive
+        # driver's docstring. Persisted because it must survive the daemon's
+        # process boundary, exactly like the call step.
+        "apply_step_id": apply_step.step_id,
+        "pause_context": pause_context,
+        "transcript": [],
+        "decision": None,
+        "call_file": None,
+        # The rounds this conversation has put on the console, oldest first.
+        # Crosses the daemon's process boundary because a bare confirmation is
+        # bound to the round it answered, and that round was published by an
+        # earlier wake-up; see :func:`_bare_confirmation_is_stale`.
+        "published_rounds": [],
+    }
+    pause_context = state.get("pause_context") or pause_context
+    call_step_id = state.get("call_step_id") or call_step.step_id
+    state["call_step_id"] = call_step_id
+    apply_step_id = state.get("apply_step_id") or apply_step.step_id
+    state["apply_step_id"] = apply_step_id
+    apply_step = flow.state.steps.get(apply_step_id) or apply_step
+
+    # WHY the key's PRESENCE and not its truthiness: ``None`` is a settled
+    # answer here — either no session was ever found, or a round discovered the
+    # provider had dropped it. Re-looking-up on every wake-up would resurrect a
+    # dead binding across the daemon's process boundary, so each later round
+    # would probe the same dead session again and stamp its user record with
+    # the obsolete id.
+    if "binding" in state:
+        binding = state.get("binding")
+    else:
+        binding = find_dialog_session(flow, current_step, project_root)
+        state["binding"] = binding
+    dialog = InterjectionDialog(
+        flow, current_step, project_root, binding=binding
+    )
+    dialog.turns = list(state.get("transcript") or [])
+
+    # WHY ``is not None`` rather than truthiness: an EMPTY message is itself
+    # an answer here — "change nothing, resume now" — and filtering it out
+    # would silently turn the cheapest decision into another paused round.
+    incoming: List[str] = [m for m in (initial_messages or []) if m is not None]
+    proposal = DialogDecision.from_dict(state.get("decision"))
+    # Set when the web reply asked for a preview of an EDITED decision rather
+    # than its execution; the round is then re-published instead of applied.
+    preview_only = False
+    # Set when the web reply was an explicit confirmation. It outranks an
+    # interjection that raced it: the operator already said "do this".
+    confirmed = False
+    # Set when a web free-text reply edited the proposal's fields: the round is
+    # re-published (with a rebuilt preview) rather than applied.
+    edits_only = False
+    # An apply/validation failure from THIS wake, republished with the round so
+    # the web operator SEES why their decision did not execute instead of
+    # watching the flow silently stay paused. Deliberately not loaded back from
+    # ``state``: once the operator answers, the new round stands on its own.
+    apply_error = ""
+
+    # Decision 5: an interjection that arrives while a round is open IS that
+    # round's next user message. Drained BEFORE the still-unanswered bail-out
+    # below, or the daemon's wake-up would exit straight back to PAUSED and the
+    # file would sit pending until some unrelated event woke the flow again.
+    drained = _collect_pending_dialog_messages(project_root)
+
+    published_rounds: List[Dict[str, Any]] = _seed_published_rounds(state, proposal)
+
+    def _reject_stale_confirmation() -> str:
+        """Re-publish the current round instead of applying a bare confirmation.
+
+        INVARIANT: the ledger keeps every round it has published. Pruning it to
+        the one being republished would make the next fieldless confirmation
+        bindable by construction — a client that retries the refused answer
+        without ever fetching the new round would have its stale approval
+        executed, which for ``keep`` → ``reset`` discards the workspace on an
+        approval never given. Only evidence the client saw this round (the
+        echoed round id) re-opens the path.
+        """
+        return t("cli.run.dialog.web_decision_superseded")
+
+    call_path = state.get("call_file")
+    if call_path:
+        call_file = Path(call_path)
+        # Taken before the answer is consumed — the binding lives on the
+        # response file, which reading the reply removes.
+        binding = (
+            interaction_calls.dialog_response_binding(call_file)
+            if call_file.exists()
+            else {}
+        )
+        response = (
+            interaction_calls.read_dialog_response(call_file)
+            if call_file.exists()
+            else None
+        )
+        if response is None and not drained:
+            # Still unanswered and nothing new arrived — stay paused.
+            flow.state.context["active_dialog"] = state
+            flow.status = FlowStatus.PAUSED
+            persistence.save_flow(flow)
+            return _DIALOG_AWAITING_WEB
+        _cleanup_discovery_call(call_file)
+        state["call_file"] = None
+        # Whether a FIELDLESS answer ("confirm" / "1") can still be read as an
+        # answer to the round now on the table; see
+        # :func:`_bare_confirmation_is_stale`.
+        stale_confirmation = _bare_confirmation_is_stale(
+            published_rounds,
+            _dialog_round_revision(proposal),
+            echoed_revision=str(binding.get("decision_revision") or ""),
+            responded_at=binding.get("responded_at"),
+        )
+        if response is None:
+            # Superseded by a new interjection: the open call file is retired
+            # and republished below carrying the answer to this message.
+            proposal = None
+        elif response.get("confirm") and proposal is not None:
+            if stale_confirmation:
+                # A fieldless confirmation of a round this one has replaced —
+                # applying it would execute a decision its author never saw.
+                apply_error = _reject_stale_confirmation()
+                preview_only = True  # republish for a fresh confirmation
+            else:
+                confirmed = True  # confirm the proposal unchanged
+        elif isinstance(response.get("decision"), dict):
+            edited = DialogDecision.from_dict(response["decision"], strict=True)
+            if edited is None:
+                # A user-edited decision with an invalid action/workspace is
+                # rejected and re-published for correction — never coerced into
+                # a different action and executed.
+                apply_error = t("cli.run.dialog.invalid_decision")
+                preview_only = True  # republish, do not apply
+            else:
+                proposal = edited
+                # "Show me what this would do", not "do it": the round is
+                # re-published with a preview built for the edited decision.
+                preview_only = bool(response.get("preview"))
+                # An edited decision that is NOT a preview request is the
+                # operator's Apply. Recording that explicitly is what keeps a
+                # racing interjection from overwriting it below — they already
+                # said "do this".
+                confirmed = not preview_only
+        else:
+            text_reply = str(response.get("text") or "")
+            stripped_reply = text_reply.strip()
+            if proposal is not None and stripped_reply == "1":
+                # The call body tells the web operator "Enter 1 to apply", so
+                # the channel honours it exactly as the terminal does — and,
+                # being just as fieldless, it is bound to its round the same
+                # way a one-click confirm is.
+                if stale_confirmation:
+                    apply_error = _reject_stale_confirmation()
+                    preview_only = True
+                else:
+                    confirmed = True
+            elif proposal is not None and _apply_decision_edits(
+                proposal, stripped_reply
+            ):
+                # ``field: value`` lines edit the pending proposal, exactly as
+                # at the terminal; the re-published round carries the edited
+                # fields (and a preview rebuilt for them).
+                edits_only = True
+            else:
+                # With no proposal on the table a bare "confirm" is just the
+                # operator's next message (the reply carries its own text), not
+                # a confirmation of something that was never offered.
+                incoming.append(text_reply)
+                proposal = None
+
+    incoming.extend(drained)
+
+    if (
+        proposal is not None
+        and not preview_only
+        and not edits_only
+        and (confirmed or not incoming)
+    ):
+        # Anything that raced the confirmation is recorded before the decision
+        # executes: the dialog is about to end, so an unanswered message would
+        # otherwise vanish without ever appearing in the step's history.
+        for raced in incoming:
+            if raced.strip():
+                dialog.record_user_turn(raced, source="web-console")
+                logger.info(
+                    "Dialog: message arrived alongside a confirmed decision; "
+                    "recorded but not answered"
+                )
+        outcome, apply_error = _confirm_and_apply_decision(
+            flow, apply_step, proposal, dialog, persistence, project_root,
+            pause_context=pause_context,
+        )
+        if outcome is not None:
+            flow.state.context.pop("active_dialog", None)
+            return outcome
+        # The confirmed decision failed to apply (a bad rewind target, a
+        # refused reset). The dialog stays open and the round is republished
+        # below with the error on it — the flow must NOT fall through to a
+        # ``continue`` the operator never confirmed, and the web side must see
+        # why nothing happened.
+        state["transcript"] = dialog.transcript()
+        state["decision"] = proposal.to_dict() if proposal is not None else None
+        state["apply_error"] = apply_error
+        state["binding"] = dialog.binding
+        state["pause_context"] = pause_context
+        call_file = interaction_calls.write_dialog_call(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=call_step_id,
+            step_type=dialog.context.current_step_type,
+            prompt=_dialog_call_prompt(dialog, proposal, error=apply_error),
+            transcript=state["transcript"],
+            decision=state["decision"],
+            rewind_targets=_dialog_rewind_targets(flow),
+            same_session=dialog.binding is not None,
+            agent_name=(dialog.binding or {}).get("agent_name") or "",
+            subject_step_id=dialog.context.current_step_id,
+            reset_preview=_reset_preview_payload(flow, proposal, project_root),
+            group_work=_group_work_preview(flow, proposal, project_root),
+            apply_error=apply_error or "",
+        )
+        state["call_file"] = str(call_file)
+        state["published_rounds"] = _record_published_round(
+            published_rounds, _dialog_round_revision(proposal), call_file
+        )
+        flow.state.context["active_dialog"] = state
+        flow.status = FlowStatus.PAUSED
+        persistence.save_flow(flow)
+        return _DIALOG_AWAITING_WEB
+
+    # The messages still to consume this round. Refilled from the calls
+    # directory as it drains: while THIS process is alive the daemon refuses to
+    # spawn another ``--resume``, so an interjection posted while the agent was
+    # answering has no other way in — draining only once left it pending until
+    # some unrelated wake-up.
+    pending: List[str] = list(incoming)
+    drains = 0
+
+    def _next_message() -> Optional[str]:
+        nonlocal drains
+        while not pending:
+            if drains >= _MAX_DIALOG_DRAINS:
+                return None
+            drains += 1
+            fresh = _collect_pending_dialog_messages(project_root)
+            if not fresh:
+                return None
+            pending.extend(fresh)
+        return pending.pop(0)
+
+    while True:
+        message = _next_message()
+        if message is None:
+            break
+        text = (message or "").strip()
+        if not text:
+            # Empty message = resume unchanged, no LLM call — but only when it
+            # is the last thing the user said. A blank followed by more text is
+            # not an answer, it is noise in front of one.
+            follow_up = _next_message()
+            if follow_up is not None:
+                pending.insert(0, follow_up)
+                continue
+            outcome, apply_error = _confirm_and_apply_decision(
+                flow, apply_step, DialogDecision(), dialog, persistence,
+                project_root, pause_context=pause_context,
+            )
+            if outcome is None:
+                # Even "resume unchanged" must not silently degrade when the
+                # apply itself fails — republish with the error attached.
+                break
+            flow.state.context.pop("active_dialog", None)
+            return outcome
+        direct = parse_direct_decision(text)
+        if direct is not None:
+            dialog.record_user_turn(text, source="web-console")
+            proposal = direct
+            # INVARIANT: no message is dropped on the way to a proposal. A
+            # proposal is not a confirmation — only the operator confirms — so
+            # anything they said after it is still theirs to have answered, and
+            # breaking here deleted its call file without ever recording,
+            # showing or processing the text.
+            continue
+        try:
+            turn = dialog.ask(text)
+        except Exception:  # noqa: BLE001 - a failed round must not lose the flow
+            logger.exception("Interjection dialog round failed")
+            turn = None
+        if turn is not None and turn.is_decision:
+            proposal = turn.decision
+        else:
+            # A further message supersedes the previous proposal: the agent has
+            # been asked something new and has not proposed anything yet.
+            proposal = None
+
+    state["transcript"] = dialog.transcript()
+    state["decision"] = proposal.to_dict() if proposal is not None else None
+    state["pause_context"] = pause_context
+    # A round may have discovered the provider dropped the session; the dialog
+    # then dropped the binding in memory. That has to cross the process
+    # boundary, or the next wake-up rebuilds the dialog on the dead binding.
+    state["binding"] = dialog.binding
+    # A round publishes this wake's apply error (if any); a clean conversation
+    # round clears a stale one from the state.
+    if apply_error:
+        state["apply_error"] = apply_error
+    else:
+        state.pop("apply_error", None)
+    prompt_text = _dialog_call_prompt(dialog, proposal, error=apply_error)
+    call_file = interaction_calls.write_dialog_call(
+        project_root,
+        flow_id=flow.flow_id,
+        step_id=call_step_id,
+        step_type=dialog.context.current_step_type,
+        prompt=prompt_text,
+        transcript=state["transcript"],
+        decision=state["decision"],
+        rewind_targets=_dialog_rewind_targets(flow),
+        same_session=dialog.binding is not None,
+        agent_name=(dialog.binding or {}).get("agent_name") or "",
+        subject_step_id=dialog.context.current_step_id,
+        reset_preview=_reset_preview_payload(flow, proposal, project_root),
+        group_work=_group_work_preview(flow, proposal, project_root),
+        apply_error=apply_error or "",
+    )
+    state["call_file"] = str(call_file)
+    state["published_rounds"] = _record_published_round(
+        published_rounds, _dialog_round_revision(proposal), call_file
+    )
+    flow.state.context["active_dialog"] = state
+    flow.status = FlowStatus.PAUSED
     persistence.save_flow(flow)
-    # Return a special marker to indicate retry
-    return StepStatus.PENDING
+    logger.info("Interjection dialog paused for web reply: %s", call_file)
+    return _DIALOG_AWAITING_WEB
+
+
+def _dialog_call_prompt(dialog: Any, proposal: Any, error: str = "") -> str:
+    """Human-facing body of a ``dialog`` call file."""
+    parts: List[str] = []
+    if error:
+        # A failed Apply is republished WITH its reason: a call body that just
+        # re-shows the proposal would read as "nothing happened" and invite the
+        # same click again.
+        parts.append(t("cli.run.dialog.apply_failed", error=error))
+        parts.append("")
+    for turn in dialog.transcript()[-6:]:
+        speaker = (
+            t("cli.run.dialog.speaker_user")
+            if turn.get("role") == "user"
+            else t("cli.run.dialog.speaker_agent")
+        )
+        content = str(turn.get("content") or "").strip()
+        if content:
+            parts.append(f"{speaker}: {content}")
+    if proposal is not None:
+        parts.append("")
+        parts.append(t("cli.run.dialog.confirm_message"))
+    else:
+        parts.append("")
+        parts.append(t("cli.run.dialog.input_message"))
+    return "\n".join(parts)
 
 
 def _restore_discovery_display(current_step: Any) -> None:
@@ -1303,6 +2940,195 @@ _DISCOVERY_SRC_WEB = "web"
 _DISCOVERY_SRC_CANCEL = "cancel"
 
 
+def _drain_interjection_as_reply(project_root: Optional[Path]) -> Optional[str]:
+    """Consume queued interjections and return them as ONE discovery reply.
+
+    Decision 5's DISCOVERY rule: while discovery is paused the user is already
+    at a conversation prompt, so a web-pushed interjection is just their next
+    turn — not a reason to nest a second conversation. Several queued messages
+    are joined into one reply so nothing is dropped and their order is kept.
+    Returns ``None`` when nothing was queued.
+    """
+    if project_root is None:
+        return None
+    texts = _collect_pending_dialog_messages(project_root)
+    if not texts:
+        return None
+    return "\n".join(texts)
+
+
+def _discard_outstanding_discovery_call(current_step: Any) -> None:
+    """Drop a discovery call that an interjection answered out of band.
+
+    Without this the stale call file would keep showing as a pending
+    interaction on the web console even though its question has been overtaken
+    by the interjection that is now the user's reply.
+    """
+    call_path = current_step.outputs.pop("discovery_call_file", None)
+    if call_path:
+        _cleanup_discovery_call(Path(call_path))
+
+
+#: Web / interjection messages that were consumed off disk but lost the race to
+#: a terminal answer.
+#:
+#: INVARIANT: a message consumed off disk is never dropped. The dual-wait
+#: pollers CONSUME as they read (an interjection call file is sealed, a dialog
+#: ``.response`` deleted), so when the terminal side completes inside the same
+#: poll tick the message exists nowhere else — discarding it loses a decision
+#: the web operator already applied. Parking it here delivers it as the next
+#: message instead: every subsequent web-channel sweep and every dialog-message
+#: drain takes from this queue first.
+#:
+#: Process-global for the same reason the stop signal is: which wait picks the
+#: message up depends on where the flow goes next, not on who parked it.
+_DEFERRED_WEB_MESSAGES: List[str] = []
+
+
+def _defer_web_messages(values: Any) -> None:
+    """Park consumed-but-undelivered web messages for the next wait.
+
+    INVARIANT: only real operator text is ever parked. The interjection
+    dialog's control sentinel is a dialog-local marker whose payload lives in
+    that dialog's own state, so parking it would outlive the dialog and be
+    handed to an unrelated wait — as a discovery reply, or as the first message
+    of a new dialog — as if the operator had typed a NUL string. Its owning
+    dialog re-offers or resolves it instead (see ``_dialog_tick`` and
+    :func:`_discard_unclaimed_web_decision`).
+    """
+    if isinstance(values, str):
+        values = [values]
+    for value in values or []:
+        text = str(value or "")
+        if not text:
+            continue
+        if text == _DIALOG_WEB_DECISION:
+            logger.debug("Dialog control sentinel not parked in the web queue")
+            continue
+        _DEFERRED_WEB_MESSAGES.append(text)
+
+
+def _take_deferred_web_message() -> Optional[str]:
+    """Pop the oldest parked message, or ``None``."""
+    if _DEFERRED_WEB_MESSAGES:
+        return _DEFERRED_WEB_MESSAGES.pop(0)
+    return None
+
+
+def _drain_deferred_web_messages() -> List[str]:
+    """Pop every parked message, oldest first."""
+    drained = list(_DEFERRED_WEB_MESSAGES)
+    _DEFERRED_WEB_MESSAGES.clear()
+    return drained
+
+
+def _ask_tick(
+    tick_callback: Optional[Callable[[], Optional[str]]]
+) -> Optional[str]:
+    """Poll the structured reply channel; a raising tick never breaks the wait."""
+    if tick_callback is None:
+        return None
+    try:
+        return tick_callback()
+    except Exception:  # pragma: no cover - never break the wait
+        logger.exception("Interjection tick callback raised; ignoring")
+        return None
+
+
+def _poll_web_answer(
+    call_file: Optional[Path],
+    tick_callback: Optional[Callable[[], Optional[str]]],
+) -> Optional[str]:
+    """One non-blocking sweep of the web channel; the answer text, or ``None``.
+
+    WHY the tick callback is asked FIRST and the plain response file only after:
+    the tick understands the structured dialog protocol (it parks a
+    ``{"decision": {...}}`` payload and hands back a sentinel), whereas
+    :func:`_read_discovery_response` flattens any non-string payload to its
+    ``str()`` repr — which, for a web operator's Apply, would turn an executable
+    decision into prose fed back to the dialog LLM, and consume the file so it
+    could never be re-read. Every place that consults the web channel therefore
+    goes through this order.
+
+    A message parked by an earlier wait that consumed it and then lost the race
+    to a terminal answer wins outright: it is already off disk, so no later
+    sweep could rediscover it.
+    """
+    deferred = _take_deferred_web_message()
+    if deferred is not None:
+        return deferred
+    pushed = _ask_tick(tick_callback)
+    if pushed is not None:
+        return pushed
+    if call_file is None:
+        return None
+    resp = _read_discovery_response(call_file)
+    if resp is None:
+        return None
+    # A reply that landed in the window BETWEEN the tick above and this read is
+    # still the structured channel's to interpret: the peek proves the file is
+    # there now, so asking the tick once more consumes it as a decision instead
+    # of flattening it here. Without this the two reads race, and roughly every
+    # other web Apply was destroyed by the loser.
+    pushed = _ask_tick(tick_callback)
+    if pushed is not None:
+        return pushed
+    _cleanup_discovery_response(call_file)
+    return resp
+
+
+def _await_terminal_or_web_non_tty(
+    call_file: Optional[Path],
+    *,
+    prompt_title: str,
+    prompt_message: str,
+    history: Any,
+    strip: bool,
+    poll_interval: float,
+    tick_callback: Optional[Callable[[], Optional[str]]] = None,
+) -> Tuple[str, Optional[str]]:
+    """Non-TTY dual-wait: the blocking stdin read raced against the web channel.
+
+    WHY this is a race and not "read stdin, then check the web file once": with
+    a non-TTY stdin that stays open (a pipe held by the launcher), the read
+    returns only at EOF, so the post-read check can be arbitrarily late — a web
+    operator answering the dialog would sit unanswered, and their answer would
+    then be read through the flattening generic path instead of the structured
+    tick. The TTY branch already races the two channels; this gives the non-TTY
+    branch the same semantics, structured decisions included.
+
+    INVARIANT: losing the race consumes no stdin. The terminal side is polled
+    in bounded slices through the process-wide funnel rather than by parking a
+    thread in the read — a parked reader outlives the wait it was started for
+    and steals the operator's next answer (a gate choice, CONFIRM feedback)
+    from the consumer that actually asked for it.
+    """
+    from ..stdin_channel import PENDING
+
+    while True:
+        pushed = _poll_web_answer(call_file, tick_callback)
+        if pushed is not None:
+            return (_DISCOVERY_SRC_WEB, pushed)
+        text = _read_multiline_input(
+            prompt_title=prompt_title,
+            prompt_message=prompt_message,
+            history=history,
+            strip=strip,
+            timeout=poll_interval,
+        )
+        if text is not PENDING:
+            break
+
+    # The terminal answered — but a web answer may have landed in the same
+    # instant, and the web keeps its long-standing priority here.
+    late = _poll_web_answer(call_file, tick_callback)
+    if late is not None:
+        return (_DISCOVERY_SRC_WEB, late)
+    if text is None:
+        return (_DISCOVERY_SRC_CANCEL, None)
+    return (_DISCOVERY_SRC_TERMINAL, text)
+
+
 def _await_terminal_or_web(
     call_file: Optional[Path],
     *,
@@ -1311,9 +3137,15 @@ def _await_terminal_or_web(
     history: Any = None,
     strip: bool = True,
     poll_interval: float = 0.4,
-    tick_callback: Optional[Callable[[], None]] = None,
+    tick_callback: Optional[Callable[[], Optional[str]]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Wait for whichever comes first: a terminal answer or a web response.
+
+    ``tick_callback`` is polled alongside the response file while the operator
+    is at the prompt. Returning a string from it delivers that text as the
+    answer (source ``web``) and cancels the terminal read — which is how a
+    web-pushed interjection becomes the paused DISCOVERY step's next reply
+    without the operator having to type anything.
 
     Returns a ``(source, value)`` tuple:
 
@@ -1332,6 +3164,10 @@ def _await_terminal_or_web(
     """
     # No web channel — terminal only (backward compatible).
     if call_file is None:
+        if tick_callback is not None:
+            pushed = tick_callback()
+            if pushed:
+                return (_DISCOVERY_SRC_WEB, pushed)
         text = _read_multiline_input(
             prompt_title=prompt_title,
             prompt_message=prompt_message,
@@ -1343,28 +3179,23 @@ def _await_terminal_or_web(
         return (_DISCOVERY_SRC_TERMINAL, text)
 
     # Deterministic priority: an answer already waiting on disk wins outright.
-    early = _read_discovery_response(call_file)
+    early = _poll_web_answer(call_file, tick_callback)
     if early is not None:
-        _cleanup_discovery_response(call_file)
         return (_DISCOVERY_SRC_WEB, early)
 
-    # No interactive terminal to race against (piped stdin / no TTY): block on
-    # the plain reader, but re-check the web file once afterwards so a response
-    # that landed during the read is still preferred.
+    # No interactive terminal to race against (piped stdin / no TTY): race the
+    # blocking stdin read against the web channel, so an answer that lands while
+    # stdin stays open is acted on rather than waiting for EOF.
     if not sys.stdin.isatty():
-        text = _read_multiline_input(
+        return _await_terminal_or_web_non_tty(
+            call_file,
             prompt_title=prompt_title,
             prompt_message=prompt_message,
             history=history,
             strip=strip,
+            poll_interval=poll_interval,
+            tick_callback=tick_callback,
         )
-        late = _read_discovery_response(call_file)
-        if late is not None:
-            _cleanup_discovery_response(call_file)
-            return (_DISCOVERY_SRC_WEB, late)
-        if text is None:
-            return (_DISCOVERY_SRC_CANCEL, None)
-        return (_DISCOVERY_SRC_TERMINAL, text)
 
     # Interactive TTY: race the prompt_toolkit read against a background poller
     # that cancels the prompt the instant a web response file appears.
@@ -1387,7 +3218,7 @@ def _await_terminal_or_web_interactive(
     history: Any,
     strip: bool,
     poll_interval: float,
-    tick_callback: Optional[Callable[[], None]] = None,
+    tick_callback: Optional[Callable[[], Optional[str]]] = None,
 ) -> Tuple[str, Optional[str]]:
     """TTY dual-wait: a prompt_toolkit read raced against a web-response poller.
 
@@ -1434,18 +3265,11 @@ def _await_terminal_or_web_interactive(
 
         def _poll() -> None:
             while not stop.is_set():
-                # Every poll tick: drain any web-pushed interjections that
-                # arrived while the operator was at the prompt, so they are
-                # persisted to history + buffered for the LLM prefix without
-                # waiting for the user to type a reply.
-                if tick_callback is not None:
-                    try:
-                        tick_callback()
-                    except Exception:  # pragma: no cover - never break the wait
-                        logger.exception(
-                            "Interjection tick callback raised; ignoring"
-                        )
-                resp = _read_discovery_response(call_file)
+                # Every poll tick: give the tick callback a chance to supply an
+                # answer of its own (a web-pushed interjection is the paused
+                # step's next reply), then check the response file — in that
+                # order, and race-free, via the shared sweep.
+                resp = _poll_web_answer(call_file, tick_callback)
                 if resp is not None:
                     web_holder["value"] = resp
                     # The app may not be running yet on the first try; keep
@@ -1476,6 +3300,10 @@ def _await_terminal_or_web_interactive(
                 _cleanup_discovery_response(call_file)
                 return (_DISCOVERY_SRC_WEB, web_holder["value"])
             return (_DISCOVERY_SRC_CANCEL, None)
+        # The terminal answered first, but the poller may have consumed a web
+        # message in the very same tick — and consuming removed it from disk.
+        # Park it so it is delivered as the next message rather than lost.
+        _defer_web_messages(web_holder["value"])
         if strip:
             result = result.strip()
         return (_DISCOVERY_SRC_TERMINAL, result)
@@ -1494,9 +3322,8 @@ def _await_terminal_or_web_interactive(
             history=history,
             strip=strip,
         )
-        late = _read_discovery_response(call_file)
+        late = _poll_web_answer(call_file, tick_callback)
         if late is not None:
-            _cleanup_discovery_response(call_file)
             return (_DISCOVERY_SRC_WEB, late)
         if text is None:
             return (_DISCOVERY_SRC_CANCEL, None)
@@ -1542,14 +3369,17 @@ def _handle_discovery_pause(
         title=t("cli.run.discovery.pause_title"),
     )
 
-    # Drain on entry so any interjection queued before this pause is folded
-    # in immediately, ahead of the dual-wait that blocks the operator.
-    if project_root is not None:
-        _drain_pending_interjections(flow, project_root, persistence)
+    # WHY an interjection during a DISCOVERY pause does NOT open the mid-flow
+    # dialog (decision 5): discovery IS a conversation, and the user is already
+    # at its prompt. Whatever they push from the web is simply their next
+    # discovery reply, so it is delivered straight into this round instead of
+    # nesting a second conversation inside the first.
+    early = _drain_interjection_as_reply(project_root)
+    if early is not None:
+        return early
 
-    def _tick() -> None:
-        if project_root is not None:
-            _drain_pending_interjections(flow, project_root, persistence)
+    def _tick() -> Optional[str]:
+        return _drain_interjection_as_reply(project_root)
 
     call_file = _maybe_write_discovery_call(flow, current_step, project_root)
     try:
@@ -1577,17 +3407,6 @@ def _handle_discovery_pause(
                 get_console().print(t("cli.run.discovery.provide_response"))
                 continue
 
-            # Prefix any buffered interjections (collected by drain ticks while
-            # we waited) onto this user reply so the next LLM call sees them
-            # ahead of the actual reply text.
-            prefix = (
-                _consume_paused_interjection_prefix(flow)
-                if project_root is not None
-                else ""
-            )
-            if prefix:
-                persistence.save_flow(flow)
-                return prefix + value
             return value
     finally:
         _cleanup_discovery_call(call_file)
@@ -1635,13 +3454,16 @@ def _handle_discovery_programmatic_confirm(
         or None if cancelled (Ctrl+C/EOF).
     """
     # The confirmation panel was already displayed by the discovery handler
-    # or _restore_discovery_display.
-    if project_root is not None:
-        _drain_pending_interjections(flow, project_root, persistence)
+    # or _restore_discovery_display. An interjection arriving here is the
+    # user's next discovery turn (decision 5) — it continues the refinement
+    # rather than confirming it.
+    early = _drain_interjection_as_reply(project_root)
+    if early is not None:
+        current_step.outputs.pop("awaiting_programmatic_confirm", None)
+        return early
 
-    def _tick() -> None:
-        if project_root is not None:
-            _drain_pending_interjections(flow, project_root, persistence)
+    def _tick() -> Optional[str]:
+        return _drain_interjection_as_reply(project_root)
 
     call_file = _maybe_write_discovery_call(flow, current_step, project_root)
     try:
@@ -1704,14 +3526,6 @@ def _handle_discovery_programmatic_confirm(
             # discovery user input directly (no separate prompt for questions)
             current_step.outputs.pop("awaiting_programmatic_confirm", None)
             get_console().print(t("cli.run.discovery.captured_input"))
-            prefix = (
-                _consume_paused_interjection_prefix(flow)
-                if project_root is not None
-                else ""
-            )
-            if prefix:
-                persistence.save_flow(flow)
-                return prefix + user_input
             return user_input
     finally:
         _cleanup_discovery_call(call_file)
@@ -1862,11 +3676,13 @@ def _handle_discovery_pause_noninteractive(
     sentinel, or :data:`_DISCOVERY_AWAITING` when the flow must pause to wait
     for a web response.
     """
-    # Drain any queued interjections regardless of whether a response has
-    # landed yet. This is the non-interactive path's only opportunity to
-    # consume an interjection before the flow exits PAUSED — the main run
-    # loop's drain only fires on the next --resume.
-    _drain_pending_interjections(flow, project_root, persistence)
+    # An interjection queued for a paused DISCOVERY step is that step's next
+    # user turn (decision 5), so it is consumed here and fed straight back
+    # rather than staying queued until the flow resumes for another reason.
+    early = _drain_interjection_as_reply(project_root)
+    if early is not None:
+        _discard_outstanding_discovery_call(current_step)
+        return early
 
     call_path = current_step.outputs.get("discovery_call_file")
     if call_path:
@@ -1898,12 +3714,6 @@ def _handle_discovery_pause_noninteractive(
                 return _PROGRAMMATIC_CONFIRM
             # Any other answer keeps refining the requirements.
             current_step.outputs.pop("awaiting_programmatic_confirm", None)
-        # Prefix any buffered interjections onto the user reply before it
-        # becomes the next LLM user message.
-        prefix = _consume_paused_interjection_prefix(flow)
-        if prefix:
-            persistence.save_flow(flow)
-            return prefix + response
         return response
     # No outstanding call — write one and pause for a web response.
     call_file = _write_discovery_call(flow, current_step, project_root)
@@ -2497,6 +4307,228 @@ def _clear_run_pidfile(persistence: PersistenceManager) -> None:
     release_run_marker(persistence.state_dir, drop_undecodable=True)
 
 
+
+def _execute_step_with_interjections(
+    state_machine: StateMachine,
+    flow: FlowInstance,
+    current_step: Any,
+    project_root: Path,
+    on_running: Callable[[Any], None],
+) -> Tuple[Any, bool]:
+    """Run a step with the web-interjection watcher live.
+
+    Returns ``(result, stopped, interrupted)``. ``stopped`` is True when a stop
+    request (Ctrl-C or a web interjection) arrived during the step — the caller
+    then opens the interjection dialog. The watcher and the SIGINT handler
+    publish to the SAME signal, which is what makes those two entry points one
+    path; the watcher additionally escalates to a main-thread
+    ``KeyboardInterrupt`` when no runner is supervising a child, so a step
+    doing its work in Python (TEST above all) is cut short by a web
+    interjection exactly as Ctrl-C cuts it short.
+
+    ``interrupted`` distinguishes "the step was actually cut short" from "the
+    request landed as the step was already finishing". Only the former may be
+    re-run by a confirmed ``continue``: rerunning a suite that completed anyway
+    would discard good work the user never asked to throw away.
+    """
+    signal_obj = get_stop_signal()
+    signal_obj.clear()
+    watcher = InterjectionWatcher(
+        project_root, signal=signal_obj, escalate_to_main=True
+    )
+    watcher.start()
+    result = None
+    interrupted = False
+    try:
+        result = state_machine.run_step(flow, current_step, on_running=on_running)
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        try:
+            watcher.stop()
+        except KeyboardInterrupt:  # pragma: no cover - escalation raced the stop
+            interrupted = True
+    if interrupted:
+        return None, True, True
+    # A cooperative stop does not raise: the runner returns partial output and
+    # the step reports failure, so the flag is the only reliable evidence that
+    # the work was cut short rather than merely interjected upon at the end.
+    stopped = signal_obj.is_set()
+    return result, stopped, stopped and _is_incomplete_result(result)
+
+
+def _stop_request_as_discovery_reply(
+    current_step: Any, result: Any, interrupted: bool
+) -> Optional[str]:
+    """Take a stop request that landed as DISCOVERY paused, as its next reply.
+
+    WHY (decision 5): discovery IS a conversation and the user is already at its
+    prompt, so an interjection arriving in the final tick of the discovery call
+    is their next discovery reply — not a request to nest a second conversation
+    inside the first. It cannot be left for ``_drain_interjection_as_reply`` to
+    find, because the watcher has already consumed the call file into the stop
+    request; without taking it here the text is delivered to the small dialog
+    and the operator has to retype it.
+
+    Returns ``None`` — leaving the request published for the small dialog — for
+    anything else: a genuinely interrupted call, a non-DISCOVERY step, a
+    discovery round that did not pause, the programmatic-confirm gate (where an
+    arbitrary message is not an answer), and a bare Ctrl-C carrying no text.
+    """
+    from ..engine.models import StepStatus, StepType
+
+    if interrupted:
+        return None
+    if getattr(current_step, "step_type", None) != StepType.DISCOVERY:
+        return None
+    if result != StepStatus.PAUSED:
+        return None
+    if (getattr(current_step, "outputs", None) or {}).get(
+        "awaiting_programmatic_confirm"
+    ):
+        return None
+    signal_obj = get_stop_signal()
+    pending = signal_obj.pending
+    texts = [
+        str(text).strip()
+        for text in (getattr(pending, "texts", None) or [])
+        if str(text).strip()
+    ]
+    if not texts:
+        return None
+    signal_obj.take()
+    return "\n\n".join(texts)
+
+
+def _is_incomplete_result(result: Any) -> bool:
+    """Whether *result* shows the step did NOT reach a terminal outcome.
+
+    A cooperatively stopped LLM step surfaces as FAILED (partial output, no
+    parsed result); a step that ran to COMPLETED/PARTIAL despite the request
+    finished its work, and re-running it is destruction, not continuation.
+    """
+    from ..engine.models import StepStatus
+
+    status = getattr(result, "status", result)
+    return status not in (
+        StepStatus.COMPLETED,
+        StepStatus.PARTIAL,
+        StepStatus.PAUSED,
+        StepStatus.REVISION_NEEDED,
+    )
+
+
+def _dialog_outcome_exit_code(
+    outcome: str,
+    flow: FlowInstance,
+    persistence: PersistenceManager,
+    emitter: Any,
+    current_step: Any,
+    step_type_value: str,
+) -> Optional[int]:
+    """Translate a dialog outcome into a process exit code, or ``None``.
+
+    ``None`` means "the run loop keeps going": ``continue`` re-armed the step
+    and ``restart`` rewound the flow, both of which are resolved by simply
+    re-entering the loop.
+    """
+    if outcome == _DIALOG_AWAITING_WEB:
+        emitter.emit(new_event(
+            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+            step_id=current_step.step_id, step_type=step_type_value,
+        ))
+        return 0
+    if outcome == _DIALOG_EXIT:
+        persistence.save_flow(flow)
+        emitter.emit(new_event(
+            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+            step_id=current_step.step_id, step_type=step_type_value,
+        ))
+        # Same return code the pre-dialog Ctrl-C-then-cancel path used, so
+        # scripts keying off it are unaffected.
+        return 130
+    return None
+
+
+def _open_dialog_after_stop(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+    prompt_history: Any,
+    output_format: str,
+    *,
+    interrupted: bool = True,
+) -> str:
+    """Consume the stop request and open the interjection dialog it asked for.
+
+    ``interrupted=False`` means the step had already reached a terminal result
+    when the request landed. The dialog still opens (the user asked for it), but
+    ``continue`` then means "carry on from here" — re-arming a step that
+    finished would throw away work nobody asked to discard.
+    """
+    signal_obj = get_stop_signal()
+    request = signal_obj.take()
+    messages = list(request.texts) if request is not None else []
+    pause_context = None if interrupted else "completed_step"
+    # INVARIANT: the interrupted step's state reaches disk BEFORE the dialog
+    # blocks on the operator. The stop handlers record what the interruption
+    # left behind — above all a DAG implement's ``dag_preserved_worktrees`` and
+    # ``implemented_groups``, which name on-disk worktrees deliberately left in
+    # place — and only in memory. The dialog can then sit at a prompt for
+    # hours; a process that dies there (SSH drop, closed terminal) would leave
+    # engine.json holding the pre-handler snapshot, and the next ``--resume``
+    # would find no record of the preserved worktrees: it would probe the
+    # interrupted groups as unaccounted, misread fork-heir commits as
+    # "completed", and force-clean the worktrees holding their uncommitted work
+    # and the cwd their provider sessions are bound to.
+    try:
+        persistence.save_flow(flow)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("Failed to persist flow before the dialog", exc_info=True)
+    # The watcher polls the moment it starts, so an interjection that landed in
+    # the gap between two steps is drained as soon as the NEXT step is entered —
+    # and that step can be a CONFIRM gate, which has no session of its own and
+    # is not what the operator is asking about. Resolving the subject here (as
+    # the pause-point entry point already does) points the conversation at the
+    # step that produced the artefact under review, and parks any one-shot note
+    # on the step id the gate's Retry actually consumes.
+    subject = _dialog_subject_step(flow, current_step)
+    apply_step = None
+    if subject is not current_step:
+        if interrupted:
+            # INVARIANT: the gate reading applies only when the gate actually
+            # REACHED its wait. A CONFIRM cut off INSIDE ``run_step`` — the
+            # watcher escalating an interjection that was already on disk when
+            # the step started — published nothing to go back to, so its
+            # ``continue`` is an ordinary retry of the CONFIRM step. The
+            # conversation still belongs to the producer's session (the gate has
+            # none), so only the step the decision is APPLIED to moves back.
+            apply_step = current_step
+        else:
+            # The stop landed on a CONFIRM gate that had reached PAUSED.
+            # ``continue`` there means "go back to waiting at this gate" — the
+            # same semantics the pause-point entry point uses — not "re-run the
+            # reviewed producer as a retry", which would discard an approval
+            # decision nobody made.
+            pause_context = "confirm"
+    if output_format == "json":
+        return _run_interjection_dialog_noninteractive(
+            flow, subject, persistence, project_root,
+            initial_messages=messages,
+            pause_context=pause_context,
+            call_step=current_step,
+            apply_step=apply_step,
+        )
+    return _run_interjection_dialog(
+        flow, subject, persistence, project_root, prompt_history,
+        initial_messages=messages,
+        pause_context=pause_context,
+        call_step=current_step,
+        apply_step=apply_step,
+    )
+
+
 def _run_flow_impl(
     project_root: Path,
     flow_id: Optional[str],
@@ -2572,6 +4604,13 @@ def _run_flow_impl(
                 display_error(t("cli.run.error.flow_not_found", flow_id=flow_id))
                 return 1
 
+            # Scope this process's interjection drains to the flow it resumes:
+            # a call queued for a different flow that once occupied this root
+            # must stay untouched rather than be opened as this flow's dialog.
+            from ..engine import interaction_calls as _ic_bind
+
+            _ic_bind.bind_active_flow(flow.flow_id)
+
             # A COMPLETED flow is terminal and must not be resumed, regardless of
             # whether it came from the active engine.json or a stale per-flow
             # snapshot under tianluo/state/resumable/. This mirrors the
@@ -2592,38 +4631,109 @@ def _run_flow_impl(
             if recovered_from_snapshot:
                 persistence.save_flow(flow)
 
-            # Detect and handle resume of a RUNNING or FAILED step
+            # A rewind whose target could not be rebuilt fails the flow with
+            # the rebuild request still armed (the main loop pops
+            # ``pending_rewind_step_type`` only after a successful rebuild).
+            # Resume must re-enter the loop so the rebuild is retried: left
+            # FAILED, the loop body never runs and the flow is bricked — the
+            # target and its successors are already deleted and nothing would
+            # ever re-create them. The current step is the target's COMPLETED
+            # predecessor, so none of the step re-arm branches below fire.
+            if (
+                flow.status == FlowStatus.FAILED
+                and flow.state.context.get("pending_rewind_step_type")
+            ):
+                logger.info(
+                    "Resuming into a pending rewind rebuild (%s)",
+                    flow.state.context["pending_rewind_step_type"],
+                )
+                flow.status = FlowStatus.RUNNING
+                persistence.save_flow(flow)
+
+            # Detect and handle resume of a RUNNING or FAILED step.
+            #
+            # INVARIANT: a resume that was triggered by an interjection (or that
+            # lands on a dialog still awaiting a web reply) does NOT re-arm the
+            # step. The dialog owns what happens next — it re-arms the step
+            # itself on ``continue`` (so re-arming here would double the retry
+            # counter), and at a failure gate it must be able to hand the
+            # operator back the Retry/Skip/Abort choice, which is only reachable
+            # while the step is still FAILED. Re-arming here instead spawned an
+            # unrequested retry of the very step the operator was asking about.
             current_step = flow.state.get_current_step()
-            if current_step and current_step.status == StepStatus.RUNNING:
+            dialog_owns_step = _dialog_state(flow) is not None
+            if not dialog_owns_step:
+                try:
+                    from ..engine import interaction_calls as _ic
+
+                    dialog_owns_step = _ic.has_pending_interjections(
+                        project_root, flow.flow_id
+                    )
+                except Exception:  # noqa: BLE001 - never block a resume
+                    logger.debug("Failed to peek pending interjections", exc_info=True)
+            if dialog_owns_step and current_step and current_step.status in (
+                StepStatus.RUNNING, StepStatus.FAILED
+            ):
+                logger.info(
+                    "Resume triggered while an interjection is pending; leaving "
+                    "step %s %s for the dialog",
+                    current_step.step_id, current_step.status.value,
+                )
+                if flow.status == FlowStatus.FAILED:
+                    # The step keeps its FAILED status (that is what routes it
+                    # to the Retry/Skip/Abort gate), but the FLOW has to be
+                    # running for the loop to get there at all.
+                    flow.status = FlowStatus.RUNNING
+                    persistence.save_flow(flow)
+            elif current_step and current_step.status == StepStatus.RUNNING:
                 # Step was interrupted - prepare for resumption with context
-                current_step.status = StepStatus.PENDING
-                # We are assigning fresh resume inputs, so this step's in-memory
-                # body is now authoritative — mark it loaded so a later keyed
-                # access (get_current_step / steps.get) does not re-fire the lazy
-                # hydrator and wipe these inputs back to {} when the cold file is
-                # missing/corrupt (issue #244 B3-i, execution/assignment path).
-                current_step.cold_loaded = True
-                current_step.inputs["resumed"] = True
-                # Increment retry_count so LLMCaller picks up conversation history
-                # from the interrupted run via _get_retry_context()
-                current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
-                current_step.retry_count = 0
+                # (``resumed`` + ONE retry_count increment, so LLMCaller picks
+                # up the interrupted run's conversation).
+                _rearm_resumed_step(current_step)
                 logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
                 persistence.save_flow(flow)
             elif current_step and current_step.status == StepStatus.FAILED:
-                # Step failed - prepare for retry from breakpoint
-                current_step.status = StepStatus.PENDING
-                # See the RUNNING branch above: mark the step loaded so the fresh
-                # retry inputs assigned here survive a later lazy-hydrator access
-                # even when the cold file is unreadable (issue #244 B3-i).
-                current_step.cold_loaded = True
-                current_step.inputs["resumed"] = True
-                # Increment retry_count so LLMCaller picks up conversation history (external_attempt)
-                current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
-                # Reset retry_count on the step model for fresh retry budget
-                current_step.retry_count = 0
+                # Step failed - prepare for retry from breakpoint.
+                #
+                # This IS the failure gate's Retry in json/daemon mode: the web
+                # answer to the retry_decision call is what made the daemon
+                # re-spawn `--resume`, and the re-arm below is the execution
+                # launched straight out of that pause. So it is also the one
+                # consumer of a note parked there (decision 4) — without this,
+                # an instruction confirmed at the gate would be delivered at an
+                # interactive terminal and silently dropped under the daemon.
+                #
+                # INVARIANT: only the gate's *Retry* re-arms the step, and only
+                # Retry consumes a note parked there. A `skip` or `abort` answer
+                # resolves the pause WITHOUT the execution it was scoped to, so
+                # the step must stay FAILED and fall straight through to the
+                # failure-decision path (which owns consuming the answer and
+                # applying it). Re-arming on those answers ran the step one more
+                # time first — and a rerun that happened to succeed swallowed the
+                # operator's Skip/Abort entirely, so the two channels disagreed
+                # on the same resolution. The peek must not consume the response:
+                # `_resolve_step_failure_action` still owns applying it.
+                from ..engine.interjection_dialog import (
+                    consume_gate_note,
+                    discard_gate_note,
+                )
+
+                gate_answer = _peek_failure_gate_decision(
+                    project_root, current_step.step_id
+                )
+                if gate_answer in ("skip", "abort"):
+                    discard_gate_note(flow)
+                    logger.info(
+                        "Resuming failed step %s (%s) into its %s decision "
+                        "without re-running it",
+                        current_step.step_id, current_step.step_type.value,
+                        gate_answer,
+                    )
+                else:
+                    _rearm_resumed_step(current_step)
+                    consume_gate_note(flow, current_step)
+                    logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
                 flow.status = FlowStatus.RUNNING
-                logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
                 persistence.save_flow(flow)
 
             # A flow persisted as PAUSED (e.g. a non-interactive discovery
@@ -2658,6 +4768,10 @@ def _run_flow_impl(
                 plan_decomposition=plan_decomposition,
                 plan_granularity=plan_granularity,
             )
+
+            from ..engine import interaction_calls as _ic_bind
+
+            _ic_bind.bind_active_flow(flow.flow_id)
 
             # Set source issue ID if provided
             if source_issue_id:
@@ -2737,11 +4851,148 @@ def _run_flow_impl(
 
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
-        # Step boundary: consume any interjection requests the daemon queued
-        # (delivered via MSG_INTERJECT_FLOW from the web console) and fold
-        # them into the flow's user_interjections so every subsequently-built
-        # step's task_description picks them up.
-        _drain_pending_interjections(flow, project_root, persistence)
+        # WHY there is no step-boundary interjection drain any more: an
+        # interjection now has exactly two doors — interrupt the running call
+        # and open the dialog, or (at a pause point) open the dialog / become
+        # the paused conversation's next reply. Silently folding one into the
+        # next step's task description was the third door, and it is the one
+        # that gave the user no answer and no confirmation.
+
+        # A rewind deleted its target step object, so the target has to be
+        # rebuilt before the loop looks for a current step — otherwise a rewind
+        # to the FIRST step (no current step left at all) would read as "flow
+        # finished", and a rewind to a later one would advance past the target
+        # because the step before it is COMPLETED.
+        #
+        # INVARIANT: the marker is popped only AFTER a successful rebuild. A
+        # rebuild that raises fails the flow with the marker still armed, and
+        # the resume path re-enters this loop (FAILED -> RUNNING when the
+        # marker is present) so ``luo run --resume`` retries the rebuild —
+        # without it the flow would be bricked: the target and its successors
+        # are already deleted, and nothing would ever re-create them.
+        _rewind_type = flow.state.context.get("pending_rewind_step_type")
+        if _rewind_type:
+            try:
+                state_machine.rebuild_rewound_step(flow, StepType(_rewind_type))
+            except Exception as exc:
+                # INVARIANT: a rewind that cannot rebuild its target FAILS the
+                # flow. After the rewind, ``current_step_id`` names the target's
+                # COMPLETED predecessor and ``current_step_index`` names the
+                # target's slot, so simply continuing hands the loop to
+                # ``transition_to_next`` and it advances PAST the target — the
+                # step the user explicitly asked to re-run would never run, and
+                # the flow would report success having skipped it. Failing
+                # loudly keeps the state on disk exactly where the operator can
+                # fix the cause (e.g. unreadable upstream outputs) and resume.
+                logger.exception(
+                    "Failed to rebuild the rewound step %s", _rewind_type,
+                )
+                display_error(
+                    t(
+                        "cli.run.rewind.rebuild_failed",
+                        step_type=str(_rewind_type),
+                        error=str(exc),
+                    )
+                )
+                flow.status = FlowStatus.FAILED
+                persistence.save_flow(flow)
+                _finalize_sync_source_issue(
+                    project_root, flow, is_worktree_mode, resolved=False
+                )
+                return 1
+            flow.state.context.pop("pending_rewind_step_type", None)
+            persistence.save_flow(flow)
+
+        # A dialog left open by a previous process (the flow exited PAUSED
+        # waiting for a reply) is resumed before anything else: it owns the
+        # flow until it settles. A daemon/json run continues it through the
+        # call-file channel; an interactive ``--resume`` takes the same paused
+        # conversation over at the terminal — transcript and pending decision
+        # included — so the operator is never told "answer it on the web" by a
+        # silent exit.
+        dialog_state = _dialog_state(flow)
+        if dialog_state is not None:
+            dialog_step = flow.state.steps.get(dialog_state.get("step_id")) or (
+                flow.state.get_current_step()
+            )
+            if dialog_step is None:
+                flow.state.context.pop("active_dialog", None)
+            else:
+                call_step = flow.state.steps.get(
+                    dialog_state.get("call_step_id") or ""
+                ) or dialog_step
+                if output_format != "json" and _stdin_is_interactive():
+                    flow.state.context.pop("active_dialog", None)
+                    persistence.save_flow(flow)
+                    outcome = _run_interjection_dialog(
+                        flow, dialog_step, persistence, project_root,
+                        prompt_history,
+                        pause_context=dialog_state.get("pause_context"),
+                        call_step=call_step,
+                        prior_state=dialog_state,
+                    )
+                    if outcome in (_DIALOG_EXIT, _DIALOG_AWAITING_WEB):
+                        emitter.emit(new_event(
+                            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                            step_id=dialog_step.step_id,
+                            step_type=(
+                                dialog_step.step_type.value
+                                if hasattr(dialog_step.step_type, "value")
+                                else str(dialog_step.step_type)
+                            ),
+                        ))
+                        return 0 if outcome == _DIALOG_AWAITING_WEB else 130
+                    flow.status = FlowStatus.RUNNING
+                    persistence.save_flow(flow)
+                    continue
+                outcome = _run_interjection_dialog_noninteractive(
+                    flow, dialog_step, persistence, project_root
+                )
+                if outcome == _DIALOG_AWAITING_WEB:
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=dialog_step.step_id,
+                        step_type=(
+                            dialog_step.step_type.value
+                            if hasattr(dialog_step.step_type, "value")
+                            else str(dialog_step.step_type)
+                        ),
+                    ))
+                    return 0
+                if outcome == _DIALOG_EXIT:
+                    flow.status = FlowStatus.PAUSED
+                    persistence.save_flow(flow)
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                    ))
+                    return 0
+                if outcome == _DIALOG_RESUME_PAUSE and _gate_call_is_pending(
+                    project_root, call_step
+                ):
+                    # A confirmed ``continue`` at a gate whose call is still
+                    # unanswered goes back to THAT wait. The wait lives in the
+                    # call file, not in this process, so returning to it means
+                    # exiting with the gate's step exactly as the dialog found
+                    # it — re-entering the loop would re-run the CONFIRM
+                    # handler, flip the step to RUNNING and publish a duplicate
+                    # call for a gate the operator never resolved (and a crash
+                    # in that window would record the gate as an interrupted
+                    # running step).
+                    flow.status = FlowStatus.PAUSED
+                    persistence.save_flow(flow)
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=call_step.step_id,
+                        step_type=(
+                            call_step.step_type.value
+                            if hasattr(call_step.step_type, "value")
+                            else str(call_step.step_type)
+                        ),
+                    ))
+                    return 0
+                flow.status = FlowStatus.RUNNING
+                persistence.save_flow(flow)
+                continue
 
         current_step = flow.state.get_current_step()
         if not current_step:
@@ -2750,6 +5001,45 @@ def _run_flow_impl(
             persistence.save_flow(flow)
             _reclaim_review_snapshots(flow)
             break
+
+        # An interjection queued while a step sits PAUSED — or while it was
+        # RUNNING in a process that has since exited — opens the dialog here.
+        # DISCOVERY is excluded on purpose: its own pause handler consumes the
+        # text as the conversation's next reply (decision 5), and stealing it
+        # here would nest a second conversation inside the first.
+        if (
+            current_step.status in (StepStatus.PAUSED, StepStatus.RUNNING)
+            and current_step.step_type != StepType.DISCOVERY
+        ):
+            _mid_step = current_step.status == StepStatus.RUNNING
+            _paused_msgs = _collect_pending_dialog_messages(project_root)
+            if _paused_msgs:
+                outcome = _dialog_at_pause_point(
+                    flow, current_step, persistence, project_root, prompt_history,
+                    initial_messages=_paused_msgs,
+                    # A step left RUNNING was cut off mid-call, not stopped at a
+                    # gate: ``continue`` there means "re-run this step as a
+                    # retry", which is also what performs the single retry-count
+                    # increment (the resume path deliberately did not).
+                    pause_context=None if _mid_step else "confirm",
+                    output_format=output_format,
+                )
+                if outcome == _DIALOG_RESTARTED:
+                    continue
+                if outcome in (_DIALOG_EXIT, _DIALOG_AWAITING_WEB):
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id,
+                        step_type=current_step.step_type.value,
+                    ))
+                    return 0 if outcome == _DIALOG_AWAITING_WEB else 130
+            elif _mid_step:
+                # The interjection was answered elsewhere between the resume
+                # peek and this drain: fall back to the ordinary resume re-arm
+                # so the interrupted step continues as a retry rather than as a
+                # brand-new call.
+                _rearm_resumed_step(current_step)
+                persistence.save_flow(flow)
 
         # If the current step already finished (process crashed after the step
         # handler returned but before transition_to_next was saved), advance
@@ -2790,6 +5080,15 @@ def _run_flow_impl(
                     "re-emission on resume",
                     current_step.step_id,
                 )
+            # Advancing RESOLVES the pause the note was parked at. In the
+            # interactive CLI the same sequence goes through normal result
+            # processing, which discards it; this fast path is the json/daemon
+            # counterpart and must behave identically, or a note parked by a
+            # ``continue`` at a ``completed_step`` pause survives to be consumed
+            # by a later, unrelated gate Retry on the same step.
+            from ..engine.interjection_dialog import discard_gate_note
+
+            discard_gate_note(flow)
             state_machine.transition_to_next(flow)
             persistence.save_flow(flow)
             continue
@@ -2898,6 +5197,11 @@ def _run_flow_impl(
         # (meaning a fresh token-consuming LLM round actually happened).
         step_ran_llm = True
 
+        # A discovery reply taken off the stop signal (an interjection that
+        # landed as the round paused). Set below, consumed by the discovery
+        # pause handling instead of prompting for an answer already given.
+        pending_discovery_reply: Optional[str] = None
+
         # Emit STEP_STARTED for EVERY step type the moment it ACTUALLY enters
         # RUNNING — including the non-LLM TEST / COMMIT / SPEC_GATE steps and the
         # interactive CONFIRM / DISCOVERY steps. It is a no-op in CliSink (the
@@ -2932,24 +5236,40 @@ def _run_flow_impl(
                 result = existing_result
                 # No LLM call — the user response was already on disk.
                 step_ran_llm = False
+            elif _gate_call_is_pending(project_root, current_step):
+                # INVARIANT: the gate's published, still-unanswered call IS the
+                # wait. Whatever re-entered the loop — a plain ``--resume``, or
+                # an interactive takeover of a dialog whose confirmed
+                # ``continue`` means "go back to this same pause point" — the
+                # gate must be re-presented without re-running it: ``run_step``
+                # would flip the step PAUSED -> RUNNING (and a crash in that
+                # window would record the gate as an interrupted running step)
+                # for a handler that can only hand back the PAUSED it already
+                # persisted.
+                result = StepStatus.PAUSED
+                step_ran_llm = False
             else:
-                try:
-                    result = state_machine.run_step(
-                        flow, current_step, on_running=_emit_step_started)
-                except KeyboardInterrupt:
-                    # AUDIT (return-130 non-interactive reachability): only a
-                    # KeyboardInterrupt reaches here, and _handle_step_interrupt
-                    # returns None only on an interactive Ctrl+C exit. Daemon
-                    # json runs have no TTY and never raise it, so this exit is
-                    # unreachable in json mode — no missing-PAUSED bug here.
-                    result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
-                    if result is None:
-                        emitter.emit(new_event(
-                            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
-                            step_id=current_step.step_id, step_type=step_type_value,
-                        ))
-                        return 130
-                    continue
+                result, stopped, interrupted = _execute_step_with_interjections(
+                    state_machine, flow, current_step, project_root,
+                    _emit_step_started,
+                )
+                if stopped:
+                    outcome = _open_dialog_after_stop(
+                        flow, current_step, persistence, project_root,
+                        prompt_history, output_format, interrupted=interrupted,
+                    )
+                    exit_code = _dialog_outcome_exit_code(
+                        outcome, flow, persistence, emitter, current_step,
+                        step_type_value,
+                    )
+                    if exit_code is not None:
+                        return exit_code
+                    # _DIALOG_RESUME_PAUSE only comes back when the step had
+                    # already produced its result: "continue" there means carry
+                    # on from here, so the result is processed normally instead
+                    # of the step being re-entered.
+                    if outcome != _DIALOG_RESUME_PAUSE:
+                        continue
 
         # Special handling for DISCOVERY steps on resume - restore last AI message without
         # re-calling the LLM (the question was already asked; just wait for user input again)
@@ -2971,23 +5291,49 @@ def _run_flow_impl(
             result = StepStatus.FAILED
             step_ran_llm = False
 
+        elif current_step.status == StepStatus.COMPLETED:
+            # The step is finished but its result was never processed: a dialog
+            # opened as it was completing paused the flow (json/daemon mode
+            # exits between dialog rounds) before the terminal event and the
+            # transition. ``run_step`` has no COMPLETED guard and would re-run
+            # the whole step — destroying work nobody asked to discard — so the
+            # persisted result is processed instead.
+            result = StepStatus.COMPLETED
+            step_ran_llm = False
+
         else:
-            try:
-                result = state_machine.run_step(
-                    flow, current_step, on_running=_emit_step_started)
-            except KeyboardInterrupt:
-                # AUDIT (return-130 non-interactive reachability): same as the
-                # CONFIRM-resume branch above — reachable only via interactive
-                # Ctrl+C (_handle_step_interrupt → None). Not reachable in json/
-                # daemon mode, so no non-interactive-exit-without-PAUSED defect.
-                result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
-                if result is None:
-                    emitter.emit(new_event(
-                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
-                        step_id=current_step.step_id, step_type=step_type_value,
-                    ))
-                    return 130
-                continue
+            result, stopped, interrupted = _execute_step_with_interjections(
+                state_machine, flow, current_step, project_root,
+                _emit_step_started,
+            )
+            if stopped:
+                # An interjection that landed as DISCOVERY was pausing is that
+                # conversation's next reply, not a request for a second one —
+                # it is routed straight into the discovery round below.
+                pending_discovery_reply = _stop_request_as_discovery_reply(
+                    current_step, result, interrupted
+                )
+                if pending_discovery_reply is not None:
+                    stopped = False
+            if stopped:
+                # Ctrl-C or a web interjection cut the call short: open the
+                # mid-flow dialog at the breakpoint (both entry points share
+                # this one path — decision 5).
+                outcome = _open_dialog_after_stop(
+                    flow, current_step, persistence, project_root,
+                    prompt_history, output_format, interrupted=interrupted,
+                )
+                exit_code = _dialog_outcome_exit_code(
+                    outcome, flow, persistence, emitter, current_step,
+                    step_type_value,
+                )
+                if exit_code is not None:
+                    return exit_code
+                # See the CONFIRM branch: a pause-style outcome means the step
+                # already finished, so fall through to its normal result
+                # handling rather than re-running it.
+                if outcome != _DIALOG_RESUME_PAUSE:
+                    continue
 
         # Emit the step's terminal event for EVERY step type — including the
         # interactive CONFIRM/DISCOVERY steps and PLAN, which used to be
@@ -3006,19 +5352,35 @@ def _run_flow_impl(
         # this emit does NOT double-render the interactive steps on the CLI;
         # HistorySink and JsonSink still receive it. run.py itself no longer
         # imports render_step_output — rendering lives entirely in the sink.
+        #
+        # INVARIANT: a failure is announced ONCE per execution. A pause-point
+        # dialog's ``continue`` means "go back to the Retry/Skip/Abort wait", so
+        # the loop turns again with the step still FAILED and no handler ever
+        # re-run — replaying its terminal event there appends a second
+        # step_failed record (duplicate failure card, double-counted step usage)
+        # for one failure. The marker is cleared by ``run_step``, so a genuine
+        # re-failure after a Retry announces itself normally, and it lives in
+        # the step's inputs so the json/daemon resume path — which comes back
+        # into this same still-FAILED step — obeys the same rule.
+        failure_already_announced = bool(
+            (current_step.inputs or {}).get("failure_announced")
+        )
         if result in (StepStatus.COMPLETED, StepStatus.PARTIAL, StepStatus.FAILED):
             step_event_type = (
                 EventType.STEP_FAILED
                 if result == StepStatus.FAILED
                 else EventType.STEP_COMPLETED
             )
-            emitter.emit(new_event(
-                step_event_type,
-                flow_id=flow.flow_id,
-                step_id=current_step.step_id,
-                step_type=step_type_value,
-                step=current_step,
-            ))
+            if not (result == StepStatus.FAILED and failure_already_announced):
+                emitter.emit(new_event(
+                    step_event_type,
+                    flow_id=flow.flow_id,
+                    step_id=current_step.step_id,
+                    step_type=step_type_value,
+                    step=current_step,
+                ))
+            if result == StepStatus.FAILED:
+                current_step.inputs["failure_announced"] = True
 
         # Non-terminal steps (PAUSED / REVISION_NEEDED / RETRYING) that
         # consumed tokens need their usage surfaced, but no terminal event
@@ -3127,7 +5489,11 @@ def _run_flow_impl(
                 ))
                 return 0
             confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root, prompt_history)
-            if confirm_result is None:
+            if confirm_result == _DIALOG_RESTARTED:
+                # An interjection dialog at this gate rewound the flow; the
+                # CONFIRM step no longer exists, so just re-enter the loop.
+                continue
+            if confirm_result is None or confirm_result == _DIALOG_EXIT:
                 # User chose to exit. This is an interactive Ctrl+C / explicit
                 # "Exit" choice (return 130 distinguishes a user-initiated exit
                 # from a normal pause) — unreachable in json/daemon mode, which
@@ -3144,7 +5510,12 @@ def _run_flow_impl(
 
         # Handle discovery step PAUSED state - need user input to continue
         if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:
-            if output_format == "json":
+            if pending_discovery_reply is not None:
+                # The operator already answered — from the web, in the instant
+                # this round was pausing. Prompting again (terminal or call
+                # file) would ask them to retype what they just sent.
+                user_response = pending_discovery_reply
+            elif output_format == "json":
                 # Non-interactive (daemon spawn): write the clarifying question
                 # as a tianluo/calls/ call file and let the web answer it through
                 # the existing "Respond to Flow" mechanism.
@@ -3207,7 +5578,11 @@ def _run_flow_impl(
 
         if result == StepStatus.FAILED:
             error_msg = current_step.error_message or t("cli.run.error.unknown")
-            display_error(t("cli.run.error.step_failed", error=error_msg))
+            # Same single-announcement rule as the terminal event above: coming
+            # back to this gate from a dialog must not re-print the failure the
+            # operator is already looking at.
+            if not failure_already_announced:
+                display_error(t("cli.run.error.step_failed", error=error_msg))
 
             max_retries = 3
             if current_step.retry_count >= max_retries:
@@ -3241,6 +5616,29 @@ def _run_flow_impl(
             #   * "race"     — interactive: race the CLI prompt vs. the webui
             #                  response (whoever answers first wins);
             #   * "pause"    — non-interactive: pause for an out-of-band answer.
+            # An interjection queued while the step was failing is a question
+            # about the failure, so it opens the mid-flow dialog before the
+            # Retry/Skip/Abort gate is even presented (decision 5). ``continue``
+            # from that dialog falls through to the gate as normal.
+            pending_failure_msgs = _collect_pending_dialog_messages(project_root)
+            if pending_failure_msgs:
+                dialog_outcome = _dialog_at_pause_point(
+                    flow, current_step, persistence, project_root, prompt_history,
+                    initial_messages=pending_failure_msgs,
+                    pause_context="failure",
+                    output_format=output_format,
+                )
+                if dialog_outcome == _DIALOG_RESTARTED:
+                    continue
+                if dialog_outcome in (_DIALOG_EXIT, _DIALOG_AWAITING_WEB):
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id, step_type=step_type_value,
+                    ))
+                    if dialog_outcome == _DIALOG_AWAITING_WEB:
+                        return 0
+                    return 130
+
             action, info = _resolve_step_failure_action(
                 project_root, flow, current_step, error_msg,
                 interactive=_stdin_is_interactive(),
@@ -3274,16 +5672,69 @@ def _run_flow_impl(
                     t("cli.run.failure.opt_skip"),
                     t("cli.run.failure.opt_abort"),
                 ]
+                gate_interjections: List[str] = []
                 _source, choice = _await_terminal_or_web_choice(
                     info, message=t("cli.run.what_to_do"), options=options,
+                    interjection_sink=gate_interjections,
+                    project_root=project_root,
                 )
+                if _source == _FAILURE_SRC_INTERJECT:
+                    # An interjection that landed while the menu was on screen
+                    # is the same event as a Ctrl-C here: it opens the dialog,
+                    # and the gate is re-presented afterwards.
+                    dialog_outcome = _dialog_at_pause_point(
+                        flow, current_step, persistence, project_root,
+                        prompt_history,
+                        initial_messages=gate_interjections,
+                        pause_context="failure",
+                        output_format=output_format,
+                    )
+                    if dialog_outcome == _DIALOG_RESTARTED:
+                        continue
+                    if dialog_outcome in (_DIALOG_EXIT, _DIALOG_AWAITING_WEB):
+                        emitter.emit(new_event(
+                            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                            step_id=current_step.step_id,
+                            step_type=step_type_value,
+                        ))
+                        if dialog_outcome == _DIALOG_AWAITING_WEB:
+                            return 0
+                        return 130
+                    continue
                 if choice is None:
-                    # Ctrl+C / EOF with no answer — treat as abort, matching the
-                    # historical prompt_user_choice non-interactive default.
-                    choice = len(options) - 1
+                    # Ctrl-C at the failure gate opens the dialog instead of
+                    # silently aborting: an operator who interrupts here wants
+                    # to understand the failure, and abort-by-default threw
+                    # away the flow without ever answering that.
+                    dialog_outcome = _dialog_at_pause_point(
+                        flow, current_step, persistence, project_root,
+                        prompt_history, pause_context="failure",
+                    )
+                    if dialog_outcome == _DIALOG_RESTARTED:
+                        continue
+                    if dialog_outcome == _DIALOG_EXIT:
+                        emitter.emit(new_event(
+                            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                            step_id=current_step.step_id,
+                            step_type=step_type_value,
+                        ))
+                        return 130
+                    # ``continue`` from the dialog means "back to this gate":
+                    # re-run the loop iteration so the choice is presented
+                    # again, now informed by the conversation.
+                    continue
 
             if choice == 0:
-                # Reset step status and retry from where it left off
+                # Reset step status and retry from where it left off. This is
+                # the ONE consumer of a gate-parked dialog note (decision 4):
+                # the instruction the operator confirmed at this pause rides
+                # this re-run and is then gone.
+                from ..engine.interjection_dialog import (
+                    consume_gate_note,
+                    discard_gate_note,
+                )
+
+                consume_gate_note(flow, current_step)
                 current_step.status = StepStatus.PENDING
                 current_step.inputs["resumed"] = True
                 current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
@@ -3291,6 +5742,9 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
                 continue
             elif choice == 1:
+                from ..engine.interjection_dialog import discard_gate_note
+
+                discard_gate_note(flow)
                 # Force step to completed so transition works
                 current_step.status = StepStatus.COMPLETED
                 # A holistic IMPLEMENT still carries its partial record in
@@ -3305,6 +5759,9 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
                 continue
             else:
+                from ..engine.interjection_dialog import discard_gate_note
+
+                discard_gate_note(flow)
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
                 # 'Abort flow' also returns early from inside the step loop and
@@ -3323,6 +5780,13 @@ def _run_flow_impl(
             current_step.status = StepStatus.REVISION_NEEDED
             # Transition will handle going back to the previous step
             state_machine.transition_to_next(flow)
+            # Same reason as the transition at the bottom of the loop: routing
+            # back for a revision is a fresh run of the target step, not the
+            # failure-gate Retry a parked note is scoped to, so the note dies
+            # here rather than surfacing in a later, unrelated pause.
+            from ..engine.interjection_dialog import discard_gate_note
+
+            discard_gate_note(flow)
             persistence.save_flow(flow)
             continue
 
@@ -3336,8 +5800,14 @@ def _run_flow_impl(
             )
         )
 
-        # Transition to next step
+        # Transition to next step. Advancing past a step also ends any pause
+        # that was holding a one-shot dialog note for it (the completed-step
+        # pseudo-pause above all) — the note's only consumer is a failure
+        # gate's Retry, and a step the flow walked past has none coming.
         state_machine.transition_to_next(flow)
+        from ..engine.interjection_dialog import discard_gate_note
+
+        discard_gate_note(flow)
         persistence.save_flow(flow)
 
     # Flow complete. Emit the terminal flow event (no-op in CliSink — the

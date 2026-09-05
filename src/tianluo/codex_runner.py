@@ -31,7 +31,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
 
-from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
+from .agent_runner import (
+    AgentInvocationIntent,
+    AgentRunner,
+    InfraErrorType,
+    RunnerStartupMetadata,
+    drain_available_output,
+    ensure_process_group_reclaimed,
+    graceful_stop_process,
+    is_message_boundary,
+    reclaim_process_group,
+    resolve_process_group,
+)
+from .i18n import t
+from .stop_signal import (
+    BOUNDARY_WAIT_SECONDS,
+    EXIT_WAIT_SECONDS,
+    get_stop_signal,
+    llm_call_scope,
+)
 
 # Platform-specific imports for process resource monitoring
 try:
@@ -1092,6 +1110,50 @@ class CodexRunner(AgentRunner):
             self.command = command
         else:
             self.command = {"cmd": "codex", "priority": 0}
+        # Thread id observed on the most recent run's ``thread.started`` event,
+        # kept for diagnostics only. It is deliberately NOT reported as startup
+        # metadata: the durable record of a session is the step jsonl, written
+        # from the attempt's own stream, and handing back a previous run's id
+        # would misidentify the next fresh thread (see get_startup_metadata).
+        self._last_provider_session_id: Optional[str] = None
+
+    #: Verified against codex-cli 0.147.0: ``codex exec resume <thread_id>
+    #: --json "<prompt>"`` continues the recorded thread (``thread.started``
+    #: reports the same ``thread_id``) and a thread whose process group was
+    #: SIGINT-ed mid-command resumes cleanly.
+    supports_native_resume: bool = True
+
+    def get_startup_metadata(
+        self, env: Optional[Dict[str, str]] = None
+    ) -> RunnerStartupMetadata:
+        """Report startup identity for a FRESH attempt — never a session id.
+
+        WHY this cannot pre-allocate the way the Claude adapters do: the codex
+        CLI mints the thread id itself and exposes no caller-chosen equivalent
+        of ``--session-id``, so the identity only becomes knowable once
+        ``thread.started`` streams. The binding is therefore recorded at the
+        earliest instant it exists rather than with the prompt: the converter
+        turns ``thread.started`` into an ``init`` line carrying
+        ``provider_session_id``, and ``StreamJSONTracker`` writes it to the step
+        jsonl right then (``chat_history._streamed_session_for_attempt`` reads
+        it back). A parent killed before the terminal response still leaves the
+        live thread addressable — which is what lets this runner declare
+        :attr:`supports_native_resume` without a window in which a real thread
+        is named nowhere.
+
+        INVARIANT: it must not report the PREVIOUS run's thread id either.
+        LLMCaller calls this only on the fresh/rebuild path — a native resume
+        takes its identity from the recorded binding instead — so reaching here
+        means a brand-new thread is about to start. Reporting the old id would
+        make LLMCaller record it explicitly, where it takes precedence over the
+        real ``thread.started`` id, and the next retry would resume the
+        obsolete thread instead of the attempt that actually just ran.
+        """
+        return RunnerStartupMetadata(
+            provider=self.command.get("provider") or self.startup_provider,
+            model=self.startup_model,
+            provider_session_id=None,
+        )
 
     # ------------------------------------------------------------------
     # build_call_args — intent → CLI arguments
@@ -1103,14 +1165,20 @@ class CodexRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
+        deny_shell: bool = False,
     ) -> List[str]:
         """Build codex CLI arguments from intent-level parameters.
+
+        *deny_shell* is accepted and needs no translation: codex's read-only
+        posture is a SANDBOX (``sandbox_mode="read-only"``), which already
+        refuses writes from the shell it runs commands in — where the Claude
+        adapters can only express the same boundary as a tool denial.
 
         Produces the argv for ``codex exec --json``:
 
         * Constant prefix: ``exec --json --skip-git-repo-check``
-        * Read-only: ``--sandbox read-only``
-        * Writable: ``--sandbox danger-full-access``
+        * Read-only: ``-c sandbox_mode="read-only"``
+        * Writable: ``-c sandbox_mode="danger-full-access"``
         * Context files: content inlined into the prompt (codex has no
           ``--file`` equivalent)
         * Prompt: positional argument at the end, or ``-`` (stdin marker)
@@ -1126,11 +1194,9 @@ class CodexRunner(AgentRunner):
             "--skip-git-repo-check",
         ]
 
-        # Sandbox / approval flags
-        if read_only:
-            args.extend(["--sandbox", "read-only"])
-        else:
-            args.extend(["--sandbox", "danger-full-access"])
+        # One spelling of the read-only lock for both invocation shapes — see
+        # _sandbox_config_overrides.
+        args.extend(self._sandbox_config_overrides(read_only))
 
         # Context files — codex has no --file flag, so inline content into prompt
         effective_prompt = prompt
@@ -1158,6 +1224,79 @@ class CodexRunner(AgentRunner):
             self._pending_stdin_prompt = None
 
         return args
+
+    @staticmethod
+    def _sandbox_config_overrides(read_only: bool) -> List[str]:
+        """Express the read-only / writable posture as ``-c`` config overrides.
+
+        WHY not ``--sandbox``: ``codex exec resume`` is a distinct subcommand
+        and does not accept that flag, so the lock has to travel through the
+        general config-override channel there. Using the SAME spelling on the
+        fresh-call path keeps one runner contract instead of two — a posture
+        that differs by invocation shape is exactly the kind of split that
+        silently diverges. Verified on codex-cli 0.147.0: ``-c
+        sandbox_mode="read-only"`` is honoured by both ``codex exec`` and
+        ``codex exec resume``.
+        """
+        mode = "read-only" if read_only else "danger-full-access"
+        return ["-c", f'sandbox_mode="{mode}"']
+
+    def build_resume_call_args(
+        self,
+        session_id: str,
+        prompt: str,
+        read_only: bool,
+        context_files: Optional[List[Path]] = None,
+        deny_shell: bool = False,
+    ) -> List[str]:
+        """Build ``codex exec resume <thread_id> --json "<prompt>"`` argv.
+
+        *deny_shell* needs no translation here either: the read-only sandbox
+        already covers shell writes (see :meth:`build_call_args`).
+
+        The thread already holds the conversation, so *prompt* carries only the
+        new user turn. Context files are inlined the same way the fresh-call
+        path does it (codex has no ``--file`` equivalent), and the oversized
+        prompt still reroutes to stdin via the ``-`` marker.
+        """
+        if not session_id:
+            raise ValueError("build_resume_call_args requires a session_id")
+        args: List[str] = [
+            "exec",
+            "resume",
+            session_id,
+            "--json",
+            "--skip-git-repo-check",
+        ]
+        args.extend(self._sandbox_config_overrides(read_only))
+
+        effective_prompt = self._inline_context_files(prompt, context_files)
+        if len(effective_prompt.encode("utf-8")) > _MAX_ARG_BYTES:
+            args.append("-")
+            self._pending_stdin_prompt = effective_prompt
+        else:
+            args.append(effective_prompt)
+            self._pending_stdin_prompt = None
+        return args
+
+    @staticmethod
+    def _inline_context_files(
+        prompt: str, context_files: Optional[List[Path]]
+    ) -> str:
+        """Prepend context-file bodies to *prompt* (codex has no ``--file``)."""
+        if not context_files:
+            return prompt
+        inline_parts: List[str] = []
+        for f in context_files:
+            if f.exists():
+                try:
+                    content = f.read_text(encoding="utf-8")
+                    inline_parts.append(f"## File: {f}\n```\n{content}\n```")
+                except Exception:
+                    logger.debug("Failed to read context file %s", f)
+        if not inline_parts:
+            return prompt
+        return "\n\n".join(inline_parts) + "\n\n" + prompt
 
     # ------------------------------------------------------------------
     # run — synchronous execution
@@ -1193,6 +1332,13 @@ class CodexRunner(AgentRunner):
         stdin_prompt = getattr(self, "_pending_stdin_prompt", None)
 
         try:
+            # WHY no ``llm_call_scope`` / own session here, unlike the
+            # monitored path: this blocking call has no monitor loop, so
+            # nothing would consume a stop request — and marking the call
+            # in-flight makes ``luo run``'s SIGINT handler stand down instead
+            # of raising, so Ctrl-C would be swallowed for the whole turn while
+            # an own session also kept the terminal's SIGINT off the child. The
+            # engine calls ``run_with_monitor``, which does supervise.
             result = subprocess.run(
                 full_cmd,
                 capture_output=True,
@@ -1279,19 +1425,22 @@ class CodexRunner(AgentRunner):
 
             stdin_prompt = getattr(self, "_pending_stdin_prompt", None)
 
-            result = self._run_single_with_monitor(
-                full_cmd=full_cmd,
-                cmd_name=cmd_name,
-                log_file=log_file,
-                wall_timeout=wall_timeout,
-                inactivity_timeout=inactivity_timeout,
-                cwd=cwd,
-                env=run_env,
-                on_output=on_output,
-                on_activity=on_activity,
-                start_time=start_time,
-                stdin_prompt=stdin_prompt,
-            )
+            # See ClaudeCodeRunner: declaring the call in flight routes a
+            # terminal Ctrl-C to the graceful stop rather than to an exception.
+            with llm_call_scope():
+                result = self._run_single_with_monitor(
+                    full_cmd=full_cmd,
+                    cmd_name=cmd_name,
+                    log_file=log_file,
+                    wall_timeout=wall_timeout,
+                    inactivity_timeout=inactivity_timeout,
+                    cwd=cwd,
+                    env=run_env,
+                    on_output=on_output,
+                    on_activity=on_activity,
+                    start_time=start_time,
+                    stdin_prompt=stdin_prompt,
+                )
 
             output = f"=== Command: {cmd_name} ===\n{result.output}"
 
@@ -1368,6 +1517,11 @@ class CodexRunner(AgentRunner):
         else:
             stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
 
+        # WHY start_new_session: isolates the child (and its shell
+        # grandchildren) from ``luo run``'s foreground process group so a
+        # terminal Ctrl-C does not kill it outright. The wind-down is driven
+        # deliberately below — boundary wait, SIGINT to the group, SIGKILL
+        # escalation — which is what leaves the codex thread resumable.
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
@@ -1377,10 +1531,17 @@ class CodexRunner(AgentRunner):
             env=env,
             bufsize=1,
             universal_newlines=True,
+            start_new_session=True,
         )
+        # Captured while the pid is live — see ClaudeCodeRunner: after the
+        # direct child is reaped the group can no longer be located from it.
+        proc_pgid = resolve_process_group(proc)
 
         if stdin_prompt is not None:
             _spawn_stdin_writer(proc, stdin_prompt)
+
+        stop_signal = get_stop_signal()
+        stop_deadline: Optional[float] = None
 
         # Drain stderr in background, capturing tail into a bounded buffer
         # for post-mortem analysis (e.g. shell snapshot validation failures).
@@ -1407,8 +1568,12 @@ class CodexRunner(AgentRunner):
             while proc.poll() is None:
                 # Check wall timeout
                 if wall_timeout and (time.time() - start_time) > wall_timeout:
-                    proc.kill()
-                    proc.wait()
+                    # Reclaim the GROUP, not just the CLI: a timeout usually
+                    # fires while a tool/shell grandchild is the thing hanging,
+                    # and reaping only the parent both leaves it running and
+                    # makes the finally block below believe there is nothing
+                    # left to clean up.
+                    reclaim_process_group(proc)
                     msg = f"\n[codex-runner] Wall timeout ({wall_timeout}s) exceeded\n"
                     output_buffer.append(msg)
                     if log_fh:
@@ -1430,6 +1595,23 @@ class CodexRunner(AgentRunner):
                     output_buffer.append(f"\n[codex-runner] select() error: {e}\n")
                     continue
 
+                # Cooperative stop (see ClaudeCodeRunner for the rationale):
+                # the request arrives on a process-wide flag, not as an
+                # exception, so DAG group runners in worker threads observe it.
+                if stop_deadline is None and stop_signal.is_set():
+                    stop_deadline = time.time() + BOUNDARY_WAIT_SECONDS
+                    print(
+                        t("runner.stop.awaiting_boundary", runner="codex-runner"),
+                        file=sys.stderr,
+                    )
+                if stop_deadline is not None and time.time() >= stop_deadline:
+                    return self._stop_gracefully(
+                        proc, converter, output_buffer, log_fh,
+                        _stderr_thread, _stderr_buffer, pgid=proc_pgid,
+                        on_output=on_output,
+                        reason_key="runner.stop.reason.boundary_timeout",
+                    )
+
                 if ready:
                     try:
                         line = proc.stdout.readline()
@@ -1447,6 +1629,15 @@ class CodexRunner(AgentRunner):
                                     on_output(ndjson_line + "\n")
                             if on_activity:
                                 on_activity()
+                            if stop_deadline is not None and any(
+                                is_message_boundary(nl) for nl in converted
+                            ):
+                                return self._stop_gracefully(
+                                    proc, converter, output_buffer, log_fh,
+                                    _stderr_thread, _stderr_buffer,
+                                    pgid=proc_pgid, on_output=on_output,
+                                    reason_key="runner.stop.reason.boundary_reached",
+                                )
                     except Exception:
                         pass
                 else:
@@ -1486,15 +1677,9 @@ class CodexRunner(AgentRunner):
                             hang_confirmed = True
 
                         if hang_confirmed:
-                            try:
-                                proc.kill()
-                                proc.wait(timeout=10)
-                            except Exception:
-                                try:
-                                    proc.terminate()
-                                    proc.wait(timeout=5)
-                                except Exception:
-                                    pass
+                            # Group-wide, for the same reason as the wall
+                            # timeout: the hang is typically a grandchild.
+                            reclaim_process_group(proc, wait=10)
 
                             output_buffer.append(msg)
                             if log_fh:
@@ -1507,16 +1692,31 @@ class CodexRunner(AgentRunner):
                                 should_retry=True,
                             )
 
+            def _emit_converted(ndjson_line: str) -> None:
+                """Buffer/log/forward one converted NDJSON line.
+
+                WHY the callback runs here too: a child that exits between two
+                select() polls leaves its terminal result — the line carrying
+                the turn's token usage — in the pipe or in ``finalize()``, and
+                the caller's stream tracker is the only place LLMCaller reads
+                that usage from.
+                """
+                output_buffer.append(ndjson_line + "\n")
+                if log_fh:
+                    log_fh.write(ndjson_line + "\n")
+                    log_fh.flush()
+                if on_output:
+                    try:
+                        on_output(ndjson_line + "\n")
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+
             # Process finished — read remaining output
             remaining = proc.stdout.read()
             if remaining:
                 for line in remaining.splitlines(keepends=True):
-                    converted = converter.convert_line(line)
-                    for ndjson_line in converted:
-                        output_buffer.append(ndjson_line + "\n")
-                        if log_fh:
-                            log_fh.write(ndjson_line + "\n")
-                            log_fh.flush()
+                    for ndjson_line in converter.convert_line(line):
+                        _emit_converted(ndjson_line)
 
             # Collect stderr tail from the bounded buffer for post-mortem.
             # Join the stderr reader thread first so the buffer is fully
@@ -1556,16 +1756,10 @@ class CodexRunner(AgentRunner):
                     "result": error_text,
                 }
                 converter._apply_terminal_metadata(error_result, {})
-                output_buffer.append(json.dumps(error_result, ensure_ascii=False) + "\n")
-                if log_fh:
-                    log_fh.write(json.dumps(error_result, ensure_ascii=False) + "\n")
-                    log_fh.flush()
+                _emit_converted(json.dumps(error_result, ensure_ascii=False))
             else:
                 for ndjson_line in converter.finalize():
-                    output_buffer.append(ndjson_line + "\n")
-                    if log_fh:
-                        log_fh.write(ndjson_line + "\n")
-                        log_fh.flush()
+                    _emit_converted(ndjson_line)
 
             returncode = proc.returncode
             output = "".join(output_buffer)
@@ -1600,47 +1794,111 @@ class CodexRunner(AgentRunner):
             )
 
         except KeyboardInterrupt:
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-            try:
-                remaining = proc.stdout.read()
-                if remaining:
-                    for line in remaining.splitlines(keepends=True):
-                        converted = converter.convert_line(line)
-                        for ndjson_line in converted:
-                            output_buffer.append(ndjson_line + "\n")
-            except Exception:
-                pass
-            # Finalize even on interrupt
-            for ndjson_line in converter.finalize():
-                output_buffer.append(ndjson_line + "\n")
-            # Join stderr reader before reading the buffer
-            _stderr_thread.join(timeout=5)
-            stderr_tail = "".join(_stderr_buffer) if _stderr_buffer else ""
-            return _SingleRunResult(
-                returncode=-2,
-                output="".join(output_buffer),
-                success=False,
-                should_retry=False,
-                interrupted=True,
-                stderr_tail=stderr_tail,
+            # Defensive path only — see ClaudeCodeRunner._stop_gracefully.
+            return self._stop_gracefully(
+                proc, converter, output_buffer, log_fh,
+                _stderr_thread, _stderr_buffer, pgid=proc_pgid,
+                on_output=on_output,
+                reason_key="runner.stop.reason.keyboard_interrupt",
             )
 
         finally:
+            self._last_provider_session_id = (
+                converter._provider_session_id or self._last_provider_session_id
+            )
             if log_fh:
                 log_fh.close()
             if proc.poll() is None:
+                # Own process group ⇒ reclaim the whole group so shell
+                # grandchildren are never orphaned.
+                reclaim_process_group(proc, pgid=proc_pgid)
+            else:
+                # Also on the clean-exit path: codex's own shell grandchildren
+                # can outlive it and keep writing to the workspace.
+                ensure_process_group_reclaimed(proc_pgid)
+
+    def _stop_gracefully(
+        self,
+        proc: subprocess.Popen,
+        converter: "CodexEventConverter",
+        output_buffer: List[str],
+        log_fh: Any,
+        stderr_thread: Any,
+        stderr_buffer: "Deque[str]",
+        *,
+        reason_key: str,
+        pgid: Optional[int] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+    ) -> "_SingleRunResult":
+        """Wind the codex child down on a stop request, keeping partial output.
+
+        The converter is finalized so any still-open tool chip gets its
+        synthesized interrupted ``tool_result`` — without it the recorded
+        NDJSON would end on a dangling ``tool_use``, which is exactly the shape
+        that makes a transcript hard to resume.
+
+        WHY every converted line here also goes to *on_output*: that callback
+        is the caller's stream tracker, and the wind-down is where codex emits
+        its closing items and the terminal result carrying the turn's token
+        usage. LLMCaller reads an attempt's usage from the tracker alone, so a
+        line absorbed into the buffer but never handed over would book a
+        fully-paid interrupted call as zero tokens.
+        """
+        print(
+            t(
+                "runner.stop.graceful",
+                runner="codex-runner",
+                reason=t(reason_key),
+            ),
+            file=sys.stderr,
+        )
+        def _emit(ndjson_line: str) -> None:
+            output_buffer.append(ndjson_line + "\n")
+            if log_fh:
                 try:
-                    proc.kill()
-                    proc.wait(timeout=5)
-                except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    log_fh.write(ndjson_line + "\n")
+                    log_fh.flush()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if on_output is not None:
+                try:
+                    on_output(ndjson_line + "\n")
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+        def _absorb(line: str) -> None:
+            for ndjson_line in converter.convert_line(line):
+                _emit(ndjson_line)
+
+        graceful_stop_process(
+            proc,
+            exit_wait=EXIT_WAIT_SECONDS,
+            pgid=pgid,
+            # Keep reading while codex closes its thread: a child blocked on a
+            # full stdout pipe can never honour the SIGINT it was just sent.
+            drain=lambda: drain_available_output(proc.stdout, _absorb),
+        )
+        try:
+            remaining = proc.stdout.read()
+            if remaining:
+                for line in remaining.splitlines(keepends=True):
+                    _absorb(line)
+        except Exception:
+            pass
+        for ndjson_line in converter.finalize():
+            _emit(ndjson_line)
+        try:
+            stderr_thread.join(timeout=5)
+        except Exception:  # pragma: no cover - defensive
+            pass
+        return _SingleRunResult(
+            returncode=-2,
+            output="".join(output_buffer),
+            success=False,
+            should_retry=False,
+            interrupted=True,
+            stderr_tail="".join(stderr_buffer) if stderr_buffer else "",
+        )
 
     # ------------------------------------------------------------------
     # detect_infra_error — infrastructure error classification

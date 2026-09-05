@@ -635,6 +635,15 @@ function interventionsSignature(entries, replyState) {
       callId: e.callId != null ? String(e.callId) : "",
       phase: e.phase != null ? e.phase : null,
       afterimage: !!e.afterimage,
+      // An interjection dialog republishes every round under ONE call_id, and
+      // `prompt` here is only the DESC_CLIP preview — two rounds can share it
+      // byte for byte. Without the backend's content hash the diff-aware skip
+      // below produces zero DOM mutations and the panel keeps showing the
+      // previous round.
+      promptRevision:
+        e.context && e.context.prompt_revision != null
+          ? String(e.context.prompt_revision)
+          : null,
     })),
     targetId: rs.targetId != null ? rs.targetId : null,
     pendingSendSettleKey:
@@ -6821,6 +6830,18 @@ const KIND_META = {
     hintKey: "intervention.confirm.hint",
     icon: "✓",
   },
+  // A round of the mid-flow interjection dialog. Unlike every other kind this
+  // one is a CONVERSATION: the panel shows the transcript so far and, once the
+  // dialog proposes a decision, editable fields plus a confirm button — the
+  // operator must be able to change any field before it executes, because a
+  // restart+reset destroys the flow's visible work.
+  dialog: {
+    label: "Interjection dialog",
+    labelKey: "intervention.dialog.label",
+    hint: "You interrupted the flow. Reply to keep talking to the agent, or confirm a decision to continue, restart, or exit.",
+    hintKey: "intervention.dialog.hint",
+    icon: "✎",
+  },
 };
 
 // Canonicalize a raw `kind` field; unknown kinds degrade to a plain "call".
@@ -7463,9 +7484,22 @@ function updateReplyBox(flow) {
   // in style.css), so even a very long prompt — e.g. a `discovery_confirm`
   // whose prompt embeds an entire refined task description — can never push the
   // textarea / options / Send out of view.
+  // Cache key, NOT the bare call_id: an interjection dialog republishes every
+  // round under one call_id (the console shows a single growing conversation),
+  // so a body cached by id alone kept showing round 1 — including after an
+  // apply-failure republish whose banner is the whole point of the new body.
+  // `prompt_revision` is the backend's content hash of the full prompt, so the
+  // key changes exactly when the body does; kinds that do not publish one keep
+  // the plain-id behaviour.
+  const promptCacheKey = target.callId
+    ? target.callId +
+      (target.context && target.context.prompt_revision
+        ? "@" + target.context.prompt_revision
+        : "")
+    : "";
   const cachedFull =
-    target.callId && state.flowReplyPromptFull
-      ? state.flowReplyPromptFull[target.callId]
+    promptCacheKey && state.flowReplyPromptFull
+      ? state.flowReplyPromptFull[promptCacheKey]
       : null;
   // Once fetched, reuse the cached untruncated body so the 3s poll / ws-push
   // rebuild does not fall back to the DESC_CLIP preview (and never re-fetches).
@@ -7494,7 +7528,7 @@ function updateReplyBox(flow) {
             }).then((full) => {
               // Cache so subsequent rebuilds mount the full body directly.
               if (typeof full === "string" && full) {
-                state.flowReplyPromptFull[target.callId] = full;
+                state.flowReplyPromptFull[promptCacheKey] = full;
               }
               return full;
             })
@@ -7573,6 +7607,17 @@ function updateReplyBox(flow) {
     ctx.appendChild(decide);
   }
 
+  // Interjection dialog: show the conversation so far and, when the dialog has
+  // settled on a decision, the decision's fields as EDITABLE controls plus a
+  // confirm button. Editability is the point — a decision executes only after
+  // the operator confirms it, and they must be able to change any field first
+  // (most consequentially restart's target step and workspace handling, since
+  // a reset discards the flow's whole visible output).
+  if (target.kind === "dialog") {
+    const panel = renderDialogPanel(target);
+    if (panel) ctx.appendChild(panel);
+  }
+
   // Optional options — render as one-click reply buttons. Clicking sends the
   // option text directly via sendReply, same path the inline option click on
   // the previous card layout used.
@@ -7588,6 +7633,10 @@ function updateReplyBox(flow) {
     const opts = el("div", "flow-reply-options");
     for (const opt of options) {
       const optText = optionText(opt);
+      // A dialog's confirm must carry the operator's edits, so its button is
+      // rendered by renderDialogPanel; a bare option button here would send an
+      // unedited confirm behind their back.
+      if (target.kind === "dialog") continue;
       const isConfirm = target.kind === "discovery_confirm";
       const btn = el(
         "button",
@@ -7723,6 +7772,14 @@ function submitReply(event) {
   const input = $("flow-reply-input");
   const text = input.value.trim();
   if (!text) {
+    // An empty answer is a real answer for an interjection dialog: "change
+    // nothing, resume now" — the same semantics an empty line has at the
+    // terminal, and the dialog's own call body advertises it. Every other
+    // interaction still requires text.
+    if (target.kind === "dialog") {
+      sendReply(state.selectedFlowId, target, "");
+      return;
+    }
     showToast("error", tf("toast.responseEmpty", "Response must not be empty."));
     return;
   }
@@ -7801,6 +7858,364 @@ function armPendingSend(target) {
 // step gets a real approve/reject rather than a free-text guess. Mirrors
 // sendReply's success/failure/settle handling so the pending-Send gate and the
 // optimistic echo behave identically for a button click and a typed reply.
+
+// ---------------------------------------------------------------------------
+// Interjection dialog panel
+// ---------------------------------------------------------------------------
+
+// Render the transcript of an interjection dialog plus, when one has been
+// proposed, its decision as editable controls with a confirm button.
+//
+// The transcript is rendered from `context.transcript` rather than from the
+// conversation stream so the panel is self-contained: the operator answering
+// from the chip bar sees what was said without having to scroll the history.
+function renderDialogPanel(target) {
+  const ctx = (target && target.context) || {};
+  const wrap = el("div", "flow-reply-dialog");
+
+  // An Apply that failed server-side is reported HERE, at the top of the panel.
+  // Carrying it only inside the call prompt was invisible in practice: the
+  // prompt renders collapsed, so a rejected decision republished a
+  // byte-identical panel and read as "nothing happened", inviting the same
+  // click again.
+  const applyError = String(ctx.apply_error == null ? "" : ctx.apply_error).trim();
+  if (applyError) {
+    const banner = el("p", "flow-reply-dialog-apply-error");
+    banner.textContent = tf(
+      "dialog.applyFailed",
+      `Could not apply the decision: ${applyError}`,
+      { error: applyError },
+    );
+    wrap.appendChild(banner);
+  }
+
+  const transcript = Array.isArray(ctx.transcript) ? ctx.transcript : [];
+  if (transcript.length) {
+    const list = el("div", "flow-reply-dialog-transcript");
+    for (const turn of transcript) {
+      if (!turn || typeof turn !== "object") continue;
+      const isUser = turn.role === "user";
+      const line = el(
+        "div",
+        "flow-reply-dialog-turn " + (isUser ? "is-user" : "is-agent"),
+      );
+      line.appendChild(el(
+        "span",
+        "flow-reply-dialog-speaker",
+        isUser
+          ? tf("dialog.speakerUser", "You (interjection)")
+          : tf("dialog.speakerAgent", "Agent (interjection)"),
+      ));
+      const body = el("span", "flow-reply-dialog-text");
+      body.textContent = String(turn.content == null ? "" : turn.content);
+      line.appendChild(body);
+      list.appendChild(line);
+    }
+    wrap.appendChild(list);
+  }
+
+  if (ctx.same_session && ctx.agent_name) {
+    wrap.appendChild(el(
+      "p",
+      "flow-reply-hint",
+      tf(
+        "dialog.sameSession",
+        `Talking to ${ctx.agent_name} in its own session (read-only).`,
+        { agent: ctx.agent_name },
+      ),
+    ));
+  }
+
+  // "Resume unchanged" is the zero-cost exit from an accidental interruption:
+  // an empty reply, which the flow reads as "change nothing, continue now" —
+  // and which the generic reply box would otherwise reject as empty. The
+  // explicit button keeps that path one click and unambiguous, including when
+  // a proposed decision is on the table (an empty reply NEVER confirms it).
+  const resumeBtn = el(
+    "button",
+    "flow-reply-option flow-reply-dialog-resume",
+    tf("dialog.resumeUnchanged", "Resume unchanged"),
+  );
+  resumeBtn.type = "button";
+  resumeBtn.title = tf(
+    "dialog.resumeUnchangedHint",
+    "Change nothing and continue the flow immediately (no LLM round).",
+  );
+  resumeBtn.addEventListener("click", () => {
+    if (resumeBtn.disabled) return;
+    resumeBtn.disabled = true;
+    sendReply(state.selectedFlowId, target, "");
+  });
+  wrap.appendChild(resumeBtn);
+
+  const decision = ctx.decision && typeof ctx.decision === "object"
+    ? ctx.decision
+    : null;
+  if (!decision) return wrap;
+
+  const form = el("div", "flow-reply-dialog-decision");
+  const fields = {};
+
+  const actionSel = el("select", "flow-reply-dialog-field");
+  for (const value of ["continue", "restart", "exit"]) {
+    const opt = el("option", "", tf("dialog.action." + value, value));
+    opt.value = value;
+    actionSel.appendChild(opt);
+  }
+  // Selecting by assigning `.value` (rather than flagging an <option>) is the
+  // canonical form and degrades correctly: a value with no matching option
+  // leaves the control on its first entry rather than on a phantom selection.
+  actionSel.value = String(decision.action || "continue");
+  fields.action = actionSel;
+  form.appendChild(labelledField(tf("dialog.field.action", "Action"), actionSel));
+
+  const restartSel = el("select", "flow-reply-dialog-field");
+  const anyOpt = el("option", "", tf("dialog.currentStep", "(current step)"));
+  anyOpt.value = "";
+  restartSel.appendChild(anyOpt);
+  const rewindTargets = Array.isArray(ctx.rewind_targets) ? ctx.rewind_targets : [];
+  for (const tgt of rewindTargets) {
+    if (!tgt || !tgt.step_id) continue;
+    const opt = el("option", "", `${tgt.step_id} (${tgt.step_type || ""})`);
+    opt.value = tgt.step_id;
+    restartSel.appendChild(opt);
+  }
+  restartSel.value = rewindTargets.some(
+    (t) => t && t.step_id === decision.restart_step_id,
+  )
+    ? String(decision.restart_step_id)
+    : "";
+  fields.restart_step_id = restartSel;
+  form.appendChild(
+    labelledField(tf("dialog.field.restartStep", "Restart from"), restartSel),
+  );
+
+  const wsSel = el("select", "flow-reply-dialog-field");
+  for (const value of ["keep", "reset"]) {
+    const opt = el("option", "", tf("dialog.workspace." + value, value));
+    opt.value = value;
+    wsSel.appendChild(opt);
+  }
+  wsSel.value = String(decision.workspace || "keep");
+  fields.workspace = wsSel;
+  form.appendChild(
+    labelledField(tf("dialog.field.workspace", "Workspace"), wsSel),
+  );
+
+  // What a `restart` + `workspace: reset` would throw away. Rendered BEFORE
+  // the confirm button because the operation erases the flow's whole visible
+  // output — the confirmation has to be informed by the actual tree, not by
+  // the word "reset" on a dropdown.
+  const preview = ctx.reset_preview && typeof ctx.reset_preview === "object"
+    ? ctx.reset_preview
+    : null;
+  // A preview is published only for a proposal that is already restart+reset,
+  // and `ok === false` means git could not be asked. Both cases must block the
+  // Apply button below: an edited decision that discards the workspace has to
+  // be previewed for ITS OWN fields before it can be confirmed.
+  const previewUsable = !!(preview && preview.ok !== false);
+  if (preview && !previewUsable) {
+    const warn = el(
+      "p",
+      "flow-reply-dialog-reset-warning",
+      tf(
+        "dialog.reset.previewFailed",
+        "The reset preview could not be taken, so this reset cannot be applied yet.",
+      ),
+    );
+    form.appendChild(warn);
+  }
+  if (preview && previewUsable) {
+    const box = el("div", "flow-reply-dialog-reset-preview");
+    box.appendChild(el(
+      "p",
+      "flow-reply-dialog-reset-title",
+      tf("dialog.reset.previewTitle", "This reset will discard:"),
+    ));
+    const status = el("pre", "flow-reply-dialog-reset-body");
+    status.textContent = String(
+      preview.status_summary
+        || tf("dialog.reset.previewClean", "(no uncommitted changes)"),
+    );
+    box.appendChild(status);
+    const commits = Array.isArray(preview.flow_commits) ? preview.flow_commits : [];
+    if (commits.length) {
+      box.appendChild(el(
+        "p",
+        "flow-reply-dialog-reset-title",
+        tf("dialog.reset.previewCommits", "and these commits made since the flow started:"),
+      ));
+      const commitBody = el("pre", "flow-reply-dialog-reset-body");
+      commitBody.textContent = commits.join("\n");
+      box.appendChild(commitBody);
+    }
+    if (preview.snapshot_warning) {
+      box.appendChild(el(
+        "p",
+        "flow-reply-dialog-reset-warning",
+        tf(
+          "dialog.reset.noSnapshot",
+          "No pre-flow workspace snapshot was recorded — untracked files that existed before this flow started cannot be restored.",
+        ),
+      ));
+    }
+    form.appendChild(box);
+  }
+
+  // The DAG group worktrees and leaf branches a restart deletes. Shown for
+  // `keep` as well as `reset`: "keep" only ever meant the flow's own tree, and
+  // a parallel implement step's work lives nowhere near it — it is on those
+  // leaf branches, which the rewind removes either way.
+  const groupWork = Array.isArray(ctx.group_work) ? ctx.group_work : [];
+  if (groupWork.length) {
+    const box = el("div", "flow-reply-dialog-reset-preview");
+    box.appendChild(el(
+      "p",
+      "flow-reply-dialog-reset-title",
+      tf(
+        "dialog.groupWork.title",
+        "This restart will also delete these parallel implementation groups (saved to a recovery ref first):",
+      ),
+    ));
+    const lines = [];
+    for (const entry of groupWork) {
+      if (!entry || typeof entry !== "object") continue;
+      lines.push(`${entry.branch || ""}  [${entry.worktree_path || "-"}]`);
+      for (const commit of (Array.isArray(entry.commits) ? entry.commits : [])) {
+        lines.push(`    ${commit}`);
+      }
+      const summary = String(entry.status_summary || "").trim();
+      if (summary) {
+        lines.push(`    ${tf("dialog.groupWork.uncommitted", "uncommitted:")}`);
+        for (const line of summary.split("\n")) lines.push(`      ${line}`);
+      }
+    }
+    const body = el("pre", "flow-reply-dialog-reset-body");
+    body.textContent = lines.join("\n");
+    box.appendChild(body);
+    form.appendChild(box);
+  }
+
+  const instruction = el("textarea", "flow-reply-dialog-field");
+  instruction.value = String(decision.instruction || "");
+  fields.instruction = instruction;
+  form.appendChild(
+    labelledField(tf("dialog.field.instruction", "Instruction (this step only)"), instruction),
+  );
+
+  const revised = el("textarea", "flow-reply-dialog-field flow-reply-dialog-revised");
+  revised.value = String(decision.revised_description || "");
+  fields.revised_description = revised;
+  form.appendChild(
+    labelledField(
+      tf("dialog.field.revised", "Revised task description (replaces the task)"),
+      revised,
+    ),
+  );
+
+  const confirmBtn = el(
+    "button",
+    "flow-reply-option flow-reply-option-primary flow-reply-dialog-confirm",
+    tf("dialog.confirm", "Apply decision"),
+  );
+  confirmBtn.type = "button";
+  if (state.pendingSendSettleKey) confirmBtn.disabled = true;
+  confirmBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    const edited = {
+      action: fields.action.value,
+      restart_step_id: fields.restart_step_id.value,
+      workspace: fields.workspace.value,
+      instruction: fields.instruction.value,
+      revised_description: fields.revised_description.value,
+    };
+    // The fields are editable, so the decision being confirmed is not
+    // necessarily the one the preview above describes — an operator can turn a
+    // proposed `continue` into `restart` + `reset`. Applying that immediately
+    // would discard the whole workspace with no discard summary ever shown, so
+    // the first click on such an edit asks the flow for a preview instead; the
+    // round comes back with one rendered and the second click applies it.
+    const discards = edited.action === "restart" && edited.workspace === "reset";
+    if (discards && !previewUsable) {
+      sendDialogDecision(state.selectedFlowId, target, edited, true);
+      return;
+    }
+    sendDialogDecision(state.selectedFlowId, target, edited);
+  });
+  form.appendChild(confirmBtn);
+  wrap.appendChild(form);
+  return wrap;
+}
+
+function labelledField(labelText, control) {
+  const row = el("label", "flow-reply-dialog-row");
+  row.appendChild(el("span", "flow-reply-dialog-label", labelText));
+  row.appendChild(control);
+  return row;
+}
+
+// Send a confirmed interjection-dialog decision as `{decision: {...}}`. The
+// running flow reads it through `interaction_calls.read_dialog_response`, so a
+// free-text reply stays the "keep talking" channel and this stays the "execute
+// it" channel — the two can never be confused for one another.
+async function sendDialogDecision(flowId, target, decision, previewOnly) {
+  if (!flowId || !target) return;
+  if (state.pendingSendSettleKey) return;
+  const submit = $("flow-reply-submit");
+  submit.disabled = true;
+  armPendingSend(target);
+  try {
+    const payload = { decision: decision };
+    // `preview_request` is the "show me, do not do it" channel: the flow adopts
+    // these fields and republishes the round with a reset preview built for
+    // them, rather than executing the discard.
+    if (previewOnly) payload.preview_request = true;
+    const resp = await authedFetch(
+      `/api/flows/${encodeURIComponent(flowId)}/respond`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          response: payload,
+          call_id: target.callId,
+        }),
+      },
+    );
+    if (resp.ok) {
+      if (previewOnly) {
+        showToast(
+          "success",
+          tf(
+            "dialog.previewRequested",
+            "Requesting a preview of what this reset would discard...",
+          ),
+        );
+      } else {
+        showToast("success", tf("dialog.applied", "Decision sent."));
+        appendLocalReply(
+          flowId,
+          target,
+          tf("dialog.appliedEcho", `Decision: ${decision.action}`, {
+            action: decision.action,
+          }),
+        );
+      }
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      const message = detail.detail || tf("error.serverReturned", `Server returned ${resp.status}.`, { status: resp.status });
+      showToast("error", tf("toast.couldNotSend", `Could not send: ${message}`, { message }));
+      settlePendingSend();
+    }
+  } catch (_) {
+    showToast("error", tf("toast.sendNetworkError", "Could not send — network error reaching the server."));
+    settlePendingSend();
+  } finally {
+    if (state.selectedFlowId === flowId && state.flowDetail) {
+      renderInterventions(state.flowDetail);
+    }
+  }
+}
+
 async function sendConfirmDecision(flowId, target, approved, feedback) {
   if (!flowId || !target) return;
   // Re-entry guard: the 批准/打回 buttons live in the context panel, separate
@@ -7892,7 +8307,10 @@ async function sendConfirmDecision(flowId, target, approved, feedback) {
 }
 
 async function sendReply(flowId, target, text) {
-  if (!flowId || !target || !text) return;
+  // Empty text is rejected for every kind EXCEPT dialog, where it carries the
+  // explicit "resume unchanged" meaning (see submitReply).
+  if (!flowId || !target) return;
+  if (!text && target.kind !== "dialog") return;
   const submit = $("flow-reply-submit");
   const input = $("flow-reply-input");
   // Only the Send button locks — the textarea stays enabled at all times so
@@ -8001,6 +8419,11 @@ async function sendReply(flowId, target, text) {
 // visible immediately, without waiting for the next `history_data` push.
 function appendLocalReply(flowId, target, text) {
   if (state.selectedFlowId !== flowId) return;
+  // A blank reply ("Resume unchanged" sends the empty string) has no
+  // authoritative counterpart: the engine writes no history record for it and
+  // `reconcileLocalEchoes` skips blank echoes, so an echo here would sit in the
+  // conversation forever, matching nothing. No echo is the honest rendering.
+  if (!String(text == null ? "" : text).trim()) return;
   // Snapshot this reply's *rank* among all copies of the same text — i.e. how
   // many prior copies already exist, counting BOTH authoritative (non-echo)
   // user records AND still-pending optimistic echoes of the same text. This
@@ -10443,8 +10866,17 @@ function normalizeRecord(rec) {
   const agentName = typeof pick("agent_name") === "string" && pick("agent_name") ? pick("agent_name") : null;
   const modelName = typeof pick("model_name") === "string" && pick("model_name") ? pick("model_name") : null;
 
+  // Record kind tag written by chat_history: "" for ordinary turns,
+  // "interjection" for the retired mid-flow inserts, "dialog" for one turn of
+  // an interjection dialog. Surfaced so the renderer can label a dialog turn
+  // as the side conversation it is instead of showing it as a step prompt the
+  // agent was given.
+  const recordKind =
+    typeof pick("kind") === "string" && pick("kind") ? pick("kind") : "";
+
   return {
     role: role,
+    kind: recordKind,
     content: content,
     timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
     stepType: pickStepType(),
@@ -12608,6 +13040,7 @@ const GROUP_STATUS_TEXT = {
   completed: "Completed",
   failed: "Failed",
   skipped: "Skipped",
+  interrupted: "Interrupted",
 };
 
 // Per-group DAG status → leading status icon, giving running / completed /
@@ -12619,6 +13052,7 @@ const GROUP_STATUS_ICON = {
   completed: "✓",
   failed: "✗",
   skipped: "⊘",
+  interrupted: "⏸",
 };
 
 // Step lifecycle status → {icon, text} for the lightweight per-step status
@@ -12936,7 +13370,7 @@ function addConversationRecords(container, st, records, startIndex) {
         bubble.__convGroupStatusKey =
           String(norm.stepId || stepKey(norm)) + "#" + (norm.groupId || "");
         bubble.__convGroupStatusTerminal =
-          ["completed", "failed", "skipped"].includes(gStatus);
+          ["completed", "failed", "skipped", "interrupted"].includes(gStatus);
       }
       // Tag code-index update-progress markers so a step's successive markers
       // (one per file/dir node, each with a higher `done`) converge to a SINGLE
@@ -17193,6 +17627,15 @@ function renderConversationRecord(norm) {
     return renderStepEventRecord(norm);
   }
 
+  // An interjection-dialog turn: the side conversation held at a breakpoint
+  // between the operator and the working agent. Rendered with its own badge
+  // and never collapsed — a user turn here is something the operator TYPED,
+  // not a template prompt, so the collapse-by-default rule that keeps long
+  // generated prompts out of the way would hide the very thing they said.
+  if (norm.kind === "dialog") {
+    return renderDialogTurnRecord(norm);
+  }
+
   // Step started / step status — a lightweight status row (text + icon). No
   // report card, no fold / raw / chip: it is just the step region's lifecycle
   // anchor. `step_started` marks RUNNING ("进行中"); `step_status` marks a
@@ -17490,6 +17933,27 @@ function stepEventRawPainter(detailEl, norm) {
 // carries a `step-type-<type>` class (added by addConversationRecords) plus a
 // `step-status-running` class so a later group can apply low-saturation
 // per-step grouping styles.
+function renderDialogTurnRecord(norm) {
+  const isUser = norm.role === "user";
+  const row = el(
+    "div",
+    "history-record conv-record kind-dialog role-" + (isUser ? "user" : "assistant"),
+  );
+  const badge = el(
+    "div",
+    "dialog-turn-badge",
+    (isUser ? "\u270e " : "\u21bb ")
+      + (isUser
+        ? tf("dialog.speakerUser", "You (interjection)")
+        : tf("dialog.speakerAgent", "Agent (interjection)")),
+  );
+  row.appendChild(badge);
+  const body = el("div", "dialog-turn-body");
+  body.textContent = norm.content || "";
+  row.appendChild(body);
+  return row;
+}
+
 function renderStepStartedRecord(norm) {
   const stepLabel = norm.stepType
     ? (resolveStepReportTitle(norm.stepType) || norm.stepType)
@@ -22232,6 +22696,9 @@ if (typeof module !== "undefined" && module.exports) {
     // CONFIRM approval gate (G3): structured decision send + free-text mirror,
     // exposed for tests/frontend/confirm_chip.test.mjs.
     sendConfirmDecision,
+    sendDialogDecision,
+    renderDialogPanel,
+    renderDialogTurnRecord,
     // ADJUDICATE approval-review block (G4): rationale panel + baseline→
     // adjudicated_description diff, exposed for tests/frontend/adjudicate_review.test.mjs.
     renderAdjudicateReview,

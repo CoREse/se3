@@ -25,6 +25,7 @@ from tianluo.engine.chat_history import (
     get_step_history,
     list_flows,
     parse_usage_from_ndjson,
+    record_dialog_message,
     record_prompt,
     record_response,
     render_session_detailed,
@@ -1543,6 +1544,52 @@ class TestGetDetailedJson:
         assert asst_msg["role"] == "assistant"
         assert "raw_json" in asst_msg
 
+    def test_step_turns_are_tagged_with_empty_kind(self, tmp_project):
+        record_prompt(tmp_project, "flow1", "step_a", "analyze",
+                      "## Task Description\nDo something.", 0)
+        record_response(tmp_project, "flow1", "step_a", "analyze",
+                        json.dumps({
+                            "type": "assistant",
+                            "message": {
+                                "content": [{"type": "text", "text": "R"}]
+                            },
+                        }), 0)
+
+        step = get_detailed_json(tmp_project, "flow1")[0]
+        assert [m["kind"] for m in step["messages"]] == ["", ""]
+
+    def test_dialog_turns_are_distinguishable_from_step_prompt(
+        self, tmp_project
+    ):
+        record_prompt(tmp_project, "flow1", "step_a", "analyze",
+                      "## Task Description\nDo something.", 0)
+        record_dialog_message(
+            tmp_project, "flow1", "step_a", "analyze",
+            "user", "## Task Description\nActually, stop.",
+        )
+        record_dialog_message(
+            tmp_project, "flow1", "step_a", "analyze",
+            "assistant", "Understood.",
+        )
+
+        step = get_detailed_json(tmp_project, "flow1")[0]
+        prompt_msg, dialog_user, dialog_agent = step["messages"]
+
+        assert prompt_msg["kind"] == ""
+        assert "segments" in prompt_msg
+
+        # The dialog user turn must not masquerade as the step's own prompt:
+        # tagged as dialog, and carrying no invented prompt segments even
+        # though its text opens with a section heading.
+        assert dialog_user["role"] == "user"
+        assert dialog_user["kind"] == "dialog"
+        assert "segments" not in dialog_user
+        assert dialog_user["content"] == "## Task Description\nActually, stop."
+
+        assert dialog_agent["role"] == "assistant"
+        assert dialog_agent["kind"] == "dialog"
+        assert dialog_agent["content"] == "Understood."
+
 
 # --- Spec content folding ---
 
@@ -3013,3 +3060,100 @@ class TestCollectUsageRecordsFromSessions:
         payload = build_usage_payload({"implement": records}, None, call_id="f")
         assert payload["summary"]["unknown_call_count"] == 1
         assert payload["completeness"] == "partial"
+
+
+class TestDialogRenderingOrder:
+    """``luo history show`` must render a dialog turn in the position it
+    actually happened. Bucketing by ``attempt`` misplaced it: a dialog record
+    carries the STEP's retry_count while a JSON retry advances LLMCaller's own
+    attempt, so a dialog held during attempt 2 was filed inside attempt 1 and
+    rendered BEFORE the very conversation it interrupted."""
+
+    def _session(self):
+        return ChatSession(
+            flow_id="f", step_id="s", step_type="implement",
+            messages=[
+                ChatMessage(
+                    role="user", content="FIRST PROMPT", raw_json=[],
+                    timestamp="2026-01-01T10:00:00", step_type="implement",
+                    attempt=0,
+                ),
+                ChatMessage(
+                    role="user", content="SECOND PROMPT", raw_json=[],
+                    timestamp="2026-01-01T10:01:00", step_type="implement",
+                    attempt=1,
+                ),
+                ChatMessage(
+                    role="user", content="MY INTERJECTION", raw_json=[],
+                    timestamp="2026-01-01T10:02:00", step_type="implement",
+                    attempt=0, kind="dialog",
+                ),
+            ],
+        )
+
+    def _render(self, session):
+        from io import StringIO
+
+        from rich.console import Console
+
+        buf = StringIO()
+        console = Console(file=buf, force_terminal=False, width=200)
+        for renderable in render_session_detailed(session, verbose=False):
+            console.print(renderable)
+        return buf.getvalue()
+
+    def test_a_dialog_turn_renders_in_jsonl_order(self):
+        output = self._render(self._session())
+        first = output.index("FIRST PROMPT")
+        second = output.index("SECOND PROMPT")
+        dialog = output.index("MY INTERJECTION")
+        assert first < second < dialog
+
+    def test_attempt_labels_still_follow_the_record(self):
+        output = self._render(self._session())
+        assert "Attempt 1" in output
+        assert "Attempt 2" in output
+
+    def test_a_single_attempt_session_is_unlabelled(self):
+        session = self._session()
+        session.messages = session.messages[:1] + session.messages[2:]
+        output = self._render(session)
+        assert "Attempt 1" not in output
+
+
+class TestExtractionRecordsNeverBindTheResume:
+    def test_an_extraction_record_is_skipped_by_last_session_binding(self, tmp_path):
+        from tianluo.engine.chat_history import (
+            last_session_binding,
+            record_prompt,
+            record_response,
+        )
+
+        record_prompt(
+            tmp_path, "f", "s", "implement", "do the work", 0,
+            agent_name="a", provider_session_id="sid-work",
+            session_cwd=str(tmp_path), runner_type="claude-code",
+        )
+        record_response(
+            tmp_path, "f", "s", "implement", "", 0,
+            agent_name="a", provider_session_id="sid-work",
+            session_cwd=str(tmp_path), runner_type="claude-code",
+        )
+        # The two-phase extraction opens its own session, and it is the newest
+        # session-bearing record on disk.
+        record_prompt(
+            tmp_path, "f", "s", "implement", "re-express as JSON", 0,
+            agent_name="a", provider_session_id="sid-extract",
+            session_cwd=str(tmp_path), runner_type="claude-code",
+            kind="extraction",
+        )
+        record_response(
+            tmp_path, "f", "s", "implement", "", 0,
+            agent_name="a", provider_session_id="sid-extract",
+            session_cwd=str(tmp_path), runner_type="claude-code",
+            kind="extraction",
+        )
+
+        binding = last_session_binding(tmp_path, "f", "s")
+        assert binding is not None
+        assert binding["provider_session_id"] == "sid-work"

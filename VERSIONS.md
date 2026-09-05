@@ -1,5 +1,14 @@
 # tianluo (formerly SE3) Framework Version History
 
+## 12.16.0 - 2026-09-05
+
+- Rework Ctrl-C and web interjections into a read-only discovery dialog with the working agent's own session, producing a user-confirmed structured decision (continue / restart / exit)
+- Adopt native provider session resume as the primary continuation and retry path for claude-code, codex, and claude-interactive runners, falling back to context rebuild when a session is unreachable; add `llm_caller.resume_strategy` config key (`native` default, `rebuild` for troubleshooting)
+- Interrupt LLM subprocesses gracefully via a cooperative in-process stop signal: runners wait for a message boundary, then SIGINT the isolated process group with SIGKILL escalation, preserving resumable provider sessions
+- Add a generic flow rewind facility: restart from any earlier step with state rollback invariants, generation-isolated step histories, and workspace `keep` or `reset` (baseline restore with dirty-state snapshot and a `refs/tianluo/discarded/` safety ref)
+- Persist description revisions as a revision chain that becomes the latest effective task description layer, replacing `## Additional Instructions` interjection appends for new flows
+- Unify web interjections with the Ctrl-C path, deliver interjections during DISCOVERY pauses directly as discovery replies, and add a new dialog call kind rendered in the WebUI for reply and decision confirmation
+- Extend interruption and resume to DAG parallel implement: all in-flight groups stop cooperatively and each group resumes natively in its own worktree session
 ## 12.15.1 - 2026-09-01
 
 - Fix WebUI step results rendering as a raw JSON code block when the model emitted unescaped ASCII double quotes inside a JSON string value; such payloads now render as structured results, matching the engine-side parser that already recovered them.

@@ -766,6 +766,134 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   background: rgba(224, 86, 75, 0.12);
 }
 
+/* Interjection dialog: the transcript of the breakpoint conversation plus, once
+   the dialog proposes one, its decision's fields as editable controls. The
+   fields are deliberately full controls rather than a read-only summary — a
+   decision executes only after the operator confirms it, and they must be able
+   to change any field first (most consequentially restart's target and the
+   workspace handling, since a reset discards the flow's visible work). */
+.flow-reply-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.flow-reply-dialog-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-subtle, transparent);
+}
+.flow-reply-dialog-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+}
+.flow-reply-dialog-speaker {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+.flow-reply-dialog-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.flow-reply-dialog-decision {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.flow-reply-dialog-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.flow-reply-dialog-label {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.75;
+}
+.flow-reply-dialog-field {
+  width: 100%;
+  font-size: 12.5px;
+}
+textarea.flow-reply-dialog-field {
+  min-height: 44px;
+  resize: vertical;
+}
+textarea.flow-reply-dialog-revised {
+  min-height: 88px;
+}
+/* The destructive-reset preview. Deliberately loud: it is the only thing
+   standing between an "Apply decision" click and an erased working tree. */
+.flow-reply-dialog-reset-preview {
+  border: 1px solid var(--danger, #d9534f);
+  border-radius: 4px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.flow-reply-dialog-reset-title {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--danger, #d9534f);
+}
+.flow-reply-dialog-reset-body {
+  margin: 0;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.flow-reply-dialog-reset-warning {
+  margin: 0;
+  font-size: 11.5px;
+  opacity: 0.85;
+}
+/* A rejected Apply. Deliberately louder than the reset warning above: the
+   panel it sits on is otherwise byte-identical to the one the operator just
+   clicked, so this banner is the only thing that says the click did nothing. */
+.flow-reply-dialog-apply-error {
+  margin: 0 0 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--danger-fg, #b3261e);
+  background: var(--danger-bg, rgba(179, 38, 30, 0.12));
+  border: 1px solid var(--danger-fg, #b3261e);
+}
+.flow-reply-dialog-confirm {
+  align-self: flex-start;
+  padding: 5px 18px;
+  font-size: 12.5px;
+}
+
+/* An interjection-dialog turn in the conversation stream. Never collapsed: a
+   user turn here is something the operator typed, so the collapse-by-default
+   rule for long generated prompts would hide the very thing they said. */
+.conv-record.kind-dialog {
+  border-left: 3px solid var(--accent, #7a5af8);
+  padding-left: 10px;
+}
+.dialog-turn-badge {
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.8;
+  margin-bottom: 2px;
+}
+.dialog-turn-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* ADJUDICATE approval review: the ruling under review, shown above the
    批准/打回 buttons so the operator can judge 批 vs 打回. A framed rationale
    panel plus a baseline→adjudicated_description diff. The diff itself reuses the
@@ -4537,4 +4665,15 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   .kv { flex-wrap: wrap; }
   .kv .k { min-width: 100%; }
   .flow-plan-chip { white-space: normal; }
+}
+
+/* Interjection dialog: the one-click "resume unchanged" affordance. It is the
+   cheapest answer to an accidental interruption, so it renders as a quiet
+   secondary action under the transcript, visually distinct from the decision
+   form's Apply. */
+.flow-reply-dialog-resume {
+  align-self: flex-start;
+  margin: 4px 0;
+  font-size: 12.5px;
+  opacity: 0.9;
 }

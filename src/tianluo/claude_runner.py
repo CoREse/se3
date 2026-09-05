@@ -19,13 +19,33 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
-from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
+from .agent_runner import (
+    AgentInvocationIntent,
+    READ_ONLY_SHELL_TOOLS,
+    AgentRunner,
+    InfraErrorType,
+    RunnerStartupMetadata,
+    drain_available_output,
+    ensure_process_group_reclaimed,
+    graceful_stop_process,
+    is_message_boundary,
+    reclaim_process_group,
+    resolve_process_group,
+)
 from .config import load_claude_commands, load_claude_subprocess_config
+from .i18n import t
+from .stop_signal import (
+    BOUNDARY_WAIT_SECONDS,
+    EXIT_WAIT_SECONDS,
+    get_stop_signal,
+    llm_call_scope,
+)
 
 # Platform-specific imports for process resource monitoring
 try:
@@ -278,6 +298,43 @@ class ClaudeCodeRunner(AgentRunner):
         else:
             self.setting_sources = ["user"]
         self._setting_sources_arg = ",".join(self.setting_sources)
+        # Session id pre-allocated by get_startup_metadata() and injected as
+        # --session-id by build_call_args(). WHY pre-allocation rather than
+        # scraping the id out of the stream: the id must be durable BEFORE the
+        # child exists, or a call interrupted during startup leaves a live
+        # provider session that nothing can name — and therefore nothing can
+        # resume. Claude Code accepts a caller-chosen uuid, so the identity is
+        # ours to fix up front.
+        self._session_id: Optional[str] = None
+        # Set by build_resume_call_args(); the transcript is the SAME file as
+        # the original session, so the id used for recording stays unchanged.
+        self._resume_session_id: Optional[str] = None
+
+    #: Verified against claude 2.1.258: ``claude -p --resume <uuid>`` with
+    #: ``--output-format stream-json`` continues the recorded session (the
+    #: result line reports the same ``session_id``), and a session whose
+    #: process group was SIGINT-ed mid-tool-loop resumes cleanly — the CLI
+    #: itself appends a ``[Request interrupted by user]`` turn to the
+    #: transcript, so no dangling ``tool_use`` is left behind.
+    supports_native_resume: bool = True
+
+    def get_startup_metadata(
+        self, env: Optional[Dict[str, str]] = None
+    ) -> RunnerStartupMetadata:
+        """Pre-allocate this attempt's session id and report it.
+
+        Called by LLMCaller *before* the prompt record is written, so the id
+        reaches the step jsonl ahead of the subprocess it identifies. A fresh
+        uuid per call is correct: each call to this method precedes one
+        attempt, and two attempts must never share a provider session.
+        """
+        self._session_id = str(uuid.uuid4())
+        self._resume_session_id = None
+        return RunnerStartupMetadata(
+            provider=self.startup_provider,
+            model=self.startup_model,
+            provider_session_id=self._session_id,
+        )
 
     @staticmethod
     def _resolve_args(
@@ -384,6 +441,18 @@ class ClaudeCodeRunner(AgentRunner):
         run_env.pop("CLAUDECODE", None)
 
         try:
+            # WHY this path deliberately does NOT take the monitored path's
+            # posture (own process group + ``llm_call_scope``): both only pay
+            # off with a supervisor. ``llm_call_scope`` tells ``luo run``'s
+            # SIGINT handler "do not raise, a runner will wind the child down"
+            # — and this blocking ``subprocess.run`` has no monitor loop to
+            # notice the stop request, so the handler would stand down and
+            # nothing would ever act on it. Isolating the child in its own
+            # session on top of that would also keep the terminal's SIGINT away
+            # from it, leaving Ctrl-C with no effect at all for the whole turn.
+            # The default disposition instead interrupts both sides, which is
+            # what this compatibility entry point has always done; the engine
+            # uses ``run_with_monitor``, which does supervise.
             result = subprocess.run(
                 full_cmd,
                 capture_output=True,
@@ -424,6 +493,7 @@ class ClaudeCodeRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
+        deny_shell: bool = False,
     ) -> List[str]:
         """Build Claude Code CLI arguments from intent-level parameters.
 
@@ -473,9 +543,33 @@ class ClaudeCodeRunner(AgentRunner):
         args: List[str] = [
             "--output-format", "stream-json",
             "--verbose",
-            "-p", prompt,
         ]
+        # Pin the session identity chosen by get_startup_metadata() so the
+        # provider session this call creates carries the id already persisted
+        # to the step jsonl; a later resume addresses exactly this session.
+        if self._session_id:
+            args += ["--session-id", self._session_id]
+        args += ["-p", prompt]
+        args += self._tool_lock_args(read_only, deny_shell)
+        args += self._context_file_args(context_files)
+        return args
 
+    def _tool_lock_args(
+        self, read_only: bool, deny_shell: bool = False
+    ) -> List[str]:
+        """Return the single merged ``--disallowedTools`` flag for a call.
+
+        Shared by the fresh-call and resume-call argv builders so the resume
+        path cannot drift away from the one-merged-flag rule below.
+
+        WHY *deny_shell* is a separate axis from *read_only*: the process is
+        launched with ``--dangerously-skip-permissions``, so nothing outside
+        this flag stands between the agent and the workspace. Denying the write
+        tools alone leaves ``Bash`` — and therefore ``rm``/``>`` — wide open,
+        which is not a read-only boundary at all for the interruption dialog.
+        Ordinary read-only steps still need the shell to inspect the tree, so
+        the stricter lock is requested per call rather than implied.
+        """
         # WHY: one merged --disallowedTools flag, never two — the claude CLI
         # resolves a repeated flag last-one-wins, so appending a second flag
         # for ReportFindings would silently discard the read-only write-tool
@@ -483,14 +577,53 @@ class ClaudeCodeRunner(AgentRunner):
         disallowed: List[str] = []
         if read_only:
             disallowed += ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+            if deny_shell:
+                disallowed += list(READ_ONLY_SHELL_TOOLS)
         disallowed.append("ReportFindings")
-        args += ["--disallowedTools"] + disallowed
+        return ["--disallowedTools"] + disallowed
 
-        if context_files:
-            for f in context_files:
-                if f.exists():
-                    args.extend(["--file", str(f)])
+    @staticmethod
+    def _context_file_args(context_files: Optional[List[Path]]) -> List[str]:
+        args: List[str] = []
+        for f in context_files or []:
+            if f.exists():
+                args.extend(["--file", str(f)])
+        return args
 
+    def build_resume_call_args(
+        self,
+        session_id: str,
+        prompt: str,
+        read_only: bool,
+        context_files: Optional[List[Path]] = None,
+        deny_shell: bool = False,
+    ) -> List[str]:
+        """Build ``claude -p --resume <session_id> "<prompt>"`` argv.
+
+        The provider still holds the conversation, so *prompt* is only the new
+        user turn (a continuation directive or a dialog instruction) — never a
+        rebuilt transcript.
+
+        Constraints preserved from :meth:`build_call_args`: exactly one merged
+        ``--disallowedTools`` flag, and no ``--settings`` of our own (a
+        duplicated ``--settings`` is last-wins in the claude CLI and would
+        silently override an agent wrapper's model selection).
+
+        ``--session-id`` is deliberately NOT emitted alongside ``--resume``:
+        the resumed turn continues the recorded session, which already has an
+        id, and the two flags are mutually exclusive.
+        """
+        if not session_id:
+            raise ValueError("build_resume_call_args requires a session_id")
+        self._resume_session_id = session_id
+        args: List[str] = [
+            "--output-format", "stream-json",
+            "--verbose",
+            "--resume", session_id,
+            "-p", prompt,
+        ]
+        args += self._tool_lock_args(read_only, deny_shell)
+        args += self._context_file_args(context_files)
         return args
 
     @staticmethod
@@ -620,21 +753,25 @@ class ClaudeCodeRunner(AgentRunner):
                 file=sys.stderr,
             )
 
-            result = self._run_single_with_monitor(
-                full_cmd=full_cmd,
-                cmd_name=cmd_name,
-                cmd_index=0,
-                log_file=log_file,
-                wall_timeout=wall_timeout,
-                inactivity_timeout=inactivity_timeout,
-                cwd=cwd,
-                env=run_env,
-                on_output=on_output,
-                on_activity=on_activity,
-                start_time=start_time,
-                stdin_prompt=stdin_prompt,
-                on_confirm=on_confirm,
-            )
+            # Declaring the call in flight is what lets a terminal Ctrl-C be
+            # answered by the graceful stop below instead of by an exception
+            # that would tear this supervisor down mid-child.
+            with llm_call_scope():
+                result = self._run_single_with_monitor(
+                    full_cmd=full_cmd,
+                    cmd_name=cmd_name,
+                    cmd_index=0,
+                    log_file=log_file,
+                    wall_timeout=wall_timeout,
+                    inactivity_timeout=inactivity_timeout,
+                    cwd=cwd,
+                    env=run_env,
+                    on_output=on_output,
+                    on_activity=on_activity,
+                    start_time=start_time,
+                    stdin_prompt=stdin_prompt,
+                    on_confirm=on_confirm,
+                )
 
             output = f"=== Command: {cmd_name} ===\n{result.output}"
 
@@ -674,6 +811,87 @@ class ClaudeCodeRunner(AgentRunner):
                 cmd_index=0,
                 was_retry=False,
             )
+
+    def _stop_gracefully(
+        self,
+        proc: subprocess.Popen,
+        output_buffer: List[str],
+        log_fh: Any,
+        stderr_tail: Callable[[], str],
+        *,
+        reason_key: str,
+        pgid: Optional[int] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+    ) -> "_SingleRunResult":
+        """Wind the child down on a stop request and return its partial output.
+
+        SIGINT reaches the whole process group first so the CLI can close its
+        own turn — that is what leaves the provider session resumable — and
+        only a child that ignores it is SIGKILL-ed. The partial stdout captured
+        so far is returned (and recorded to history by the caller) exactly as
+        the historical Ctrl-C path did.
+
+        WHY *on_output* is threaded in here rather than left to the monitor
+        loop: the wind-down carries the CLI's closing ``tool_result`` and its
+        terminal ``result`` line, and that result line is where the turn's
+        token usage lives. The caller's callback IS the stream tracker, which
+        is the only source LLMCaller reads usage from — dropping these lines
+        would book a fully-paid interrupted call as zero tokens and hide its
+        last fragments from the live conversation view.
+        """
+        msg = "\n" + t(
+            "runner.stop.graceful",
+            runner="claude-runner",
+            reason=t(reason_key),
+        ) + "\n"
+        print(msg.strip(), file=sys.stderr)
+        if log_fh:
+            try:
+                log_fh.write(msg)
+                log_fh.flush()
+            except Exception:  # pragma: no cover - defensive
+                pass
+        def _absorb(line: str) -> None:
+            output_buffer.append(line)
+            if log_fh:
+                try:
+                    log_fh.write(line)
+                    log_fh.flush()
+                except Exception:  # pragma: no cover - defensive
+                    pass
+            if on_output is not None:
+                try:
+                    on_output(line)
+                except Exception:  # pragma: no cover - defensive
+                    pass
+
+        graceful_stop_process(
+            proc,
+            exit_wait=EXIT_WAIT_SECONDS,
+            pgid=pgid,
+            # Keep reading while the CLI winds down: its closing tool_result
+            # and result line would otherwise fill the pipe and block it.
+            drain=lambda: drain_available_output(proc.stdout, _absorb),
+        )
+        try:
+            remaining = proc.stdout.read()
+            if remaining:
+                # Split before absorbing: whatever the exiting child left in
+                # the pipe can hold several NDJSON records, and the consumer
+                # parses one line at a time.
+                for line in remaining.splitlines(keepends=True):
+                    _absorb(line)
+        except Exception:
+            pass
+        output_buffer.append(msg)
+        return _SingleRunResult(
+            returncode=-2,
+            output="".join(output_buffer),
+            success=False,
+            should_retry=False,
+            interrupted=True,
+            stderr_tail=stderr_tail(),
+        )
 
     def _run_single_with_monitor(
         self,
@@ -733,6 +951,15 @@ class ClaudeCodeRunner(AgentRunner):
         else:
             stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
 
+        # WHY start_new_session: puts the child (and its tool/bash
+        # grandchildren) in its own process group, so a terminal Ctrl-C's
+        # SIGINT is delivered to ``luo run`` ALONE. The child is then wound
+        # down deliberately by this loop — wait for a stream message boundary,
+        # SIGINT the group, escalate to SIGKILL — which is what leaves the
+        # provider session in a resumable state instead of killing it
+        # mid-tool-call. Sharing the foreground group (the pre-cooperative-stop
+        # behaviour) made that ordering impossible: the child died the instant
+        # the operator pressed the key.
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
@@ -742,10 +969,21 @@ class ClaudeCodeRunner(AgentRunner):
             env=env,
             bufsize=1,
             universal_newlines=True,
+            start_new_session=True,
         )
+        # Captured now, while the pid is live: once the direct child is reaped
+        # its pgid is no longer resolvable, and every cleanup path below still
+        # has to be able to reach surviving tool/bash grandchildren.
+        proc_pgid = resolve_process_group(proc)
 
         if stdin_prompt is not None:
             _spawn_stdin_writer(proc, stdin_prompt)
+
+        stop_signal = get_stop_signal()
+        # Set once a stop is observed; from then on the loop keeps draining
+        # stdout until the next message boundary (or the bounded wait expires)
+        # before signalling the child.
+        stop_deadline: Optional[float] = None
 
         # Drain stderr in a background thread so the pipe never fills and
         # the NDJSON on stdout stays clean.  Use a dedicated log file so
@@ -782,8 +1020,12 @@ class ClaudeCodeRunner(AgentRunner):
             while proc.poll() is None:
                 # Check wall timeout
                 if wall_timeout and (time.time() - start_time) > wall_timeout:
-                    proc.kill()
-                    proc.wait()
+                    # Reclaim the GROUP, not just the CLI: a timeout usually
+                    # fires while a tool/bash grandchild is the thing hanging,
+                    # and reaping only the parent both leaves it running and
+                    # makes the finally block below believe there is nothing
+                    # left to clean up.
+                    reclaim_process_group(proc)
                     msg = f"\n[claude-runner] Wall timeout ({wall_timeout}s) exceeded\n"
                     output_buffer.append(msg)
                     if log_fh:
@@ -806,6 +1048,28 @@ class ClaudeCodeRunner(AgentRunner):
                     output_buffer.append(f"\n[claude-runner] select() error: {e}\n")
                     continue
 
+                # Cooperative stop: a Ctrl-C or a web interjection publishes a
+                # request on the process-wide signal instead of raising into
+                # this thread (DAG group runners are worker threads and would
+                # never see a KeyboardInterrupt). The child is not signalled
+                # immediately — the loop keeps draining until the stream
+                # reaches a message boundary, bounded by BOUNDARY_WAIT_SECONDS.
+                if stop_deadline is None and stop_signal.is_set():
+                    stop_deadline = time.time() + BOUNDARY_WAIT_SECONDS
+                    msg = "\n" + t(
+                        "runner.stop.awaiting_boundary", runner="claude-runner"
+                    ) + "\n"
+                    print(msg.strip(), file=sys.stderr)
+                    if log_fh:
+                        log_fh.write(msg)
+                        log_fh.flush()
+                if stop_deadline is not None and time.time() >= stop_deadline:
+                    return self._stop_gracefully(
+                        proc, output_buffer, log_fh, _stderr_tail, pgid=proc_pgid,
+                        on_output=on_output,
+                        reason_key="runner.stop.reason.boundary_timeout",
+                    )
+
                 if ready:
                     try:
                         line = proc.stdout.readline()
@@ -819,15 +1083,31 @@ class ClaudeCodeRunner(AgentRunner):
                                 on_output(line)
                             if on_activity:
                                 on_activity()
+                            if stop_deadline is not None and is_message_boundary(line):
+                                return self._stop_gracefully(
+                                    proc, output_buffer, log_fh, _stderr_tail,
+                                    pgid=proc_pgid, on_output=on_output,
+                                    reason_key="runner.stop.reason.boundary_reached",
+                                )
                             if on_confirm is not None:
                                 detected = detect_confirmation_prompt(line)
                                 if detected is not None:
                                     prompt_text, options = detected
                                     try:
+                                        # ``is_alive`` also reports False once a
+                                        # stop is published: this callback blocks
+                                        # inline in the monitor loop, so a
+                                        # handler that watched only the child
+                                        # would keep the loop from ever polling
+                                        # the stop signal — Ctrl-C at a
+                                        # confirmation prompt would hang forever.
                                         answer = on_confirm(
                                             prompt_text,
                                             options,
-                                            lambda: proc.poll() is None,
+                                            lambda: (
+                                                proc.poll() is None
+                                                and not stop_signal.is_set()
+                                            ),
                                         )
                                     except Exception as exc:  # noqa: BLE001
                                         answer = None
@@ -838,6 +1118,21 @@ class ClaudeCodeRunner(AgentRunner):
                                         )
                                     if answer is not None:
                                         _write_stdin_response(proc, answer)
+                                    elif stop_signal.is_set():
+                                        # A child parked at a confirmation
+                                        # prompt has already emitted a complete
+                                        # message and will emit nothing more
+                                        # until answered — that IS the boundary
+                                        # the graceful stop waits for, so there
+                                        # is nothing to gain from the 30s wait.
+                                        return self._stop_gracefully(
+                                            proc, output_buffer, log_fh,
+                                            _stderr_tail, pgid=proc_pgid,
+                                            on_output=on_output,
+                                            reason_key=(
+                                                "runner.stop.reason.boundary_reached"
+                                            ),
+                                        )
                                     # The callback may have blocked while
                                     # awaiting a response; reset the activity
                                     # clock so that wait does not trip the
@@ -884,15 +1179,9 @@ class ClaudeCodeRunner(AgentRunner):
                             hang_confirmed = True
 
                         if hang_confirmed:
-                            try:
-                                proc.kill()
-                                proc.wait(timeout=10)  # Wait for process to terminate
-                            except Exception:
-                                try:
-                                    proc.terminate()
-                                    proc.wait(timeout=5)
-                                except Exception:
-                                    pass
+                            # Group-wide, for the same reason as the wall
+                            # timeout: the hang is typically a grandchild.
+                            reclaim_process_group(proc, wait=10)
 
                             output_buffer.append(msg)
                             if log_fh:
@@ -907,13 +1196,23 @@ class ClaudeCodeRunner(AgentRunner):
                                 stderr_tail=_stderr_tail(),
                             )
 
-            # Process finished - read remaining output
+            # Process finished - read remaining output.
+            # WHY these lines are forwarded like any other: a child that exits
+            # between two select() polls leaves its terminal ``result`` line —
+            # and with it the turn's token usage — in the pipe, so skipping the
+            # callback here would lose the usage for an otherwise normal call.
             remaining = proc.stdout.read()
             if remaining:
-                output_buffer.append(remaining)
-                if log_fh:
-                    log_fh.write(remaining)
-                    log_fh.flush()
+                for line in remaining.splitlines(keepends=True):
+                    output_buffer.append(line)
+                    if log_fh:
+                        log_fh.write(line)
+                        log_fh.flush()
+                    if on_output:
+                        try:
+                            on_output(line)
+                        except Exception:  # pragma: no cover - defensive
+                            pass
 
             returncode = proc.returncode
             output = "".join(output_buffer)
@@ -954,27 +1253,16 @@ class ClaudeCodeRunner(AgentRunner):
             )
 
         except KeyboardInterrupt:
-            # Ctrl+C: kill subprocess and return partial output so callers
-            # can persist it to history before re-raising the interrupt.
-            try:
-                proc.kill()
-                proc.wait(timeout=5)
-            except Exception:
-                pass
-            # Drain any remaining buffered output
-            try:
-                remaining = proc.stdout.read()
-                if remaining:
-                    output_buffer.append(remaining)
-            except Exception:
-                pass
-            return _SingleRunResult(
-                returncode=-2,
-                output="".join(output_buffer),
-                success=False,
-                should_retry=False,
-                interrupted=True,
-                stderr_tail=_stderr_tail(),
+            # Defensive path only: with the child in its own process group and
+            # ``luo run``'s SIGINT handler publishing to the stop signal, the
+            # cooperative branch above handles Ctrl-C. A KeyboardInterrupt that
+            # still lands here (an embedder that kept the default handler) gets
+            # the same graceful shutdown so the provider session stays
+            # resumable, and the partial output is returned for history.
+            return self._stop_gracefully(
+                proc, output_buffer, log_fh, _stderr_tail, pgid=proc_pgid,
+                on_output=on_output,
+                reason_key="runner.stop.reason.keyboard_interrupt",
             )
 
         finally:
@@ -988,15 +1276,15 @@ class ClaudeCodeRunner(AgentRunner):
             if log_fh:
                 log_fh.close()
             if proc.poll() is None:
-                try:
-                    proc.kill()
-                    proc.wait(timeout=5)  # Non-blocking wait with timeout
-                except (subprocess.TimeoutExpired, KeyboardInterrupt):
-                    # Force kill if still running or interrupted
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                # Own process group ⇒ reclaim the whole group, not just the
+                # direct child, so tool/bash grandchildren are never orphaned.
+                reclaim_process_group(proc, pgid=proc_pgid)
+            else:
+                # WHY this runs even on the clean-exit path: the CLI exiting
+                # says nothing about the tools it spawned. A grandchild that
+                # outlived it keeps mutating the workspace behind the flow's
+                # back, so the group is drained before the call returns.
+                ensure_process_group_reclaimed(proc_pgid)
 
 
 @dataclass

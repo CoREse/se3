@@ -291,7 +291,10 @@ def test_run_loop_json_confirm_pause_returns_0_and_emits_flow_paused(capsys):
         )
 
         assert rc == 0
-        assert fake_sm.run_step_calls == 1
+        # The gate's own unanswered call file IS the wait: the loop re-presents
+        # it instead of re-running the handler, which would only flip the step
+        # PAUSED -> RUNNING to hand back the PAUSED it already persisted.
+        assert fake_sm.run_step_calls == 0
 
         # JsonSink writes NDJSON to stdout — the FLOW_PAUSED event must be there.
         out = capsys.readouterr().out

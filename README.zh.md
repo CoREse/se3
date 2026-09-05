@@ -353,6 +353,78 @@ scoped round 运行：首轮 `full` 覆盖本 flow 改动的全部内容，修�
 执行项目配置的完整测试 —— 审查范围绝不缩小它 —— 每个通过验证的 finding 也一律
 进入 fix loop。
 
+### 打断一次运行：插话对话
+
+运行中按 `Ctrl-C`——或从网页控制台推一条插话——**不会**中止 flow，也不再把一段
+文字悄悄追加到下一个 step 的任务描述里。两者走的是同一条路：
+
+1. **优雅地停下正在进行的调用。** agent 子进程跑在独立进程组里，因此中断不会
+   直接杀死它。runner 先等流里的下一个消息边界（一个完整的 tool_result，或一条
+   不含 tool_use 的 assistant 消息，上限 30 秒），再向子进程组发 `SIGINT` 让 CLI
+   自己收尾，仍不退出才升级为 `SIGKILL`。正是这个顺序让 provider 会话保持可续接。
+   DAG 并行 implement 时，所有进行中的 group 都以同样方式停下后才交回控制权。
+2. **和刚才在干活的那个 agent 本人对话。** 对话会在只读工具锁下 resume 它的
+   provider 会话，因此它带着完整的工作上下文回答——它读过的文件、正在推进的
+   思路、写了一半的改动。若该会话不可达（TEST / COMMIT 这类非 LLM 步骤、runner
+   不支持、`resume_strategy: rebuild`），则退回到一次独立只读调用，注入 flow
+   上下文与该 step 重建出的对话。
+3. **对话收敛为一个由你确认的决定。** agent 给出 `continue` / `restart` /
+   `exit` 之一，可带一条只对本次续跑生效的 `instruction`、一份完整的
+   `revised_description`、`restart_step_id` 以及 `keep`/`reset` 的工作区处理。
+   确认之前什么都不会执行，且确认时你可以修改任一字段。空回复表示「什么都不改、
+   立即续跑」，不消耗任何 LLM 调用；直接输入 `continue` / `restart <step_id>` /
+   `exit` 则完全跳过对话。
+
+`restart` 可回退到当前步骤或本 flow 历史中的任一更早步骤（更晚的步骤不是合法目标，
+会被直接拒绝）：从该步起的所有步骤被删除，目标步骤经正常构建路径重建并以全新调用
+运行，flow 级派生状态（fix 计数、review 轮次、review scope，以及步骤序列本身——
+含运行中插入的 adjudicate / confirm 槽位）恢复为该步骤首次进入时的值。flow 级
+事实——任务描述链、baseline commit、invariant 锚点、任务类型、plan doctrine、
+session 用量账本——永不回退。若某步骤是在本机制存在之前进入的，没有记录进入时
+状态，则对它的 restart 会被直接拒绝，而不是做一半。
+
+回退一个并行 IMPLEMENT 步骤时，其各分组的 worktree 与 leaf 分支同样会被删除——
+`keep` 与 `reset` 都是如此，因为「keep」从来只针对 flow 自己的工作树。各分组持有
+的内容（已提交的 commit 与未提交的改动）会在确认面板中列出，并在删除前保存到
+`refs/tianluo/discarded/<flow_id>/<timestamp>/groups/<branch>`。
+
+`workspace: reset` 还会把工作树恢复到 flow 启动前的状态：确认**之前**会先向你展示
+当前 git status 与本 flow 产生的提交；被丢弃的一切先被保存到
+`refs/tianluo/discarded/<flow_id>/<timestamp>/workspace`，执行后展示丢弃内容摘要与恢复方法。
+恢复未跟踪文件依赖 flow 启动时拍下的脏状态快照——没有快照的 flow（旧 flow 或快照
+拍摄失败）只把已跟踪文件恢复到基线提交，未跟踪文件原样保留，并明确告知。
+
+`revised_description` 会成为有效任务描述的最新一层——它**整体替换**任务是什么，
+而不是在后面追加——因此质量门以修正后的需求为验收依据。
+
+同一条路也适用于**已经停在某个门前**的时刻：确认门与失败后的 Retry/Skip/Abort
+菜单在等待时同样监听插话——菜单已经显示出来之后才推来的插话依然会打断等待、进入
+插话对话，而不必等这道门被别的方式解决；`continue` 则回到该门继续等待。
+
+DISCOVERY 暂停期间规则不同，也更简单：此时你本就在一个对话提示符前，所以推来的
+插话会直接作为你的下一条 discovery 回复投递，而不会在对话里再套一层对话。
+
+### 续跑：以 native session resume 为主路径
+
+每一次续跑——插话之后、失败后选择 Retry、`luo run --resume`、以及引擎自身的内部
+重试——都会先尝试续接 agent **已有的 provider 会话**，而不是把对话重建进一个新
+prompt。发起调用的 cwd 在子进程拉起**之前**就写入该 step 的历史；会话 id 本身对
+Claude 系适配器也是如此——它由 tianluo 预分配、以 `--session-id` 注入，因此被中断
+的 Claude 调用总能留下一个可寻址的会话。codex 则是 capture-only：thread id 由其
+CLI 自行生成，tianluo 最早在 `thread.started` 事件里看到它，因而在该事件流出的瞬间
+把 id 回填到本次 attempt 的记录上。比 `thread.started` 更早被中断的 attempt 没有可
+resume 的 thread，直接走重建路径。
+
+当记录下的会话所属 agent 仍在当前 agent 链中、其 runner 支持 resume、且该会话的
+发起 cwd 就是本次调用所在的工作区（DAG group 的会话住在它自己的 worktree 里）时
+才启用；否则——或 resume 本身因任何原因失败时——引擎回落到重建上下文的路径，并不让
+调用失败。轮换到另一个 agent 后一律走重建。排障时可在 `tianluo.yaml` 里设
+`llm_caller.resume_strategy: rebuild` 强制走重建路径。
+
+回落只改变**先前对话如何被提供**：续跑必须携带的东西——对话得出的一次性
+instruction、任务描述已被替换的告知、「你曾被用户中断、先核对工作区再继续」的
+framing、以及本 step 的输出契约——两条路径都会照常发送。
+
 ### 三种运行形态
 
 - **`luo run --worktree`** — 在自己的 git worktree 里跑**完全相同**的 flow：相同

@@ -154,6 +154,256 @@ class TestResumeDetection:
     @patch("tianluo.commands.run.PersistenceManager")
     @patch("tianluo.commands.run.StateMachine")
     @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_an_open_dialog_owns_the_re_arm(self, mock_sm_class, mock_pm_class):
+        """A json-mode interruption exits PAUSED with the dialog still open.
+
+        The dialog's own ``continue`` re-arms the step (one increment, exactly
+        like the Retry path), so the resume path must not increment it first —
+        the records would then be stamped with an attempt number no attempt
+        ever produced.
+        """
+        self.flow.state.context["active_dialog"] = {
+            "step_id": self.implement_step.step_id,
+            "call_step_id": self.implement_step.step_id,
+            "pause_context": None,
+            "transcript": [],
+            "decision": None,
+            "call_file": None,
+        }
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+
+        with patch(
+            "tianluo.commands.run._run_interjection_dialog_noninteractive"
+        ) as dialog:
+            dialog.return_value = "exit"
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
+
+        assert dialog.called
+        assert self.implement_step.status == StepStatus.RUNNING
+        assert "retry_count" not in self.implement_step.inputs
+        assert mock_sm.run_step.call_count == 0
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_a_confirmed_continue_at_a_gate_returns_to_the_wait(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """``continue`` at a CONFIRM pause resolves nothing: the gate keeps
+        waiting for its own answer. Re-entering the loop would re-run the
+        CONFIRM handler — flipping the step PAUSED → RUNNING and publishing a
+        second call for a gate nobody resolved."""
+        from tianluo.commands.run import _DIALOG_RESUME_PAUSE
+        from tianluo.engine.interaction_calls import calls_dir_for
+
+        confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.PAUSED,
+            step_id="confirm-001",
+            inputs={"step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan"},
+        )
+        self.implement_step.status = StepStatus.COMPLETED
+        self.flow.state.add_step(confirm_step)
+        self.flow.state.current_step_id = "confirm-001"
+        self.flow.state.selected_steps.append(StepType.CONFIRM)
+        self.flow.state.current_step_index = 3
+        self.flow.state.context["active_dialog"] = {
+            "step_id": "plan-001",
+            "call_step_id": "confirm-001",
+            "pause_context": "confirm",
+            "transcript": [],
+            "decision": None,
+            "call_file": None,
+        }
+        # The wait itself: the gate's unanswered call file.
+        calls_dir = calls_dir_for(self.project_root)
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        (calls_dir / "confirm_confirm-001_1.json").write_text(
+            json.dumps({"step": "confirm-001", "kind": "confirm"})
+        )
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+
+        with patch(
+            "tianluo.commands.run._run_interjection_dialog_noninteractive"
+        ) as dialog:
+            dialog.return_value = _DIALOG_RESUME_PAUSE
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
+                    rc = run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
+
+        assert rc == 0
+        assert dialog.called
+        # The gate is exactly as the dialog found it.
+        assert confirm_step.status == StepStatus.PAUSED
+        assert self.flow.status == FlowStatus.PAUSED
+        assert mock_sm.run_step.call_count == 0
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_an_interactive_takeover_returns_to_the_same_gate_wait(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Taking a persisted dialog over at the terminal obeys the same rule.
+
+        An operator who resumes a daemon-paused flow with an interactive
+        ``luo run --resume`` and confirms ``continue`` must land back on the
+        gate's own prompt — not on a re-run of the CONFIRM handler, which would
+        flip the step PAUSED → RUNNING for a gate nobody answered.
+        """
+        from tianluo.commands.run import _DIALOG_RESUME_PAUSE
+        from tianluo.engine.interaction_calls import calls_dir_for
+
+        confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.PAUSED,
+            step_id="confirm-003",
+            inputs={"step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan"},
+            outputs={"call_file": "unused"},
+        )
+        self.implement_step.status = StepStatus.COMPLETED
+        self.flow.state.add_step(confirm_step)
+        self.flow.state.current_step_id = "confirm-003"
+        self.flow.state.selected_steps.append(StepType.CONFIRM)
+        self.flow.state.current_step_index = 3
+        self.flow.state.context["active_dialog"] = {
+            "step_id": "plan-001",
+            "call_step_id": "confirm-003",
+            "pause_context": "confirm",
+            "transcript": [],
+            "decision": None,
+            "call_file": None,
+        }
+        calls_dir = calls_dir_for(self.project_root)
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        (calls_dir / "confirm_confirm-003_1.json").write_text(
+            json.dumps({"step": "confirm-003", "kind": "confirm"})
+        )
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.PAUSED
+
+        with patch("tianluo.commands.run._stdin_is_interactive", return_value=True), \
+             patch(
+                 "tianluo.commands.run._run_interjection_dialog",
+                 return_value=_DIALOG_RESUME_PAUSE,
+             ) as dialog, \
+             patch(
+                 # The gate is re-presented at the terminal; answering it is
+                 # not what this test is about (None = the operator exits).
+                 "tianluo.commands.run._handle_confirm_pause", return_value=None,
+             ) as gate:
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
+
+        assert dialog.called
+        # Back at the gate's own wait, with the gate step untouched.
+        assert gate.called
+        assert confirm_step.status == StepStatus.PAUSED
+        assert mock_sm.run_step.call_count == 0
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_a_gate_that_never_published_its_call_is_re_entered(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """With no pending call there is no wait to return to (the stop landed
+        before the handler published one), so the gate has to be re-entered —
+        exiting would strand the flow with nothing to answer."""
+        from tianluo.commands.run import _DIALOG_RESUME_PAUSE
+
+        confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.PAUSED,
+            step_id="confirm-002",
+            inputs={"step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan"},
+        )
+        self.implement_step.status = StepStatus.COMPLETED
+        self.flow.state.add_step(confirm_step)
+        self.flow.state.current_step_id = "confirm-002"
+        self.flow.state.selected_steps.append(StepType.CONFIRM)
+        self.flow.state.current_step_index = 3
+        self.flow.state.context["active_dialog"] = {
+            "step_id": "plan-001",
+            "call_step_id": "confirm-002",
+            "pause_context": "confirm",
+            "transcript": [],
+            "decision": None,
+            "call_file": None,
+        }
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.PAUSED
+
+        def _settle(flow, *_a, **_k):
+            # What the real driver does when a decision applies: the dialog is
+            # closed before its outcome is reported.
+            flow.state.context.pop("active_dialog", None)
+            return _DIALOG_RESUME_PAUSE
+
+        with patch(
+            "tianluo.commands.run._run_interjection_dialog_noninteractive",
+            side_effect=_settle,
+        ) as dialog, patch(
+            # The gate is re-entered and re-presented; answering it is not what
+            # this test is about.
+            "tianluo.commands.run._handle_confirm_pause", return_value=None,
+        ):
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
+
+        assert dialog.called
+        assert mock_sm.run_step.call_count == 1
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_rejects_completed_active_flow(
         self, mock_sm_class, mock_pm_class
     ):
@@ -598,6 +848,430 @@ class TestResumeFailedFlow:
     @patch("tianluo.commands.run.PersistenceManager")
     @patch("tianluo.commands.run.StateMachine")
     @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_a_pending_interjection_does_not_re_arm_the_failed_step(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """A resume triggered by an interjection is not a Retry decision.
+
+        The operator asked a question about the failure; re-arming the step
+        here spawns an unrequested retry, and the dialog then opens mid-call
+        against a fresh attempt instead of at the Retry/Skip/Abort gate.
+        """
+        from tianluo.engine import interaction_calls
+
+        # A flow parked at the failure gate still has retries left (the gate is
+        # not even offered once they are exhausted).
+        self.implement_step.retry_count = 1
+        interaction_calls.write_interjection_request(
+            interaction_calls.calls_dir_for(self.project_root),
+            "why did that fail?",
+            flow_id="test-flow-002",
+        )
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.commands.run._dialog_at_pause_point") as dialog:
+            dialog.return_value = "exit"
+            with patch("tianluo.engine.step_renderers.render_step_output"):
+                with patch("tianluo.commands.run.render_full"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-002",
+                    )
+
+        # Still FAILED, still on its original counters: the gate is reachable.
+        assert self.implement_step.status == StepStatus.FAILED
+        assert self.implement_step.inputs["retry_count"] == 2
+        # And the step's own handler was never invoked.
+        assert mock_sm.run_step.call_count == 0
+        # The dialog opened AT the failure gate, carrying the operator's text.
+        assert dialog.called
+        kwargs = dialog.call_args.kwargs
+        assert kwargs["pause_context"] == "failure"
+        assert kwargs["initial_messages"] == ["why did that fail?"]
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_delivers_the_note_parked_at_the_failure_gate(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """The daemon-mode Retry IS this re-arm: it must consume the note.
+
+        A web operator confirms ``continue`` with an instruction at the failure
+        pause, then clicks Retry; the daemon answers the retry_decision call and
+        re-spawns ``--resume``. Without consumption here the step retries with
+        the instruction never delivered — while the same sequence at a terminal
+        delivers it.
+        """
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": "implement-002",
+            "note": "use postgres",
+        }
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert self.implement_step.inputs["dialog_note"] == "use postgres"
+        # One-shot: it is gone from flow context, so no later run sees it.
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_discards_the_parked_note_when_the_gate_answered_skip(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Only the gate's Retry consumes the note — Skip must drop it.
+
+        Daemon mode reaches the re-arm for ANY answer that re-spawns
+        ``--resume``, so without reading the answer a ``skip`` would deliver
+        the parked instruction to an execution the operator never asked for.
+        The interactive terminal discards it on that same choice.
+        """
+        from tianluo.engine import interaction_calls
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": "implement-002",
+            "note": "use postgres",
+        }
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        interaction_calls.write_response(call_path, {"decision": "skip"})
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert "dialog_note" not in self.implement_step.inputs
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
+        # Peeking must not consume: the answer still has to reach the gate.
+        assert interaction_calls.read_response(call_path) == {"decision": "skip"}
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_discards_the_parked_note_when_the_gate_answered_abort(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """``abort`` resolves the pause without the scoped execution too."""
+        from tianluo.engine import interaction_calls
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": "implement-002",
+            "note": "use postgres",
+        }
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        # The daemon client writes the `.response.json` variant.
+        call_path.with_name(call_path.stem + ".response.json").write_text(
+            json.dumps({"response": "abort"}), encoding="utf-8"
+        )
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert "dialog_note" not in self.implement_step.inputs
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_does_not_rerun_the_step_when_the_gate_answered_skip(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """A ``skip`` answer must reach the gate WITHOUT the step running again.
+
+        Re-arming on a non-Retry answer executed the very step the operator
+        chose not to run: a rerun that happened to succeed swallowed the Skip
+        outright, and one that failed applied it only after an unrequested
+        execution — neither of which the interactive terminal does.
+        """
+        from tianluo.engine import interaction_calls
+
+        # A flow parked at the gate still has retries left.
+        self.implement_step.retry_count = 1
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        interaction_calls.write_response(call_path, {"decision": "skip"})
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert mock_sm.run_step.call_count == 0
+        # Untouched retry bookkeeping: no execution was launched to count.
+        assert self.implement_step.inputs["retry_count"] == 2
+        assert "resumed" not in self.implement_step.inputs
+        # The skip itself was applied: the flow moved on past the step.
+        assert mock_sm.transition_to_next.called
+        assert self.implement_step.inputs.get("holistic_skip_forced") is True
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_does_not_rerun_the_step_when_the_gate_answered_abort(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """``abort`` ends the flow straight from the pause, running nothing."""
+        from tianluo.engine import interaction_calls
+
+        self.implement_step.retry_count = 1
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        interaction_calls.write_response(call_path, {"decision": "abort"})
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                exit_code = run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert exit_code == 1
+        assert mock_sm.run_step.call_count == 0
+        assert self.implement_step.inputs["retry_count"] == 2
+        assert self.flow.status == FlowStatus.FAILED
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_reruns_the_step_when_the_gate_answered_retry(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """The Retry answer is the one that DOES re-arm and re-run the step."""
+        from tianluo.engine import interaction_calls
+
+        self.implement_step.retry_count = 1
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        interaction_calls.write_response(call_path, {"decision": "retry"})
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert mock_sm.run_step.call_count == 1
+        assert self.implement_step.inputs["retry_count"] == 3
+        assert self.implement_step.inputs["resumed"] is True
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_delivers_the_note_when_the_gate_answered_retry(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """An explicit ``retry`` answer is the note's one legitimate consumer."""
+        from tianluo.engine import interaction_calls
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": "implement-002",
+            "note": "use postgres",
+        }
+        call_path = interaction_calls.write_retry_decision_call(
+            self.project_root,
+            flow_id="test-flow-002",
+            step_id="implement-002",
+            step_type="implement",
+            error="boom",
+        )
+        interaction_calls.write_response(call_path, {"decision": "retry"})
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert self.implement_step.inputs["dialog_note"] == "use postgres"
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_drops_a_note_parked_for_another_step(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """A note scoped to a different step's pause is dropped, not delivered."""
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": "analyze-001",
+            "note": "use postgres",
+        }
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(
+            flow, "status", FlowStatus.COMPLETED
+        )
+
+        with patch("tianluo.engine.step_renderers.render_step_output"):
+            with patch("tianluo.commands.run.render_full"):
+                run_flow(
+                    project_root=self.project_root,
+                    flow_id="test-flow-002",
+                )
+
+        assert "dialog_note" not in self.implement_step.inputs
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
     def test_resume_failed_logs_retry_info(
         self, mock_sm_class, mock_pm_class, caplog
     ):
@@ -702,10 +1376,13 @@ class TestHandleResumeInteractiveFailedFlows:
         assert any("failed" in str(call) for call in render_calls)
 
 
-class TestHandleStepInterrupt:
-    """Test cases for ``_handle_step_interrupt`` persisting Ctrl-C user
-    interjections into ``flow.state.context["user_interjections"]`` and
-    inlining them into the current step's ``inputs["task_description"]``.
+class TestInterjectionDialogDriver:
+    """``_run_interjection_dialog`` — the Ctrl-C / web interjection path.
+
+    The interjection is no longer an append-to-task-description one-shot; it is
+    a read-only dialog held at the breakpoint that settles into a confirmed
+    decision. These cover the driver's contract with the run loop rather than
+    the LLM conversation itself (which ``tests/engine`` covers).
     """
 
     def _make_flow_and_step(self, base_task: str = "do the thing"):
@@ -723,171 +1400,249 @@ class TestHandleStepInterrupt:
         )
         flow.state.steps[step.step_id] = step
         flow.state.step_history.append(step.step_id)
+        flow.state.current_step_id = step.step_id
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        # run_step writes an entry snapshot for every step it executes, and a
+        # rewind refuses a target without one; a fixture flow needs it to stand
+        # in for a flow that has actually run.
+        from tianluo.engine.rewind import snapshot_step_entry
+
+        snapshot_step_entry(flow, step.step_id)
         return flow, step
 
     @patch("tianluo.commands.run._read_multiline_input")
-    def test_user_input_persists_to_context_and_step_inputs(
+    def test_empty_first_message_resumes_without_calling_the_llm(
         self, mock_read, tmp_path,
     ):
-        """A non-empty interjection writes into both the durable
-        ``flow.state.context["user_interjections"]`` and the current step's
-        ``inputs["task_description"]`` (so the immediate re-run sees it)."""
-        from tianluo.commands.run import _handle_step_interrupt
-
-        mock_read.return_value = "actually use Postgres not SQLite"
-        flow, step = self._make_flow_and_step()
-        persistence = MagicMock(spec=PersistenceManager)
-
-        result = _handle_step_interrupt(flow, step, persistence)
-
-        # Persistence saved
-        persistence.save_flow.assert_called_once_with(flow)
-        # Step status reset for re-run
-        assert step.status == StepStatus.PENDING
-        assert result == StepStatus.PENDING
-        # Interjection persisted to flow context
-        interjections = flow.state.context.get("user_interjections", [])
-        assert len(interjections) == 1
-        assert interjections[0]["text"] == "actually use Postgres not SQLite"
-        assert interjections[0]["step_id"] == "01_implement_abc"
-        assert interjections[0]["step_type"] == "implement"
-        assert interjections[0]["timestamp"]  # ISO timestamp set
-        # Current step's inputs.task_description got the section appended
-        td = step.inputs["task_description"]
-        assert td.startswith("do the thing")
-        assert "## Additional Instructions" in td
-        assert "actually use Postgres not SQLite" in td
-        # Exactly one section header (no doubling).
-        assert td.count("## Additional Instructions") == 1
-
-    @patch("tianluo.commands.run._read_multiline_input")
-    def test_repeated_interjections_compose_against_original_base(
-        self, mock_read, tmp_path,
-    ):
-        """A second Ctrl-C must not produce nested
-        ``## Additional Instructions`` sections — the second composer call
-        sees the original base, not the post-first-interjection prose."""
-        from tianluo.commands.run import _handle_step_interrupt
-
-        flow, step = self._make_flow_and_step()
-        persistence = MagicMock(spec=PersistenceManager)
-
-        mock_read.return_value = "first instruction"
-        _handle_step_interrupt(flow, step, persistence)
-        mock_read.return_value = "second instruction"
-        _handle_step_interrupt(flow, step, persistence)
-
-        interjections = flow.state.context["user_interjections"]
-        assert len(interjections) == 2
-        assert interjections[0]["text"] == "first instruction"
-        assert interjections[1]["text"] == "second instruction"
-
-        td = step.inputs["task_description"]
-        # Exactly ONE section header
-        assert td.count("## Additional Instructions") == 1
-        # Both bullets present, in order
-        pos1 = td.find("first instruction")
-        pos2 = td.find("second instruction")
-        assert 0 < pos1 < pos2
-
-    @patch("tianluo.commands.run._read_multiline_input")
-    def test_empty_input_does_not_persist_or_modify(
-        self, mock_read, tmp_path,
-    ):
-        """An empty user_input (just Enter / Esc-Enter with no text) reverts
-        to "retry as-is": no interjection persisted, no task_description
-        change, but step still reset to PENDING for retry."""
-        from tianluo.commands.run import _handle_step_interrupt
+        """Empty input = "change nothing, resume now" and costs no LLM call."""
+        from tianluo.commands.run import (
+            _DIALOG_CONTINUE_STEP,
+            _run_interjection_dialog,
+        )
 
         mock_read.return_value = ""
         flow, step = self._make_flow_and_step()
         persistence = MagicMock(spec=PersistenceManager)
 
-        result = _handle_step_interrupt(flow, step, persistence)
+        with patch(
+            "tianluo.engine.interjection_dialog.InterjectionDialog.ask"
+        ) as ask:
+            outcome = _run_interjection_dialog(
+                flow, step, persistence, tmp_path,
+            )
 
-        assert result == StepStatus.PENDING
+        assert outcome == _DIALOG_CONTINUE_STEP
+        ask.assert_not_called()
+        # Re-armed exactly like the Retry path so a native resume is considered.
         assert step.status == StepStatus.PENDING
-        # No interjection persisted
-        assert "user_interjections" not in flow.state.context
-        # task_description unchanged
-        assert step.inputs["task_description"] == "do the thing"
+        assert step.inputs["resumed"] is True
+        assert step.inputs["retry_count"] == 1
 
     @patch("tianluo.commands.run._read_multiline_input")
-    def test_interrupt_on_later_step_does_not_double_section(
-        self, mock_read, tmp_path,
-    ):
-        """Regression: when an interrupt happens on step A, a second
-        interrupt on step B (whose inputs.task_description already
-        carries the section composed by ``_build_step_inputs`` for the
-        first interjection) must NOT produce a doubled
-        ``## Additional Instructions`` section.
-        """
-        from tianluo.commands.run import _handle_step_interrupt
-
-        flow = FlowInstance(
-            flow_id="iflow-2",
-            task_description="do the thing",
-            task_type="feature",
-            status=FlowStatus.RUNNING,
-        )
-
-        # Simulate: first interrupt happened on step_A, list has interjection_1
-        flow.state.context["user_interjections"] = [
-            {"text": "first instruction", "step_id": "01_analyze",
-             "step_type": "analyze", "timestamp": "t1"},
-        ]
-        # Step B was built via _build_step_inputs, which composed the
-        # task_description with the existing first interjection. We
-        # simulate that here directly.
-        from tianluo.engine.task_description import compose_task_description_with_interjections
-        step_b_td = compose_task_description_with_interjections(
-            "do the thing", flow.state.context["user_interjections"],
-        )
-        step_b = Step(
-            step_id="03_implement_yyy",
-            step_type=StepType.IMPLEMENT,
-            status=StepStatus.RUNNING,
-            inputs={"task_description": step_b_td},
-        )
-        flow.state.steps[step_b.step_id] = step_b
-        flow.state.step_history.append(step_b.step_id)
-
-        persistence = MagicMock(spec=PersistenceManager)
-        mock_read.return_value = "second instruction"
-
-        _handle_step_interrupt(flow, step_b, persistence)
-
-        td = step_b.inputs["task_description"]
-        # Exactly ONE section header — no doubling.
-        assert td.count("## Additional Instructions") == 1, (
-            f"interjection section was doubled. Full td:\n{td}"
-        )
-        # Each interjection appears exactly once.
-        assert td.count("first instruction") == 1
-        assert td.count("second instruction") == 1
-        # Both bullets present.
-        pos1 = td.find("first instruction")
-        pos2 = td.find("second instruction")
-        assert 0 < pos1 < pos2
-
-    @patch("tianluo.commands.run._read_multiline_input")
-    def test_cancelled_input_returns_none(self, mock_read, tmp_path):
-        """user_input is None when user cancels with Ctrl-C inside the input
-        prompt. _handle_step_interrupt saves and returns None to exit."""
-        from tianluo.commands.run import _handle_step_interrupt
+    def test_cancelled_input_exits(self, mock_read, tmp_path):
+        """Ctrl-C at the dialog's input box is the ``exit`` decision."""
+        from tianluo.commands.run import _DIALOG_EXIT, _run_interjection_dialog
 
         mock_read.return_value = None
         flow, step = self._make_flow_and_step()
         persistence = MagicMock(spec=PersistenceManager)
 
-        result = _handle_step_interrupt(flow, step, persistence)
+        outcome = _run_interjection_dialog(flow, step, persistence, tmp_path)
 
-        assert result is None
-        persistence.save_flow.assert_called_once_with(flow)
-        # Step status NOT changed
+        assert outcome == _DIALOG_EXIT
+        persistence.save_flow.assert_called_with(flow)
+        # An exit must not silently re-arm the step.
         assert step.status == StepStatus.RUNNING
-        # No interjection persisted
+
+    @patch("tianluo.commands.run._read_multiline_input")
+    def test_cancelled_input_discards_a_parked_gate_note(self, mock_read, tmp_path):
+        """Ctrl-C at the input box is the exit decision, so it must resolve the
+        pause exactly like one — including dropping the one-shot instruction an
+        earlier ``continue`` parked at this same pause. Returning early used to
+        skip ``apply_decision`` entirely, and the note was then delivered to a
+        run launched from a completely different process's ``--resume``."""
+        from tianluo.commands.run import _DIALOG_EXIT, _run_interjection_dialog
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        mock_read.return_value = None
+        flow, step = self._make_flow_and_step()
+        flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": step.step_id,
+            "note": "use pytest -x",
+        }
+        persistence = MagicMock(spec=PersistenceManager)
+
+        outcome = _run_interjection_dialog(
+            flow, step, persistence, tmp_path, pause_context="failure",
+        )
+
+        assert outcome == _DIALOG_EXIT
+        assert PENDING_GATE_NOTE_KEY not in flow.state.context
+        assert step.status == StepStatus.RUNNING
+
+    @patch("tianluo.commands.run._read_multiline_input")
+    def test_direct_decision_skips_the_conversation(self, mock_read, tmp_path):
+        """Typing a decision verb goes straight to the confirmation gate."""
+        from tianluo.commands.run import (
+            _DIALOG_CONTINUE_STEP,
+            _run_interjection_dialog,
+        )
+
+        # First turn: the direct decision. Second: confirm it.
+        mock_read.side_effect = ["continue", "1"]
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        with patch(
+            "tianluo.engine.interjection_dialog.InterjectionDialog.ask"
+        ) as ask:
+            outcome = _run_interjection_dialog(
+                flow, step, persistence, tmp_path,
+            )
+
+        assert outcome == _DIALOG_CONTINUE_STEP
+        ask.assert_not_called()
+        assert step.inputs["retry_count"] == 1
+
+    @patch("tianluo.commands.run._read_multiline_input")
+    def test_revised_description_becomes_the_new_effective_base(
+        self, mock_read, tmp_path,
+    ):
+        """A confirmed ``revised_description`` covers the original description.
+
+        Decision 6: it is a replacement layer, not an appended
+        ``## Additional Instructions`` section.
+        """
+        from tianluo.commands.run import _run_interjection_dialog
+        from tianluo.engine.interjection_dialog import (
+            DialogDecision,
+            DialogTurn,
+        )
+        from tianluo.engine.state_machine import (
+            _effective_task_description_base,
+        )
+
+        mock_read.side_effect = ["use Postgres, not SQLite", "1"]
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+        turn = DialogTurn(
+            mode="decision",
+            content="Understood.",
+            decision=DialogDecision(
+                action="continue",
+                revised_description="Build the thing on Postgres.",
+            ),
+        )
+
+        with patch(
+            "tianluo.engine.interjection_dialog.InterjectionDialog.ask",
+            return_value=turn,
+        ):
+            _run_interjection_dialog(flow, step, persistence, tmp_path)
+
+        assert (
+            _effective_task_description_base(flow)
+            == "Build the thing on Postgres."
+        )
+        # The retired append-mechanism must not have been used.
         assert "user_interjections" not in flow.state.context
+        assert "## Additional Instructions" not in step.inputs["task_description"]
+
+    @patch("tianluo.commands.run._read_multiline_input")
+    def test_restart_rewinds_and_reports_restarted(self, mock_read, tmp_path):
+        """A confirmed ``restart`` rewinds the flow and tells the loop so."""
+        from tianluo.commands.run import (
+            _DIALOG_RESTARTED,
+            _run_interjection_dialog,
+        )
+        from tianluo.engine.interjection_dialog import (
+            DialogDecision,
+            DialogTurn,
+        )
+
+        mock_read.side_effect = ["start over please", "1"]
+        flow, step = self._make_flow_and_step()
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        persistence = MagicMock(spec=PersistenceManager)
+        turn = DialogTurn(
+            mode="decision",
+            content="Restarting.",
+            decision=DialogDecision(action="restart"),
+        )
+
+        with patch(
+            "tianluo.engine.interjection_dialog.InterjectionDialog.ask",
+            return_value=turn,
+        ):
+            outcome = _run_interjection_dialog(
+                flow, step, persistence, tmp_path,
+            )
+
+        assert outcome == _DIALOG_RESTARTED
+        # The step object is gone; the flow will rebuild it from scratch.
+        assert step.step_id not in flow.state.steps
+        assert flow.state.step_history == []
+        assert flow.state.context["rewind_generation"] == 2  # 1 → 2
+        assert flow.state.context["pending_dialog_note"]
+
+    @patch("tianluo.commands.run._read_multiline_input")
+    def test_pause_context_continue_returns_to_the_gate(self, mock_read, tmp_path):
+        """``continue`` from a pause-point dialog goes back to that gate."""
+        from tianluo.commands.run import (
+            _DIALOG_RESUME_PAUSE,
+            _run_interjection_dialog,
+        )
+
+        mock_read.return_value = ""
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        outcome = _run_interjection_dialog(
+            flow, step, persistence, tmp_path, pause_context="confirm",
+        )
+
+        assert outcome == _DIALOG_RESUME_PAUSE
+
+    def test_rewind_targets_stop_at_the_current_step(self):
+        """A rewind runs forward from its target, so a LATER history entry is
+        not a restart target at all — offering one hands the operator a choice
+        that would leave the steps in between un-run."""
+        from tianluo.commands.run import _dialog_rewind_targets
+
+        flow, step = self._make_flow_and_step()
+        for sid, st in (
+            ("02_test_ab", StepType.TEST),
+            ("03_self_check_ab", StepType.SELF_CHECK),
+        ):
+            flow.state.steps[sid] = Step(
+                step_id=sid, step_type=st, status=StepStatus.COMPLETED,
+            )
+            flow.state.step_history.append(sid)
+        # The fix loop re-armed the IMPLEMENT step, which is current again.
+        flow.state.current_step_id = step.step_id
+
+        ids = [t["step_id"] for t in _dialog_rewind_targets(flow)]
+        assert ids == [step.step_id]
+
+    def test_decision_edits_are_applied_before_confirmation(self):
+        """``field: value`` lines edit the proposal; prose does not."""
+        from tianluo.commands.run import _apply_decision_edits
+        from tianluo.engine.interjection_dialog import DialogDecision
+
+        decision = DialogDecision(action="continue")
+        assert _apply_decision_edits(
+            decision, "action: restart\nworkspace: reset"
+        )
+        assert decision.action == "restart"
+        assert decision.workspace == "reset"
+
+        # Prose is a dialog message, never a silent edit.
+        assert not _apply_decision_edits(decision, "no, do it differently")
+        # An unknown field is rejected wholesale rather than half-applied.
+        assert not _apply_decision_edits(decision, "colour: blue")
+        # An invalid enum value is rejected too.
+        assert not _apply_decision_edits(decision, "action: teleport")
+        assert decision.action == "restart"
 
 
 class TestOutputFormatEventStream:
@@ -1009,6 +1764,182 @@ class TestOutputFormatEventStream:
             self._run(mock_sm_class, mock_pm_class, "json")
 
         mock_render.assert_not_called()
+
+
+class TestRewindRebuildFailureFailsTheFlow:
+    """A rewind that cannot rebuild its target must NOT let the loop advance.
+
+    After a rewind, ``current_step_id`` names the target's COMPLETED
+    predecessor and ``current_step_index`` names the target's slot, so simply
+    continuing hands the loop to ``transition_to_next`` and it advances PAST the
+    target: the step the user explicitly asked to re-run never runs, and the
+    flow reports success having skipped it.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+
+        self.flow = FlowInstance(
+            flow_id="rwf-001",
+            task_description="task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        self.flow.state.selected_steps = [
+            StepType.PLAN, StepType.IMPLEMENT, StepType.TEST,
+        ]
+        plan = Step(
+            step_type=StepType.PLAN, status=StepStatus.COMPLETED,
+            step_id="01_plan_x", inputs={}, outputs={},
+        )
+        self.flow.state.add_step(plan)
+        # The rewind already ran: the IMPLEMENT step object is gone, the index
+        # points at its slot, and the rebuild request is pending.
+        self.flow.state.current_step_id = "01_plan_x"
+        self.flow.state.current_step_index = 1
+        self.flow.state.context["pending_rewind_step_type"] = "implement"
+
+    def teardown_method(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_a_failed_rebuild_fails_the_flow_instead_of_advancing(
+        self, mock_sm_class, mock_pm_class,
+    ):
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.rebuild_rewound_step.side_effect = RuntimeError(
+            "plan outputs unreadable"
+        )
+
+        with patch("tianluo.commands.run.render_full"), \
+                patch("tianluo.commands.run.display_error") as err:
+            exit_code = run_flow(
+                project_root=self.project_root, flow_id="rwf-001",
+            )
+
+        assert exit_code == 1
+        assert self.flow.status == FlowStatus.FAILED
+        # Never advanced past the target.
+        mock_sm.transition_to_next.assert_not_called()
+        mock_sm.run_step.assert_not_called()
+        assert err.called
+        assert "implement" in " ".join(str(c) for c in err.call_args_list)
+        # INVARIANT: the rebuild request stays armed so a resume can retry it —
+        # the rewind already deleted the target, so losing the marker would
+        # brick the flow.
+        assert self.flow.state.context["pending_rewind_step_type"] == "implement"
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_resume_retries_the_rebuild_after_the_cause_is_fixed(
+        self, mock_sm_class, mock_pm_class,
+    ):
+        """``luo run --resume`` on a flow FAILED by a failed rewind rebuild
+        re-enters the loop and retries the rebuild — the flow must not be
+        bricked in FAILED with its rewound steps already deleted."""
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.rebuild_rewound_step.side_effect = RuntimeError("unreadable")
+        with patch("tianluo.commands.run.render_full"), \
+                patch("tianluo.commands.run.display_error"):
+            first = run_flow(project_root=self.project_root, flow_id="rwf-001")
+        assert first == 1
+        assert self.flow.status == FlowStatus.FAILED
+
+        # The operator fixes the cause and resumes: the rebuild is retried.
+        mock_sm.rebuild_rewound_step.side_effect = None
+        mock_sm.transition_to_next.side_effect = (
+            lambda flow: setattr(flow, "status", FlowStatus.COMPLETED)
+        )
+        with patch("tianluo.commands.run.render_full"):
+            second = run_flow(project_root=self.project_root, flow_id="rwf-001")
+
+        assert second == 0
+        assert mock_sm.rebuild_rewound_step.call_count == 2
+        # A successful rebuild consumes the marker.
+        assert "pending_rewind_step_type" not in self.flow.state.context
+
+
+class TestFastAdvanceDiscardsTheGateNote:
+    """A note parked by a ``continue`` at a ``completed_step`` pause is scoped
+    to that pause. Advancing RESOLVES it, so the json/daemon fast path must
+    discard it exactly as the interactive result-processing path does."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+        (self.project_root / "tianluo" / "state").mkdir(parents=True, exist_ok=True)
+
+        self.flow = FlowInstance(
+            flow_id="gn-001",
+            task_description="task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        self.flow.state.selected_steps = [StepType.IMPLEMENT]
+        step = Step(
+            step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED,
+            step_id="01_implement_x", inputs={}, outputs={},
+        )
+        self.flow.state.add_step(step)
+        self.flow.state.current_step_id = step.step_id
+        self.step = step
+
+    def teardown_method(self):
+        import shutil
+
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("tianluo.commands.run.PersistenceManager")
+    @patch("tianluo.commands.run.StateMachine")
+    @patch("tianluo.commands.run.STEP_HANDLERS", {})
+    def test_the_parked_note_is_dropped_when_the_step_fast_advances(
+        self, mock_sm_class, mock_pm_class,
+    ):
+        from tianluo.engine.interjection_dialog import PENDING_GATE_NOTE_KEY
+
+        self.flow.state.context[PENDING_GATE_NOTE_KEY] = {
+            "step_id": self.step.step_id,
+            "note": "use pytest -x",
+        }
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        _stub_state_dir(mock_pm, self.project_root)
+        mock_pm.load_flow.return_value = self.flow
+        mock_pm.load_flow_by_id.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.transition_to_next.side_effect = (
+            lambda flow: setattr(flow, "status", FlowStatus.COMPLETED)
+        )
+
+        with patch("tianluo.commands.run.render_full"):
+            run_flow(project_root=self.project_root, flow_id="gn-001")
+
+        mock_sm.transition_to_next.assert_called()
+        mock_sm.run_step.assert_not_called()
+        assert PENDING_GATE_NOTE_KEY not in self.flow.state.context
 
 
 class TestDiscoverFromIssueCombination:

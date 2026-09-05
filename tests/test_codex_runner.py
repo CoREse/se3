@@ -684,20 +684,18 @@ class TestCodexBuildCallArgs:
         assert "/goal" not in " ".join(args)
         assert not getattr(runner, "supports_native_goal", False)
 
-    def test_writable_step_has_sandbox_flag(self):
+    def test_writable_step_has_sandbox_override(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="do it", read_only=False)
-        assert "--sandbox" in args
-        si = args.index("--sandbox")
-        assert args[si + 1] == "danger-full-access"
+        assert 'sandbox_mode="danger-full-access"' in args
+        assert args[args.index('sandbox_mode="danger-full-access"') - 1] == "-c"
         assert "--dangerously-bypass-approvals-and-sandbox" not in args
 
-    def test_read_only_step_has_sandbox_flag(self):
+    def test_read_only_step_has_sandbox_override(self):
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="analyze", read_only=True)
-        assert "--sandbox" in args
-        si = args.index("--sandbox")
-        assert args[si + 1] == "read-only"
+        assert 'sandbox_mode="read-only"' in args
+        assert args[args.index('sandbox_mode="read-only"') - 1] == "-c"
         assert "--dangerously-bypass-approvals-and-sandbox" not in args
 
     def test_prompt_as_positional_arg(self):
@@ -766,7 +764,7 @@ class TestCodexBuildCallArgs:
             read_only=True,
             context_files=[f],
         )
-        assert "--sandbox" in args
+        assert 'sandbox_mode="read-only"' in args
         assert "## File:" in args[-1]
 
 
@@ -1743,19 +1741,19 @@ class TestCodexBuildCallArgsExtended:
         assert "-a" not in args
 
     def test_read_only_sandbox_immediately_after_prefix(self):
-        """--sandbox read-only should come right after the constant prefix."""
+        """The read-only override should come right after the constant prefix."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="analyze", read_only=True)
-        assert args[3] == "--sandbox"
-        assert args[4] == "read-only"
+        assert args[3] == "-c"
+        assert args[4] == 'sandbox_mode="read-only"'
 
     def test_writable_sandbox_immediately_after_prefix(self):
-        """--sandbox danger-full-access should come right
+        """The writable override should come right
         after the constant prefix."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="implement", read_only=False)
-        assert args[3] == "--sandbox"
-        assert args[4] == "danger-full-access"
+        assert args[3] == "-c"
+        assert args[4] == 'sandbox_mode="danger-full-access"'
 
     def test_prompt_is_always_last_element(self):
         """The prompt (or '-' for stdin) must be the last element."""
@@ -1992,13 +1990,13 @@ class TestBuildCallArgsNoClaudeFlags:
         assert "--setting-sources" not in args
 
     def test_no_disallowed_tools_flag(self):
-        """Read-only enforcement uses --sandbox, not --disallowedTools."""
+        """Read-only enforcement uses the sandbox_mode override, not --disallowedTools."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="test", read_only=True)
         assert "--disallowedTools" not in args
 
     def test_no_dangerously_skip_permissions(self):
-        """Codex exec is non-interactive; read/write both use --sandbox."""
+        """Codex exec is non-interactive; read/write both use sandbox_mode."""
         runner = CodexRunner(command={"cmd": "codex", "priority": 0})
         args = runner.build_call_args(prompt="test", read_only=False)
         assert "--dangerously-skip-permissions" not in args

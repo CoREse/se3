@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..dag_scheduler import (
+    DAGInterrupted,
     DAGScheduler,
     GROUP_STATUS_COMPLETED,
     GROUP_STATUS_FAILED,
@@ -31,6 +32,7 @@ from ..dag_scheduler import (
 )
 from ..chat_history import record_group_status
 from ...agent_runner import AgentInvocationIntent
+from ...stop_signal import uninterruptible_scope
 from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
@@ -1004,7 +1006,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             # that completed after the last state save.
             # Skip this scan if step.outputs already accounts for all groups.
             all_group_ids = {g.get("group_id", g.get("name", "unknown")) for g in groups}
-            unaccounted = all_group_ids - completed_groups_dag
+            unaccounted = _groups_to_scan_for_survivors(
+                step.outputs, all_group_ids, completed_groups_dag,
+            )
 
             if unaccounted:
                 original_branch = get_current_branch(project_root)
@@ -1073,6 +1077,15 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                             "group_summaries": _prior_group_summaries(
                                 step.outputs, completed_groups_dag,
                             ),
+                            "estimated_test_duration": step.outputs.get(
+                                "estimated_test_duration"
+                            ),
+                            DAG_GROUP_COMPLETION_KEY: _normalize_group_completion(
+                                step.outputs.get(DAG_GROUP_COMPLETION_KEY)
+                            ),
+                            DAG_PRESERVED_WORKTREES_KEY: dict(
+                                step.outputs.get(DAG_PRESERVED_WORKTREES_KEY) or {}
+                            ),
                         },
                     )
                     step.outputs["session_commits"] = _collect_session_commits(
@@ -1087,6 +1100,15 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     "implemented_groups": list(completed_groups_dag),
                     "group_summaries": _prior_group_summaries(
                         step.outputs, completed_groups_dag,
+                    ),
+                    "estimated_test_duration": step.outputs.get(
+                        "estimated_test_duration"
+                    ),
+                    DAG_GROUP_COMPLETION_KEY: _normalize_group_completion(
+                        step.outputs.get(DAG_GROUP_COMPLETION_KEY)
+                    ),
+                    DAG_PRESERVED_WORKTREES_KEY: dict(
+                        step.outputs.get(DAG_PRESERVED_WORKTREES_KEY) or {}
                     ),
                 }
                 logger.info(
@@ -1447,6 +1469,7 @@ def _make_execute_fn(
     group_agent_info: dict[str, tuple[str, str | None]] | None = None,
     root_cause_section: str = "",
     capability_mode: bool = False,
+    preserved_worktrees: dict[str, dict] | None = None,
 ) -> Callable[[dict, dict[str, GroupResult], RelayContext], GroupResult]:
     """Build the execute_fn closure for relay-based DAG parallel execution.
 
@@ -1464,7 +1487,14 @@ def _make_execute_fn(
     ``capability_mode`` selects the per-group prompt: a coarse capability group
     carries no per-task enumeration, so it must be told to decompose itself
     rather than to work through a task list it does not have.
+
+    ``preserved_worktrees`` maps ``group_id -> {branch, worktree}`` for the
+    worktrees a previously INTERRUPTED run of this step left in place. A group
+    listed there reuses its worktree rather than recreating its branch: that
+    directory holds its unfinished work and is the cwd its provider session is
+    addressed in.
     """
+    preserved_worktrees = preserved_worktrees or {}
     git_lock = threading.Lock()
 
     def execute_fn(
@@ -1500,59 +1530,126 @@ def _make_execute_fn(
                     branch_name, worktree_path,
                 )
             else:
-                # Root node (or no relay_plan): create new branch + worktree
-                with git_lock:
-                    force_cleanup_worktree(project_root, branch_name)
-                    _run_git(project_root, "branch", "-D", branch_name, check=False)
-                    _run_git(project_root, "branch", branch_name, original_branch)
-                    logger.info(
-                        "DAG root: created branch %s from %s",
-                        branch_name, original_branch,
-                    )
-                    worktree_path = create_worktree(project_root, branch_name)
-                logger.info(
-                    "DAG root: group %s created worktree %s",
-                    group_id, worktree_path,
+                reused = _reuse_preserved_worktree(
+                    preserved_worktrees, group_id, branch_name, git_lock,
                 )
+                if reused is not None:
+                    # Continuing an interrupted run: this group's worktree still
+                    # holds its half-finished work and is the cwd its provider
+                    # session is bound to. Recreating the branch would throw both
+                    # away — which is exactly what the user interrupted to avoid.
+                    worktree_path, branch_name = reused
+                    logger.info(
+                        "DAG continue: group %s reusing preserved worktree %s "
+                        "(branch %s)",
+                        group_id, worktree_path, branch_name,
+                    )
+                else:
+                    # Root node (or no relay_plan): create new branch + worktree.
+                    # WHY the base is not unconditionally ``original_branch``:
+                    # when this group HAS a preserved entry whose worktree just
+                    # failed reuse, the recorded branch still carries real work
+                    # — either this group's own commits, or (for a relay heir)
+                    # its predecessor's completed commits, whose merge was
+                    # deferred precisely because this group was expected to keep
+                    # building on them. Branching off the base would drop that
+                    # work out of everything the step later merges.
+                    recorded_entry = preserved_worktrees.get(group_id)
+                    recorded_branch = (
+                        str(recorded_entry.get("branch") or "")
+                        if isinstance(recorded_entry, dict)
+                        else ""
+                    )
+                    with git_lock:
+                        force_cleanup_worktree(project_root, branch_name)
+                        base_ref = original_branch
+                        if recorded_branch and _run_git(
+                            project_root, "rev-parse", "--verify", recorded_branch,
+                            check=False,
+                        ).returncode == 0:
+                            base_ref = recorded_branch
+                        if base_ref == branch_name:
+                            # This group's own branch survived: keep it (its
+                            # commits are the work) and only re-attach a
+                            # worktree to it.
+                            logger.info(
+                                "DAG root: reattaching worktree to surviving "
+                                "branch %s", branch_name,
+                            )
+                        else:
+                            _run_git(
+                                project_root, "branch", "-D", branch_name,
+                                check=False,
+                            )
+                            _run_git(project_root, "branch", branch_name, base_ref)
+                            logger.info(
+                                "DAG root: created branch %s from %s",
+                                branch_name, base_ref,
+                            )
+                        worktree_path = create_worktree(project_root, branch_name)
+                    logger.info(
+                        "DAG root: group %s created worktree %s",
+                        group_id, worktree_path,
+                    )
 
             # Step 2: Convergence merge — merge secondary predecessor branches
             if relay_context.convergence_merges:
                 with git_lock:
-                    for sec_branch in relay_context.convergence_merges:
-                        logger.info(
-                            "DAG convergence: merging %s into worktree at %s",
-                            sec_branch, worktree_path,
-                        )
-                        merge_result = _run_git(
-                            worktree_path, "merge", sec_branch, "--no-edit",
-                            check=False,
-                        )
-                        if merge_result.returncode != 0:
-                            stderr = merge_result.stderr.strip()
-                            is_conflict = "CONFLICT" in (
-                                merge_result.stdout + merge_result.stderr
+                    # INVARIANT: this block never leaves a half-merged worktree
+                    # behind. A stop request raises KeyboardInterrupt straight out
+                    # of the LLM conflict resolution below — past every
+                    # ``except Exception`` in this function — and the group then
+                    # returns interrupted with MERGE_HEAD and conflict markers on
+                    # disk. The continuation reuses that worktree, and the
+                    # end-of-group ``git add -A && git commit`` would complete the
+                    # merge with whatever is there, leaf-merging conflict markers
+                    # into original_branch.
+                    try:
+                        for sec_branch in relay_context.convergence_merges:
+                            logger.info(
+                                "DAG convergence: merging %s into worktree at %s",
+                                sec_branch, worktree_path,
                             )
-                            if is_conflict:
-                                logger.warning(
-                                    "DAG convergence: conflict merging %s, "
-                                    "attempting LLM resolution",
-                                    sec_branch,
+                            merge_result = _run_git(
+                                worktree_path, "merge", sec_branch, "--no-edit",
+                                check=False,
+                            )
+                            if merge_result.returncode != 0:
+                                stderr = merge_result.stderr.strip()
+                                is_conflict = "CONFLICT" in (
+                                    merge_result.stdout + merge_result.stderr
                                 )
-                                conflict_files = get_conflicting_files(worktree_path)
-                                if conflict_files:
-                                    resolved = _resolve_convergence_conflicts(
-                                        worktree_path, conflict_files,
-                                        task_description, deps_results,
+                                if is_conflict:
+                                    logger.warning(
+                                        "DAG convergence: conflict merging %s, "
+                                        "attempting LLM resolution",
+                                        sec_branch,
                                     )
-                                    if not resolved:
+                                    conflict_files = get_conflicting_files(worktree_path)
+                                    if conflict_files:
+                                        resolved = _resolve_convergence_conflicts(
+                                            worktree_path, conflict_files,
+                                            task_description, deps_results,
+                                        )
+                                        if not resolved:
+                                            _run_git(
+                                                worktree_path, "merge", "--abort",
+                                                check=False,
+                                            )
+                                            return GroupResult.failed(
+                                                group_id,
+                                                f"Convergence merge conflict with "
+                                                f"{sec_branch} could not be resolved",
+                                            )
+                                    else:
                                         _run_git(
                                             worktree_path, "merge", "--abort",
                                             check=False,
                                         )
                                         return GroupResult.failed(
                                             group_id,
-                                            f"Convergence merge conflict with "
-                                            f"{sec_branch} could not be resolved",
+                                            f"Convergence merge failed: {sec_branch}: "
+                                            f"{stderr}",
                                         )
                                 else:
                                     _run_git(
@@ -1564,16 +1661,13 @@ def _make_execute_fn(
                                         f"Convergence merge failed: {sec_branch}: "
                                         f"{stderr}",
                                     )
-                            else:
-                                _run_git(
-                                    worktree_path, "merge", "--abort",
-                                    check=False,
-                                )
-                                return GroupResult.failed(
-                                    group_id,
-                                    f"Convergence merge failed: {sec_branch}: "
-                                    f"{stderr}",
-                                )
+                    except BaseException:
+                        if merge_in_progress(worktree_path):
+                            _run_git(
+                                worktree_path, "merge", "--abort",
+                                check=False,
+                            )
+                        raise
 
             # Step 3: Build previous_results context from deps_results
             if deps_results:
@@ -1610,8 +1704,16 @@ def _make_execute_fn(
             # Use group-specific step_id so each group has its own history file
             group_step_id = f"{step.step_id}_{group_id}"
 
-            # Restore history from main repo so retry context injection works
-            _restore_history_to_worktree(project_root, worktree_path, flow.flow_id)
+            # Restore history from main repo so retry context injection works.
+            # ``group_step_id`` is passed so a group whose preserved worktree
+            # was NOT reusable still gets its own salvaged conversation back:
+            # without it the replacement LLMCaller sees neither the old session
+            # binding (different cwd) nor any history, and re-runs the group
+            # from its original prompt as if nothing had happened.
+            _restore_history_to_worktree(
+                project_root, worktree_path, flow.flow_id,
+                group_step_id=group_step_id,
+            )
 
             # Live agent/model relay: as the in-worktree LLMCaller selects the
             # agent for each attempt (and as it parses the actual model name),
@@ -1730,6 +1832,17 @@ def _make_execute_fn(
             result = GroupResult.failed(group_id, f"{msg} Original error: {e}")
             result.worktree_path = worktree_path  # preserve for history salvaging
             return result
+        except KeyboardInterrupt:
+            # A stop request, not a failure. RETURNED rather than re-raised so
+            # the result carries the worktree and branch: the continuation
+            # resumes this group's provider session in that same cwd, and the
+            # half-finished edits in the worktree are the thing the user
+            # interrupted to talk about. Re-raising discarded both.
+            logger.info("DAG: group %s interrupted by a stop request", group_id)
+            result = GroupResult.interrupted(group_id)
+            result.worktree_path = worktree_path
+            result.branch_name = branch_name or ""
+            return result
         except (LLMCallError, Exception) as e:
             logger.exception("DAG: group %s failed", group_id)
             result = GroupResult.failed(group_id, str(e))
@@ -1737,6 +1850,79 @@ def _make_execute_fn(
             return result
 
     return execute_fn
+
+
+def _reuse_preserved_worktree(
+    preserved: dict[str, dict],
+    group_id: str,
+    branch_name: str,
+    git_lock: threading.Lock,
+) -> tuple[Path, str] | None:
+    """Return the worktree AND branch an interrupted run left for *group_id*.
+
+    WHY the recorded branch is adopted rather than compared against the
+    generated ``impl/<flow>/<group>`` name: a relay descendant never had a
+    branch of its own — it inherited its predecessor's worktree and branch, and
+    that pair is exactly where its half-finished work and its provider session
+    live. Requiring the generated name here rejected precisely the groups this
+    reuse exists for, sending them to a fresh worktree and throwing both away.
+
+    Still conservative about the directory: it must exist, still be a git
+    worktree, and still have the recorded branch checked out. Anything else
+    returns ``None`` so the caller takes the ordinary create-from-scratch path.
+    """
+    entry = preserved.get(group_id)
+    if not isinstance(entry, dict):
+        return None
+    recorded_branch = str(entry.get("branch") or "") or branch_name
+    raw = str(entry.get("worktree") or "")
+    if not raw:
+        return None
+    path = Path(raw)
+    with git_lock:
+        if not path.is_dir() or not (path / ".git").exists():
+            return None
+        # A worktree whose HEAD has moved elsewhere is no longer this group's
+        # checkout; running in it would commit onto a branch nobody merges.
+        # Advisory: git answering "not this branch" is a reject, but git being
+        # unable to answer at all is not — the directory checks above already
+        # establish it is a checkout, and refusing here would throw away the
+        # interrupted work over a transient git failure.
+        try:
+            head = _run_git(path, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+        except Exception:  # noqa: BLE001 - cannot tell; fall through
+            head = None
+        if head is not None and head.returncode == 0:
+            if head.stdout.strip() != recorded_branch:
+                return None
+        # INVARIANT: a reused worktree is never handed back mid-merge. A crash
+        # (or any path that escaped the convergence block's abort) can leave
+        # MERGE_HEAD and conflict-marked files on disk; the resumed agent would
+        # then work inside a half-merged checkout and the end-of-group
+        # ``git add -A && git commit`` would silently complete that merge with
+        # whatever is there. Aborting restores the group's own committed work
+        # and leaves the convergence merge to be re-attempted; a merge that
+        # cannot be aborted is not reusable at all.
+        try:
+            if merge_in_progress(path):
+                logger.warning(
+                    "DAG resume: worktree %s for group %s is mid-merge; "
+                    "aborting the merge before reusing it", path, group_id,
+                )
+                _run_git(path, "merge", "--abort", check=False)
+                if merge_in_progress(path):
+                    logger.error(
+                        "DAG resume: could not abort the in-progress merge in "
+                        "%s; refusing to reuse it", path,
+                    )
+                    return None
+        except Exception:  # noqa: BLE001 - unanswerable probe = not reusable
+            logger.debug(
+                "DAG resume: merge-state probe failed for %s", path,
+                exc_info=True,
+            )
+            return None
+    return path, recorded_branch
 
 
 def _resolve_convergence_conflicts(
@@ -1905,6 +2091,32 @@ def _merge_leaf_branch(
        stash is dropped only after archival is proven; if it cannot be, the
        live stash is kept for manual recovery. ``IssueManager`` audits the
        archive manifest so the operator can actually restore.
+    """
+    with uninterruptible_scope():
+        return _merge_leaf_branch_locked(
+            project_root, branch, original_branch, task_description,
+            group_summaries, flow_id=flow_id, merge_step_id=merge_step_id,
+        )
+
+
+def _merge_leaf_branch_locked(
+    project_root: Path,
+    branch: str,
+    original_branch: str,
+    task_description: str,
+    group_summaries: list[dict],
+    flow_id: str | None = None,
+    merge_step_id: str | None = None,
+) -> bool:
+    """The merge-back body, run inside a non-interruptible section.
+
+    WHY the split: this is a multi-command git sequence (checkout, stash push,
+    merge, conflict resolution, stash pop) whose intermediate states live on
+    disk. A KeyboardInterrupt from the interjection watcher landing between two
+    of those commands leaves a ``MERGE_HEAD`` or a live stash behind, and the
+    IMPLEMENT step the operator asked to interrupt then refuses to re-run
+    ("an in-progress git merge ... abort it before retrying"). The stop request
+    is still published — it is honoured at the next real breakpoint.
     """
     current = get_current_branch(project_root)
     if current != original_branch:
@@ -2339,6 +2551,142 @@ def _salvage_results_history(results: list, project_root: Path) -> None:
                 logger.warning("DAG: failed to salvage history from worktree %s", r.worktree_path)
 
 
+#: ``step.outputs`` key recording the worktrees an interrupted DAG run left in
+#: place, so the continuation reuses them instead of force-cleaning them away.
+DAG_PRESERVED_WORKTREES_KEY = "dag_preserved_worktrees"
+
+
+def _groups_to_scan_for_survivors(
+    step_outputs: dict[str, Any],
+    all_group_ids: set[str],
+    completed_group_ids: set[str],
+) -> set[str]:
+    """Groups whose branch may be probed to guess "it completed after all".
+
+    INVARIANT: a group the interrupt recorded as still RUNNING is never probed.
+    The probe asks "does this branch carry commits the base branch does not",
+    and a fork group's branch is created FROM its predecessor's branch — so it
+    carries the predecessor's commits from the moment it exists. Probing it
+    answers "completed" for a group that implemented nothing, and its tasks are
+    then silently dropped from the continuation.
+    """
+    interrupted = {
+        gid
+        for gid, entry in (step_outputs.get(DAG_PRESERVED_WORKTREES_KEY) or {}).items()
+        if isinstance(entry, dict)
+        and entry.get("status")
+        and entry.get("status") != "completed"
+    }
+    return set(all_group_ids) - set(completed_group_ids) - interrupted
+
+
+def _persist_interrupted_dag_state(
+    step: Step,
+    results: list[GroupResult],
+    prior_outputs: dict[str, Any] | None,
+) -> None:
+    """Record what a stopped DAG run had achieved, before the interrupt unwinds.
+
+    Two distinct jobs, both of which the empty-results path used to lose:
+
+    * groups that COMPLETED before the stop are written into
+      ``implemented_groups`` (with their files/tests/summaries) so the
+      continuation's resume filter skips them instead of running them twice;
+    * every group that still owns a worktree — completed or interrupted — is
+      recorded so :func:`_make_execute_fn` reuses it rather than force-cleaning
+      the branch and starting from an empty tree.
+    """
+    prior = prior_outputs or {}
+    implemented: list[str] = [
+        g if isinstance(g, str) else g.get("group_id", "")
+        for g in (
+            step.outputs.get("implemented_groups")
+            or prior.get("implemented_groups")
+            or []
+        )
+    ]
+    files_changed: list[str] = list(
+        step.outputs.get("files_changed") or prior.get("files_changed") or []
+    )
+    tests_added: list[str] = list(
+        step.outputs.get("tests_added") or prior.get("tests_added") or []
+    )
+    test_mapping: dict = dict(
+        step.outputs.get("test_mapping") or prior.get("test_mapping") or {}
+    )
+    summaries: list[dict] = _normalize_group_summaries(
+        step.outputs.get("group_summaries") or prior.get("group_summaries")
+    )
+    known_summary_ids = {
+        entry.get("group_id") for entry in summaries if isinstance(entry, dict)
+    }
+    preserved: dict[str, dict[str, str]] = dict(
+        step.outputs.get(DAG_PRESERVED_WORKTREES_KEY) or {}
+    )
+    completion: dict[str, dict] = _normalize_group_completion(
+        step.outputs.get(DAG_GROUP_COMPLETION_KEY)
+        or prior.get(DAG_GROUP_COMPLETION_KEY)
+    )
+    # Carried forward for the same reason as files/tests: a completed group is
+    # SKIPPED on continue, so its whole-suite estimate would otherwise vanish
+    # and TEST would size its timeout from the re-run groups alone.
+    estimates: list[float] = []
+    for source in (
+        step.outputs.get("estimated_test_duration"),
+        prior.get("estimated_test_duration"),
+    ):
+        if source is not None:
+            try:
+                estimates.append(float(source))
+            except (TypeError, ValueError):
+                pass
+
+    for r in results:
+        if r.worktree_path or r.branch_name:
+            preserved[r.group_id] = {
+                "branch": r.branch_name or "",
+                "worktree": str(r.worktree_path) if r.worktree_path else "",
+                "status": r.status,
+            }
+        if r.status != "completed":
+            continue
+        if r.group_id not in implemented:
+            implemented.append(r.group_id)
+        for path in r.files_changed:
+            if path not in files_changed:
+                files_changed.append(path)
+        for path in r.tests_added:
+            if path not in tests_added:
+                tests_added.append(path)
+        test_mapping.update(r.test_mapping or {})
+        if r.summary and r.group_id not in known_summary_ids:
+            summaries.append({"group_id": r.group_id, "summary": r.summary})
+            known_summary_ids.add(r.group_id)
+        completion[r.group_id] = {
+            "completion_status": r.completion_status or "complete",
+            "incomplete_tasks": list(r.incomplete_tasks or []),
+        }
+        if r.estimated_test_duration is not None:
+            try:
+                estimates.append(float(r.estimated_test_duration))
+            except (TypeError, ValueError):
+                pass
+
+    if estimates:
+        step.outputs["estimated_test_duration"] = max(estimates)
+    step.outputs["implemented_groups"] = implemented
+    step.outputs["files_changed"] = files_changed
+    step.outputs["tests_added"] = tests_added
+    step.outputs["test_mapping"] = test_mapping
+    step.outputs["group_summaries"] = summaries
+    step.outputs[DAG_GROUP_COMPLETION_KEY] = completion
+    step.outputs[DAG_PRESERVED_WORKTREES_KEY] = preserved
+    logger.info(
+        "DAG interrupted: %d group(s) completed, %d worktree(s) preserved",
+        len(implemented), len(preserved),
+    )
+
+
 def _run_dag_parallel(
     groups: list[dict],
     step: Step,
@@ -2405,13 +2753,89 @@ def _run_dag_parallel(
     # before running new groups (so new groups see recovered code)
     recovered_groups: list[str] = list(prior_outputs.get("implemented_groups", [])) if prior_outputs else []
     already_deleted_gids: set[str] = set()
+    # Completed branches whose merge was postponed because an interrupted heir
+    # still owns them. The heir normally carries them into ``original_branch``
+    # by committing onto the same branch — but only if it actually reused it,
+    # so step end re-checks and merges whatever the heir left behind.
+    deferred_merges: dict[str, str] = {}
+    # INVARIANT: a relay descendant that was interrupted owns its PREDECESSOR's
+    # branch and worktree — it never had one of its own. Recovering the
+    # completed predecessor must therefore not treat that pair as stale: the
+    # worktree still holds the descendant's uncommitted work and is the cwd its
+    # provider session is bound to, and the branch is the one it will keep
+    # committing onto. Both are left alone here and merged at step end, when
+    # the descendant is done with them.
+    preserved_map = (
+        step.outputs.get(DAG_PRESERVED_WORKTREES_KEY)
+        or (prior_outputs or {}).get(DAG_PRESERVED_WORKTREES_KEY)
+        or {}
+    )
+    live_branches: set[str] = set()
+    live_worktrees: set[str] = set()
+    if isinstance(preserved_map, dict):
+        for gid, entry in preserved_map.items():
+            if not isinstance(entry, dict) or gid in recovered_groups:
+                continue
+            if entry.get("branch"):
+                live_branches.add(str(entry["branch"]))
+            if entry.get("worktree"):
+                live_worktrees.add(str(Path(str(entry["worktree"]))))
     if recovered_groups:
         from ..worktree import has_new_commits
         for gid in recovered_groups:
+            entry = preserved_map.get(gid) if isinstance(preserved_map, dict) else None
             branch = f"impl/{flow.flow_id}/{gid}"
+            if isinstance(entry, dict) and entry.get("branch"):
+                branch = str(entry["branch"])
+            if branch in live_branches:
+                # INVARIANT: only the CLEANUP is deferred, never the merge.
+                # ``_prune_recovered_dependencies`` has already stripped this
+                # completed group from every retained group's ``depends_on`` on
+                # the premise that its commits are in ``original_branch`` — a
+                # dependent that never started before the stop is therefore a
+                # root and branches straight off ``original_branch``. Merging a
+                # branch INTO original_branch does not touch the heir's
+                # worktree (only deleting the branch or removing that worktree
+                # would), so the merge is safe here and the deletion is what
+                # waits; step end re-merges whatever the heir commits after
+                # this point, and skips this branch when it added nothing.
+                deferred_merges[gid] = branch
+                try:
+                    if has_new_commits(project_root, branch, original_branch):
+                        logger.info(
+                            "DAG resume: pre-merging branch %s while its "
+                            "worktree stays with the interrupted relay "
+                            "descendant (cleanup deferred to step end)",
+                            branch,
+                        )
+                        merge_step_id = f"{step.step_id}_recover_{gid}"
+                        if not _merge_leaf_branch(
+                            project_root, branch, original_branch,
+                            task_description, [],
+                            flow_id=flow.flow_id, merge_step_id=merge_step_id,
+                        ):
+                            logger.error(
+                                "DAG resume: merge failed for held branch %s",
+                                branch,
+                            )
+                    else:
+                        logger.info(
+                            "DAG resume: held branch %s has nothing new to "
+                            "merge yet; deferring to step end", branch,
+                        )
+                except Exception as e:
+                    logger.warning(
+                        "DAG resume: failed to pre-merge held branch %s: %s",
+                        branch, e,
+                    )
+                continue
             # Salvage history from stale worktree before cleanup
             safe_name = branch.replace("/", "-")
             stale_wt = runtime_dir(project_root) / "worktrees" / safe_name
+            if isinstance(entry, dict) and entry.get("worktree"):
+                stale_wt = Path(str(entry["worktree"]))
+            if str(stale_wt) in live_worktrees:
+                continue
             if stale_wt.exists():
                 try:
                     _salvage_history_from_worktree(stale_wt, project_root)
@@ -2471,8 +2895,24 @@ def _run_dag_parallel(
             e["summary"] for e in recovered_summaries if e["summary"]
         )
         step.outputs["summary"] = joined_recovered or "Recovered from previous run"
-        step.outputs["completion_status"] = "complete"
-        step.outputs["incomplete_tasks"] = []
+        # Read off the recovered groups' own verdicts rather than assumed: a
+        # group that completed ``partial`` before the interruption is skipped
+        # here, so hard-coding "complete" hid its unfinished work from the
+        # review/fix loop entirely.
+        recovered_completion = _normalize_group_completion(
+            prior_outputs.get(DAG_GROUP_COMPLETION_KEY) if prior_outputs else None
+        )
+        step.outputs[DAG_GROUP_COMPLETION_KEY] = recovered_completion
+        recovered_incomplete: list[str] = []
+        recovered_partial = False
+        for entry in recovered_completion.values():
+            if (entry.get("completion_status") or "complete") != "complete":
+                recovered_partial = True
+            recovered_incomplete.extend(entry.get("incomplete_tasks") or [])
+        step.outputs["completion_status"] = (
+            "partial" if recovered_partial else "complete"
+        )
+        step.outputs["incomplete_tasks"] = recovered_incomplete
         step.outputs["estimated_test_duration"] = (
             prior_outputs.get("estimated_test_duration") if prior_outputs else None
         )
@@ -2549,26 +2989,62 @@ def _run_dag_parallel(
         group_agent_info=group_agent_info,
         root_cause_section=root_cause_section,
         capability_mode=capability_mode,
+        preserved_worktrees=step.outputs.get(DAG_PRESERVED_WORKTREES_KEY) or {},
     )
 
     results: list[GroupResult] = []
+    interrupted_exc: DAGInterrupted | None = None
     try:
         results = scheduler.run(execute_fn)
+    except DAGInterrupted as exc:
+        # The stop is still an interruption — it is re-raised below — but the
+        # groups it cut short have real, salvageable state, and the scheduler
+        # hands it over on the exception precisely so this block can preserve it
+        # instead of the caller inheriting an empty results list.
+        interrupted_exc = exc
+        results = list(exc.results)
+    except KeyboardInterrupt as exc:
+        # Defence in depth for a stop that reached the scheduling thread as an
+        # exception outside the region run() guards (it normally converts one
+        # into DAGInterrupted itself). Salvaging the scheduler's own view of the
+        # groups is what keeps the preserved worktrees — the interrupted work
+        # and the cwd each provider session is bound to — from being force-
+        # cleaned by the finally below and re-run from scratch afterwards.
+        results = scheduler.salvaged_results()
+        interrupted_exc = DAGInterrupted(str(exc) or "DAG execution interrupted", results)
     finally:
+        # INVARIANT: the interrupted state is persisted FIRST, inside the
+        # guarded region. The stop signal is already consumed (llm_active is 0
+        # once the pool converges), so a second Ctrl-C lands as a plain
+        # KeyboardInterrupt that can interrupt the salvage below — and a
+        # persistence left AFTER this block would then never run, silently
+        # dropping implemented_groups / dag_preserved_worktrees and dooming the
+        # continuation to force-clean and re-run work that survived.
+        if interrupted_exc is not None:
+            _persist_interrupted_dag_state(step, results, prior_outputs)
+
         # Salvage history files from worktrees before cleanup.
         _salvage_results_history(results, project_root)
 
         # Clean up worktrees (deduplicated for relay chains sharing worktrees).
         # NOTE: Only remove worktree directories here, NOT branches.
         # Branches must survive until after merge-back completes.
+        #
+        # INVARIANT: an interrupted run cleans NOTHING. A worktree is where an
+        # interrupted group's uncommitted work lives AND the cwd its provider
+        # session is bound to, so removing it would destroy both the work the
+        # user stopped to discuss and the session the continuation resumes into.
+        # Completed groups' worktrees are kept too: the continuation re-enters
+        # the same DAG and may relay/fork from them.
         cleaned_branches: set[str] = set()
-        for r in results:
-            if r.branch_name and r.branch_name not in cleaned_branches:
-                cleaned_branches.add(r.branch_name)
-                try:
-                    force_cleanup_worktree(project_root, r.branch_name)
-                except Exception:
-                    logger.warning("DAG: failed to force-cleanup worktree for branch %s", r.branch_name)
+        if interrupted_exc is None:
+            for r in results:
+                if r.branch_name and r.branch_name not in cleaned_branches:
+                    cleaned_branches.add(r.branch_name)
+                    try:
+                        force_cleanup_worktree(project_root, r.branch_name)
+                    except Exception:
+                        logger.warning("DAG: failed to force-cleanup worktree for branch %s", r.branch_name)
 
         # Ensure we're back on original_branch
         try:
@@ -2577,6 +3053,11 @@ def _run_dag_parallel(
                 _run_git(project_root, "checkout", original_branch)
         except Exception:
             logger.warning("DAG: failed to restore original branch %s", original_branch)
+
+    if interrupted_exc is not None:
+        # Already persisted inside the finally above (a repeat interrupt during
+        # salvage must not be able to skip it); only the raise remains here.
+        raise interrupted_exc
 
     # Build results map for easy lookup
     results_map: dict[str, GroupResult] = {r.group_id: r for r in results}
@@ -2613,6 +3094,31 @@ def _run_dag_parallel(
         )
         if not success:
             logger.error("DAG: leaf merge failed for %s (branch %s)", gid, branch)
+            merge_failures.append(gid)
+
+    # Deferred predecessor branches: merged here when the heir that was holding
+    # them did NOT end up on them (its worktree could not be reused, so it ran
+    # on a branch of its own). Without this the completed predecessor's work
+    # would sit on an orphan branch while ``implemented_groups`` claims it
+    # landed.
+    for gid, branch in deferred_merges.items():
+        if branch in seen_branches:
+            continue
+        check = _run_git(project_root, "rev-parse", "--verify", branch, check=False)
+        if check.returncode != 0:
+            continue
+        if _is_branch_reachable_from(project_root, branch, original_branch):
+            continue
+        logger.info("DAG: merging deferred branch %s back to %s", branch, original_branch)
+        merge_step_id = f"{step.step_id}_deferred_{gid}"
+        if _merge_leaf_branch(
+            project_root, branch, original_branch,
+            task_description, group_summaries,
+            flow_id=flow.flow_id, merge_step_id=merge_step_id,
+        ):
+            seen_branches.add(branch)
+        else:
+            logger.error("DAG: deferred merge failed for %s (branch %s)", gid, branch)
             merge_failures.append(gid)
 
     # Delete impl branches — but ONLY if their commits are now reachable
@@ -2673,6 +3179,17 @@ def _run_dag_parallel(
     summaries: list[str] = [
         e["summary"] for e in group_summary_entries if e["summary"]
     ]
+    # Seeded from the pre-interruption groups for the same reason as
+    # ``summaries``: those groups are skipped on this run, so their verdicts
+    # exist nowhere else and the step would otherwise report only what it re-ran.
+    group_completion: dict[str, dict] = _normalize_group_completion(
+        prior_outputs.get(DAG_GROUP_COMPLETION_KEY) if prior_outputs else None
+    )
+    for _entry in group_completion.values():
+        all_completion_statuses.append(
+            _entry.get("completion_status") or "complete"
+        )
+        all_incomplete_tasks.extend(_entry.get("incomplete_tasks") or [])
     estimated_durations: list[float] = []
     if prior_outputs and prior_outputs.get("estimated_test_duration") is not None:
         estimated_durations.append(float(prior_outputs["estimated_test_duration"]))
@@ -2688,6 +3205,10 @@ def _run_dag_parallel(
             group_summary_entries.append(
                 {"group_id": r.group_id, "summary": r.summary or ""}
             )
+            group_completion[r.group_id] = {
+                "completion_status": r.completion_status or "complete",
+                "incomplete_tasks": list(r.incomplete_tasks or []),
+            }
             if r.summary:
                 summaries.append(r.summary)
             if r.estimated_test_duration is not None:
@@ -2711,6 +3232,7 @@ def _run_dag_parallel(
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
     step.outputs["group_summaries"] = group_summary_entries
+    step.outputs[DAG_GROUP_COMPLETION_KEY] = group_completion
     step.outputs["summary"] = "; ".join(summaries)
     # Each group reports a whole-suite estimate, so take the max; see
     # IMPLEMENT_GROUP_PROMPT response field notes.
@@ -3066,8 +3588,6 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
         worktree_path: Path to the worktree directory
         main_repo_root: Path to the main repository root
     """
-    import shutil
-
     wt_history = runtime_dir(worktree_path) / "history"
     if not wt_history.exists():
         return
@@ -3090,30 +3610,150 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
             # plan, etc.) to prevent them from being appended N times.
             if not re.search(r"_G\d+\.jsonl$", history_file.name):
                 continue
+            # INVARIANT: each worktree turn reaches the main history EXACTLY
+            # once. An interrupted run salvages the file and then KEEPS the
+            # worktree, so the continuation salvages the very same file again;
+            # without a high-water mark every pre-interruption prompt, tool
+            # event and response would be duplicated, once per interruption,
+            # in both the history display and the rebuilt retry context.
+            size = history_file.stat().st_size
+            already = _read_salvage_mark(history_file)
+            if already > size:
+                # Truncated or rewritten under us — the mark is meaningless.
+                already = 0
             target_file = target_flow_dir / history_file.name
-            if target_file.exists():
-                # Append content (NDJSON is line-based, safe to concatenate)
-                with open(target_file, "a", encoding="utf-8") as dst:
-                    dst.write(history_file.read_text(encoding="utf-8"))
-            else:
-                shutil.copy2(history_file, target_file)
-            copied += 1
+            target_exists = target_file.exists()
+            if target_exists and already == 0:
+                # A copy reached main without leaving a mark (a run interrupted
+                # before the mark existed). Main's copy is USUALLY a prefix of
+                # this file — it was built by concatenating it — so its length
+                # is the high-water mark, and starting from zero would
+                # duplicate every line already there.
+                #
+                # WHY the prefix is verified instead of assumed: it does not
+                # hold when this worktree's file did NOT descend from main's
+                # copy — a retry whose fresh worktree was never seeded with the
+                # restored history starts its own file at zero while main still
+                # holds a longer earlier attempt. Clamping to min() there reads
+                # "already salvaged" for bytes main has never seen and drops the
+                # whole new attempt. An unverifiable overlap is worth a
+                # duplicate, never a silent loss, so it falls back to zero.
+                already = _salvaged_prefix_length(target_file, history_file)
+            if already >= size and target_exists:
+                _write_salvage_mark(history_file, size)
+                continue
+            with open(history_file, "rb") as src:
+                src.seek(already)
+                payload = src.read()
+            if not target_exists:
+                target_file.write_bytes(payload)
+                copied += 1
+            elif payload:
+                with open(target_file, "ab") as dst:
+                    dst.write(payload)
+                copied += 1
+            _write_salvage_mark(history_file, size)
 
     if copied:
         logger.info("Salvaged %d history file(s) from worktree %s", copied, worktree_path)
 
 
-def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow_id: str) -> None:
+def _salvaged_prefix_length(target_file: Path, history_file: Path) -> int:
+    """Bytes of *history_file* that main's copy already holds, verbatim.
+
+    The mark-less recovery path for :func:`_salvage_history_from_worktree`.
+    Main's copy counts as already-salvaged only when the whole overlap matches
+    byte for byte — i.e. one file is entirely a prefix of the other, which is
+    what "main was built by concatenating this file" actually means.
+
+    A PARTIAL match is deliberately worth nothing: the salvage unit is a whole
+    NDJSON record, so two unrelated files sharing an opening ``{"attempt": ``
+    would otherwise yield a mid-line offset and splice a corrupt record into
+    main. Any divergence, and any failed read, answers 0 — re-copying is
+    recoverable, skipping unsalvaged turns is not.
+    """
+    chunk = 65536
+    matched = 0
+    try:
+        with open(target_file, "rb") as dst, open(history_file, "rb") as src:
+            while True:
+                a = dst.read(chunk)
+                b = src.read(chunk)
+                if not a or not b:
+                    # One file ended with everything so far identical, so the
+                    # shorter one IS a prefix of the longer.
+                    return matched
+                # WHY the reads are compared over their OVERLAP and not
+                # directly: a buffered read returns fewer than *chunk* bytes
+                # only at EOF, so unequal lengths mean one file ended inside
+                # this chunk. Comparing the raw buffers made that the common
+                # case of a genuine prefix — a 10 KB main file that exactly
+                # prefixes a 12 KB worktree file — read as "unrelated", and the
+                # whole 12 KB was then appended, duplicating every
+                # pre-interruption turn.
+                n = min(len(a), len(b))
+                if a[:n] != b[:n]:
+                    return 0
+                matched += n
+                if len(a) != len(b):
+                    return matched
+    except OSError:
+        logger.debug(
+            "Could not compare %s against %s; re-salvaging from the start",
+            history_file, target_file, exc_info=True,
+        )
+        return 0
+
+
+def _salvage_mark_path(history_file: Path) -> Path:
+    """Sidecar recording how much of *history_file* already reached main.
+
+    Kept beside the worktree copy (not in the main repo) because it describes
+    that copy's read offset, and it must die with the worktree it belongs to.
+    """
+    return history_file.parent / f".{history_file.name}.salvaged"
+
+
+def _read_salvage_mark(history_file: Path) -> int:
+    try:
+        return int(_salvage_mark_path(history_file).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _write_salvage_mark(history_file: Path, offset: int) -> None:
+    try:
+        _salvage_mark_path(history_file).write_text(str(offset), encoding="utf-8")
+    except OSError:  # pragma: no cover - a lost mark only costs a re-copy
+        logger.debug("Failed to record salvage mark for %s", history_file)
+
+
+def _restore_history_to_worktree(
+    main_repo_root: Path,
+    worktree_path: Path,
+    flow_id: str,
+    group_step_id: str | None = None,
+) -> None:
     """Copy history files from main repo into a worktree.
 
     This enables LLMCaller retry context injection in worktrees,
     which look for history at their own project_root/tianluo/history/.
     Only copies history for the given flow_id.
 
+    ``group_step_id`` names THIS group's own conversation file. It is restored
+    only when the worktree does not already hold it — i.e. when an interrupted
+    group's preserved worktree was unusable and it is starting in a fresh one.
+    WHY it must be restored there: that group has neither its provider session
+    (bound to the old cwd) nor its conversation, so without it the group would
+    re-run from its original prompt and redo work the user interrupted to
+    discuss. The salvage high-water mark is anchored at the restored length so
+    the copy is not appended back into main a second time.
+
     Args:
         main_repo_root: Main repository root
         worktree_path: Worktree directory
         flow_id: Flow ID to copy history for
+        group_step_id: This group's step id (``<step>_<group>``), or None.
     """
     import shutil
 
@@ -3124,6 +3764,7 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
     wt_flow_dir = runtime_dir(worktree_path) / "history" / flow_id
     wt_flow_dir.mkdir(parents=True, exist_ok=True)
 
+    own_file = f"{group_step_id}.jsonl" if group_step_id else None
     copied = 0
     for history_file in main_flow_dir.iterdir():
         if not history_file.is_file():
@@ -3133,6 +3774,16 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
         # shared/context files (discovery, analyze, plan, …) are needed for LLM
         # retry-context injection.
         if re.search(r"_G\d+\.jsonl$", history_file.name):
+            if history_file.name != own_file:
+                continue
+            target = wt_flow_dir / history_file.name
+            if target.exists():
+                # The preserved worktree already holds the live conversation —
+                # main's salvaged copy is a prefix of it, never an addition.
+                continue
+            shutil.copy2(history_file, target)
+            _write_salvage_mark(target, target.stat().st_size)
+            copied += 1
             continue
         target = wt_flow_dir / history_file.name
         shutil.copy2(history_file, target)
@@ -3160,6 +3811,46 @@ def _normalize_group_summaries(value: Any) -> list[dict]:
             "summary": str(item.get("summary", "") or ""),
         })
     return entries
+
+
+#: ``step.outputs`` key holding the per-group completion verdicts of the groups
+#: this DAG step has finished — ``{group_id: {"completion_status",
+#: "incomplete_tasks"}}``.
+#:
+#: INVARIANT: a group's verdict survives an interruption. A group that completed
+#: before the stop is SKIPPED on the continuation, so its result object never
+#: exists again and this record is the only place its verdict lives. Without it
+#: an interrupted-then-continued step reported ``complete`` with no incomplete
+#: tasks even when a recovered group had finished ``partial``, and the
+#: downstream review/fix loop never learned of the unfinished work. Kept beside
+#: ``group_summaries`` rather than inside it because that list is a rendering
+#: payload with its own settled shape.
+DAG_GROUP_COMPLETION_KEY = "group_completion"
+
+
+def _normalize_group_completion(value: Any) -> dict[str, dict]:
+    """Coerce a persisted :data:`DAG_GROUP_COMPLETION_KEY` payload.
+
+    Entries recorded before this key existed are simply absent, and an absent
+    group aggregates as ``complete`` with no tasks — the value it was
+    implicitly given before.
+    """
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict] = {}
+    for gid, entry in value.items():
+        if not isinstance(entry, dict):
+            continue
+        tasks = entry.get("incomplete_tasks")
+        normalized[str(gid)] = {
+            "completion_status": str(
+                entry.get("completion_status", "") or "complete"
+            ),
+            "incomplete_tasks": [
+                str(task) for task in tasks if str(task or "").strip()
+            ] if isinstance(tasks, list) else [],
+        }
+    return normalized
 
 
 def _prior_group_summaries(outputs: dict, group_ids) -> list[dict]:

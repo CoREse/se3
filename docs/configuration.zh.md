@@ -239,6 +239,7 @@ agents:
 ```yaml
 llm_caller:
   defaults: [primary, cheap]
+  resume_strategy: native
   steps:
     implement: [primary]
     self_check: [[primary], [gpt]]
@@ -247,11 +248,46 @@ llm_caller:
 | Key | 类型 | 默认值 | 含义 |
 |-----|------|--------|------|
 | `defaults` | agent 名列表 | 内置的 PATH 探测 | 所有没有单独覆盖的 step 所用的默认轮换链路。书写顺序**就是**轮换顺序。 |
+| `resume_strategy` | `native` \| `rebuild` | `native` | 续跑以何种方式抵达 agent。`native` 原地续接已记录的 provider 会话;`rebuild` 一律把对话重建进新 prompt。取值无法识别时告警并回落 `native`。 |
 | `steps` | mapping `<step> → agent 名列表` | `{}` | 按 step 的硬覆盖。key 必须是 `StepType` 的取值;未知 key 会打印一次性的『很可能是笔误』告警并被忽略。 |
 
 轮换语义:在一条链路内部,`LLMCaller` 遇到*基础设施*类错误时轮换到下一个 agent。
 轮换**严格发生在所选列表内部** —— 单个 runner 永不自行轮换,step 覆盖也永远不会
 溢出到 `defaults`。
+
+#### `resume_strategy` —— native session resume 与重建上下文
+
+每一次续跑(插话对话之后、失败后选择 Retry、`luo run --resume`、JSON 重试,以及
+引擎自身的内部重试)都会先尝试续接 agent **已有的 provider 会话**:Claude 系适配器
+用 `claude -p --resume <session_id>`,codex 用 `codex exec resume <thread_id>`。
+发起调用的 cwd 一律在子进程拉起**之前**写入该 step 的历史(resume 必须在同一 cwd
+下发起);但**会话 id 本身何时落盘取决于 provider**:
+
+| 适配器 | 会话身份 | 落盘时机 |
+|--------|----------|----------|
+| `claude-code`、`claude-interactive` | 由 tianluo 预分配、以 `--session-id <uuid>` 注入 | 随 prompt 记录写入,在子进程拉起之前 |
+| `codex` | 由 CLI 自行生成,最早出现在其 `thread.started` 事件中 | 该事件流出的瞬间 —— prompt 记录先以空 id 写入,并在同一 attempt 内回填为真实 id |
+
+因此 Claude 的 attempt 总能留下一个可寻址的会话,哪怕它一行输出都没产生就被杀掉。
+codex 的 attempt 只有从 `thread.started` 起才可寻址:比这更早被中断(或根本没起来)
+时不存在可 resume 的 thread id,下一次续跑因而走下文的重建上下文路径。这是预期行为,
+不是会话丢失。
+
+两类都遵守同一条不变量:同一个 attempt 的两条记录指向同一个会话,且绝不是上一次
+attempt 的会话。
+
+只有当记录下的会话所属 agent 仍在当前链路中(按 name 与 runner type 匹配)、且该
+runner 声明支持该能力时,才会走 native resume。否则 —— 以及 resume 因任何原因失败
+时(会话已被清理、flag 不支持、provider 拒绝续接该 transcript)—— 引擎回落到重建
+上下文的路径,并不让调用失败;轮换到另一个 agent 后一律走重建。每次 attempt 都会
+记录本次所采用的策略。
+
+two_phase 步骤的 Phase-2 JSON 抽取调用被刻意排除在这套选择之外:它自己开一个
+provider 会话,内容只有「把这段文本重新表达为 JSON」,因此续跑恢复的是它背后的
+Phase-1 工作会话(或走重建),而不是这个重新格式化器。
+
+排障时可设为 `rebuild`,把 provider 自身的会话状态从问题中排除;代价是每次续跑的
+输入 token 更多,除此之外行为不变。
 
 #### 坑 2 —— `llm_caller.steps.<step>` 是无 fallback 的硬覆盖
 

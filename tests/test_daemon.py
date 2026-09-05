@@ -939,6 +939,52 @@ class TestDaemonLifecycle:
             sleeper.terminate()
             sleeper.wait(timeout=10)
 
+    def test_resume_wakes_the_addressed_flow_from_its_snapshot(
+        self, fake_se3, tmp_path
+    ):
+        """A later flow B holds the root's single engine.json slot while the
+        addressed flow A sits PAUSED in its per-flow resumable snapshot. Waking
+        whoever occupies the slot would run B and strand A forever."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="running")
+        snap = proj / "tianluo" / "state" / "resumable"
+        snap.mkdir(parents=True, exist_ok=True)
+        (snap / "flow-a.json").write_text(
+            json.dumps({"flow_id": "flow-a", "status": "paused"}), encoding="utf-8"
+        )
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._resume_paused_flow(str(proj), flow_id="flow-a")
+        procs = daemon.spawner.processes
+        assert len(procs) == 1
+        assert "flow-a" in procs[0].args
+        assert "flow-b" not in procs[0].args
+        daemon.spawner.wait(procs[0].pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_resume_skips_a_flow_it_cannot_locate(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        # The addressed flow is nowhere on disk; the occupant of the slot must
+        # NOT be resumed in its place.
+        daemon._resume_paused_flow(str(proj), flow_id="flow-missing")
+        assert daemon.spawner.processes == []
+
+    def test_resume_rejects_a_snapshot_whose_flow_id_disagrees(
+        self, fake_se3, tmp_path
+    ):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="running")
+        snap = proj / "tianluo" / "state" / "resumable"
+        snap.mkdir(parents=True, exist_ok=True)
+        (snap / "flow-a.json").write_text(
+            json.dumps({"flow_id": "someone-else", "status": "paused"}),
+            encoding="utf-8",
+        )
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._resume_paused_flow(str(proj), flow_id="flow-a")
+        assert daemon.spawner.processes == []
+
     # -- request_resume (explicit protocol-driven resume) ------------------
 
     def test_request_resume_paused_flow(self, fake_se3, tmp_path):
@@ -1088,6 +1134,81 @@ class TestDaemonLifecycle:
         assert len(procs) == 1
         assert "--resume" in procs[0].args
         assert "flow-disc" in procs[0].args
+        daemon.spawner.wait(procs[0].pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_handle_respond_wakes_the_calls_own_flow_not_the_slot_occupant(
+        self, fake_se3, tmp_path
+    ):
+        """A dialog-round answer must resume the flow that asked the question.
+
+        Flow A pauses on a dialog call; flow B then takes the root's single
+        engine.json slot, displacing A into its resumable snapshot. Answering
+        A's call must resume A — waking B would run unrelated work and leave A
+        paused forever with its answer unread.
+        """
+        from tianluo.engine import interaction_calls
+
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="paused")
+        _make_resumable_snapshot(proj, flow_id="flow-a", status="paused")
+        call_path = interaction_calls.write_dialog_call(
+            proj,
+            flow_id="flow-a",
+            step_id="step-3",
+            step_type="implement",
+            prompt="what next?",
+            transcript=[{"role": "assistant", "content": "what next?"}],
+        )
+        call_id = json.loads(call_path.read_text(encoding="utf-8"))["call_id"]
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._handle_respond_request(call_id, str(proj), "continue")
+        procs = daemon.spawner.processes
+        assert len(procs) == 1
+        assert "flow-a" in procs[0].args
+        assert "flow-b" not in procs[0].args
+        daemon.spawner.wait(procs[0].pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_handle_respond_skips_when_the_calls_flow_is_gone(
+        self, fake_se3, tmp_path
+    ):
+        """An addressed call whose flow is nowhere on disk resumes nobody."""
+        from tianluo.engine import interaction_calls
+
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-b", status="paused")
+        interaction_calls.write_call(
+            interaction_calls.calls_dir_for(proj),
+            kind=interaction_calls.CALL_KIND_RETRY_DECISION,
+            prompt="retry?",
+            context={"flow_id": "flow-gone", "step_id": "step-3"},
+            call_id="retry_1",
+        )
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._handle_respond_request("retry_1", str(proj), "1")
+        assert (proj / "tianluo" / "calls" / "retry_1.response.json").exists()
+        assert daemon.spawner.processes == []
+
+    def test_handle_respond_falls_back_for_an_unaddressed_call(
+        self, fake_se3, tmp_path
+    ):
+        """A legacy call file with no flow_id still wakes the slot occupant."""
+        from tianluo.engine import interaction_calls
+
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-legacy", status="paused")
+        calls_dir = interaction_calls.calls_dir_for(proj)
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        (calls_dir / "legacy_1.json").write_text(
+            json.dumps({"call_id": "legacy_1", "prompt": "answer me"}),
+            encoding="utf-8",
+        )
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._handle_respond_request("legacy_1", str(proj), "1")
+        procs = daemon.spawner.processes
+        assert len(procs) == 1
+        assert "flow-legacy" in procs[0].args
         daemon.spawner.wait(procs[0].pid, timeout=10)
         daemon.spawner.reap()
 

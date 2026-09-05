@@ -1,9 +1,9 @@
 id: '207'
 description: 现在的“插话”系统很原始很不友好。需要改成在当前上下文里进行一个小型的“discovery”对话模式，然后discover结果可能分为几种：1.
   什么都不做，从断点处恢复运行（而不是从这一步重新开始，通过上下文构建从断点处恢复）。2. 将讨论的内容注入到refined description或者其它什么地方，然后从某步重新开始。你觉得怎么样？有什么补充的吗？
-status: open
+status: in-progress
 tags: []
 source: human
 created_at: '2026-06-18T10:50:47.114594'
-updated_at: '2026-06-18T10:50:47.114594'
+updated_at: '2026-09-02T15:52:30.120183'
 type: feature

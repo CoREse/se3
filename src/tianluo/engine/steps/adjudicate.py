@@ -874,6 +874,7 @@ def adjudicate_handler(step: Step, flow: FlowInstance) -> StepStatus:
     _apply_ruling(
         step, ctx, ledger, result, candidates, task_description, task_groups,
         _constraint_source_texts(project_root, flow, candidates),
+        flow=flow,
     )
     return StepStatus.COMPLETED
 
@@ -904,6 +905,8 @@ def _apply_ruling(
     task_description: str,
     task_groups: List[Dict[str, Any]],
     constraint_texts: Optional[List[str]] = None,
+    *,
+    flow: Optional[FlowInstance] = None,
 ) -> None:
     """Write the ruling to ``step.outputs`` and stage its ledger side effects.
 
@@ -1120,6 +1123,20 @@ def _apply_ruling(
     step.outputs["adjudication_noop"] = False
     step.outputs["contradiction_type"] = contradiction_type
     step.outputs["adjudicated_description"] = adjudicated_description
+    # Ordinal in the flow's covering-layer sequence. WHY it is stamped rather
+    # than inferred from ``adjudicated_at``: a ruling and a dialog revision are
+    # both covering rewrites and must be ordered against each other, but they
+    # can be produced by processes on different machines whose wall clocks are
+    # not synchronised. Only a counter persisted in the flow's own state orders
+    # them truthfully — see ``state_machine.next_description_layer_seq``. A
+    # rerun of this step re-stamps, because the rerun IS the later layer.
+    if flow is not None:
+        from ..state_machine import (
+            DESCRIPTION_LAYER_SEQ_OUTPUT_KEY,
+            next_description_layer_seq,
+        )
+
+        step.outputs[DESCRIPTION_LAYER_SEQ_OUTPUT_KEY] = next_description_layer_seq(flow)
     # A rerun of a legacy in-place step may carry a stale plan override. Modern
     # rulings never create one; remove it while old completed steps remain
     # byte-for-byte readable in history.

@@ -425,7 +425,10 @@ def _resolve_description(positional: Optional[str]) -> Optional[str]:
             return stripped
         raise ValueError(t("issue.desc_empty"))
 
-    # 2. Piped stdin (non-TTY): read all of stdin
+    # 2. Piped stdin (non-TTY): read all of stdin. Reading the fd directly is
+    # safe here and only here: ``luo issue`` is its own command with a single
+    # stdin consumer, so the shared funnel that ``luo run`` needs (several
+    # consumers over one held-open pipe) has nothing to arbitrate.
     if not sys.stdin.isatty():
         try:
             content = sys.stdin.read()

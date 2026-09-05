@@ -23,6 +23,7 @@ from tianluo.daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
     CALL_KIND_CONFIRM,
+    CALL_KIND_DIALOG,
     CALL_KIND_DISCOVERY_CONFIRM,
     CALL_KIND_INTERJECTION,
     CALL_KIND_RETRY_DECISION,
@@ -45,6 +46,7 @@ def test_call_kinds_set():
         CALL_KIND_CLI_CONFIRM,
         CALL_KIND_DISCOVERY_CONFIRM,
         CALL_KIND_CONFIRM,
+        CALL_KIND_DIALOG,
     }
 
 
@@ -235,6 +237,49 @@ def test_dispatch_interject_unresolvable_root_does_not_crash(caplog):
         )
 
     asyncio.run(scenario())  # must not raise
+
+
+def test_dispatch_interject_uses_the_injected_handler(tmp_path):
+    """The daemon injects a handler that ALSO wakes a PAUSED flow: such a flow
+    has no live process polling ``tianluo/calls/``, so a web interjection would
+    otherwise sit on disk indefinitely."""
+    seen = []
+    client = _make_client(
+        interject_handler=lambda flow_id, root, text: seen.append(
+            (flow_id, root, text)
+        )
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_interject_flow(
+                "flow-9", "please stop", project_root=str(tmp_path)
+            ),
+        )
+
+    asyncio.run(scenario())
+    assert seen == [("flow-9", str(tmp_path), "please stop")]
+
+
+def test_daemon_interject_handler_writes_then_resumes(tmp_path, monkeypatch):
+    """The write is only half the job — the paused flow must be re-spawned."""
+    from tianluo.daemon.daemon import Daemon
+
+    resumed = []
+    daemon = Daemon.__new__(Daemon)
+    monkeypatch.setattr(
+        Daemon,
+        "_resume_paused_flow",
+        lambda self, root, flow_id=None: resumed.append((root, flow_id)),
+    )
+    daemon._handle_interject_request("flow-9", str(tmp_path), "wake up")
+
+    files = list((tmp_path / "tianluo" / "calls").glob("interjection_*.json"))
+    assert len(files) == 1
+    # The ADDRESSED flow is woken, not whoever happens to hold the root's
+    # single engine.json slot.
+    assert resumed == [(str(tmp_path), "flow-9")]
 
 
 def test_dispatch_interject_ignores_empty_text(tmp_path):

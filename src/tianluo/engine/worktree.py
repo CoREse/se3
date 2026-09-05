@@ -102,6 +102,15 @@ def _branch_safe_name(branch: str) -> str:
     return branch.replace("/", "-")
 
 
+def worktree_path_for_branch(project_root: Path, branch: str) -> Path:
+    """Where :func:`create_worktree` puts (and cleanup removes) *branch*'s checkout.
+
+    Exposed so callers that must VERIFY a cleanup actually happened check the
+    same directory the cleanup targets, instead of re-deriving the convention.
+    """
+    return runtime_dir(project_root) / "worktrees" / _branch_safe_name(branch)
+
+
 def seed_uploads(project_root: Path, worktree_path: Path) -> int:
     """Materialize *project_root*'s web-UI attachments inside *worktree_path*.
 
@@ -182,8 +191,7 @@ def create_worktree(project_root: Path, branch: str) -> Path:
     Raises:
         subprocess.CalledProcessError: If worktree creation fails
     """
-    safe_name = _branch_safe_name(branch)
-    worktree_path = runtime_dir(project_root) / "worktrees" / safe_name
+    worktree_path = worktree_path_for_branch(project_root, branch)
 
     # Prune stale worktree entries to avoid lock contention
     _run_git(project_root, "worktree", "prune", check=False)
@@ -362,8 +370,7 @@ def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
         project_root: Project root directory
         branch_name: The branch whose worktree should be cleaned up
     """
-    safe_name = _branch_safe_name(branch_name)
-    worktree_path = runtime_dir(project_root) / "worktrees" / safe_name
+    worktree_path = worktree_path_for_branch(project_root, branch_name)
 
     # Step 1: Unlock the worktree if locked (ignore errors if not locked)
     try:
@@ -432,7 +439,7 @@ def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
         )
 
 
-def delete_branch(project_root: Path, branch: str) -> None:
+def delete_branch(project_root: Path, branch: str) -> bool:
     """Delete a local branch.
 
     Before deleting, checks whether a worktree is still registered for the
@@ -443,6 +450,14 @@ def delete_branch(project_root: Path, branch: str) -> None:
     Args:
         project_root: Project root directory
         branch: Branch name to delete
+
+    Returns:
+        True when THIS call removed the ref. WHY it is reported here rather
+        than re-probed afterwards: a caller that must invalidate state whose
+        only copy was that ref needs the answer even when git has stopped
+        answering questions, and ``git branch -D``'s own exit status is the one
+        piece of evidence that survives a later probe timing out. A false
+        answer (branch absent, deletion refused) means nothing was discarded.
     """
     # Pre-delete: ensure no worktree is registered for this branch
     if exists_for_branch(project_root, branch):
@@ -462,8 +477,9 @@ def delete_branch(project_root: Path, branch: str) -> None:
     result = _run_git(project_root, "branch", "-D", branch, check=False)
     if result.returncode != 0:
         logger.warning("Failed to delete branch %s: %s", branch, result.stderr.strip())
-    else:
-        logger.info("Deleted branch: %s", branch)
+        return False
+    logger.info("Deleted branch: %s", branch)
+    return True
 
 
 def has_new_commits(project_root: Path, branch: str, base_branch: str) -> bool:

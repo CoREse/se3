@@ -80,7 +80,8 @@ def _read_multiline_input(
     history: Optional[any] = None,
     *,
     strip: bool = True,
-) -> Optional[str]:
+    timeout: Optional[float] = None,
+):
     """Read multiline input from stdin with proper Unicode support.
 
     Uses prompt_toolkit for interactive mode to correctly handle
@@ -94,6 +95,11 @@ def _read_multiline_input(
         strip: Whether to strip leading/trailing whitespace from input.
                Default True. Set False when strict character comparison is
                needed (e.g., discovery confirmation gate's == "1" check).
+        timeout: Non-TTY only. Bound on how long to wait for the piped answer
+            to complete; on expiry the call returns
+            :data:`tianluo.stdin_channel.PENDING` having consumed nothing, so a
+            caller racing this read against another channel can drop it without
+            stranding a reader on the fd. ``None`` waits for EOF.
     """
     # WHY: the default chrome is resolved here, not in the signature — signature
     # defaults evaluate at import time, before the command binds the project root
@@ -106,20 +112,32 @@ def _read_multiline_input(
 
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
-        # Non-interactive mode (pipe/redirect): read all at once, show full content
+        # Non-interactive mode (pipe/redirect): the read goes through the
+        # process-wide funnel rather than straight at the fd. WHY: a pipe the
+        # launcher holds open reaches EOF only when it closes, so a caller that
+        # abandons this read must not leave a reader parked on stdin — the next
+        # thing the operator types would be swallowed by it instead of reaching
+        # the gate that asked. The funnel buffers instead, so an abandoned read
+        # consumes nothing.
+        from .stdin_channel import PENDING, read_all
+
         try:
-            content = sys.stdin.read()
-            lines = content.split("\n")
-
-            # Show full content for all input (no truncation)
-            if lines:
-                render_full("\n".join(lines), title=prompt_title)
-
-            if strip:
-                content = content.strip()
-            return content if content else None
+            content = read_all(timeout)
         except (EOFError, KeyboardInterrupt):
             return None
+        if content is PENDING:
+            return PENDING
+        if content is None:
+            return None
+        lines = content.split("\n")
+
+        # Show full content for all input (no truncation)
+        if lines:
+            render_full("\n".join(lines), title=prompt_title)
+
+        if strip:
+            content = content.strip()
+        return content if content else None
 
     # Interactive mode with prompt_toolkit for proper Unicode handling
     render_text(prompt_message, title=prompt_title)

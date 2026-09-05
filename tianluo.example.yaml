@@ -41,8 +41,19 @@ agents:
 # override — there is no silent fallback to `defaults`, so if you want a
 # default tail you must list it explicitly. Rotation on infrastructure
 # errors happens strictly within the step's list.
+# `resume_strategy` decides HOW a continuation reaches the agent — after an
+# interjection dialog, after a failure you chose to retry, on `luo run
+# --resume`, and on the engine's own internal retries:
+#   - native  (default) continue the agent's existing provider session in
+#             place (`claude -p --resume` / `codex exec resume`), sending only
+#             the new instruction. Falls back to `rebuild` by itself whenever
+#             the session is unreachable or the resume fails.
+#   - rebuild always reconstruct the conversation into a fresh prompt. Costs
+#             more input tokens; useful for troubleshooting, since it takes
+#             the provider's own session state out of the picture.
 llm_caller:
   defaults: [primary]
+  resume_strategy: native
   steps:
     implement: [primary]
     summarize: [primary]

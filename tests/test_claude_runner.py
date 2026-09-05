@@ -664,6 +664,12 @@ class TestStderrIsolation:
         """_run_single_with_monitor passes stderr=PIPE, not STDOUT."""
         runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
         mock_proc = MagicMock()
+        # WHY pid=None: a bare MagicMock pid coerces to int 1, so the runner's
+        # process-group reclaim resolved init's group and ran
+        # ``os.killpg(1, SIGKILL)`` == ``kill(-1, SIGKILL)`` — every process of
+        # the user died (the 2026-09-02/03 "machine hang"). None makes
+        # ``resolve_process_group`` opt out of group handling entirely.
+        mock_proc.pid = None
         mock_proc.poll.return_value = 0  # already exited
         mock_proc.stdout = MagicMock()
         mock_proc.stdout.read.return_value = ""
@@ -703,6 +709,7 @@ class TestStderrIsolation:
         runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
 
         mock_proc = MagicMock()
+        mock_proc.pid = None  # see test_monitored_child_uses_separate_stderr
         mock_proc.poll.return_value = 0  # already exited
         mock_proc.stdout = MagicMock()
         mock_proc.stdout.read.return_value = '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}'

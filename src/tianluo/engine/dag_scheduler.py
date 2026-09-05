@@ -31,6 +31,31 @@ GROUP_STATUS_RUNNING = "running"
 GROUP_STATUS_COMPLETED = "completed"
 GROUP_STATUS_FAILED = "failed"
 GROUP_STATUS_SKIPPED = "skipped"
+#: Cut short by the cooperative stop signal. Distinct from ``failed`` because
+#: the group's worktree, branch and provider session are all still valid and a
+#: continuation resumes INTO them rather than starting over.
+GROUP_STATUS_INTERRUPTED = "interrupted"
+
+
+def _shutdown_pool(executor: ThreadPoolExecutor) -> None:
+    """Wait for the pool to converge, ignoring interrupts while it does.
+
+    WHY not a plain ``with ThreadPoolExecutor(...)``: its ``__exit__`` waits,
+    but a Ctrl-C landing during that wait propagates and leaves group children
+    running past the point where the caller believes the run has stopped. The
+    stop is already published on the shared signal, so every worker is winding
+    its own child down; the only correct response to another interrupt here is
+    to keep waiting.
+    """
+    while True:
+        try:
+            executor.shutdown(wait=True)
+            return
+        except KeyboardInterrupt:
+            logger.info(
+                "Interrupt during pool shutdown ignored — still waiting for "
+                "the group workers to wind down"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +276,36 @@ class GroupResult:
             error=error,
         )
 
+    @classmethod
+    def interrupted(cls, group_id: str) -> GroupResult:
+        """A group cut short by a stop request.
+
+        Distinct from ``failed`` on purpose: nothing went wrong with it, and its
+        worktree/branch must be PRESERVED (they hold the partial work and the
+        provider session a continuation resumes into) rather than force-cleaned
+        the way a finished run's are.
+        """
+        return cls(
+            group_id=group_id,
+            status="interrupted",
+            completion_status="partial",
+            error="Interrupted by user",
+        )
+
+
+class DAGInterrupted(KeyboardInterrupt):
+    """A DAG run stopped by the cooperative stop signal, carrying its results.
+
+    Subclasses ``KeyboardInterrupt`` so every existing handler up the stack —
+    the run loop that opens the interjection dialog included — behaves exactly
+    as before; the ``results`` payload is purely additive, for the caller that
+    wants to salvage what the stopped run had already produced.
+    """
+
+    def __init__(self, message: str, results: "list[GroupResult]") -> None:
+        super().__init__(message)
+        self.results = list(results)
+
 
 class DAGScheduler:
     """Event-driven DAG scheduler for parallel task group execution.
@@ -303,6 +358,11 @@ class DAGScheduler:
         self._topo_order: list[str] = []
         # Populated by run() — needed for get_fallback_leaves()
         self._run_results: dict[str, GroupResult] = {}
+        # Live views of run()'s in-progress result maps, so salvaged_results()
+        # can report what a stopped run achieved even if run() never returned.
+        self._live_condition: Optional[threading.Condition] = None
+        self._live_completed: dict[str, GroupResult] = {}
+        self._live_skipped: dict[str, GroupResult] = {}
 
         self._build_dag()
 
@@ -474,7 +534,21 @@ class DAGScheduler:
 
         step_usage_accumulator = token_usage.current_step_usage()
 
+        from ..stop_signal import STOP_REASON_INTERRUPT, get_stop_signal
+
+        stop_signal = get_stop_signal()
+
         def _execute_in_step_scope(group_dict, deps_results, relay_context):
+            # WHY the guard is HERE and not only in the scheduling loop: every
+            # ready group is submitted to the pool at once, so a group waiting
+            # for a free worker is queued inside the executor where the
+            # scheduler can no longer withdraw it. This runs on the worker the
+            # instant it picks the task up — the last point at which "do not
+            # start new work" can still be honoured.
+            gid = group_dict.get("group_id", group_dict.get("name", ""))
+            if stop_signal.is_set():
+                logger.info("Stop requested — group '%s' not started", gid)
+                return GroupResult.skipped(gid)
             with token_usage.use_step_usage(step_usage_accumulator):
                 return execute_fn(group_dict, deps_results, relay_context)
 
@@ -482,9 +556,20 @@ class DAGScheduler:
         condition = threading.Condition()
         pending: set[str] = set(self._group_map.keys())
         running: set[str] = set()
+        # Groups whose future actually reached the pool (subset of what
+        # ``running`` claims, which is set before submission).
+        launched: set[str] = set()
         completed: dict[str, GroupResult] = {}
         failed: set[str] = set()
         skipped: dict[str, GroupResult] = {}
+
+        # Published for salvaged_results(): a caller that catches a stop the
+        # loop below could not convert (an interrupt landing outside the guarded
+        # region) still needs the per-group worktree/branch/session, not an
+        # empty list.
+        self._live_condition = condition
+        self._live_completed = completed
+        self._live_skipped = skipped
 
         # Announce every group as queued up front (topological order for a
         # stable sequence), before any is submitted for execution.
@@ -523,9 +608,18 @@ class DAGScheduler:
                 if all(dep in completed for dep in deps):
                     ready.append(gid)
 
+            # WHY claim-then-submit in two passes: ``add_done_callback`` fires
+            # inline on THIS thread when the future is already finished, and
+            # ``condition`` is re-entrant, so a fast group's ``_on_complete``
+            # re-enters this function mid-loop. Claiming every ready group up
+            # front means that nested call finds nothing left in ``pending``;
+            # claiming one at a time let it re-submit a group this loop was
+            # about to submit itself, running it twice.
             for gid in ready:
                 pending.discard(gid)
                 running.add(gid)
+
+            for gid in ready:
                 self._emit_status(gid, GROUP_STATUS_RUNNING)
                 deps_results = _get_deps_results(gid)
                 relay_context = self._build_relay_context(gid, completed)
@@ -533,6 +627,10 @@ class DAGScheduler:
                 future = executor.submit(
                     _execute_in_step_scope, group_dict, deps_results, relay_context,
                 )
+                # Recorded the instant the future exists: a group claimed into
+                # ``running`` whose submission never completed has no worker to
+                # wait for, and the stop path must not converge on it forever.
+                launched.add(gid)
                 future.add_done_callback(
                     lambda f, g=gid: _on_complete(g, f, executor)
                 )
@@ -548,7 +646,18 @@ class DAGScheduler:
                 running.discard(group_id)
 
                 exc = future.exception()
-                if exc is not None:
+                if isinstance(exc, KeyboardInterrupt):
+                    # A stop that reached the worker as an exception rather than
+                    # as a returned result (an LLMCaller pre-spawn abort). Its
+                    # worktree is unknown here, but it must still be reported as
+                    # interrupted, not failed: the caller preserves interrupted
+                    # groups instead of force-cleaning them.
+                    logger.info("Group '%s' was interrupted", group_id)
+                    result = GroupResult.interrupted(group_id)
+                    completed[group_id] = result
+                    self._emit_status(group_id, GROUP_STATUS_INTERRUPTED)
+                    _propagate_failure_locked(group_id)
+                elif exc is not None:
                     # Group raised an exception
                     error_msg = f"{type(exc).__name__}: {exc}"
                     logger.error(
@@ -562,7 +671,15 @@ class DAGScheduler:
                     _propagate_failure_locked(group_id)
                 else:
                     result = future.result()
-                    if result.status == "failed":
+                    if result.status == GROUP_STATUS_INTERRUPTED:
+                        # Returned (not raised) by a worker that wound down
+                        # gracefully, so it carries the worktree/branch the
+                        # continuation needs.
+                        logger.info("Group '%s' was interrupted", group_id)
+                        completed[group_id] = result
+                        self._emit_status(group_id, GROUP_STATUS_INTERRUPTED)
+                        _propagate_failure_locked(group_id)
+                    elif result.status == "failed":
                         logger.error(
                             "Group '%s' returned failed status: %s",
                             group_id, result.error,
@@ -570,6 +687,14 @@ class DAGScheduler:
                         failed.add(group_id)
                         completed[group_id] = result
                         self._emit_status(group_id, GROUP_STATUS_FAILED)
+                        _propagate_failure_locked(group_id)
+                    elif result.status == "skipped":
+                        # The worker declined to start because a stop was
+                        # already pending. Reported as skipped, not completed —
+                        # nothing ran, and the console must not claim it did.
+                        logger.info("Group '%s' was skipped", group_id)
+                        skipped[group_id] = result
+                        self._emit_status(group_id, GROUP_STATUS_SKIPPED)
                         _propagate_failure_locked(group_id)
                     else:
                         logger.info(
@@ -585,16 +710,93 @@ class DAGScheduler:
                 condition.notify_all()
 
         # Main scheduling loop
-        with ThreadPoolExecutor(max_workers=self._max_workers) as executor:
+        stopped = False
+
+        def _begin_stop_locked() -> None:
+            """Stop feeding the pool and drop the queue (caller holds lock).
+
+            A stop request reaches each running group through the shared signal
+            (their runners poll it and wind their own children down); the
+            scheduler's job is to stop FEEDING the pool and then converge.
+            Queued-but-unstarted groups are dropped rather than launched into a
+            run the user has just asked to stop.
+            """
+            nonlocal stopped
+            if stopped:
+                return
+            stopped = True
+            logger.info(
+                "Stop requested — draining %d pending group(s) and "
+                "waiting for %d running group(s) to wind down",
+                len(pending), len(running),
+            )
+            for gid in list(pending):
+                pending.discard(gid)
+                skipped[gid] = GroupResult.skipped(gid)
+                self._emit_status(gid, GROUP_STATUS_SKIPPED)
+
+        executor = ThreadPoolExecutor(max_workers=self._max_workers)
+        try:
             with condition:
-                # Submit all root groups (in_degree == 0)
-                _submit_ready(executor)
+                try:
+                    # Submit all root groups (in_degree == 0)
+                    _submit_ready(executor)
 
-                # Wait until all groups are resolved
-                while pending or running:
-                    condition.wait(timeout=1.0)
+                    # Wait until all groups are resolved
+                    while pending or running:
+                        if not stopped and stop_signal.is_set():
+                            _begin_stop_locked()
+                        condition.wait(timeout=1.0)
+                except KeyboardInterrupt:
+                    # WHY a stop can arrive here as an EXCEPTION and not only as
+                    # the flag: the SIGINT handler and the interjection watcher
+                    # both raise in the main thread whenever no LLM call is in
+                    # flight, and the scheduling thread IS the main thread — so
+                    # a stop landing while the workers are still setting up
+                    # (creating worktrees under the git lock, before any runner
+                    # enters an llm call scope) unwinds this wait. Treated
+                    # exactly like the flag: the pool is converged first, and
+                    # the DAGInterrupted built below carries every group's
+                    # worktree/branch/session so the continuation reuses them.
+                    # Unwinding here instead would hand the caller an empty
+                    # result list, and the interrupted groups' worktrees — their
+                    # uncommitted work and the cwd their provider sessions are
+                    # bound to — would be force-cleaned.
+                    logger.info(
+                        "Stop reached the DAG scheduling thread as an "
+                        "interrupt; converging the pool before reporting"
+                    )
+                    stop_signal.request(reason=STOP_REASON_INTERRUPT)
+                    _begin_stop_locked()
+                    # A group claimed into ``running`` whose submission was cut
+                    # short has no worker to converge on; nothing ran for it, so
+                    # it is reported as skipped rather than waited for forever.
+                    for gid in list(running - launched):
+                        running.discard(gid)
+                        skipped[gid] = GroupResult.skipped(gid)
+                        self._emit_status(gid, GROUP_STATUS_SKIPPED)
+                    while running:
+                        try:
+                            condition.wait(timeout=1.0)
+                        except KeyboardInterrupt:
+                            # A repeat Ctrl-C must not abandon children mid-run:
+                            # the groups are already winding down and the wait
+                            # is what makes "all groups have stopped" true.
+                            logger.info(
+                                "Already stopping — still waiting for %d "
+                                "running group(s)",
+                                len(running),
+                            )
+        finally:
+            _shutdown_pool(executor)
 
-        # Store results for get_fallback_leaves()
+        interrupted = stopped or stop_signal.is_set()
+
+        # Store results for get_fallback_leaves(). Written BEFORE the
+        # interruption is raised: a stopped run has just as much salvageable
+        # state as a finished one (a group that completed before the stop, a
+        # group whose worktree holds half-finished work and a resumable provider
+        # session), and the caller cannot preserve what it is never handed.
         self._run_results = {**completed, **skipped}
 
         # Build results in topological order
@@ -604,11 +806,55 @@ class DAGScheduler:
                 results.append(completed[gid])
             elif gid in skipped:
                 results.append(skipped[gid])
+            elif interrupted:
+                # Cut short mid-flight: its worktree and branch still hold the
+                # work and the session, so it is reported as interrupted rather
+                # than as an unexplained failure.
+                results.append(GroupResult.interrupted(gid))
             else:
                 # Should not happen, but be defensive
                 results.append(GroupResult.failed(gid, "Unknown state"))
 
+        # WHY the interruption is re-raised on the SCHEDULING thread: the stop
+        # signal reached the workers as a flag, so nothing propagated an
+        # exception, yet the run loop above needs the interruption presented as
+        # one to open the interjection dialog at the breakpoint. Raising here —
+        # after the pool has converged and every group runner has wound its own
+        # child down — is the point at which "all groups have stopped" becomes
+        # true, so no child outlives the raise. The results ride ON the
+        # exception so the salvage path is not a second, divergent code path.
+        #
+        # The flag is re-read after the pool block because a stop that arrives
+        # while the LAST group is finishing converges the loop without another
+        # tick: the groups were still cut short, so the run was still stopped.
+        if interrupted:
+            raise DAGInterrupted(
+                "DAG execution stopped by user interjection", results
+            )
+
         return results
+
+    def salvaged_results(self) -> list[GroupResult]:
+        """Per-group results known so far, in topological order.
+
+        For a caller unwinding on a stop that :meth:`run` did not itself convert
+        into :class:`DAGInterrupted` — the results still have to be preserved,
+        because a group's worktree holds its uncommitted work and is the cwd its
+        provider session is bound to. Groups with no result yet are reported as
+        interrupted rather than dropped.
+        """
+        known: dict[str, GroupResult] = {}
+        condition = self._live_condition
+        if condition is not None:
+            with condition:
+                known.update(self._live_completed)
+                known.update(self._live_skipped)
+        if not known:
+            known.update(self._run_results)
+        return [
+            known.get(gid) or GroupResult.interrupted(gid)
+            for gid in self._topo_order
+        ]
 
     def get_fallback_leaves(self) -> list[str]:
         """Return group_ids of completed groups that should be merged as fallback leaves.

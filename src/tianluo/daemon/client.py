@@ -100,6 +100,8 @@ ResumeHandler = Callable[[str, str], Any]
 EndSessionHandler = Callable[[str, str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
+#: ``(flow_id, project_root, text)`` — write the interjection, then wake the flow.
+InterjectHandler = Callable[[str, str, str], Any]
 #: Type of the project-registry handler — called with (operation, project_root)
 #: when a PROJECT_COMMAND arrives, returning the *normalized* path that was
 #: actually registered / deregistered. It performs blocking disk I/O (registry
@@ -273,6 +275,7 @@ class DaemonClient:
         resume_handler: Optional[ResumeHandler] = None,
         end_session_handler: Optional[EndSessionHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
+        interject_handler: Optional[InterjectHandler] = None,
         project_handler: Optional[ProjectHandler] = None,
         upload_handler: Optional[UploadHandler] = None,
         fetch_handler: Optional[FetchHandler] = None,
@@ -309,6 +312,12 @@ class DaemonClient:
                 subprocess). When ``None`` an END_SESSION is logged and ignored.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
+            interject_handler: Callable invoked for an incoming INTERJECT_FLOW
+                with ``(flow_id, project_root, text)``. When ``None`` the client
+                only writes the interjection file. The daemon injects a handler
+                that ALSO resumes a PAUSED flow: such a flow has no live process
+                polling ``tianluo/calls/``, so a web interjection would otherwise
+                sit on disk indefinitely.
             project_handler: Callable invoked for an incoming PROJECT_COMMAND
                 with ``(operation, project_root)``, returning the normalized
                 path it registered / deregistered. When ``None`` the command is
@@ -366,7 +375,7 @@ class DaemonClient:
         self._project_handler = project_handler
         self._upload_handler = upload_handler
         self._fetch_handler = fetch_handler
-        self._interject_handler = _default_interject_handler
+        self._interject_handler = interject_handler or _default_interject_handler
         self._history_provider = history_provider
         self._calls_signature_provider = calls_signature_provider
         self.status_interval = max(0.5, float(status_interval))
@@ -1354,7 +1363,12 @@ class DaemonClient:
             )
             return
         try:
-            self._interject_handler(flow_id, project_root, text)
+            # Off the event loop: the handler writes the call file and (in the
+            # daemon's wiring) reads engine.json to decide whether the flow
+            # needs waking, both of which are disk work (issue #243 A3).
+            await asyncio.to_thread(
+                self._interject_handler, flow_id, project_root, text
+            )
         except Exception:
             logger.exception("INTERJECT_FLOW handler failed")
             return
@@ -3074,8 +3088,10 @@ def _default_interject_handler(flow_id: str, project_root: str, text: str) -> No
     """Write a mid-flow interjection request file under ``tianluo/calls/``.
 
     A server-delivered :data:`~tianluo.daemon.protocol.MSG_INTERJECT_FLOW` becomes
-    an ``interjection``-kind call file; the running ``luo run`` process drains
-    it at the next step boundary and folds it into ``user_interjections``.
+    an ``interjection``-kind call file; the running ``luo run`` process
+    interrupts its in-flight LLM call and opens the interjection dialog with
+    the text as the opening message (or opens it at the pause point it is
+    sitting on).
     """
     from ..engine.interaction_calls import calls_dir_for, write_interjection_request
 

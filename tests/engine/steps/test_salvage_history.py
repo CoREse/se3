@@ -125,8 +125,15 @@ class TestSalvageHistoryFromWorktree:
         assert (target_flow_dir / "_G3.jsonl").exists()
 
     def test_relay_chain_deduplication(self, tmp_path: Path):
-        """Calling the function twice for the same worktree (simulating relay chains)
-        should only append content once if target already exists after first call."""
+        """Salvaging the same worktree twice leaves exactly one copy of each turn.
+
+        The caller (``_run_dag_parallel``) deduplicates worktree paths within a
+        single step, but that alone cannot cover an interrupted run: it salvages
+        the group file and then KEEPS the worktree, so the continuation salvages
+        the very same file again in a *later process*. The high-water mark makes
+        the copy idempotent, so a group interrupted N times still renders once
+        in history display and in the rebuilt retry context.
+        """
         worktree = tmp_path / "worktree"
         flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
         flow_dir.mkdir(parents=True)
@@ -141,12 +148,89 @@ class TestSalvageHistoryFromWorktree:
         target = main_repo / "tianluo" / "history" / "20260413-flow1" / "_G1.jsonl"
         assert target.read_text() == content
 
-        # Second call (as would happen with un-deduplicated relay chains): appends again
-        # This test documents the behavior — the fix is in the caller (_run_dag_parallel)
-        # which now deduplicates worktree_paths before calling this function.
+        # Second call with nothing new written: no-op.
         _salvage_history_from_worktree(worktree, main_repo)
-        result = target.read_text()
-        assert result == content + content  # appended once more
+        assert target.read_text() == content
+
+        # Only turns produced SINCE the previous salvage are appended.
+        more = '{"group": "G1", "turn": 2}\n'
+        with open(flow_dir / "_G1.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(more)
+        _salvage_history_from_worktree(worktree, main_repo)
+        assert target.read_text() == content + more
+
+    def test_unrelated_target_is_not_mistaken_for_a_prefix(self, tmp_path: Path):
+        """Main's copy counts as already-salvaged only when it really is a prefix.
+
+        A retry whose fresh worktree was never seeded with the restored history
+        starts its own file at zero while main still holds a longer earlier
+        attempt. Treating main's length as the high-water mark there would read
+        "already salvaged" for bytes main has never seen and drop the entire new
+        attempt, so a non-prefix overlap must re-copy instead.
+        """
+        worktree = tmp_path / "worktree"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
+        flow_dir.mkdir(parents=True)
+        main_repo = tmp_path / "main"
+        target_flow_dir = main_repo / "tianluo" / "history" / "20260413-flow1"
+        target_flow_dir.mkdir(parents=True)
+
+        # Main holds a LONGER, unrelated earlier attempt; the worktree file is
+        # this attempt's own shorter, independent conversation.
+        earlier = '{"attempt": 1, "padding": "aaaaaaaaaaaaaaaaaaaaaaaa"}\n'
+        fresh = '{"attempt": 2}\n'
+        (target_flow_dir / "_G1.jsonl").write_text(earlier, encoding="utf-8")
+        self._make_history_file(flow_dir, "_G1.jsonl", fresh)
+
+        _salvage_history_from_worktree(worktree, main_repo)
+
+        assert (target_flow_dir / "_G1.jsonl").read_text() == earlier + fresh
+
+
+class TestMarklessPrefixRecovery:
+    """The sidecar-less path: an upgraded interrupted flow, or a sidecar whose
+    write failed. Main's copy is then recognised as already-salvaged only by
+    comparing the bytes."""
+
+    def _run(self, tmp_path: Path, main_text: str, worktree_text: str) -> str:
+        worktree = tmp_path / "worktree"
+        flow_dir = worktree / "tianluo" / "history" / "20260413-flow1"
+        flow_dir.mkdir(parents=True)
+        target_flow_dir = tmp_path / "main" / "tianluo" / "history" / "20260413-flow1"
+        target_flow_dir.mkdir(parents=True)
+        (target_flow_dir / "_G1.jsonl").write_text(main_text, encoding="utf-8")
+        (flow_dir / "_G1.jsonl").write_text(worktree_text, encoding="utf-8")
+        _salvage_history_from_worktree(worktree, tmp_path / "main")
+        return (target_flow_dir / "_G1.jsonl").read_text()
+
+    def test_a_shorter_exact_prefix_appends_only_the_new_bytes(self, tmp_path):
+        """Reads of the two files are compared over their OVERLAP: a short read
+        means EOF, not divergence. Comparing the raw buffers made a genuine
+        prefix read as "unrelated" and duplicated every pre-interruption turn."""
+        already = '{"turn": 1}\n{"turn": 2}\n'
+        new = '{"turn": 3}\n'
+        assert self._run(tmp_path, already, already + new) == already + new
+
+    def test_a_large_shorter_prefix_is_recognised_across_chunks(self, tmp_path):
+        """The failure needed the divergence to land inside one 64 KiB read."""
+        already = "".join('{"turn": %d}\n' % i for i in range(6000))
+        new = '{"turn": "last"}\n'
+        assert len(already) > 65536
+        assert self._run(tmp_path, already, already + new) == already + new
+
+    def test_a_longer_main_copy_appends_nothing(self, tmp_path):
+        worktree_text = '{"turn": 1}\n'
+        main_text = worktree_text + '{"turn": 2}\n'
+        assert self._run(tmp_path, main_text, worktree_text) == main_text
+
+    def test_divergent_content_is_still_re_copied(self, tmp_path):
+        """Any divergence answers zero: re-copying is recoverable, skipping
+        unsalvaged turns is not."""
+        main_text = '{"turn": 1, "x": 1}\n'
+        worktree_text = '{"turn": 1, "y": 2}\n{"turn": 2}\n'
+        assert self._run(tmp_path, main_text, worktree_text) == (
+            main_text + worktree_text
+        )
 
 
 class TestSalvageResultsHistory:

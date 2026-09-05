@@ -2108,7 +2108,10 @@ def create_app(
         Unlike ``/respond`` (which answers an *existing* pending call), this
         endpoint pushes a fresh instruction into a flow that has no pending
         call: the owning daemon turns it into an ``interjection``-kind call
-        file that ``luo run`` drains at the next step boundary.
+        file, and ``luo run`` acts on it immediately — gracefully stopping the
+        LLM call in flight and opening the interjection dialog with this text
+        as its opening message, or opening that dialog at the pause point the
+        flow is sitting on.
         """
         text = req.text.strip()
         if not text:

@@ -76,7 +76,13 @@ whether a flow is complete.
 **执行栈分层：LLMCaller 之上、AgentRunner 之下。** 所有 LLM 调用经统一的两层
 结构。上层 LLMCaller 负责 agent 列表轮换、prompt 注入、JSON 抽取模式与重试上下文
 重建；其下每个 AgentRunner 适配器只封装『一条 CLI 命令的一次调用』。关键边界：
-多命令的轮换/回退归 LLMCaller 所有，单个 runner 永不自行轮换。LLM-无关的关注点
+多命令的轮换/回退归 LLMCaller 所有，单个 runner 永不自行轮换。Continuation after an
+interruption or failure is likewise LLMCaller's strategy decision: when the last recorded
+attempt carries a reachable provider session and its runner declares native resume
+capability, the continuation is issued as a native resume of that session carrying only
+the new instruction; context rebuild is the fallback when no session is reachable or a
+resume attempt fails. A runner declares this capability and translates resume intent
+into argv at the same layer as `build_call_args`. LLM-无关的关注点
 （stream-json NDJSON 契约、历史记录、重试、Web 渲染）被共享，并以 Claude 的
 stream-json 模型为准；LLM-相关的关注点（CLI 参数构造、输出解析）各 runner 自理，
 经 `build_call_args` 意图翻译缝合——使 LLMCaller 无需感知任何具体 LLM 的 CLI 细节，
@@ -189,7 +195,9 @@ treated as local, preserving pre-upgrade behaviour.
   证据落地校验来实现——前者留下痕迹，后者只筛『证据是否成立』而非『值不值得修』。
 - **Requirement authority of check steps**: what a check step accepts against is
   the effective task description chain (the original or refined task description,
-  user interjections, and the adjudicated description); charter, `WHY:` /
+  the persisted revision chain produced by interjection dialogs — legacy
+  `user_interjections` entries on pre-upgrade flows still compose as before —
+  and the adjudicated description); charter, `WHY:` /
   `INVARIANT:` comments and code invariants remain the project-side constraints.
   Plan output — task groups included — is *derived scheduling data* (division of
   work, dependency ordering, isolated execution, progress recovery, history

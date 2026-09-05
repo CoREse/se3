@@ -379,6 +379,105 @@ flow advances; any change to the effective requirements forces `full` again.
 TEST always runs the project's complete configured tests — review scope never
 shrinks them — and every validated finding always enters the fix loop.
 
+### Interrupting a run: the interjection dialog
+
+Pressing `Ctrl-C` during a run — or pushing an interjection from the web
+console — does **not** abort the flow and does not quietly append a note to the
+next step. Both do the same thing, because they are the same path:
+
+1. **The in-flight call is stopped gracefully.** The agent's subprocess runs in
+   its own process group, so the interrupt does not kill it outright. The
+   runner waits for the next stream message boundary (a settled tool result, or
+   an assistant turn that issued no tool call — bounded at 30s), then sends
+   `SIGINT` to the child's process group so the CLI can close its own turn, and
+   escalates to `SIGKILL` only if it does not. That ordering is what leaves the
+   provider session resumable. In a DAG-parallel implement step every running
+   group is stopped the same way before control returns.
+2. **You talk to the agent that was doing the work.** The dialog resumes its
+   provider session under a read-only tool lock, so it answers with its full
+   working context — the files it read, the reasoning it was midway through,
+   the edit it had half made. If that session is unreachable (a non-LLM step
+   like TEST / COMMIT, a runner without resume, `resume_strategy: rebuild`),
+   the dialog falls back to a standalone read-only assistant given the flow's
+   context and the step's reconstructed conversation.
+3. **The conversation settles into a decision you confirm.** The agent proposes
+   one of `continue` / `restart` / `exit`, with an optional one-off
+   `instruction`, an optional complete `revised_description`, a `restart_step_id`
+   and `keep`/`reset` workspace handling. Nothing executes until you confirm,
+   and you can edit any field first. An empty reply means "change nothing,
+   resume now" and costs no LLM call; typing `continue` / `restart <step_id>` /
+   `exit` skips the conversation entirely.
+
+`restart` rewinds the flow to the current step or any earlier one in its
+history (a later entry is not a restart target and is rejected): the steps from
+there on are deleted and the target is rebuilt and run as a fresh call, with
+derived flow state (fix counters, review rounds, scope, and the step sequence
+itself, including any adjudication or confirmation slot spliced in later)
+restored to what it was when that step was first entered. Flow-level facts —
+the task description chain, the baseline commit, invariant anchors, the task
+type, the plan doctrine, and the session's usage ledger — are never rewound. A
+step the flow entered before this mechanism existed has no such entry state
+recorded, so a restart to it is refused rather than performed half-way.
+
+Restarting a parallel IMPLEMENT step also deletes its group worktrees and leaf
+branches, under `keep` as well as `reset` — "keep" only ever meant the flow's
+own tree. What each group holds (its commits and its uncommitted edits) is
+listed in the confirmation panel and saved to
+`refs/tianluo/discarded/<flow_id>/<timestamp>/groups/<branch>` before anything
+is removed.
+
+`workspace: reset` additionally returns the working tree to its pre-flow state.
+You are shown the working-tree status and the flow's commits *before* you
+confirm; everything discarded is first saved to
+`refs/tianluo/discarded/<flow_id>/<timestamp>/workspace`, and the recovery command is
+printed afterwards. Restoring untracked files depends on the pre-flow snapshot
+taken at flow start — a flow that has none (an older flow, or a failed capture)
+restores tracked files to the baseline commit only, leaves untracked files
+alone, and says so.
+
+A `revised_description` becomes the newest layer of the effective task
+description — it *replaces* what the task is, rather than appending to it — so
+the quality gates accept against the corrected requirement.
+
+The same path is available while the run is already stopped at a gate: the
+confirmation gate and the post-failure Retry/Skip/Abort menu both keep watching
+for interjections *while their prompt is on screen*, so one pushed after the
+menu appeared still cancels the wait and opens the dialog instead of sitting on
+disk until the gate is resolved some other way. `continue` there means "go back
+to waiting at this gate".
+
+While DISCOVERY is paused the rule is different and simpler: you are already at
+a conversation prompt, so a pushed interjection is delivered as your next
+discovery reply rather than opening a second conversation inside the first.
+
+### Continuing work: native session resume
+
+Every continuation — after an interjection, after a failure you chose to retry,
+after `luo run --resume`, and on the engine's own internal retries — first tries
+to continue the agent's **existing provider session** instead of rebuilding the
+conversation into a new prompt. The working directory a call was opened in is
+recorded to the step's history *before* the subprocess starts, and so is the
+session id itself for the Claude adapters, which pre-allocate it and pass it in
+as `--session-id` — an interrupted Claude call therefore always leaves an
+addressable session. Codex is capture-only: its CLI mints the thread id and
+tianluo first sees it in the `thread.started` event, so the id is written back
+onto that attempt's records the instant it streams. An attempt interrupted
+before `thread.started` has no thread to resume and simply rebuilds.
+
+Resume is used when the recorded session's agent is still in the configured
+chain, its runner supports it, and the session was opened in the working
+directory this call runs in (a DAG group's session lives in its own worktree);
+otherwise, or if the resume itself fails for any reason, the engine falls back
+to the reconstructed-context path without failing the call. Rotating to a
+different agent always rebuilds. Set `llm_caller.resume_strategy: rebuild` in
+`tianluo.yaml` to force the rebuild path for troubleshooting.
+
+The fallback changes only *how* the earlier conversation is supplied. Whatever
+the continuation has to carry — the dialog's one-off instruction, the notice
+that the task description was replaced, the "you were interrupted, check the
+workspace before you continue" framing, and the step's output contract — is
+sent on both paths.
+
 ### Three operating modes
 
 - **`luo run --worktree`** — Run the **identical** flow inside its own git

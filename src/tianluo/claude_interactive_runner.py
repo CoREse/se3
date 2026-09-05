@@ -48,8 +48,26 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
-from .agent_runner import AgentInvocationIntent, AgentRunner, InfraErrorType
+from .agent_runner import (
+    READ_ONLY_SHELL_TOOLS,
+    AgentInvocationIntent,
+    AgentRunner,
+    InfraErrorType,
+    RunnerStartupMetadata,
+    ensure_process_group_reclaimed,
+    is_message_boundary,
+    process_group_alive,
+    resolve_process_group,
+    signal_process_group,
+)
+from .stop_signal import (
+    BOUNDARY_WAIT_SECONDS,
+    EXIT_WAIT_SECONDS,
+    get_stop_signal,
+    llm_call_scope,
+)
 from .config import load_claude_commands, load_claude_subprocess_config
+from .i18n import t
 
 # Keywords indicating usage/rate limit in Claude output (shared with the
 # print-mode runner's taxonomy).  Scanned by ``detect_infra_error`` against the
@@ -91,6 +109,15 @@ _TERM_GRACE = 0.2
 # complete".  A generous default avoids mistaking Claude's brief mid-turn
 # pauses (thinking / waiting on a tool) for the end of the turn.
 TURN_SILENCE_WINDOW = 2.0
+
+# How long the graceful stop keeps waiting for the SIGINT-ed child to exit when
+# there is no transcript to observe (no ``cwd``, or the session file was never
+# located).  WHY it is short rather than :data:`EXIT_WAIT_SECONDS`: the
+# interactive TUI answers SIGINT by ending the turn and returning to its input
+# box — it never exits — so a blind wait can only ever buy the rare CLI that
+# does self-exit, and paying 30s for it delays the interjection dialog the
+# operator is waiting on by exactly that much.
+STOP_BLIND_GRACE_SECONDS = 2.0
 
 # Bracketed-paste control sequences (DEC 2004).  The effective prompt is large
 # and multi-line; wrapping it in bracketed paste makes the interactive TUI
@@ -771,8 +798,18 @@ class SessionTranscriptWatcher:
         cwd: Union[str, Path],
         projects_dir: Optional[Path] = None,
         session_id: Optional[str] = None,
+        resuming: bool = False,
     ) -> None:
         self.cwd = cwd
+        # WHY resume needs its own flag rather than "start at whatever exists":
+        # on a resumed launch the transcript ALREADY holds the previous turn,
+        # ending on a terminal assistant record with a long-idle mtime. Reading
+        # it from byte 0 would re-emit that whole turn as this attempt's output,
+        # double-count its tokens, and — worse — satisfy turn_complete() before
+        # the new prompt has even been typed, so the runner would report the old
+        # answer as this attempt's result. The cursor is therefore parked at the
+        # file's current end in snapshot(), before the child is spawned.
+        self.resuming = resuming
         self.projects_dir = (
             Path(projects_dir) if projects_dir is not None else claude_projects_dir()
         )
@@ -794,10 +831,33 @@ class SessionTranscriptWatcher:
         self._model: Optional[str] = None
         self._terminal_result_seen = False
         self._last_poll_activity = time.time()
+        # Lower bound for write_activity(); see the property and snapshot().
+        self._activity_floor = 0.0
 
     def snapshot(self) -> None:
-        """Capture the pre-launch ``*.jsonl`` set (call before spawning)."""
+        """Capture the pre-launch ``*.jsonl`` set (call before spawning).
+
+        On a resumed launch this also binds to the existing transcript and
+        parks the cursor at its current end, so only records appended by the
+        resumed turn are ever read.
+        """
         self._pre_snapshot = snapshot_session_files(self.projects_dir)
+        if self.resuming and self.session_id:
+            existing = locate_session_file(
+                self.projects_dir, set(), self.cwd, self.session_id
+            )
+            if existing is not None:
+                self.path = existing
+                try:
+                    self._cursor = existing.stat().st_size
+                except Exception:
+                    self._cursor = 0
+                # Nothing from the previous turn may count as this attempt's
+                # activity or terminality.
+                self.last_record = None
+                self.last_meaningful_record = None
+                self._last_poll_activity = time.time()
+                self._activity_floor = self._last_poll_activity
 
     def locate(self) -> bool:
         """Try to locate this launch's transcript file; idempotent once found."""
@@ -955,7 +1015,12 @@ class SessionTranscriptWatcher:
         if self.path is not None:
             m = _safe_mtime(self.path)
             if m > 0:
-                return m
+                # The floor is set only when binding to a PRE-EXISTING
+                # transcript on a resumed launch: its last write is the previous
+                # turn's and would otherwise read as "no activity for hours",
+                # tripping the inactivity-hang detector before the resumed turn
+                # writes its first record.
+                return max(m, self._activity_floor)
         return self._last_poll_activity
 
     def synthesize_result(
@@ -1044,6 +1109,80 @@ class ClaudeInteractiveRunner(AgentRunner):
         # launch's own ``<session_id>.jsonl`` — the race-free way to isolate
         # concurrent flows sharing the same cwd.
         self._session_id: Optional[str] = None
+        # True once build_resume_call_args() has bound ``_session_id`` to an
+        # EXISTING session: the launch argv then carries ``--resume <id>``
+        # instead of ``--session-id <id>``. The transcript file is the same
+        # ``<id>.jsonl`` either way, so the watcher binding is unchanged.
+        self._resuming: bool = False
+        # Process group of the current PTY child, captured while its pid is
+        # still live. Cleanup addresses the GROUP, so this must survive the
+        # direct child being reaped (see _remember_pgid).
+        self._pty_pgid: Optional[int] = None
+
+    #: Verified against claude 2.1.258 in a trusted project directory: a PTY
+    #: ``claude --resume <session_id>`` re-enters the recorded session (the
+    #: model answered a question that could only be answered from the earlier
+    #: headless turn) and appends to the SAME ``<session_id>.jsonl`` transcript
+    #: the watcher already binds to.
+    supports_native_resume: bool = True
+
+    def _ensure_session_id(self) -> str:
+        """Return this launch's session id, allocating one if needed.
+
+        WHY not simply allocate at launch as before: LLMCaller now records the
+        session identity BEFORE the child is spawned, so the id has to exist by
+        the time :meth:`get_startup_metadata` returns. Launch reuses whatever
+        was allocated there instead of minting a second id that would point at
+        a different transcript than the one persisted to history.
+        """
+        if not self._session_id:
+            self._session_id = str(uuid.uuid4())
+        return self._session_id
+
+    def get_startup_metadata(
+        self, env: Optional[Dict[str, str]] = None
+    ) -> RunnerStartupMetadata:
+        """Pre-allocate a FRESH session id for this attempt and report it.
+
+        INVARIANT: this always mints a new id and drops any resume binding.
+        LLMCaller calls it only on the fresh/rebuild path — a native resume
+        takes its identity from the recorded binding and never asks the runner
+        — so reaching here after a failed resume means the fallback attempt
+        must genuinely start a new session. Keeping ``_resuming`` set would
+        make ``build_call_args`` re-issue ``--resume`` against the very session
+        that just rejected us, so the required soft fallback would never
+        happen while history labelled it "rebuild".
+        """
+        self._session_id = str(uuid.uuid4())
+        self._resuming = False
+        return RunnerStartupMetadata(
+            provider=self.startup_provider,
+            model=self.startup_model,
+            provider_session_id=self._session_id,
+        )
+
+    def build_resume_call_args(
+        self,
+        session_id: str,
+        prompt: str,
+        read_only: bool,
+        context_files: Optional[List[Path]] = None,
+        deny_shell: bool = False,
+    ) -> List[str]:
+        """Bind this launch to an existing session and return its argv flags.
+
+        Interactive mode carries no ``-p``: the prompt is typed into the TUI's
+        input box by the feed thread, exactly as on the fresh-call path, so the
+        only difference here is which session the PTY opens.
+        """
+        if not session_id:
+            raise ValueError("build_resume_call_args requires a session_id")
+        self._session_id = session_id
+        self._resuming = True
+        return self.build_call_args(
+            prompt=prompt, read_only=read_only, context_files=context_files,
+            deny_shell=deny_shell,
+        )
 
     # ------------------------------------------------------------------
     # build_call_args — intent → interactive-mode CLI flags
@@ -1055,6 +1194,7 @@ class ClaudeInteractiveRunner(AgentRunner):
         read_only: bool,
         context_files: Optional[List[Path]] = None,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
+        deny_shell: bool = False,
     ) -> List[str]:
         """Translate call intent into interactive-mode launch CLI flags.
 
@@ -1107,6 +1247,13 @@ class ClaudeInteractiveRunner(AgentRunner):
         disallowed: List[str] = []
         if read_only:
             disallowed += ["Write", "Edit", "NotebookEdit", "AskUserQuestion"]
+            if deny_shell:
+                # WHY the shell is only denied on request: the session runs with
+                # --dangerously-skip-permissions, so Bash is an unguarded write
+                # channel for a call that must not touch the tree (the
+                # interruption dialog), while ordinary read-only steps need it
+                # to inspect the tree.
+                disallowed += list(READ_ONLY_SHELL_TOOLS)
         disallowed.append("ReportFindings")
         args += ["--disallowedTools"] + disallowed
 
@@ -1143,9 +1290,12 @@ class ClaudeInteractiveRunner(AgentRunner):
         ]
         # Pin an explicit session id so the transcript filename is known up
         # front; this is what lets the watcher bind to exactly this launch's
-        # transcript and never a concurrent same-cwd flow's.
+        # transcript and never a concurrent same-cwd flow's. On a native
+        # resume the session already exists, so the id is spelled ``--resume``
+        # (``--session-id`` would ask the CLI to CREATE that id and conflict).
         if self._session_id:
-            full += ["--session-id", self._session_id]
+            full += (["--resume"] if self._resuming else ["--session-id"])
+            full += [self._session_id]
         return full + list(args)
 
     # ------------------------------------------------------------------
@@ -1168,6 +1318,9 @@ class ClaudeInteractiveRunner(AgentRunner):
         Returns the ``pexpect.spawn`` handle.
         """
         pexpect = _import_pexpect()
+        # A new child means a new group; the previous launch's id must not be
+        # signalled after its pid was recycled.
+        self._pty_pgid = None
         handle = pexpect.spawn(
             full_cmd[0],
             args=list(full_cmd[1:]),
@@ -1179,6 +1332,10 @@ class ClaudeInteractiveRunner(AgentRunner):
             timeout=None,
             dimensions=(40, 120),
         )
+        # Taken now, while the child is certainly alive: after it is reaped the
+        # group can no longer be resolved from it, and the group is what
+        # cleanup has to reach.
+        self._remember_pgid(handle)
         return handle
 
     def _feed_prompt(
@@ -1356,6 +1513,156 @@ class ClaudeInteractiveRunner(AgentRunner):
                 except Exception:
                     pass
 
+    @staticmethod
+    def _boundary_reached_since(
+        ndjson_buffer: List[str], stop_mark: int
+    ) -> bool:
+        """True once a message boundary lands AFTER the stop was requested.
+
+        WHY the window is anchored to the request and not to "the last few
+        records": a completed assistant message emitted BEFORE the user hit
+        Ctrl-C says nothing about the tool_use that may be outstanding now.
+        Matching it would end the wait immediately and tear the PTY down at
+        exactly the dangling-transcript state the wait exists to avoid.
+        """
+        return any(
+            is_message_boundary(line) for line in ndjson_buffer[stop_mark:]
+        )
+
+    def _remember_pgid(self, handle: Any) -> Optional[int]:
+        """Resolve and cache the PTY child's process group id.
+
+        WHY it is cached rather than re-resolved: ``os.getpgid`` needs a live
+        pid, and the direct child is the FIRST thing to disappear — a claude
+        that answers SIGINT by exiting cleanly takes its pid with it while a
+        Bash grandchild that ignored the same signal keeps running (and keeps
+        writing to the workspace the user is about to decide the fate of).
+        Ownership of the group therefore has to outlive ownership of the child,
+        so the identity is taken once, while the pid is still there.
+        """
+        if self._pty_pgid is None:
+            self._pty_pgid = resolve_process_group(handle)
+        return self._pty_pgid
+
+    @staticmethod
+    def _stop_reason_key(boundary_reached: bool) -> str:
+        """Which reason the stop is reported under.
+
+        The two ways out of the boundary wait are not the same event, and the
+        print-mode runners already distinguish them: reporting "boundary
+        reached" after a 30s timeout tells the operator the transcript closed
+        cleanly when in fact the CLI was cut off mid-turn.
+        """
+        return (
+            "runner.stop.reason.boundary_reached"
+            if boundary_reached
+            else "runner.stop.reason.boundary_timeout"
+        )
+
+    @staticmethod
+    def _transcript_settled(
+        watcher: Optional["SessionTranscriptWatcher"], since: float
+    ) -> bool:
+        """True once the transcript has stopped growing after the stop request.
+
+        WHY this — and not child liveness — is what "the turn closed" means
+        here: the print-mode assumption "SIGINT ⇒ the CLI exits" holds for
+        ``claude -p`` but NOT for the interactive TUI, which answers SIGINT by
+        ending the current turn and returning to its input box, then lives on
+        forever. The observable end of the turn is the transcript: the CLI
+        writes its wind-down records (an interrupt marker, or the terminal
+        assistant record) and stops appending.
+
+        The quiet window is measured from the LATER of the stop request and the
+        last write, so a transcript that was already idle when the stop landed
+        (a model call stuck mid-turn) still gives the CLI a full window to
+        record its wind-down before this reports settled.
+        """
+        if watcher is None or watcher.path is None:
+            return False
+        try:
+            last_write = watcher.write_activity()
+        except Exception:  # pragma: no cover - defensive
+            return False
+        return (time.time() - max(last_write, since)) >= TURN_SILENCE_WINDOW
+
+    def _graceful_stop(
+        self,
+        handle: Any,
+        watcher: Optional["SessionTranscriptWatcher"] = None,
+        on_records: Optional[Callable[[List[str]], None]] = None,
+    ) -> None:
+        """SIGINT the PTY child's process group and wait for the turn to close.
+
+        The counterpart of the print-mode runners' ``graceful_stop_process``:
+        the CLI treats SIGINT as "close the current turn", which finalises the
+        transcript and leaves the provider session resumable. ``_terminate``
+        (SIGTERM after a 0.2s grace) is a *reclamation* step, not a stop
+        protocol — reaching it first would kill the CLI mid-tool_use and leave
+        exactly the dangling transcript a resume cannot continue from.
+
+        WHY the wait ends on transcript settlement rather than on the child
+        exiting: unlike ``claude -p``, the interactive TUI does not exit when
+        its turn is closed, so waiting for the pid to disappear always burns
+        the whole :data:`EXIT_WAIT_SECONDS` and delays the interjection dialog
+        by that much on EVERY stop. The transcript settling is the signal that
+        the thing we actually care about — the turn, and with it the session's
+        resumability — is done; reclaiming the still-live group is then the
+        finally block's ``_terminate``'s job.
+
+        WHY the transcript keeps being polled while waiting: the records the
+        CLI writes while winding down belong to this attempt's output, exactly
+        as the print-mode path records its partial stream.
+
+        WHY the direct child exiting is nevertheless still handled: a CLI that
+        does self-exit says nothing about the tools it spawned, so its group is
+        drained (and any survivor SIGKILL-ed) before this returns. Otherwise a
+        grandchild goes on editing the tree while the dialog — a deliberately
+        read-only conversation — is open.
+
+        Best effort throughout; the finally block's ``_terminate`` remains the
+        backstop for a child that ignores SIGINT for the whole wait.
+        """
+        if handle is None:
+            return
+        pgid = self._remember_pgid(handle)
+        signal_process_group(handle, signal.SIGINT, pgid=pgid)
+        requested_at = time.time()
+        # Without a transcript the turn's end is unobservable, so the only
+        # thing left to wait for is an exit the TUI will never perform.
+        observable = watcher is not None and watcher.path is not None
+        wait_seconds = (
+            EXIT_WAIT_SECONDS if observable else STOP_BLIND_GRACE_SECONDS
+        )
+        deadline = requested_at + wait_seconds
+        settled = False
+        while time.time() < deadline and _safe_isalive(handle):
+            if watcher is not None:
+                try:
+                    if watcher.path is not None:
+                        new_lines = watcher.poll()
+                        if new_lines and on_records is not None:
+                            on_records(new_lines)
+                except Exception:
+                    pass
+            if self._transcript_settled(watcher, requested_at):
+                settled = True
+                break
+            time.sleep(0.25)
+        if not _safe_isalive(handle):
+            ensure_process_group_reclaimed(pgid)
+            return
+        if settled:
+            return
+        print(
+            t(
+                "runner.stop.escalating",
+                runner="claude-interactive",
+                seconds=f"{wait_seconds:.0f}",
+            ),
+            file=sys.stderr,
+        )
+
     def _terminate(self, handle: Any) -> None:
         """Force-terminate the PTY child's whole process group and reap it.
 
@@ -1364,39 +1671,44 @@ class ClaudeInteractiveRunner(AgentRunner):
         orphaned: SIGTERM the group, grace period, SIGKILL the group if still
         alive, then ``close(force=True)`` to run pexpect's own cleanup and reap
         the child.  Every step is best-effort; cleanup never raises.
+
+        INVARIANT: the group is signalled from the id captured while the child
+        was alive, and the liveness question asked of the GROUP, never of the
+        direct child alone. A reaped claude whose Bash grandchild survives
+        reports "not alive" here, and gating on that skipped both signals —
+        which is precisely how a surviving grandchild used to keep writing to
+        the workspace after the run had stopped.
         """
         if handle is None:
             return
 
-        pid = getattr(handle, "pid", None)
+        pgid = self._remember_pgid(handle)
 
-        def _killpg(sig: int) -> None:
-            if pid is None:
-                return
-            try:
-                pgid = os.getpgid(pid)
-                os.killpg(pgid, sig)
-            except (ProcessLookupError, OSError):
-                pass
+        def _group_or_child_alive() -> bool:
+            return _safe_isalive(handle) or process_group_alive(pgid)
 
         # 1. Polite group terminate.
-        if _safe_isalive(handle):
-            _killpg(signal.SIGTERM)
+        if _group_or_child_alive():
+            signal_process_group(handle, signal.SIGTERM, pgid=pgid)
 
-        # 2. Grace period, then hard group kill if still alive.
-        if _safe_isalive(handle):
+            # 2. Grace period, then hard group kill if still alive.
             try:
                 time.sleep(_TERM_GRACE)
             except Exception:
                 pass
-        if _safe_isalive(handle):
-            _killpg(signal.SIGKILL)
+            if _group_or_child_alive():
+                signal_process_group(handle, signal.SIGKILL, pgid=pgid)
 
         # 3. pexpect's own close (sends signals + waits/reaps the child).
         try:
             handle.close(force=True)
         except Exception:
             pass
+
+        # 4. Whatever the close did to the direct child, survivors in the group
+        #    are the ones that matter; this is the last chance to reclaim them.
+        ensure_process_group_reclaimed(pgid, grace=0.0)
+        self._pty_pgid = None
 
     # ------------------------------------------------------------------
     # run — synchronous execution (delegates to the monitored path)
@@ -1433,7 +1745,7 @@ class ClaudeInteractiveRunner(AgentRunner):
         run_env.pop("CLAUDECODE", None)
 
         prompt = self._pending_prompt or ""
-        self._session_id = str(uuid.uuid4())
+        self._ensure_session_id()
         full_cmd = self._build_full_cmd(args)
 
         result = self._run_single_with_monitor(
@@ -1519,24 +1831,27 @@ class ClaudeInteractiveRunner(AgentRunner):
 
         prompt = self._pending_prompt or ""
 
-        self._session_id = str(uuid.uuid4())
+        self._ensure_session_id()
         full_cmd = self._build_full_cmd(args)
 
         print(f"[claude-interactive] Running command: '{cmd_name}'", file=sys.stderr)
 
-        result = self._run_single_with_monitor(
-            full_cmd=full_cmd,
-            cmd_name=cmd_name,
-            prompt=prompt,
-            log_file=log_file,
-            wall_timeout=wall_timeout,
-            inactivity_timeout=inactivity_timeout,
-            cwd=cwd,
-            env=run_env,
-            on_output=on_output,
-            on_activity=on_activity,
-            start_time=start_time,
-        )
+        # See ClaudeCodeRunner: declaring the call in flight routes a terminal
+        # Ctrl-C to the graceful stop rather than to an exception.
+        with llm_call_scope():
+            result = self._run_single_with_monitor(
+                full_cmd=full_cmd,
+                cmd_name=cmd_name,
+                prompt=prompt,
+                log_file=log_file,
+                wall_timeout=wall_timeout,
+                inactivity_timeout=inactivity_timeout,
+                cwd=cwd,
+                env=run_env,
+                on_output=on_output,
+                on_activity=on_activity,
+                start_time=start_time,
+            )
 
         output = f"=== Command: {cmd_name} ===\n{result.output}"
 
@@ -1576,7 +1891,11 @@ class ClaudeInteractiveRunner(AgentRunner):
         if cwd is None:
             return None
         try:
-            return SessionTranscriptWatcher(cwd=cwd, session_id=self._session_id)
+            return SessionTranscriptWatcher(
+                cwd=cwd,
+                session_id=self._session_id,
+                resuming=self._resuming,
+            )
         except Exception:
             return None
 
@@ -1717,10 +2036,78 @@ class ClaudeInteractiveRunner(AgentRunner):
             drain_thread.start()
 
             turn_done = False
+            stop_signal = get_stop_signal()
+            # Cooperative stop: like the print-mode runners, the request
+            # arrives as a process-wide flag so it also reaches a group runner
+            # on a worker thread. The PTY child is already its own session
+            # leader (pexpect calls setsid), so _graceful_stop() below performs
+            # the same SIGINT → wait → SIGKILL escalation the print-mode path
+            # does, which is what leaves the provider session resumable.
+            stop_deadline: Optional[float] = None
+            # Index into ``ndjson_buffer`` at the moment the stop was
+            # requested. Only a boundary AFTER that point ends the wait: a
+            # completed assistant message from before the request says nothing
+            # about the tool_use that may be outstanding now, and matching it
+            # would tear the PTY down at exactly the dangling-transcript state
+            # this wait exists to avoid.
+            stop_mark = 0
 
             # --- Supervisor loop: composite PTY + JSONL activity / turn-end ---
             while _safe_isalive(handle):
                 now = time.time()
+
+                if stop_deadline is None and stop_signal.is_set():
+                    stop_deadline = now + BOUNDARY_WAIT_SECONDS
+                    stop_mark = len(ndjson_buffer)
+                    print(
+                        t(
+                            "runner.stop.interactive_awaiting_boundary",
+                            runner="claude-interactive",
+                        ),
+                        file=sys.stderr,
+                    )
+                boundary_reached = (
+                    stop_deadline is not None
+                    and self._boundary_reached_since(ndjson_buffer, stop_mark)
+                )
+                if stop_deadline is not None and (
+                    now >= stop_deadline or boundary_reached
+                ):
+                    # SIGINT first, and wait for the TRANSCRIPT to settle: the
+                    # CLI answers the signal by closing its own turn and
+                    # finalising the transcript, which is what makes the
+                    # session resumable afterwards — but the TUI then goes back
+                    # to its input box rather than exiting, so the still-live
+                    # process group is left for the finally block to reclaim.
+                    self._graceful_stop(
+                        handle, watcher=watcher, on_records=_emit_ndjson
+                    )
+                    msg = "\n" + t(
+                        "runner.stop.graceful",
+                        runner="claude-interactive",
+                        reason=t(self._stop_reason_key(boundary_reached)),
+                    ) + "\n"
+                    output_buffer.append(msg)
+                    if log_fh:
+                        log_fh.write(msg)
+                        log_fh.flush()
+                    # Drain whatever the CLI wrote while winding down, so the
+                    # partial turn is recorded like the print-mode path does.
+                    if watcher is not None:
+                        try:
+                            if watcher.path is not None:
+                                _emit_ndjson(watcher.poll())
+                        except Exception:
+                            pass
+                    return _SingleRunResult(
+                        returncode=-2,
+                        output=self._compose_output_with_limit_marker(
+                            ndjson_buffer, output_buffer, -2, cmd_name, log_fh
+                        ),
+                        success=False,
+                        should_retry=False,
+                        interrupted=True,
+                    )
 
                 if wall_timeout and (now - start_time) > wall_timeout:
                     msg = f"\n[claude-interactive] Wall timeout ({wall_timeout}s) exceeded\n"

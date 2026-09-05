@@ -12,6 +12,7 @@ from tianluo.runtime_paths import runtime_dir
 
 import json
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -70,8 +71,43 @@ class ChatMessage:
     # set to ``"interjection"`` by :func:`record_user_interjection` to mark
     # mid-flow user inserts that ``luo history show`` keeps visible as user
     # bubbles but ``format_history_for_retry`` skips so they are not
-    # re-fed to the LLM as part of the retry prompt.
+    # re-fed to the LLM as part of the retry prompt; set to ``"extraction"``
+    # for the two-phase JSON extraction call, whose session is a throwaway
+    # re-formatter of Phase-1 prose and must never become the session a
+    # continuation resumes into (see :data:`NON_BINDING_KINDS`).
     kind: str = ""
+    # Provider session/thread id this record belongs to (Claude Code's
+    # ``--session-id`` uuid, codex's thread id). Written on BOTH the prompt and
+    # the response record of an attempt so a later native resume can address
+    # the exact session — the prompt record is what makes the identity durable
+    # for a call interrupted before it produced any response. ``None`` for
+    # records predating this field and for runners that expose no session.
+    provider_session_id: Optional[str] = None
+    # Working directory the provider session was opened in. A session is bound
+    # to its cwd (Claude Code stores transcripts under a munged-cwd directory;
+    # codex filters threads by cwd), so a resume MUST be issued from the same
+    # place — most visibly for a DAG group, whose session lives in its own
+    # worktree rather than the flow's project root.
+    session_cwd: Optional[str] = None
+    # Which strategy produced this attempt: ``"native"`` (provider-side resume)
+    # or ``"rebuild"`` (history reconstructed into the prompt). Recorded per
+    # attempt so a fallback is visible in history rather than inferred.
+    resume_strategy: Optional[str] = None
+    # Runner type (``claude-code`` / ``codex`` / ``claude-interactive``) that
+    # owns ``provider_session_id``. INVARIANT: a session id is only addressable
+    # together with its runner, so native resume refuses a binding whose runner
+    # type is absent or no longer matches the configured agent. Recorded as a
+    # first-class field — not only inside the response record's usage record —
+    # because the prompt record (written before the subprocess starts) and the
+    # dialog records are exactly the ones that have to survive a crash, and
+    # neither carries a usage record.
+    runner_type: Optional[str] = None
+    # Rewind generation. Rewinding to a step bumps the generation of that step
+    # and everything after it, so the retry context rebuilt for the re-entered
+    # step sees only records from the CURRENT generation and never the
+    # abandoned attempt it was rewound away from. Legacy records deserialize
+    # with 0, which ``format_history_for_retry`` treats as a wildcard.
+    generation: int = 0
     # Optional per-call token-usage increment for this message. Set only on
     # assistant records by :func:`record_response` from the LLM stream's
     # ``type == "result"`` line (see :func:`parse_usage_from_ndjson`). Left
@@ -113,6 +149,16 @@ class ChatMessage:
             data.pop("agent_name", None)
         if data.get("model_name") is None:
             data.pop("model_name", None)
+        # Session-binding / generation metadata is likewise omitted at its
+        # neutral value so a record from a runner with no session (or from
+        # before rewind existed) serializes byte-identically to the old schema.
+        for key in (
+            "provider_session_id", "session_cwd", "resume_strategy", "runner_type",
+        ):
+            if data.get(key) is None:
+                data.pop(key, None)
+        if not data.get("generation"):
+            data.pop("generation", None)
         return data
 
     @classmethod
@@ -171,6 +217,12 @@ def record_prompt(
     attempt: int,
     fix_iteration: int = 0,
     agent_name: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    session_cwd: Optional[str] = None,
+    resume_strategy: Optional[str] = None,
+    generation: int = 0,
+    runner_type: Optional[str] = None,
+    kind: str = "",
 ) -> None:
     """Record a user prompt sent to the LLM.
 
@@ -182,6 +234,11 @@ def record_prompt(
     ``agent_name`` (default None) records the configuration name of the
     agent that will handle this prompt (e.g. "dclaude", "claude"). Omitted
     from serialization when None so legacy records stay unchanged.
+
+    ``provider_session_id`` / ``session_cwd`` / ``resume_strategy`` bind this
+    attempt to the provider session it is about to open. INVARIANT: they are
+    written BEFORE the subprocess is spawned — a call interrupted during
+    startup must still leave a resumable, addressable session behind.
     """
     msg = ChatMessage(
         role="user",
@@ -192,8 +249,90 @@ def record_prompt(
         attempt=attempt,
         fix_iteration=fix_iteration,
         agent_name=agent_name,
+        provider_session_id=provider_session_id,
+        session_cwd=session_cwd,
+        resume_strategy=resume_strategy,
+        generation=generation,
+        runner_type=runner_type,
+        kind=kind,
     )
     _append_message(project_root, flow_id, step_id, msg)
+
+
+def backfill_prompt_session_id(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    *,
+    attempt: int,
+    session_id: str,
+    agent_name: Optional[str] = None,
+) -> bool:
+    """Stamp a captured session id onto the attempt's existing prompt record.
+
+    INVARIANT: both records of one attempt — the pre-spawn prompt record and
+    the response record — name the SAME provider session, and never a session
+    belonging to some other attempt. A caller-chosen id (the Claude adapters
+    pre-allocate one) satisfies that at ``record_prompt`` time. A capture-only
+    provider cannot: codex mints its thread id itself and only announces it
+    mid-stream, so its prompt record is necessarily written with none. Faking
+    an id, or carrying the previous attempt's forward, would violate the
+    invariant in the other direction — so the record is instead rewritten in
+    place the moment the real id is known, inside the same attempt.
+
+    Rewrites the LAST session-less user record matching *attempt* (and
+    *agent_name* when given), leaving every other line byte-identical, and
+    swaps the file in atomically so a concurrent reader never observes a
+    half-written history. Returns whether a record was updated; a miss is not
+    an error — the stream-announced identity record remains the durable
+    binding either way (see :func:`_streamed_session_for_attempt`).
+    """
+    if not session_id:
+        return False
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        lines = path.read_text(encoding="utf-8").split("\n")
+    except OSError:
+        return False
+
+    target = -1
+    for index in range(len(lines) - 1, -1, -1):
+        stripped = lines[index].strip()
+        if not stripped:
+            continue
+        try:
+            data = json.loads(stripped)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict) or data.get("type"):
+            # ``type`` marks a non-message telemetry line (stream_progress and
+            # friends); only real ChatMessage records carry the binding.
+            continue
+        if data.get("role") != "user" or data.get("attempt") != attempt:
+            continue
+        if agent_name is not None and data.get("agent_name") != agent_name:
+            continue
+        if data.get("provider_session_id"):
+            # Already bound. If it is the same id there is nothing to do; if it
+            # differs, this record belongs to an attempt that named its own
+            # session and must not be re-pointed at another one.
+            return data.get("provider_session_id") == session_id
+        target = index
+        break
+    if target < 0:
+        return False
+
+    try:
+        record = json.loads(lines[target].strip())
+        record["provider_session_id"] = session_id
+        lines[target] = _json_line(record).rstrip("\n")
+        tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+        tmp.write_text("\n".join(lines), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except (OSError, ValueError, TypeError) as exc:
+        logger.debug("Failed to backfill prompt session id: %s", exc)
+        return False
+    return True
 
 
 def record_response(
@@ -206,6 +345,12 @@ def record_response(
     fix_iteration: int = 0,
     agent_name: Optional[str] = None,
     usage_record: Optional[Union[UsageRecord, Mapping[str, Any]]] = None,
+    provider_session_id: Optional[str] = None,
+    session_cwd: Optional[str] = None,
+    resume_strategy: Optional[str] = None,
+    generation: int = 0,
+    runner_type: Optional[str] = None,
+    kind: str = "",
 ) -> None:
     """Record an LLM response (raw NDJSON output).
 
@@ -304,8 +449,286 @@ def record_response(
         ),
         agent_name=agent_name,
         model_name=model_name or None,
+        # Prefer the caller's explicit binding; fall back to whatever the
+        # stream reported. Codex mints its thread id itself, so its session
+        # identity only becomes knowable here — the caller has none to pass.
+        provider_session_id=(
+            provider_session_id or authoritative_usage.provider_session_id or None
+        ),
+        session_cwd=session_cwd,
+        resume_strategy=resume_strategy,
+        generation=generation,
+        runner_type=(
+            runner_type or authoritative_usage.runner_type or None
+        ),
+        kind=kind,
     )
     _append_message(project_root, flow_id, step_id, msg)
+
+
+def record_dialog_message(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    role: str,
+    content: str,
+    *,
+    attempt: int = 0,
+    fix_iteration: int = 0,
+    generation: int = 0,
+    agent_name: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
+    runner_type: Optional[str] = None,
+    session_cwd: Optional[str] = None,
+    source: str = "terminal",
+) -> None:
+    """Record one turn of the mid-flow interjection dialog.
+
+    The dialog is a real conversation with the working agent held at the
+    breakpoint, so each turn lands in the step's own jsonl as a
+    ``kind == "dialog"`` record. Unlike the retired ``interjection`` kind these
+    records ARE replayed into a later rebuilt retry context
+    (:func:`format_history_for_retry` includes them in timestamp order): the
+    conclusions reached in the dialog are part of what the step was told, and
+    dropping them would make a rebuild forget the very correction the user
+    stopped the run to make.
+
+    Missing ``flow_id`` / ``step_id`` is a soft no-op, and a write failure is
+    swallowed — a history write must never break the dialog it is recording.
+    """
+    if not flow_id or not step_id:
+        logger.warning(
+            "record_dialog_message: missing flow_id=%r or step_id=%r; dropping "
+            "dialog turn of length %d",
+            flow_id, step_id, len(content or ""),
+        )
+        return
+    record = ChatMessage(
+        role=role,
+        content=content,
+        raw_json=[],
+        timestamp=datetime.now().isoformat(),
+        step_type=step_type,
+        attempt=attempt,
+        fix_iteration=fix_iteration,
+        kind="dialog",
+        agent_name=agent_name,
+        provider_session_id=provider_session_id,
+        # A dialog turn is the newest session-bearing record in the step jsonl,
+        # so it SHADOWS the response record ``last_session_binding`` would
+        # otherwise pick. It therefore has to carry the full binding — runner
+        # type and cwd included — or the shadowed lookup would come back
+        # unusable and silently force a rebuild.
+        runner_type=runner_type,
+        session_cwd=session_cwd,
+        generation=generation,
+    ).to_dict()
+    record["source"] = source
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_json_line(record))
+    except OSError as exc:
+        logger.warning(
+            "Failed to record dialog turn for %s/%s: %s", flow_id, step_id, exc
+        )
+
+
+# Record kinds that are invisible to session-binding resolution: they carry a
+# provider session id, but that session is not the one a continuation of the
+# step's work should re-enter.
+NON_BINDING_KINDS = frozenset({"extraction"})
+
+
+def last_session_binding(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    *,
+    fix_iteration: int = 0,
+    generation: int = 0,
+) -> Optional[Dict[str, Any]]:
+    """Return the most recent recorded provider-session binding for a step.
+
+    This is what makes native resume possible: it answers "which agent, which
+    provider session, opened in which cwd, did this step last actually talk
+    to?". Scans the step's jsonl in reverse and returns the first record
+    carrying a ``provider_session_id``, as
+    ``{"agent_name", "provider_session_id", "session_cwd", "role"}``.
+
+    Records from a different fix-iteration or a superseded rewind generation
+    are skipped — resuming into an abandoned generation's session would
+    continue exactly the work the rewind discarded. As elsewhere, ``0`` on
+    either axis is a wildcard so legacy jsonl is not filtered out.
+    """
+    session = get_step_history(project_root, flow_id, step_id)
+    if not session or not session.messages:
+        return None
+    messages = session.messages
+    for index in range(len(messages) - 1, -1, -1):
+        msg = messages[index]
+        if not _matches_iteration(msg, fix_iteration):
+            continue
+        if not _matches_generation(msg, generation):
+            continue
+        if getattr(msg, "kind", "") in NON_BINDING_KINDS:
+            # INVARIANT: a two-phase Phase-2 extraction opens its own provider
+            # session whose entire content is "re-express this text as JSON".
+            # It is the step's NEWEST session-bearing record, so without this
+            # skip a later continuation would resume the re-formatter instead
+            # of the agent that did the work — it would be told to "continue
+            # from where you left off" in a session that never did the task.
+            # Such a record neither establishes nor invalidates the binding:
+            # the scan walks past it to the Phase-1 attempt behind it.
+            continue
+        if not getattr(msg, "provider_session_id", None):
+            # INVARIANT: only the MOST RECENT attempt's session may be resumed.
+            # Skipping past a session-less attempt would hand back an older
+            # agent's session — after a rotation whose new agent crashed before
+            # reporting its session id, that session knows nothing of the work
+            # since, so "continue where you left off" would address the wrong
+            # conversation. No id on the latest attempt means rebuild.
+            if _is_attempt_record(msg):
+                # …unless the attempt itself announced one while it ran. A
+                # provider that mints the session id itself (codex) cannot be
+                # named by the pre-spawn prompt record, so the live stream's
+                # announcement is that attempt's only durable binding when the
+                # run is killed before its response record lands.
+                streamed = _streamed_session_for_attempt(
+                    project_root, flow_id, step_id, msg,
+                    # Bounded by the NEXT record of any kind: an announcement
+                    # past it belongs to whatever ran after this attempt (a
+                    # later fix-iteration or generation the filters above
+                    # skipped), and binding to it would resume work this
+                    # caller's iteration never did.
+                    before=(
+                        getattr(messages[index + 1], "timestamp", None)
+                        if index + 1 < len(messages)
+                        else None
+                    ),
+                )
+                if streamed:
+                    return {
+                        "agent_name": msg.agent_name,
+                        "provider_session_id": streamed,
+                        "session_cwd": msg.session_cwd,
+                        "runner_type": getattr(msg, "runner_type", None) or None,
+                        "role": msg.role,
+                    }
+                return None
+            continue
+        # First-class field first; the response record's usage record is the
+        # fallback for jsonl written before the field existed. A binding that
+        # still resolves to no runner type is reported as such and rejected by
+        # the caller — resume is not attempted on a guess.
+        runner_type = getattr(msg, "runner_type", None) or None
+        if not runner_type:
+            for record in msg.usage_records or []:
+                if isinstance(record, dict) and record.get("runner_type"):
+                    runner_type = str(record["runner_type"])
+                    break
+        return {
+            "agent_name": msg.agent_name,
+            "provider_session_id": msg.provider_session_id,
+            "session_cwd": msg.session_cwd,
+            "runner_type": runner_type,
+            "role": msg.role,
+        }
+    return None
+
+
+def _streamed_session_for_attempt(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    attempt_msg: ChatMessage,
+    *,
+    before: Optional[str] = None,
+) -> Optional[str]:
+    """The provider session *attempt_msg*'s own subprocess announced mid-stream.
+
+    WHY this exists: a provider that mints its session id itself (codex has no
+    caller-chosen ``--session-id``) cannot be named by the prompt record, which
+    is written BEFORE the subprocess starts. The id first becomes knowable when
+    the stream announces it, and the tracker stamps it on a ``stream_progress``
+    line right then — so a run killed between that line and the response record
+    still leaves the live provider session addressable here. Without this, such
+    an attempt would look session-less and every later retry would rebuild from
+    history while the real thread sat unreferenced.
+
+    Only a line that belongs to *attempt_msg* counts: written after it and
+    before the next record of any kind (*before*), for the same attempt number,
+    and by the same agent. A mismatch means the id belongs to a different
+    attempt and rebuilding is the correct answer.
+    """
+    after = getattr(attempt_msg, "timestamp", None)
+    if not after:
+        return None
+    path = _history_file(project_root, flow_id, step_id)
+    if not path.exists():
+        return None
+    found: Optional[str] = None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(data, dict) or data.get("type") != "stream_progress":
+            continue
+        session_id = data.get("provider_session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            continue
+        timestamp = data.get("timestamp")
+        if not isinstance(timestamp, str) or timestamp < after:
+            continue
+        if before and timestamp >= before:
+            continue
+        if data.get("attempt") is not None and data["attempt"] != attempt_msg.attempt:
+            continue
+        agent = data.get("agent_name")
+        if agent and attempt_msg.agent_name and agent != attempt_msg.agent_name:
+            continue
+        found = session_id.strip()
+    return found
+
+
+def _is_attempt_record(msg: ChatMessage) -> bool:
+    """Whether *msg* is one half of an LLM attempt (its prompt or its reply).
+
+    Interjections, dialog turns and other tagged records are commentary around
+    the attempts, not attempts themselves, so they neither establish nor
+    invalidate a session binding.
+    """
+    return getattr(msg, "kind", "") == "" and msg.role in ("user", "assistant")
+
+
+def _matches_iteration(msg: ChatMessage, current_fix_iteration: int) -> bool:
+    """Fix-iteration filter with 0 as a two-sided wildcard (legacy jsonl)."""
+    return (
+        msg.fix_iteration == 0
+        or current_fix_iteration == 0
+        or msg.fix_iteration == current_fix_iteration
+    )
+
+
+def _matches_generation(msg: ChatMessage, current_generation: int) -> bool:
+    """Rewind-generation filter with 0 as a two-sided wildcard.
+
+    WHY 0 is a wildcard on BOTH sides: records written before the field existed
+    carry 0 and must stay visible to a generation-1 rebuild, and a flow that
+    has never rewound asks with 0 and must see everything.
+    """
+    gen = getattr(msg, "generation", 0) or 0
+    return gen == 0 or current_generation == 0 or gen == current_generation
 
 
 def record_user_interjection(
@@ -889,6 +1312,7 @@ def record_stream_progress(
     tool_detail: Optional[Dict[str, Any]] = None,
     agent_name: Optional[str] = None,
     model_name: Optional[str] = None,
+    provider_session_id: Optional[str] = None,
 ) -> None:
     """Append a single in-progress (partial) stream line to the step jsonl.
 
@@ -940,6 +1364,13 @@ def record_stream_progress(
     init/system metadata. Each is written only when non-None; when both default
     to ``None`` (together with the tool-event fields above) the record stays
     byte-identical to the pre-extension schema.
+
+    ``provider_session_id`` is the durable pre-response binding for a provider
+    that mints its own session id: it is written the moment the stream
+    announces one, so a run killed before its response record still leaves the
+    live session addressable (:func:`_streamed_session_for_attempt` reads it
+    back). Written only when non-None, so nothing changes for the adapters that
+    pre-allocate their id and record it with the prompt.
     """
     record = {
         "type": "stream_progress",
@@ -961,6 +1392,8 @@ def record_stream_progress(
         record["agent_name"] = agent_name
     if model_name is not None:
         record["model_name"] = model_name
+    if provider_session_id is not None:
+        record["provider_session_id"] = provider_session_id
     path = _history_file(project_root, flow_id, step_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1606,6 +2039,7 @@ def format_history_for_retry(
     step_id: str,
     mode: str = "continue",
     current_fix_iteration: int = 0,
+    current_generation: int = 0,
 ) -> Optional[str]:
     """Format previous conversation attempts for retry context injection.
 
@@ -1643,35 +2077,37 @@ def format_history_for_retry(
 
     # Filter by fix-iteration boundary. ``fix_iteration == 0`` is a wildcard
     # match (covers legacy data and non-fix-loop callers); otherwise must
-    # match the in-flight iteration exactly.
+    # match the in-flight iteration exactly. The rewind ``generation`` axis is
+    # filtered the same way: a rewind bumps the target step's generation, so a
+    # rebuild after rewinding must not resurrect the abandoned generation's
+    # conversation (those records stay on disk for history display only).
     #
-    # Also skip user-interjection records (``kind == "interjection"``):
-    # these are mid-flow user inserts written by
-    # :func:`record_user_interjection`. They are kept in the on-disk jsonl
-    # so ``luo history show`` and the web console can render them as user
-    # bubbles, but they MUST NOT be re-fed into the LLM as additional
-    # ``[User Prompt]:`` turns in the retry context — the interjection
-    # has already been composed into the current step's effective
-    # ``task_description`` via the user-interjection-handling subsystem,
-    # so re-injecting it here would duplicate the instruction.
+    # Also skip the retired user-interjection records
+    # (``kind == "interjection"``): mid-flow inserts written by
+    # :func:`record_user_interjection`, whose text was already folded into the
+    # step's composed ``task_description``, so replaying them here would
+    # duplicate the instruction. ``kind == "dialog"`` records are the opposite
+    # case and ARE included — the interjection dialog is a real conversation
+    # the agent had at the breakpoint, and its conclusions are not carried
+    # anywhere else in a rebuilt prompt.
     filtered = [
         m for m in session.messages
-        if (m.fix_iteration == 0
-            or current_fix_iteration == 0
-            or m.fix_iteration == current_fix_iteration)
+        if _matches_iteration(m, current_fix_iteration)
+        and _matches_generation(m, current_generation)
         and getattr(m, "kind", "") != "interjection"
     ]
     if not filtered:
         return None
 
-    # Group messages by attempt
-    attempts: dict[int, list[ChatMessage]] = {}
-    for msg in filtered:
-        attempts.setdefault(msg.attempt, []).append(msg)
-
-    if not attempts:
-        return None
-
+    # INVARIANT: records are replayed in JSONL order — the order they actually
+    # happened in — and an ``=== Attempt N ===`` header is opened whenever a
+    # step record's attempt changes. WHY not bucket by attempt: a dialog record
+    # carries the STEP's ``retry_count``, while an attempt carries LLMCaller's
+    # own external attempt, and the two diverge (a JSON retry advances the
+    # attempt without touching retry_count). Bucketing then filed a dialog held
+    # during attempt 2 inside attempt 1 and rendered it BEFORE the very work it
+    # was about, which is exactly backwards for an agent reading its own
+    # history.
     # Set truncation limits based on mode
     assistant_fallback_limit = 4000 if mode == "continue" else 2000
 
@@ -1680,50 +2116,58 @@ def format_history_for_retry(
     # a section divider or emitting it twice will silently break the cap.
     parts = [RETRY_HISTORY_MARKER]
 
-    for attempt_num in sorted(attempts.keys()):
-        msgs = attempts[attempt_num]
-        parts.append(f"\n=== Attempt {attempt_num + 1} ===")
+    attempt_num = 0
+    current_attempt: Optional[int] = None
+    for msg in filtered:
+        is_dialog = getattr(msg, "kind", "") == "dialog"
+        if not is_dialog and msg.attempt != current_attempt:
+            # Only a step record opens an attempt block: a dialog belongs to
+            # the attempt it interrupted, which is the one already open.
+            current_attempt = msg.attempt
+            attempt_num = msg.attempt
+            parts.append(f"\n=== Attempt {attempt_num + 1} ===")
 
-        for msg in msgs:
-            if msg.role == "user":
-                parts.append(f"\n[User Prompt]:")
-                parts.append(msg.content)
+        if is_dialog:
+            # Labelled distinctly from the step prompt so the agent can
+            # tell "what I was asked to do" from "what we agreed mid-run".
+            label = (
+                "[Interjection Dialog — user]"
+                if msg.role == "user"
+                else "[Interjection Dialog — assistant]"
+            )
+            parts.append(f"\n{label}:")
+            parts.append(msg.content)
 
-            elif msg.role == "assistant":
-                # Extract full conversation from raw_json
-                if msg.raw_json:
-                    try:
-                        conversation = extract_conversation_from_ndjson(msg.raw_json)
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to parse raw_json for attempt {attempt_num} "
-                            f"(falling back to simplified content): {e}"
-                        )
-                        conversation = None
-                    if conversation:
-                        # In 'continue' mode, check if conversation has tool calls
-                        has_tool_calls = mode == "continue" and any(
-                            m.tool_calls for m in conversation
-                        )
-                        formatted = format_conversation_for_llm(conversation)
-                        # In 'continue' mode, preserve tool-call-containing responses untruncated
-                        if not has_tool_calls and len(formatted) > assistant_fallback_limit:
-                            head_size = min(1000, assistant_fallback_limit // 4)
-                            tail_size = assistant_fallback_limit - head_size
-                            formatted = formatted[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + formatted[-tail_size:]
-                        parts.append(f"\n[Assistant Response]:")
-                        parts.append(formatted)
-                    else:
-                        # Fallback to simplified content if parsing fails
-                        content = msg.content
-                        if len(content) > assistant_fallback_limit:
-                            head_size = min(1000, assistant_fallback_limit // 4)
-                            tail_size = assistant_fallback_limit - head_size
-                            content = content[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + content[-tail_size:]
-                        parts.append(f"\n[Assistant Response]:")
-                        parts.append(content)
+        elif msg.role == "user":
+            parts.append(f"\n[User Prompt]:")
+            parts.append(msg.content)
+
+        elif msg.role == "assistant":
+            # Extract full conversation from raw_json
+            if msg.raw_json:
+                try:
+                    conversation = extract_conversation_from_ndjson(msg.raw_json)
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to parse raw_json for attempt {attempt_num} "
+                        f"(falling back to simplified content): {e}"
+                    )
+                    conversation = None
+                if conversation:
+                    # In 'continue' mode, check if conversation has tool calls
+                    has_tool_calls = mode == "continue" and any(
+                        m.tool_calls for m in conversation
+                    )
+                    formatted = format_conversation_for_llm(conversation)
+                    # In 'continue' mode, preserve tool-call-containing responses untruncated
+                    if not has_tool_calls and len(formatted) > assistant_fallback_limit:
+                        head_size = min(1000, assistant_fallback_limit // 4)
+                        tail_size = assistant_fallback_limit - head_size
+                        formatted = formatted[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + formatted[-tail_size:]
+                    parts.append(f"\n[Assistant Response]:")
+                    parts.append(formatted)
                 else:
-                    # No raw_json, use simplified content
+                    # Fallback to simplified content if parsing fails
                     content = msg.content
                     if len(content) > assistant_fallback_limit:
                         head_size = min(1000, assistant_fallback_limit // 4)
@@ -1731,6 +2175,15 @@ def format_history_for_retry(
                         content = content[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + content[-tail_size:]
                     parts.append(f"\n[Assistant Response]:")
                     parts.append(content)
+            else:
+                # No raw_json, use simplified content
+                content = msg.content
+                if len(content) > assistant_fallback_limit:
+                    head_size = min(1000, assistant_fallback_limit // 4)
+                    tail_size = assistant_fallback_limit - head_size
+                    content = content[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + content[-tail_size:]
+                parts.append(f"\n[Assistant Response]:")
+                parts.append(content)
 
     # INVARIANT: emit exactly one RETRY_HISTORY_SEPARATOR per retry-context
     # block, immediately before the continuation notice. The cap locates the
@@ -1978,8 +2431,28 @@ def render_session_text(session: ChatSession, truncate_prompt: int = 500) -> str
 
     for msg in session.messages:
         ts = msg.timestamp[:19]  # Trim microseconds
-        if msg.role == "user":
-            lines.append(f"[User Prompt] (attempt {msg.attempt}, {ts})")
+        kind = getattr(msg, "kind", "")
+        if kind == "dialog":
+            # Labelled distinctly from the step's own turns: the interjection
+            # dialog is a side conversation held at a breakpoint, and reading
+            # it as an ordinary prompt/response pair would misrepresent when
+            # (and why) it happened.
+            from ..i18n import t
+
+            lines.append(
+                t(
+                    "history.dialog.turn_label_user"
+                    if msg.role == "user"
+                    else "history.dialog.turn_label_agent",
+                    timestamp=ts,
+                )
+            )
+            lines.append(msg.content)
+        elif msg.role == "user":
+            label = (
+                "[User Interjection]" if kind == "interjection" else "[User Prompt]"
+            )
+            lines.append(f"{label} (attempt {msg.attempt}, {ts})")
             content = msg.content
             if truncate_prompt and len(content) > truncate_prompt:
                 content = content[:truncate_prompt] + "\n... [truncated]"
@@ -2473,91 +2946,120 @@ def render_session_detailed(
 
     renderables = []
 
-    # Group messages by attempt
-    attempts: dict[int, list[ChatMessage]] = {}
+    # INVARIANT: records render in JSONL (chronological) order — the same rule
+    # ``format_history_for_retry`` follows, and for the same reason. Bucketing
+    # by ``attempt`` misplaced dialog turns: a dialog record carries the STEP's
+    # retry_count while a JSON retry advances LLMCaller's own attempt, so a
+    # dialog held during attempt 2 was filed inside attempt 1 and rendered
+    # BEFORE the very conversation it interrupted. The attempt number still
+    # labels each step record, it just no longer decides the order.
+    step_attempts = {
+        msg.attempt
+        for msg in session.messages
+        if getattr(msg, "kind", "") != "dialog"
+    }
+    multi_attempt = len(step_attempts) > 1
+
     for msg in session.messages:
-        attempts.setdefault(msg.attempt, []).append(msg)
+        attempt_label = (
+            f"Attempt {msg.attempt + 1}" if multi_attempt else ""
+        )
+        if getattr(msg, "kind", "") == "dialog":
+            # ── Interjection dialog turn ──
+            # A side conversation held at a breakpoint, not one of the
+            # step's own prompt/response turns, so it gets its own panel
+            # rather than being folded into either.
+            from ..i18n import t
 
-    for attempt_num in sorted(attempts.keys()):
-        msgs = attempts[attempt_num]
-        attempt_label = f"Attempt {attempt_num + 1}" if len(attempts) > 1 else ""
+            title = t(
+                "history.dialog.panel_title_user"
+                if msg.role == "user"
+                else "history.dialog.panel_title_agent"
+            )
+            renderables.extend([
+                _reverse_title(title, "magenta"),
+                Text(""),
+                Markdown(msg.content or ""),
+                Text(""),
+                _reverse_footer("magenta"),
+                Text(""),
+            ])
 
-        for msg in msgs:
-            if msg.role == "user":
-                # ── Prompt: structured segment display ──
-                segments = segment_prompt(msg.content)
-                prompt_parts = []
-                for seg in segments:
-                    header = Text(f"── {seg['title']} ──", style="bold cyan")
-                    prompt_parts.append(header)
-                    folded = fold_spec_content(seg["title"], seg["content"])
-                    if folded is not None:
-                        for line in folded:
-                            prompt_parts.append(line)
-                    else:
-                        prompt_parts.append(Markdown(seg["content"]))
-                    prompt_parts.append(Text(""))  # spacer
+        elif msg.role == "user":
+            # ── Prompt: structured segment display ──
+            segments = segment_prompt(msg.content)
+            prompt_parts = []
+            for seg in segments:
+                header = Text(f"── {seg['title']} ──", style="bold cyan")
+                prompt_parts.append(header)
+                folded = fold_spec_content(seg["title"], seg["content"])
+                if folded is not None:
+                    for line in folded:
+                        prompt_parts.append(line)
+                else:
+                    prompt_parts.append(Markdown(seg["content"]))
+                prompt_parts.append(Text(""))  # spacer
 
-                title = "Prompt"
-                if attempt_label:
-                    title = f"Prompt ({attempt_label})"
+            title = "Prompt"
+            if attempt_label:
+                title = f"Prompt ({attempt_label})"
+            renderables.extend([
+                _reverse_title(title, "blue"),
+                Text(""),
+                Group(*prompt_parts),
+                Text(""),
+                _reverse_footer("blue"),
+                Text(""),
+            ])
+
+        elif msg.role == "assistant":
+            # ── Response display ──
+            title = "Response"
+            if attempt_label:
+                title = f"Response ({attempt_label})"
+
+            if verbose and msg.raw_json:
+                # Full response with tool calls — reuse _render_ndjson_for_human
+                # Use Text() instead of Markdown() to avoid rendering artifacts
+                # (bracket sequences like [Edit: src/handler.py] get misinterpreted as links)
+                rendered_text = _render_ndjson_for_human(msg.raw_json)
+                body = Text(rendered_text) if rendered_text else Text("(empty response)", style="dim")
                 renderables.extend([
-                    _reverse_title(title, "blue"),
+                    _reverse_title(title, "green"),
                     Text(""),
-                    Group(*prompt_parts),
+                    body,
                     Text(""),
-                    _reverse_footer("blue"),
+                    _reverse_footer("green"),
                     Text(""),
                 ])
-
-            elif msg.role == "assistant":
-                # ── Response display ──
-                title = "Response"
-                if attempt_label:
-                    title = f"Response ({attempt_label})"
-
-                if verbose and msg.raw_json:
-                    # Full response with tool calls — reuse _render_ndjson_for_human
-                    # Use Text() instead of Markdown() to avoid rendering artifacts
-                    # (bracket sequences like [Edit: src/handler.py] get misinterpreted as links)
-                    rendered_text = _render_ndjson_for_human(msg.raw_json)
-                    body = Text(rendered_text) if rendered_text else Text("(empty response)", style="dim")
+            else:
+                # Default: show only the final assistant text
+                if msg.raw_json:
+                    text = _extract_final_text(msg.raw_json)
+                    # If no assistant text but there was tool activity,
+                    # fall back to showing tool activity summary
+                    if not text:
+                        text = _render_ndjson_for_human(msg.raw_json)
+                else:
+                    text = msg.content
+                if text:
                     renderables.extend([
                         _reverse_title(title, "green"),
                         Text(""),
-                        body,
+                        Markdown(text),
                         Text(""),
                         _reverse_footer("green"),
                         Text(""),
                     ])
                 else:
-                    # Default: show only the final assistant text
-                    if msg.raw_json:
-                        text = _extract_final_text(msg.raw_json)
-                        # If no assistant text but there was tool activity,
-                        # fall back to showing tool activity summary
-                        if not text:
-                            text = _render_ndjson_for_human(msg.raw_json)
-                    else:
-                        text = msg.content
-                    if text:
-                        renderables.extend([
-                            _reverse_title(title, "green"),
-                            Text(""),
-                            Markdown(text),
-                            Text(""),
-                            _reverse_footer("green"),
-                            Text(""),
-                        ])
-                    else:
-                        renderables.extend([
-                            _reverse_title(title, "green"),
-                            Text(""),
-                            Text("(empty response)", style="dim"),
-                            Text(""),
-                            _reverse_footer("green"),
-                            Text(""),
-                        ])
+                    renderables.extend([
+                        _reverse_title(title, "green"),
+                        Text(""),
+                        Text("(empty response)", style="dim"),
+                        Text(""),
+                        _reverse_footer("green"),
+                        Text(""),
+                    ])
 
     return renderables
 
@@ -2595,6 +3097,13 @@ def get_detailed_json(
     chronological interleave as the Rich display path so programmatic
     consumers see ``implement-iter{N}`` entries interleaved with
     test/self_check rather than a monolithic implement session.
+
+    Every message carries its record ``kind`` (empty for the step's own
+    prompt/response turns), mirroring the distinction the Rich detailed
+    path draws with its own panel: without the tag an interjection-dialog
+    turn would be byte-identical in shape to the step's own LLM prompt, so
+    a consumer would read the user's dialog message as the prompt actually
+    sent to the step's LLM.
     """
     sessions = get_flow_history(project_root, flow_id)
     sessions = interleave_sessions_for_display(sessions)
@@ -2606,12 +3115,19 @@ def get_detailed_json(
             "messages": [],
         }
         for msg in session.messages:
+            kind = getattr(msg, "kind", "") or ""
             msg_data: dict = {
                 "role": msg.role,
                 "attempt": msg.attempt,
                 "timestamp": msg.timestamp,
+                "kind": kind,
             }
-            if msg.role == "user":
+            if kind == "dialog":
+                # A dialog turn is free-form chat with the working agent, not
+                # a section-structured step prompt; running segment_prompt over
+                # it would invent "sections" that were never sent to the step.
+                msg_data["content"] = msg.content
+            elif msg.role == "user":
                 msg_data["segments"] = segment_prompt(msg.content)
                 msg_data["content"] = msg.content
             elif msg.role == "assistant":

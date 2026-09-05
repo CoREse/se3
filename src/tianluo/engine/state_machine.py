@@ -181,6 +181,32 @@ def _latest_adjudicated_output(
     return None
 
 
+def _latest_adjudicate_step(
+    flow: "FlowInstance", exclude_step_id: Optional[str] = None
+) -> Optional[Any]:
+    """The ADJUDICATE step behind :func:`_latest_adjudicated_output`.
+
+    Exposed separately because the effective-description chain compares a
+    ruling against a dialog revision by their flow-local layer ordinals (and,
+    for pre-counter records only, by wall clock) — and both live on the step
+    object, not on the extracted text.
+    """
+    if not (flow.state and flow.state.step_history):
+        return None
+    for sid in reversed(flow.state.step_history):
+        if exclude_step_id is not None and sid == exclude_step_id:
+            continue
+        s = flow.state.steps.get(sid)
+        if (
+            s
+            and s.step_type == StepType.ADJUDICATE
+            and s.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
+            and s.outputs.get("adjudicated_description")
+        ):
+            return s
+    return None
+
+
 def _latest_investigation_report(flow: "FlowInstance") -> Optional[Dict[str, Any]]:
     """Newest COMPLETED INVESTIGATE step's ``root_cause_report``, or ``None``.
 
@@ -204,21 +230,155 @@ def _latest_investigation_report(flow: "FlowInstance") -> Optional[Dict[str, Any
     return None
 
 
+#: ``flow.state.context`` key holding the description revision chain — the
+#: append-only list of full task descriptions produced by interjection dialogs.
+DESCRIPTION_REVISIONS_KEY = "description_revisions"
+
+#: ``flow.state.context`` key holding the effective-description layer counter.
+DESCRIPTION_LAYER_SEQ_KEY = "description_layer_seq"
+
+#: ``step.outputs`` key carrying an ADJUDICATE ruling's layer sequence number.
+DESCRIPTION_LAYER_SEQ_OUTPUT_KEY = "description_layer_seq"
+
+
+def next_description_layer_seq(flow: "FlowInstance") -> int:
+    """Allocate the next covering-layer ordinal for this flow.
+
+    WHY a persisted logical counter instead of a wall-clock timestamp: the two
+    covering layers (a dialog revision and an ADJUDICATE ruling) can be produced
+    by processes on DIFFERENT machines — a flow paused on one host is resumed on
+    another — and naive ``datetime.now()`` values from unsynchronised clocks do
+    not order those events. A ruling written on a fast-running clock would then
+    outrank a correction the user made afterwards, and the check steps would keep
+    verifying a requirement the user had explicitly replaced. The counter lives in
+    the flow's own persisted state, so it is a single clock domain by
+    construction: whoever writes a layer next reads the flow's current value and
+    increments it, whatever their local time says.
+
+    Gaps are fine (a ruling whose confirmation gate later rejects it consumes an
+    ordinal); only the ordering is load-bearing. Rewind never rolls it back —
+    see ``rewind.FLOW_LEVEL_CONTEXT_KEYS``.
+    """
+    try:
+        current = int(flow.state.context.get(DESCRIPTION_LAYER_SEQ_KEY) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    nxt = current + 1
+    flow.state.context[DESCRIPTION_LAYER_SEQ_KEY] = nxt
+    return nxt
+
+
+def record_description_revision(
+    flow: "FlowInstance",
+    text: str,
+    *,
+    step_id: str = "",
+    source: str = "interjection_dialog",
+) -> Dict[str, Any]:
+    """Append a full revised description to the flow's revision chain.
+
+    WHY a covering layer instead of an appended ``## Additional Instructions``
+    section: the user is not adding a footnote, they are restating what the
+    task IS. As an addendum the superseded requirement stays in the effective
+    text, so a check step keeps verifying against a requirement the user just
+    withdrew. As the newest layer of the description chain it wholly replaces
+    the earlier text, which is what makes check steps accept against the
+    corrected requirement (charter, "Requirement authority of check steps").
+
+    The chain is a flow-level fact: it is never rewound, and it survives every
+    later step.
+    """
+    entry = {
+        "text": text,
+        "step_id": step_id,
+        # Ordering against an ADJUDICATE ruling is decided by ``seq``, not this
+        # timestamp — the timestamp stays for human/audit display and as the
+        # legacy fallback for chains written before the counter existed.
+        "seq": next_description_layer_seq(flow),
+        "timestamp": datetime.now().isoformat(),
+        "source": source,
+    }
+    flow.state.context.setdefault(DESCRIPTION_REVISIONS_KEY, []).append(entry)
+    return entry
+
+
+def latest_description_revision(flow: "FlowInstance") -> Optional[Dict[str, Any]]:
+    """Return the newest revision-chain entry, or ``None``."""
+    chain = flow.state.context.get(DESCRIPTION_REVISIONS_KEY)
+    if not isinstance(chain, list):
+        return None
+    for entry in reversed(chain):
+        if isinstance(entry, dict) and isinstance(entry.get("text"), str) and entry["text"]:
+            return entry
+    return None
+
+
+def _step_settled_at(step: Any) -> Optional[datetime]:
+    """Best-effort "when did this step produce its output" timestamp.
+
+    Only a LEGACY ordering fallback: a step recorded before the layer counter
+    existed carries no ordinal, and a local wall clock is then the only evidence
+    left. New rulings are ordered by ``description_layer_seq``.
+    """
+    for attr in ("completed_at", "started_at"):
+        value = getattr(step, attr, None)
+        if isinstance(value, datetime):
+            return value
+    return None
+
+
+def _coerce_layer_seq(raw: Any) -> Optional[int]:
+    """Normalize a stored layer ordinal, or ``None`` if there isn't one.
+
+    ``None`` is the signal that this layer predates the counter, which is what
+    routes the comparison to the legacy wall-clock fallback.
+    """
+    if raw is None or isinstance(raw, bool) or not isinstance(raw, (int, float, str)):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _revision_layer_seq(revision: Any) -> Optional[int]:
+    """Layer ordinal of a description-revision chain entry."""
+    return _coerce_layer_seq(revision.get("seq")) if isinstance(revision, Mapping) else None
+
+
+def _ruling_layer_seq(step: Any) -> Optional[int]:
+    """Layer ordinal stamped on an ADJUDICATE step's ruling."""
+    outputs = getattr(step, "outputs", None)
+    if not isinstance(outputs, Mapping):
+        return None
+    return _coerce_layer_seq(outputs.get(DESCRIPTION_LAYER_SEQ_OUTPUT_KEY))
+
+
 def _effective_task_description_base(
     flow: "FlowInstance", exclude_step_id: Optional[str] = None
 ) -> str:
     """Pre-interjection base of the effective task_description.
 
-    Resolution order (highest priority first): a completed ADJUDICATE step's
-    ``adjudicated_description`` (the covering patch that resolves a spec
-    contradiction) > a completed DISCOVERY step's ``refined_description`` >
+    Resolution order (highest priority first): the newest of {the description
+    revision chain's last entry, a completed ADJUDICATE step's
+    ``adjudicated_description``} — compared by the time each was PRODUCED, not
+    by kind — then a completed DISCOVERY step's ``refined_description``, then
     the canonical ``flow.task_description``. Does NOT apply user_interjections
-    — that's the ``_compose_effective_task_description`` step. Exposed
-    separately so callers that need to RE-compose after appending an
-    interjection (e.g. ``run.py:_handle_step_interrupt`` on a step whose
-    inputs already carry a previously-composed task_description) can recover
-    the un-decorated base without double-counting prior interjections that are
-    already in the persisted list.
+    — that's the ``_compose_effective_task_description`` step.
+
+    WHY revision-vs-adjudication is resolved by recency rather than a fixed
+    precedence: both are *covering* rewrites of the whole requirement, so
+    whichever was written later is the one that saw the other. A fixed
+    precedence would let a stale adjudication silently outrank a correction the
+    user made afterwards (or the reverse), which is exactly the failure the
+    covering-layer model exists to prevent.
+
+    "Later" is read off the persisted layer ordinal (see
+    ``next_description_layer_seq``), never off a wall clock, because the two
+    layers can be written by processes on different, unsynchronised machines.
+    A layer missing the ordinal predates the counter and therefore loses to any
+    layer carrying one; wall clocks are consulted only when NEITHER side has an
+    ordinal, i.e. both records are pre-upgrade.
 
     ``exclude_step_id`` skips one ADJUDICATE ruling, yielding the base that was
     effective *before* it — used when building a confirmation门 that gates that
@@ -231,11 +391,45 @@ def _effective_task_description_base(
     text fails validation (see ``self_check._build_source_pool``); an
     additional-instructions approach would leave the contradiction in the pool.
     """
+    revision = latest_description_revision(flow)
     adjudicated = _latest_adjudicated_output(
         flow, "adjudicated_description", exclude_step_id=exclude_step_id
     )
-    if isinstance(adjudicated, str) and adjudicated:
-        return adjudicated
+    adjudicated_text = adjudicated if isinstance(adjudicated, str) and adjudicated else None
+
+    if revision is not None and adjudicated_text is not None:
+        adjudicate_step = _latest_adjudicate_step(flow, exclude_step_id=exclude_step_id)
+        revision_seq = _revision_layer_seq(revision)
+        ruling_seq = _ruling_layer_seq(adjudicate_step)
+        if revision_seq is not None and ruling_seq is not None:
+            # Both layers carry a flow-local ordinal: that is the authoritative
+            # "which one saw the other", independent of which machine wrote it.
+            return revision["text"] if revision_seq >= ruling_seq else adjudicated_text
+        if revision_seq is not None or ruling_seq is not None:
+            # WHY the seq-bearing side wins outright when only one side has one:
+            # the ordinal is stamped by code that did not exist before the
+            # upgrade, so a layer WITHOUT one was necessarily written before the
+            # upgrade, hence before any layer that has one. Comparing wall clocks
+            # here would reintroduce the cross-machine skew bug the counter
+            # exists to kill — a pre-upgrade ruling written on a fast clock would
+            # outrank the correction the user made afterwards.
+            return revision["text"] if revision_seq is not None else adjudicated_text
+        # Legacy fallback — NEITHER side carries the counter, so both predate the
+        # upgrade and wall clocks are all that is left. Single-machine flows (the
+        # shape those records came from) order correctly under it.
+        ruled_at = _step_settled_at(adjudicate_step) if adjudicate_step else None
+        revised_at = None
+        try:
+            revised_at = datetime.fromisoformat(str(revision.get("timestamp")))
+        except (TypeError, ValueError):
+            revised_at = None
+        if ruled_at is None or (revised_at is not None and revised_at >= ruled_at):
+            return revision["text"]
+        return adjudicated_text
+    if revision is not None:
+        return revision["text"]
+    if adjudicated_text is not None:
+        return adjudicated_text
     base = flow.task_description or ""
     # Walk step_history in reverse to pick up the latest completed
     # DISCOVERY step's refined_description.
@@ -938,12 +1132,74 @@ class StateMachine:
         Returns:
             Final status of the step
         """
+        # Rewind bookkeeping, before anything else this step could derive:
+        # publish the flow's generation so every LLM call this step makes
+        # stamps its history records with it (and rebuilds context only
+        # from the current generation). Idempotent across retry / resume /
+        # fix-loop re-entries.
+        # INVARIANT: the entry snapshot is taken on ENTRY, before any blocking
+        # pre-step work. ``_ensure_baseline_ready`` can hold the step for a full
+        # baseline test run, and a stop arriving in that window used to find no
+        # snapshot at all — ``restart`` was refused for a step that had not even
+        # started. The snapshot is then AMENDED once the pre-step baselines are
+        # frozen, because the review baseline is part of the derived state a
+        # ``restart`` with ``workspace: keep`` must get back: without the
+        # amendment the re-entry would re-photograph a tree that already
+        # contains the abandoned attempt's edits, silently excluding them from
+        # every later review's diff scope.
+        from .rewind import (
+            bind_flow_generation,
+            has_entry_snapshot,
+            snapshot_step_entry,
+        )
+
+        bind_flow_generation(flow)
+        first_entry = not has_entry_snapshot(flow, step.step_id)
+        snapshot_step_entry(flow, step.step_id)
+
+        # A step re-armed by an interjection dialog's ``continue`` — or rebuilt
+        # by its ``restart`` — carries the conversation's conclusion. Delivered
+        # through the transient extra-prompt channel so it reaches the step's
+        # LLM call whatever prompt template that step uses.
+        #
+        # INVARIANT: the note is scoped to THIS step's single execution. It is
+        # POPPED from the inputs (so a later attempt does not silently re-apply
+        # a one-off instruction) and the process-global transient slot is
+        # cleared again in the finally block below — a non-LLM step (TEST /
+        # COMMIT) never consumes that slot, and leaving it set would deliver
+        # the user's step-specific instruction to an unrelated later LLM step.
+        step_inputs = step.inputs if step.inputs is not None else {}
+        dialog_note = step_inputs.pop("dialog_note", None)
+        dialog_resume = bool(step_inputs.pop("dialog_resume", False))
+        # A terminal event announced for a PREVIOUS run of this step must not
+        # suppress this run's own; the marker is only meaningful while the flow
+        # is looping back to a pause without re-executing anything.
+        step_inputs.pop("failure_announced", None)
+        step.inputs = step_inputs
+
+        # INVARIANT: a dialog conclusion always reaches an agent. A two_phase
+        # step with a cached Phase-1 output skips Phase 1 outright on any
+        # ``external_attempt > 0`` re-arm and runs only the self-contained
+        # Phase-2 extraction (retry context suppressed by contract) — so the
+        # note, the dialog framing and the recomposed description would be
+        # delivered to nobody and the step would complete from the superseded
+        # Phase-1 output. Dropping the cache is what makes the re-arm re-ask the
+        # implementing agent, exactly as a holistic continuation already does.
+        if dialog_note:
+            clear_phase1_cache(self.project_root, flow.flow_id, step.step_id)
+
         # Freeze the pre-implement test baseline before IMPLEMENT's first write,
         # so the test step can tell inherited (baseline) failures from
         # introduced ones. Idempotent across fix-loop re-entries into implement.
         if step.step_type == StepType.IMPLEMENT:
             self._ensure_baseline_ready(flow)
             self._ensure_implementation_review_baseline(flow, step)
+            # Amend only within the step's OWN first entry: on a fix-loop or
+            # ``--resume`` re-entry the original capture is the one a restart
+            # must restore, and re-capturing here would replace it with the
+            # state a failed attempt left behind.
+            if first_entry:
+                snapshot_step_entry(flow, step.step_id, amend=True)
 
         # An interjection can mutate the effective requirements while a
         # SELF_CHECK step is pending or being retried. Refresh here, immediately
@@ -1017,6 +1273,17 @@ class StateMachine:
         # token_usage.add_call_usage. The yielded UsageTotals is captured here so
         # the finally block can read it even after the context manager has reset
         # the contextvar on exit (including the exception path).
+        # Arm the dialog injection channel here — after every early return
+        # above — so the process-global transient slot is only ever set on a
+        # path that reaches the finally block that clears it again.
+        if dialog_note or dialog_resume:
+            from .llm_caller import mark_dialog_resume, set_extra_prompt
+
+            if dialog_note:
+                set_extra_prompt(str(dialog_note))
+            if dialog_resume:
+                mark_dialog_resume()
+
         step_usage = None
         try:
             # Execute handler under the step usage scope. A step carrying a
@@ -1046,6 +1313,18 @@ class StateMachine:
 
         finally:
             step.completed_at = datetime.now()
+
+            # Close the dialog-note scope opened at the top of this method, so
+            # a note this step never consumed (a non-LLM step makes no LLM
+            # call) cannot reach the next step's prompt.
+            if dialog_note or dialog_resume:
+                from .llm_caller import (
+                    clear_transient_extra_prompt,
+                    consume_dialog_resume,
+                )
+
+                clear_transient_extra_prompt()
+                consume_dialog_resume()
 
             # Aggregate this step's token usage before persisting. Best-effort:
             # a fault here must never break the step / flow.
@@ -1757,6 +2036,62 @@ class StateMachine:
         logger.info(f"Transitioned to step: {next_step_type.value}")
 
         return next_step
+
+    def rebuild_rewound_step(
+        self, flow: FlowInstance, step_type: StepType
+    ) -> Step:
+        """Construct the step a rewind landed on, through the normal path.
+
+        A rewind deletes the target step object, so something has to put a new
+        one in its place before the run loop turns again. It is built exactly
+        the way ``transition_to_next`` builds any step — same
+        ``_build_step_inputs``, same cwd resolution — which is what makes the
+        rewound-to step a genuinely FRESH call rather than a retry: it carries
+        no ``retry_count`` and no ``resumed`` flag, so nothing injects the
+        abandoned attempt's context into it. The single exception is the
+        pre-step workspace baseline the rewind carried over (see below), which
+        describes the tree BEFORE the abandoned attempt rather than the attempt
+        itself.
+
+        WHY the run loop cannot just fall through to ``transition_to_next``:
+        after a rewind to the first step there IS no current step to transition
+        *from*, and after a rewind to a later one the previous step is
+        COMPLETED — so the loop would advance past the target instead of
+        re-entering it.
+        """
+        from .rewind import PENDING_REWIND_INPUTS_KEY
+
+        inputs = self._build_step_inputs(flow, step_type)
+        # The one thing carried over from the step this rewind deleted: the
+        # workspace baseline photographed before that step ever ran. It is not
+        # part of the abandoned attempt (which is why a fresh call may hold it)
+        # but the "before" picture the attempt has to be measured against —
+        # without it INVESTIGATE's net-zero-diff guard would re-baseline onto
+        # the very probe edits the discarded attempt left on disk and pass.
+        carried = flow.state.context.pop(PENDING_REWIND_INPUTS_KEY, None)
+        if isinstance(carried, dict):
+            for key, value in carried.items():
+                if value is not None:
+                    inputs[key] = value
+        step = Step(
+            step_type=step_type,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+            cwd=self._merge_step_cwd(flow, step_type),
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        # WHY the routing index is NOT re-derived here: ``rewind_to_step``
+        # already restored the target's own recorded position from its entry
+        # snapshot. Deriving one from ``selected_steps.index(step_type)`` picks
+        # the FIRST occurrence of a repeated step type (CONFIRM appears once
+        # per confirmed step), which would send the transition after this step
+        # into an earlier segment of the flow.
+        self.persistence.save_flow(flow)
+        logger.info(
+            "Rebuilt rewound step %s (%s)", step.step_id, step_type.value
+        )
+        return step
 
     def _transition_to_revision(
         self,
@@ -3158,6 +3493,15 @@ class StateMachine:
             inputs["original_task_description"] = inputs["task_description"]
         inputs["task_description"] = _compose_effective_task_description(flow)
 
+        # A step rebuilt by an interjection dialog's ``restart`` carries the
+        # conversation's conclusion plus the workspace-handling note. Consumed
+        # ONCE, by the first step built after the rewind: it describes the
+        # situation that step is walking into, and would be stale advice for
+        # every step after it.
+        dialog_note = flow.state.context.pop("pending_dialog_note", None)
+        if dialog_note:
+            inputs["dialog_note"] = dialog_note
+
         if step_type in (StepType.PLAN, StepType.IMPLEMENT):
             # The doctrine/granularity a flow entered, forwarded so neither step
             # re-decides anything: PLAN emits under the doctrine the flow was
@@ -3609,8 +3953,72 @@ class StateMachine:
 
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
+        self._capture_workspace_dirty_snapshot(flow)
         self._start_baseline_capture(flow)
         self._freeze_invariant_anchors(flow)
+        # Republish the persisted rewind generation: a resumed flow that had
+        # already been rewound must not have its first LLM call stamped 0 and
+        # rebuild context from the abandoned generation.
+        from .rewind import bind_flow_generation
+
+        bind_flow_generation(flow)
+
+    def _capture_workspace_dirty_snapshot(self, flow: FlowInstance) -> None:
+        """Snapshot the working tree's pre-flow dirty state (once per flow).
+
+        WHY ``baseline_commit`` is not enough: a flow routinely starts on a
+        tree that already carries uncommitted work, so an interjection dialog's
+        ``workspace: reset`` — which puts the tree back to "before this flow" —
+        would otherwise delete work the flow never touched. Captured here,
+        alongside the baseline commit it is the dirty counterpart of, and
+        idempotent so ``--resume`` keeps the original capture.
+
+        Never raises: a flow that cannot snapshot still runs; it merely loses
+        the ability to replay pre-existing dirty state on a later reset, which
+        the reset itself reports as a warning.
+
+        ``flow_started`` is the guard that keeps this honest across ``--resume``:
+        ``init_flow`` also runs on resumption, and a flow that has already
+        executed steps has already changed the tree, so a capture taken now
+        would mislabel the flow's own output as the state that preceded it.
+
+        WHY the guard reads step STATUS and not the presence of a step:
+        ``create_flow`` already appends the first (PENDING) step, so a brand-new
+        flow always has a non-empty ``step_history``. Keying off that made every
+        normal flow snapshot-less, which is precisely the case a later
+        ``workspace: reset`` needs the snapshot for. A flow has "started" only
+        once some step has left PENDING.
+        """
+        try:
+            from .flow_workspace import capture_baseline_dirty_state
+
+            record = capture_baseline_dirty_state(
+                flow,
+                self.project_root,
+                flow_started=self._flow_has_executed_a_step(flow),
+            )
+            if record is not None:
+                self.persistence.save_flow(flow)
+        except Exception as e:  # noqa: BLE001 — see docstring
+            logger.warning("Failed to capture workspace dirty snapshot: %s", e)
+
+    @staticmethod
+    def _flow_has_executed_a_step(flow: FlowInstance) -> bool:
+        """True once any step of *flow* has left ``PENDING``.
+
+        The status table lives in the hot partition, so this answer is available
+        without hydrating any step body — which matters because it is asked on
+        every ``init_flow``, including a ``--resume`` of a flow whose step bodies
+        are still cold.
+        """
+        steps = getattr(flow.state, "steps", None) or {}
+        for step in steps.values():
+            try:
+                if step.status != StepStatus.PENDING:
+                    return True
+            except AttributeError:  # pragma: no cover - defensive
+                continue
+        return False
 
     def _freeze_invariant_anchors(self, flow: FlowInstance) -> None:
         """Freeze the INVARIANT_CHECK anchor set once per flow, at flow start.

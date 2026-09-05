@@ -502,7 +502,8 @@ MSG_HISTORY_REQUEST = "history_request"
 MSG_HISTORY_INDEX_REQUEST = "history_index_request"
 #: server → daemon: deliver a mid-flow user interjection to a running flow.
 #: The daemon turns it into an ``interjection``-kind call file under
-#: ``tianluo/calls/`` which ``luo run`` drains at the next step boundary.
+#: ``tianluo/calls/``; ``luo run`` picks it up mid-call (gracefully stopping
+#: the LLM and opening the interjection dialog) or at a pause point.
 MSG_INTERJECT_FLOW = "interject_flow"
 
 #: server → daemon: end (terminate + archive) a session by ``flow_id``. The
@@ -736,6 +737,18 @@ CALL_KIND_DISCOVERY_CONFIRM = "discovery_confirm"
 #: operator to guess a free-text answer. The structured reply travels back as
 #: ``{"approved": bool, "feedback": ...}`` through the existing respond path.
 CALL_KIND_CONFIRM = "confirm"
+#: One round of the mid-flow interjection dialog: the flow was interrupted (by
+#: Ctrl-C or by a web interjection), is holding a read-only conversation with
+#: the agent that was doing the work, and is waiting for the operator's next
+#: message — or for their confirmation of a decision the dialog has settled on.
+#: The call's ``context`` carries ``flow_id`` / ``step_id``, the ``transcript``
+#: so far (a list of ``{role, content}``), and — once the dialog proposes one —
+#: a ``decision`` object (``action`` / ``instruction`` / ``revised_description``
+#: / ``restart_step_id`` / ``workspace``) plus the ``rewind_targets`` the
+#: operator may restart from. The reply travels back either as free text (the
+#: next dialog turn) or as ``{"decision": {...}}`` (confirm, with any field
+#: edited).
+CALL_KIND_DIALOG = "dialog"
 #: Every recognised interaction-call kind.
 CALL_KINDS: FrozenSet[str] = frozenset(
     {
@@ -745,6 +758,7 @@ CALL_KINDS: FrozenSet[str] = frozenset(
         CALL_KIND_CLI_CONFIRM,
         CALL_KIND_DISCOVERY_CONFIRM,
         CALL_KIND_CONFIRM,
+        CALL_KIND_DIALOG,
     }
 )
 
@@ -1088,8 +1102,10 @@ def make_interject_flow(
     *text* is the user-typed instruction to fold into the running flow (the
     same content a local operator would type at the Ctrl-C interjection
     prompt). The daemon writes *text* as an ``interjection``-kind call file
-    under the flow's ``tianluo/calls/`` directory; the running ``luo run`` process
-    drains it at the next step boundary and folds it into ``user_interjections``.
+    under the flow's ``tianluo/calls/`` directory; the running ``luo run``
+    process interrupts its in-flight LLM call and opens the interjection
+    dialog with *text* as the opening message (or, at a pause point, opens
+    that dialog there). It is never folded into the task description silently.
     """
     return Message(
         type=MSG_INTERJECT_FLOW,

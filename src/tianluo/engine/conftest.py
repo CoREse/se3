@@ -142,3 +142,77 @@ def _force_en_us_ui_language(monkeypatch):
     yield
     _i18n.reset_language()
     _i18n.clear_caches()
+
+
+# ---------------------------------------------------------------------------
+# Lethal-signal guard
+# ---------------------------------------------------------------------------
+# WHY this exists: on 2026-09-02/03 the suite took the whole machine down three
+# times. A runner test drove ``_run_single_with_monitor`` with a
+# ``MagicMock()`` process; ``int(MagicMock().pid)`` is 1, so
+# ``resolve_process_group`` returned init's group (1) and the group-reclaim
+# path executed ``os.killpg(1, SIGKILL)`` — which glibc turns into
+# ``kill(-1, SIGKILL)``: every process owned by the user, including the
+# daemon, VS Code and the SSH session, died. The symptom looked like an OOM /
+# memory leak but was a signal. This fixture turns such a call into a loud
+# test failure instead of a delivered signal.
+_LETHAL_KILL_LOG_ENV = "TIANLUO_TEST_LETHAL_KILL_LOG"
+
+
+def _lethal_signal_target(kind: str, target: int, own_pgrp: int) -> bool:
+    """True when *target* would reach pytest itself or every user process."""
+    try:
+        target = int(target)
+    except (TypeError, ValueError):
+        return True  # a non-int (e.g. MagicMock) is never a valid target
+    if kind == "killpg":
+        # killpg(1) == kill(-1): the whole user; killpg(0) / own group: pytest.
+        return target <= 1 or target == own_pgrp
+    # kill(-1): the whole user; kill(0) / kill(-own): pytest's own group;
+    # kill(1): init.
+    return target in (-1, 0, 1) or target == -own_pgrp
+
+
+@pytest.fixture(autouse=True)
+def _forbid_lethal_process_signals(monkeypatch):
+    """Refuse ``os.kill`` / ``os.killpg`` aimed at pgid<=1 or at pytest itself.
+
+    Signal 0 (the aliveness probe) is refused too: it is the precursor of the
+    lethal kill and is just as much a sign that a test fed a fake process into
+    a real process-group path.
+    """
+    real_killpg = getattr(os, "killpg", None)
+    real_kill = os.kill
+    own_pgrp = os.getpgrp() if hasattr(os, "getpgrp") else -1
+    log_path = os.environ.get(_LETHAL_KILL_LOG_ENV)
+
+    def _refuse(kind: str, target, sig) -> None:
+        nodeid = os.environ.get("PYTEST_CURRENT_TEST", "<unknown test>")
+        msg = (
+            f"refusing os.{kind}({target!r}, {sig!r}) from {nodeid}: it would "
+            "signal pytest itself or every process of this user (this is what "
+            "took the machine down on 2026-09-02/03). Give the fake process a "
+            "real-looking pid or stub the process-group helpers."
+        )
+        if log_path:
+            try:
+                with open(log_path, "a", encoding="utf-8") as fh:
+                    fh.write(msg + "\n")
+            except OSError:
+                pass
+        raise RuntimeError(msg)
+
+    def killpg(pgid, sig):
+        if _lethal_signal_target("killpg", pgid, own_pgrp):
+            _refuse("killpg", pgid, sig)
+        return real_killpg(pgid, sig)
+
+    def kill(pid, sig):
+        if _lethal_signal_target("kill", pid, own_pgrp):
+            _refuse("kill", pid, sig)
+        return real_kill(pid, sig)
+
+    if real_killpg is not None:
+        monkeypatch.setattr(os, "killpg", killpg)
+    monkeypatch.setattr(os, "kill", kill)
+    yield

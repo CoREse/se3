@@ -767,6 +767,7 @@ class Daemon:
             resume_handler=self._handle_resume_request,
             end_session_handler=self._handle_end_session_request,
             respond_handler=self._handle_respond_request,
+            interject_handler=self._handle_interject_request,
             project_handler=self._handle_project_request,
             upload_handler=self._handle_upload_request,
             fetch_handler=self._handle_fetch_request,
@@ -899,25 +900,97 @@ class Daemon:
         web-published discovery task would never advance past its first
         question. So once the answer is durably on disk we re-spawn the paused
         flow with ``--resume`` to carry the conversation forward.
+
+        The flow to wake is read off the answered call file's ``context.flow_id``
+        rather than assumed to be the root's ``engine.json`` occupant: a dialog
+        round, a retry decision or a confirm gate may belong to a flow that a
+        later flow has since displaced into ``state/resumable/<flow_id>.json``,
+        and waking the occupant would run unrelated work while the flow that
+        asked stays paused with its answer unread. Resolved *before* the write,
+        so a live consumer that reacts to the response by deleting the call file
+        cannot race the lookup. An unaddressed (legacy) call still resolves to
+        ``""`` and falls back to the occupant.
         """
+        from ..engine.interaction_calls import flow_id_for_call
         from .client import _default_respond_handler
 
+        try:
+            flow_id = flow_id_for_call(project_root, call_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to resolve owning flow for call %s", call_id)
+            flow_id = ""
         _default_respond_handler(call_id, project_root, response)
-        self._resume_paused_flow(project_root)
+        self._resume_paused_flow(project_root, flow_id=flow_id)
 
-    def _resume_paused_flow(self, project_root: str) -> None:
-        """Re-spawn the project's flow with ``--resume`` when it is PAUSED.
+    def _handle_interject_request(
+        self, flow_id: str, project_root: str, text: str
+    ) -> None:
+        """Adapt a server INTERJECT_FLOW: write the interjection, then resume.
 
-        Best-effort: a missing/unreadable ``engine.json``, a non-PAUSED flow,
+        The write alone is only half the job, for the same reason it is only
+        half of RESPOND_CALL: a daemon-spawned flow (``luo run --output-format
+        json``) EXITS its process when it pauses — for a discovery question, a
+        confirmation gate, or a dialog round — so nothing is left polling
+        ``tianluo/calls/``. A web interjection sent to such a flow would sit on
+        disk until some unrelated response happened to wake it. Resuming here
+        makes the interjection arrive as what decision 5 says it is: the paused
+        conversation's next user message.
+
+        ``_resume_paused_flow`` is itself the guard — it is a no-op for a
+        RUNNING flow (whose live process drains the file on its own), for a
+        terminal one, and whenever a live ``luo run`` already owns the project.
+        """
+        from .client import _default_interject_handler
+
+        _default_interject_handler(flow_id, project_root, text)
+        self._resume_paused_flow(project_root, flow_id=flow_id)
+
+    def _resume_paused_flow(
+        self, project_root: str, flow_id: Optional[str] = None
+    ) -> None:
+        """Re-spawn a paused flow with ``--resume``.
+
+        With *flow_id* given, THAT flow is the one woken: the root's single
+        ``engine.json`` slot may have since been taken by a later flow, and
+        waking whoever happens to occupy it would run an unrelated flow while
+        the addressed one stays paused. The per-flow resumable snapshot is the
+        fallback lookup for exactly that case. Without a *flow_id* — an
+        unaddressed legacy call file, or a caller that has no flow in hand —
+        the active ``engine.json`` flow is the target.
+
+        Best-effort: a missing/unreadable state file, a non-PAUSED flow,
         or a flow that already has a live ``luo run`` process is left alone.
         """
         root = Path(project_root).resolve() if project_root else Path.cwd()
-        engine_json = runtime_dir(root) / "state" / "engine.json"
+        state_dir = runtime_dir(root) / "state"
+        engine_json = state_dir / "engine.json"
         # Only flow_id/status are needed, so read the size-guarded header rather
         # than fully parsing a possibly tens-of-MB legacy engine.json (issue
         # #243 A2). The caller dispatches this via asyncio.to_thread, so the
         # guard is the second line of defence against burning a core.
         data = read_engine_header(engine_json, active=True)
+        wanted = str(flow_id or "").strip()
+        if wanted and not (
+            isinstance(data, dict) and str(data.get("flow_id") or "") == wanted
+        ):
+            snapshot_file = state_dir / "resumable" / f"{wanted}.json"
+            snapshot = read_engine_header(snapshot_file)
+            # The snapshot's embedded flow_id must match what was asked for, so
+            # a stale or misnamed artifact can never authorize resuming a
+            # different flow than the interjection was addressed to.
+            if (
+                isinstance(snapshot, dict)
+                and str(snapshot.get("flow_id") or "") == wanted
+            ):
+                data = snapshot
+            else:
+                logger.debug(
+                    "Flow %s not found in engine.json or resumable snapshots "
+                    "under %s; skipping resume",
+                    wanted,
+                    root,
+                )
+                return
         if not isinstance(data, dict):
             logger.debug("No readable engine.json under %s; skipping resume", root)
             return

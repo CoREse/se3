@@ -174,7 +174,13 @@ class TestLLMCallerRetryMode:
             assert len(calls_made) == 1
             args, kwargs = calls_made[0]
             assert args == (Path("/tmp"), "test-flow", "test-step")
-            assert kwargs == {"mode": "continue", "current_fix_iteration": 0}
+            # ``current_generation`` rides along so a rebuild after a rewind
+            # cannot resurrect the generation it was rewound away from.
+            assert kwargs == {
+                "mode": "continue",
+                "current_fix_iteration": 0,
+                "current_generation": caller2.generation,
+            }
         finally:
             ch_mod.format_history_for_retry = original_fn
 

@@ -1,0 +1,52 @@
+id: '302'
+description: 'runner 进程组回收路径会执行 os.killpg(1, SIGKILL)，等价于 kill(-1, SIGKILL)，杀掉本用户名下全部进程（daemon、luo
+  run、VS Code、SSH 会话），表现为"整台机器挂掉"。09-02 21:56、09-03 15:31、09-03 15:38 三次挂机全部对应 implement
+  步骤里 agent 跑 `pytest tests/` 后 30 秒内；daemon 是 signal=KILL 而非 OOM（Mem peak 仅 5.5G/7.6G，容器
+  7 天只有 2 次 OOM kill），每次挂机后 journal 里 user systemd 紧跟着重启。不是内存泄漏。
+
+
+  根因链条（均在 2026-09 的 graceful-stop / 进程组回收 WIP 代码中）：
+
+  1. src/tianluo/agent_runner.py resolve_process_group() 对 proc.pid 直接调 os.getpgid()。测试用
+  MagicMock() 充当 Popen，int(MagicMock().pid) == 1，于是 os.getpgid(1) 返回 init 的进程组 1。
+
+  2. claude_runner.py / codex_runner.py 的 finally 分支在子进程已退出时调用 ensure_process_group_reclaimed(proc_pgid)，pgid
+  为 1 时 os.killpg(1, 0) 探活成功，等 GROUP_DRAIN_SECONDS=5s 后执行 os.killpg(1, SIGKILL)，glibc
+  将其翻译为 kill(-1, SIGKILL)。
+
+  3. tests/test_claude_runner.py::TestStderrIsolation 的两个测试（test_monitored_child_uses_separate_stderr、test_run_with_monitor_stdout_prefix_does_not_contain_stderr_messages）正是这样的
+  MagicMock 进程，且 poll() 返回 0。
+
+
+  已做的临时处置（本次会话）：
+
+  - 两个测试显式设置 mock_proc.pid = None，让 resolve_process_group 退出进程组处理。
+
+  - tests/conftest.py 与 src/tianluo/engine/conftest.py 新增 autouse fixture _forbid_lethal_process_signals：拦截
+  os.kill / os.killpg，目标为 pgid<=1、pytest 自身进程组、-1/0/1 时抛 RuntimeError 而不发信号；设置环境变量
+  TIANLUO_TEST_LETHAL_KILL_LOG 可把触发的测试记录到文件。全量套件在该保险下跑过：11740 passed，仅上述两个测试触发拦截。
+
+
+  本 issue 要求的正式修复（生产代码侧，防止任何调用方再踩到）：
+
+  - resolve_process_group() 仅接受 isinstance(pid, int) 且 pid > 1 的 pid，其余返回 None；不得依赖
+  int() 隐式转换。
+
+  - signal_process_group() / ensure_process_group_reclaimed() / process_group_alive()
+  拒绝 pgid <= 1 以及 pgid == os.getpgrp()（luo run 自身进程组），拒绝时记录 warning 并直接返回，这是最后一道硬保险。
+
+  - 同样审查 claude_interactive_runner.py 里的 _killpg 与 end_session_cmd.py 的 os.kill 路径是否存在同类目标校验缺失。
+
+  - 为上述保护补充单元测试（pgid 为 1、0、None、MagicMock、自身 pgrp 时均不得调用 os.killpg）。'
+status: open
+tags:
+- runner
+- process-group
+- safety
+- tests
+source: human
+created_at: '2026-09-03T16:14:45.009590'
+updated_at: '2026-09-03T16:14:45.009590'
+title: 进程组回收路径 os.killpg(1) 等价 kill(-1) 杀掉全用户进程（被误判为内存泄漏/OOM）
+priority: high
+type: bug

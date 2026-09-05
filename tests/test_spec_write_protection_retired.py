@@ -108,7 +108,13 @@ class TestNoGuardPlugin:
         from tianluo.claude_runner import ClaudeCodeRunner
         from tianluo.codex_runner import CodexRunner
 
-        expected = ["self", "prompt", "read_only", "context_files", "invocation_intent"]
+        expected = [
+            "self", "prompt", "read_only", "context_files", "invocation_intent",
+            # The strict read-only posture (the interruption dialog's lock):
+            # every runner must be able to receive it, even where its own
+            # sandbox already satisfies it.
+            "deny_shell",
+        ]
         for cls in (
             AgentRunner,
             ClaudeCodeRunner,

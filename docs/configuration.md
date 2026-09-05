@@ -258,6 +258,7 @@ Which agent chain runs which step.
 ```yaml
 llm_caller:
   defaults: [primary, cheap]
+  resume_strategy: native
   steps:
     implement: [primary]
     self_check: [[primary], [gpt]]
@@ -266,12 +267,55 @@ llm_caller:
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
 | `defaults` | list of agent names | built-in PATH probe | The default rotation chain for any step without an override. Written order **is** rotation order. |
+| `resume_strategy` | `native` \| `rebuild` | `native` | How a continuation reaches the agent. `native` continues the recorded provider session in place; `rebuild` always reconstructs the conversation into a new prompt. An unrecognised value warns and falls back to `native`. |
 | `steps` | mapping `<step> → list of agent names` | `{}` | Per-step hard overrides. Keys must be `StepType` values; unknown keys log a one-shot "likely a typo" warning and are ignored. |
 
 Rotation semantics: within a chain, the `LLMCaller` rotates to the next agent on
 *infrastructure* errors. Rotation happens **strictly inside the selected list** —
 a single runner never rotates on its own, and a step override never spills over
 into `defaults`.
+
+#### `resume_strategy` — native session resume vs. rebuilt context
+
+Every continuation (after an interjection dialog, after a failure you chose to
+retry, on `luo run --resume`, on a JSON retry, and on the engine's own internal
+retries) first tries to continue the agent's **existing provider session**:
+`claude -p --resume <session_id>` for the Claude adapters,
+`codex exec resume <thread_id>` for codex. The working directory a call was
+opened in is always written to the step's history *before* the subprocess
+starts (a resume must be launched from the same cwd), but **when the session id
+itself lands depends on the provider**:
+
+| Adapter | Session identity | Recorded |
+|---------|------------------|----------|
+| `claude-code`, `claude-interactive` | pre-allocated by tianluo and passed in as `--session-id <uuid>` | with the prompt, before the subprocess starts |
+| `codex` | minted by the CLI, first seen in its `thread.started` event | the instant that event streams — the prompt record is written with an empty id and back-filled to the real one within the same attempt |
+
+So a Claude attempt always leaves an addressable session, even one killed
+before it produced a single line. A codex attempt is addressable only from
+`thread.started` onwards: interrupt it earlier (or have it fail to start at
+all) and there is no thread id to resume, so the next continuation takes the
+rebuilt-context path below. That is the expected behaviour, not a lost session.
+
+Either way the invariant holds that both records of one attempt name the same
+session, and never a previous attempt's.
+
+Native resume is used only when the recorded session's agent is still in the
+configured chain (matched by name and runner type) and that runner declares the
+capability. Otherwise — and whenever a resume fails for any reason (a pruned
+session, an unsupported flag, a transcript the provider will not continue) — the
+engine falls back to the rebuilt-context path without failing the call, and a
+rotation to a different agent always rebuilds. Every attempt records which
+strategy it used.
+
+A two-phase step's Phase-2 JSON extraction is deliberately invisible to this
+selection. It opens its own provider session whose whole content is "re-express
+this text as JSON", so a continuation resumes the Phase-1 working session behind
+it (or rebuilds) rather than the re-formatter.
+
+Set `rebuild` to take the provider's own session state out of the picture while
+troubleshooting; it costs more input tokens per continuation but is otherwise
+behaviour-preserving.
 
 #### Pitfall 2 — `llm_caller.steps.<step>` is a hard override with no fallback
 

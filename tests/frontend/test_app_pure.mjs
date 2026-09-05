@@ -7035,6 +7035,60 @@ await checkAsync("reply-context: expanding a clipped call prompt lazy-loads the 
   }
 });
 
+await checkAsync("reply-context: a republished dialog round re-fetches its own prompt", async () => {
+  // An interjection dialog republishes EVERY round under one call_id (the
+  // console shows a single growing conversation), so a body cached by id alone
+  // kept showing round 1 — hiding, above all, the apply-failure banner that
+  // explains why a confirmed decision did not execute. The backend stamps a
+  // content hash (`context.prompt_revision`) that the cache key includes.
+  const saved = globalThis.fetch;
+  const reply = document.getElementById("flow-reply-context");
+  const ROUND1 = "a".repeat(4000) + " round one";
+  const ROUND2 = "b".repeat(4000) + " round two (apply failed)";
+  app.state.flowInterjectRequested = false;
+  app.state.flowReplyPromptExpanded = {};
+  app.state.flowReplyPromptScroll = {};
+  app.state.flowReplyPromptFull = {};
+  try {
+    let body = ROUND1;
+    globalThis.fetch = () => Promise.resolve({
+      ok: true, status: 200,
+      json: () => Promise.resolve({ machine_id: "m1", call: { prompt: body } }),
+    });
+    const publish = (rev) => app.renderInterventions({
+      status: "running",
+      pending_calls: [{
+        call_id: "dialog_step1",
+        kind: "dialog",
+        prompt: "z".repeat(200) + "...",
+        project_root: "/p",
+        context: { prompt_revision: rev },
+      }],
+    });
+
+    publish("rev1");
+    findOne(reply, "flow-reply-prompt-toggle").dispatch("click");
+    await flushTicks();
+    assert.ok(findOne(reply, "flow-reply-prompt").textContent.includes("round one"),
+      "round 1 renders its own body");
+
+    body = ROUND2;
+    app.state.flowReplyPromptExpanded = {};
+    publish("rev2");
+    assert.ok(!findOne(reply, "flow-reply-prompt").textContent.includes("round one"),
+      "round 2 must not mount round 1's cached body");
+    findOne(reply, "flow-reply-prompt-toggle").dispatch("click");
+    await flushTicks();
+    assert.ok(findOne(reply, "flow-reply-prompt").textContent.includes("round two"),
+      "round 2 must not render round 1's cached body");
+    // Both rounds are cached side by side, keyed by their own revision.
+    assert.equal(app.state.flowReplyPromptFull["dialog_step1@rev1"], ROUND1);
+    assert.equal(app.state.flowReplyPromptFull["dialog_step1@rev2"], ROUND2);
+  } finally {
+    globalThis.fetch = saved;
+  }
+});
+
 await checkAsync("reply-context: a short (un-clipped) call prompt never fetches detail", async () => {
   // A prompt at/under DESC_CLIP is carried verbatim, so expanding it must not
   // fire a needless detail pull.
@@ -8349,5 +8403,20 @@ await messageHistoryMod.registerMessageHistoryTests({ app, check, checkAsync, fi
 // auto-expanded, so a failure-heavy session still opens with zero requests.
 const lazyDetailMod = await import("./history_lazy_detail.test.mjs");
 await lazyDetailMod.registerHistoryLazyDetailTests({ app, check, checkAsync, findOne, findAll });
+
+// ---------------------------------------------------------------------------
+// Mid-flow interjection dialog (chat record + call kind + reply panel)
+// ---------------------------------------------------------------------------
+//
+// An interjection is now a read-only conversation held at the breakpoint that
+// settles into a confirmed decision. These checks hold the three surfaces the
+// console owns: a `kind:"dialog"` turn renders as its own always-expanded
+// labelled record (it is text the operator typed, not a generated prompt), the
+// `dialog` call kind is a first-class intervention, and the reply panel shows
+// the transcript plus every decision field as an EDITABLE control — a decision
+// executes only after confirmation, and the operator must be able to change
+// any field first.
+const interjectionDialogMod = await import("./interjection_dialog.test.mjs");
+interjectionDialogMod.registerInterjectionDialogTests({ app, check, findOne, findAll });
 
 console.log(`\n${passed} checks passed.`);

@@ -1572,6 +1572,48 @@ def _read_llm_caller_section(
     return llm_caller
 
 
+# Valid values of ``llm_caller.resume_strategy``.
+RESUME_STRATEGY_NATIVE = "native"
+RESUME_STRATEGY_REBUILD = "rebuild"
+RESUME_STRATEGIES = (RESUME_STRATEGY_NATIVE, RESUME_STRATEGY_REBUILD)
+
+
+def load_resume_strategy(project_root: Optional[Path] = None) -> str:
+    """Resolve ``llm_caller.resume_strategy`` (``native`` by default).
+
+    ``native`` lets LLMCaller continue a recorded provider session in place
+    whenever one is reachable; ``rebuild`` forces every continuation through
+    the history-reconstruction path. The escape hatch exists for
+    troubleshooting: when a run misbehaves it must be possible to take the
+    provider's own session state out of the picture without editing code.
+
+    Follows the documented top-level merge rule (project overrides global at
+    the key level). An unrecognised value degrades to ``native`` with a
+    warning — a typo in a diagnostic switch must never abort a flow.
+    """
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    for data, label in (
+        (project_data, project_source_label),
+        (global_data, "~/.se3/config.yaml"),
+    ):
+        section = _read_llm_caller_section(data, label)
+        if section is None:
+            continue
+        raw = section.get("resume_strategy")
+        if raw is None:
+            continue
+        value = str(raw).strip().lower()
+        if value in RESUME_STRATEGIES:
+            return value
+        logger.warning(
+            "%s: llm_caller.resume_strategy must be one of %s (got %r); "
+            "falling back to %r",
+            label, list(RESUME_STRATEGIES), raw, RESUME_STRATEGY_NATIVE,
+        )
+        return RESUME_STRATEGY_NATIVE
+    return RESUME_STRATEGY_NATIVE
+
+
 def _explicit_defaults(
     data: dict, source_label: str,
 ) -> Optional[list[str]]:

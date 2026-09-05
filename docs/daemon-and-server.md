@@ -885,6 +885,38 @@ From the frontend you can:
   answer and send it; the server routes it as a `RESPOND_CALL` to the owning
   daemon, which writes the response into that project's `tianluo/calls/` queue and
   resumes the flow.
+- **Interject into a running flow.** The **Interject** button pushes an
+  instruction to a flow that is mid-call. This does not append a note to the
+  next step: the run gracefully stops the in-flight agent call and opens an
+  *interjection dialog* — a read-only conversation with the agent that was
+  doing the work, held inside its own provider session. Each round of that
+  conversation surfaces as a `dialog` pending call carrying the transcript so
+  far; you reply with free text to keep talking, and once the agent proposes a
+  decision (`continue` / `restart` / `exit`, with an optional one-off
+  instruction, a complete revised task description, a restart target and
+  `keep`/`reset` workspace handling) the panel renders every field as an
+  editable control plus an **Apply decision** button. Nothing executes until
+  you apply it — and because those fields are editable, turning the proposal
+  into `restart` + `reset` first fetches a preview of exactly what that reset
+  would discard (working-tree changes and the flow's commits) and only lets you
+  apply it once that preview is on screen. The **Apply decision** button always
+  sends the fields you can see, so it executes what you approved even if the
+  terminal has meanwhile edited the round. A *fieldless* confirmation — the
+  bare `confirm` option a non-WebUI client may send — is instead bound to the
+  round it answered: when the round has been amended since, it is refused and
+  the current one is republished for a fresh confirmation. Re-sending the same
+  fieldless answer does not make it valid — that is what a client blindly
+  retrying a timed-out request would do, having never seen the new round. Such
+  a client confirms by echoing the round's `decision_revision` (published in
+  the call's context) alongside its `confirm`, which binds the answer to the
+  round it actually rendered. Interjecting into a
+  flow that is
+  *paused* (a DISCOVERY question, a confirmation gate, a Retry/Skip/Abort gate)
+  works too: the daemon wakes the paused flow so the message is picked up
+  immediately rather than waiting for some unrelated answer. Interjecting into
+  a flow that is paused in DISCOVERY is
+  different by design: there you are already at a conversation prompt, so the
+  text is delivered as that discovery's next reply instead.
 
 The frontend is read-only over the WebSocket (it only *listens* for state
 pushes); the New Task and respond actions go through the server's REST API.

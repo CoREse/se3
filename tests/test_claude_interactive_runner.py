@@ -432,6 +432,56 @@ class TestTerminate:
         assert signal.SIGKILL in sigs  # still alive after SIGTERM (killpg mocked)
         assert fake.closed is True
 
+    def test_a_surviving_grandchild_is_still_reclaimed(
+        self, no_kill, monkeypatch
+    ):
+        """Claude can answer SIGINT cleanly while a Bash grandchild ignores it.
+
+        The direct child is then reaped and reports "not alive", and gating the
+        signals on that skipped them entirely — the grandchild went on editing
+        the workspace after the dialog (a read-only conversation) had opened.
+        """
+        runner = _make_runner()
+        fake = FakePty()
+        # Captured at spawn, while the pid is still live.
+        runner._remember_pgid(fake)
+        fake._alive = False  # the CLI wound down; its group did not
+
+        drained = []
+        monkeypatch.setattr(
+            cir, "ensure_process_group_reclaimed",
+            lambda pgid, **k: drained.append(pgid),
+        )
+        runner._terminate(fake)
+
+        sigs = [s for (pgid, s) in no_kill if pgid == fake.pid]
+        assert signal.SIGTERM in sigs
+        assert signal.SIGKILL in sigs
+        assert drained == [fake.pid]
+
+    def test_graceful_stop_drains_the_group_after_the_child_exits(
+        self, no_kill, monkeypatch
+    ):
+        runner = _make_runner()
+        fake = FakePty()
+        drained = []
+        monkeypatch.setattr(
+            cir, "ensure_process_group_reclaimed",
+            lambda pgid, **k: drained.append(pgid),
+        )
+
+        def _killpg(pgid, sig):
+            no_kill.append((pgid, sig))
+            if sig == signal.SIGINT:
+                fake._alive = False  # the CLI closes its turn and exits
+
+        monkeypatch.setattr(os, "killpg", _killpg)
+        runner._graceful_stop(fake)
+
+        assert (fake.pid, signal.SIGINT) in no_kill
+        # Returning here without draining would leave the grandchild running.
+        assert drained == [fake.pid]
+
     def test_terminate_none_is_noop(self):
         runner = _make_runner()
         runner._terminate(None)  # must not raise
@@ -1480,6 +1530,60 @@ class TestSessionTranscriptWatcher:
         assert watcher.usage["input_tokens"] == 10
         assert watcher.usage["output_tokens"] == 4
         assert watcher.line_count == 1
+
+    def test_resuming_watcher_ignores_the_previous_turn(self, tmp_path):
+        """A resumed launch reads only what the resumed turn appends.
+
+        Starting at byte 0 re-emitted the whole prior session as this attempt's
+        output, double-counted its tokens, and — because that session ends on a
+        terminal record with an idle mtime — satisfied turn_complete() before
+        the new prompt had even been typed.
+        """
+        projects = tmp_path / "projects"
+        cwd = "/p"
+        target = projects / munge_cwd(cwd)
+        prior = target / "sid-1.jsonl"
+        _write_jsonl(
+            prior,
+            [
+                _assistant_record(
+                    cwd=cwd, text="old answer",
+                    usage={"input_tokens": 100, "output_tokens": 50},
+                )
+            ],
+        )
+        os.utime(prior, (12345.0, 12345.0))
+
+        watcher = SessionTranscriptWatcher(
+            cwd=cwd, projects_dir=projects, session_id="sid-1", resuming=True,
+        )
+        watcher.snapshot()
+        assert watcher.locate() is True
+        assert watcher.path == prior
+
+        # Nothing from the previous turn is this attempt's output ...
+        assert watcher.poll() == []
+        assert watcher.usage["input_tokens"] == 0
+        # ... nor its terminality, and the stale mtime cannot read as idleness.
+        assert watcher.last_meaningful_record is None
+        assert turn_complete(True, watcher.last_meaningful_record) is False
+        assert watcher.write_activity() > 12345.0
+
+        # The resumed turn's own records ARE read.
+        with open(prior, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(_assistant_record(
+                cwd=cwd, text="new answer",
+                usage={"input_tokens": 7, "output_tokens": 3},
+            )) + "\n")
+        lines = watcher.poll()
+        assert any("new answer" in ln for ln in lines)
+        assert not any("old answer" in ln for ln in lines)
+        assert watcher.usage["input_tokens"] == 7
+
+    def test_fresh_watcher_is_not_resuming_by_default(self, tmp_path):
+        projects = tmp_path / "projects"
+        watcher = SessionTranscriptWatcher(cwd="/p", projects_dir=projects)
+        assert watcher.resuming is False
 
     def test_usage_accumulates_across_messages(self, tmp_path):
         projects = tmp_path / "projects"

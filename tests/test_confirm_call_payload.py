@@ -317,7 +317,9 @@ def _drive_cli_confirm(monkeypatch, flow, confirm_step, tmp_project, *, approve=
     """Drive _handle_confirm_pause past its interactive prompt."""
     from tianluo.commands import run as run_mod
 
-    monkeypatch.setattr(run_mod, "_drain_pending_interjections", lambda *a, **k: [])
+    # No queued interjection: the gate presents its menu rather than opening
+    # the mid-flow dialog first.
+    monkeypatch.setattr(run_mod, "_collect_pending_dialog_messages", lambda *a, **k: [])
     monkeypatch.setattr(run_mod, "prompt_user_choice", lambda *a, **k: 0 if approve else 2)
 
     class _Persistence:

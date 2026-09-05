@@ -26,6 +26,9 @@ class TestPromptUserChoiceNonInteractive:
         def _raise_eof(*_a, **_k):
             raise EOFError
 
+        # ``input()`` is only reached on a TTY — off one the menu answer comes
+        # from the shared stdin funnel — so pin the TTY branch here.
+        monkeypatch.setattr(run.sys.stdin, "isatty", lambda: True)
         monkeypatch.setattr(builtins, "input", _raise_eof)
         idx = run.prompt_user_choice("Pick one", ["First", "Abort"])
         # Non-interactive default is always the last option.

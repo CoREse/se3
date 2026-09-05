@@ -20,6 +20,7 @@ from ..agent_runner import (
     RunnerStartupMetadata,
 )
 from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
+from ..stop_signal import get_stop_signal
 from ..usage import (
     UsageEventAggregator,
     UsageRecord,
@@ -157,12 +158,23 @@ def _post_dedup_safety_cap(
     )
     return truncated
 
-# Module-level extra prompt state for Ctrl+C injection (transient, consumed after one use)
+# Module-level extra prompt state for Ctrl+C injection (transient, consumed once
+# PER CALLER — see ``_extra_prompt_epoch``)
 _extra_prompt: Optional[str] = None
 # Persistent extra prompt state for loop context injection (survives across LLM calls)
 _persistent_extra_prompt: Optional[str] = None
 # Lock protecting _extra_prompt and _persistent_extra_prompt for thread safety
 _extra_prompt_lock = threading.Lock()
+# Bumped every time the transient slot is armed. WHY an epoch rather than
+# clearing the slot on first read: a DAG IMPLEMENT step runs several groups in
+# parallel, each with its own LLMCaller, and the dialog conclusion is addressed
+# to the STEP — every group resumed as part of that execution must receive it.
+# Clearing on first read handed it to whichever thread got there first and left
+# the others resuming with no idea what the user decided. Each LLMCaller records
+# the epoch it consumed, so the instruction reaches every caller exactly once and
+# still never repeats on a second call by the same caller. The slot itself is
+# closed by the step scope (``clear_transient_extra_prompt``).
+_extra_prompt_epoch: int = 0
 
 
 def set_extra_prompt(prompt: Optional[str], persistent: bool = False) -> None:
@@ -180,8 +192,10 @@ def set_extra_prompt(prompt: Optional[str], persistent: bool = False) -> None:
             global _persistent_extra_prompt
             _persistent_extra_prompt = prompt
         else:
-            global _extra_prompt
+            global _extra_prompt, _extra_prompt_epoch
             _extra_prompt = prompt
+            if prompt:
+                _extra_prompt_epoch += 1
 
 
 def get_extra_prompt() -> Optional[str]:
@@ -206,11 +220,131 @@ def clear_extra_prompt() -> None:
         _persistent_extra_prompt = None
 
 
+def clear_transient_extra_prompt() -> None:
+    """Clear only the transient extra prompt.
+
+    This is what CLOSES a step-scoped injection — the LLM calls that read the
+    slot no longer clear it (each caller only records the epoch it took, so a
+    DAG step's parallel groups all receive the instruction). Without this close,
+    the slot would stay armed into an unrelated later step; a step that makes no
+    LLM call at all (TEST, COMMIT) never even reads it.
+    """
+    with _extra_prompt_lock:
+        global _extra_prompt
+        _extra_prompt = None
+
+
+#: Agent ``type`` → runner class, for capability probes that must not pay the
+#: cost (or the import) of building a runner instance.
+_RUNNER_RESUME_SUPPORT_CACHE: Dict[str, bool] = {}
+
+
+def runner_supports_native_resume(agent_type: Optional[str]) -> bool:
+    """Whether the runner for *agent_type* declares native session resume.
+
+    A pure capability probe for callers that need the answer BEFORE a call is
+    made (the interjection dialog, deciding whether to promise a same-session
+    conversation). The strategy decision itself stays inside LLMCaller — this
+    only reads the runner class attribute the charter's layering makes the
+    runner's to declare.
+    """
+    key = str(agent_type or "claude-code")
+    cached = _RUNNER_RESUME_SUPPORT_CACHE.get(key)
+    if cached is not None:
+        return cached
+    supported = False
+    try:
+        if key == "claude-code":
+            supported = bool(ClaudeCodeRunner.supports_native_resume)
+        elif key == "codex":
+            from tianluo.codex_runner import CodexRunner
+
+            supported = bool(CodexRunner.supports_native_resume)
+        elif key == "claude-interactive":
+            from tianluo.claude_interactive_runner import ClaudeInteractiveRunner
+
+            supported = bool(ClaudeInteractiveRunner.supports_native_resume)
+    except Exception:  # pragma: no cover - an unimportable runner cannot resume
+        logger.debug("Failed to probe resume support for %r", key, exc_info=True)
+        supported = False
+    _RUNNER_RESUME_SUPPORT_CACHE[key] = supported
+    return supported
+
+
 def clear_persistent_extra_prompt() -> None:
     """Clear only the persistent extra prompt (for cleanup between loop iterations)."""
     with _extra_prompt_lock:
         global _persistent_extra_prompt
         _persistent_extra_prompt = None
+
+
+def _same_directory(a: Any, b: Any) -> bool:
+    """Whether two path-likes name the same directory, symlinks resolved."""
+    try:
+        return Path(str(a)).resolve() == Path(str(b)).resolve()
+    except (OSError, ValueError):  # pragma: no cover - defensive
+        return str(a) == str(b)
+
+
+#: The framing a post-dialog continuation opens with, on either strategy.
+#: WHY it is a constant rather than inline text: the native and the rebuilt
+#: continuation must tell the agent the SAME story about why it stopped, or the
+#: fallback silently changes what the user's decision meant.
+_DIALOG_RESUME_FRAMING = (
+    "[Continuation after a user interruption]\n"
+    "The user interrupted your run to discuss it with you. That "
+    "discussion has concluded. Before doing anything else, check "
+    "the workspace for half-finished edits from your interrupted "
+    "attempt and reconcile them. Then continue from where you "
+    "stopped — do NOT redo work you already completed."
+)
+
+#: Headers of the framework injections appended AFTER a step template's own
+#: output contract (charter, code-index, runtime environment). The contract
+#: search stops at the first of these: a project charter containing a ```json
+#: example would otherwise be quoted back to the agent as the required reply
+#: shape.
+_POST_CONTRACT_INJECTION_HEADERS = (
+    "\n\n## Project Charter\n",
+    "\n\n## Code Index (project structure map)\n",
+    "\n## tianluo Runtime Environment\n",
+    "\n## SE3 Runtime Environment\n",
+)
+
+
+# Set by the interjection-dialog "continue" decision immediately before the
+# step is re-run. It only selects the FRAMING of the continuation directive —
+# "you were interrupted by the user and the discussion has concluded" rather
+# than "the previous attempt failed" — because the two situations call for
+# different first moves from the agent (reconcile a half-finished workspace vs.
+# retry a failure). The instruction text itself travels through the existing
+# extra-prompt channel, so there is one carrier, not two.
+_dialog_resume_pending = False
+#: Epoch companion of ``_dialog_resume_pending``; see ``_extra_prompt_epoch``.
+_dialog_resume_epoch: int = 0
+
+
+def mark_dialog_resume() -> None:
+    """Flag the next LLM call as a post-interjection-dialog continuation."""
+    global _dialog_resume_pending, _dialog_resume_epoch
+    with _extra_prompt_lock:
+        _dialog_resume_pending = True
+        _dialog_resume_epoch += 1
+
+
+def consume_dialog_resume() -> bool:
+    """Return and clear the post-dialog continuation flag.
+
+    The step-scope closer (``run_step``'s finally) and tests use this. A single
+    LLM call sequence does NOT: it takes the per-caller epoch view instead
+    (``LLMCaller._take_dialog_resume``) so parallel DAG groups do not race for
+    one flag.
+    """
+    global _dialog_resume_pending
+    with _extra_prompt_lock:
+        value = _dialog_resume_pending
+        _dialog_resume_pending = False
+        return value
 
 
 def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
@@ -334,6 +468,11 @@ class StreamJSONTracker:
         # model is seen; once set, subsequent progress lines carry it so the
         # frontend upgrades the bubble label from "agent" to "agent · model".
         self._model_name: Optional[str] = None
+        # Provider session id already durably recorded for this attempt. Seeded
+        # with the caller's pre-spawn id (the Claude adapters pre-allocate one,
+        # and the prompt record already names it) so only a session the STREAM
+        # announces — codex mints its thread id itself — costs an extra record.
+        self._recorded_session_id: Optional[str] = provider_session_id
         # Pending coalesced text/thinking awaiting a flush.
         self._progress_text_buf: List[str] = []
         self._progress_text_len = 0
@@ -418,6 +557,29 @@ class StreamJSONTracker:
         except Exception:  # pragma: no cover - defensive; never break the stream
             logger.debug("Failed to record stream progress", exc_info=True)
 
+    def _backfill_prompt_session_id(self, session_id: str) -> None:
+        """Point this attempt's prompt record at the just-captured session id.
+
+        Best-effort and never fatal: the stream-announced identity record is
+        the durable binding on its own, so a failed rewrite degrades to the
+        pre-existing behaviour rather than disturbing the live stream.
+        """
+        if not self._progress_enabled or not session_id:
+            return
+        try:
+            from .chat_history import backfill_prompt_session_id
+
+            backfill_prompt_session_id(
+                self._project_root or Path.cwd(),
+                self._flow_id,
+                self._step_id,
+                attempt=self._attempt,
+                session_id=session_id,
+                agent_name=self._agent_name,
+            )
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Failed to backfill prompt session id", exc_info=True)
+
     def emit_agent_identity(self) -> None:
         """Emit an identity-only progress record at attempt start.
 
@@ -444,6 +606,8 @@ class StreamJSONTracker:
             extra: Dict[str, Any] = {"agent_name": self._agent_name}
             if self._model_name is not None:
                 extra["model_name"] = self._model_name
+            if self._recorded_session_id:
+                extra["provider_session_id"] = self._recorded_session_id
             record_stream_progress(
                 self._project_root or Path.cwd(),
                 self._flow_id,
@@ -579,6 +743,28 @@ class StreamJSONTracker:
             msg_type = data.get('type', '')
             self._usage_aggregator.add_event(data)
 
+            # A session id the stream announces (codex's ``thread.started``,
+            # converted to an ``init`` line) is durably recorded the instant it
+            # is known, not when the turn ends. The provider thread already
+            # exists at this point; a parent killed before the response record
+            # lands would otherwise leave it named nowhere, and every later
+            # retry would rebuild from history instead of resuming it. The
+            # write itself is deferred past the model-parse block below so an
+            # init line carrying BOTH lands as one identity record.
+            streamed_session = self._usage_aggregator.provider_session_id
+            session_pending = bool(
+                streamed_session and streamed_session != self._recorded_session_id
+            )
+            if session_pending:
+                self._recorded_session_id = streamed_session
+                # INVARIANT: both records of one attempt name the same session.
+                # A capture-only provider mints its id itself, so the prompt
+                # record was necessarily written pre-spawn with none; the id is
+                # written back onto it here, inside the same attempt, rather
+                # than leaving the pair inconsistent (or, worse, seeding the
+                # prompt record with an id that was never this attempt's).
+                self._backfill_prompt_session_id(streamed_session)
+
             # Best-effort parse the actual model name from this line's
             # init/system metadata. The first match is cached so subsequent
             # progress lines carry "agent · model"; a parse miss leaves the
@@ -597,6 +783,9 @@ class StreamJSONTracker:
                     # The record carries empty content (badge-only) and now also
                     # the freshly parsed model_name via _emit_progress's extras.
                     self.emit_agent_identity()
+                    # It carries the session id too, so a binding announced on
+                    # this same line is already durable.
+                    session_pending = False
                     # Notify the consumer that the actual model is now known so
                     # it can upgrade its label to "agent · model". Best-effort;
                     # a callback error must never disturb the stream.
@@ -608,6 +797,9 @@ class StreamJSONTracker:
                                 "on_agent_change(agent, model) notify failed",
                                 exc_info=True,
                             )
+
+            if session_pending:
+                self.emit_agent_identity()
 
             if msg_type == 'assistant':
                 self.message_count += 1
@@ -755,6 +947,16 @@ class StreamJSONTracker:
         """Authoritative usage record, including unavailable attempts."""
         return self._usage_aggregator.to_record()
 
+    @property
+    def session_id(self) -> Optional[str]:
+        """Session identity this attempt actually ran under, if known yet.
+
+        The stream-announced id wins over the pre-spawn seed: a capture-only
+        provider mints its own thread id, so the seed is empty and only the
+        stream can name the live session.
+        """
+        return self._usage_aggregator.provider_session_id or self._recorded_session_id
+
     def _record_touched_path(self, path: str) -> None:
         """Record a file path touched by a tool, normalized to project-relative."""
         p = Path(path)
@@ -792,6 +994,101 @@ class StreamJSONTracker:
         self._tool_use_id_to_name.clear()
 
 
+class SessionCaptureRelay:
+    """Session-identity sidecar wrapped around a caller-supplied ``on_output``.
+
+    WHY it exists: the default streaming path builds a :class:`StreamJSONTracker`,
+    which durably names a capture-only provider's session (codex mints its
+    ``thread.started`` id itself, so nothing can be written pre-spawn) the
+    instant the stream announces it. A caller that supplies its own
+    ``on_output`` bypasses that tracker entirely — and without this relay the
+    attempt's prompt record would keep its empty pre-spawn id forever while the
+    response record, which falls back to the id parsed out of the stream, names
+    the real one. That splits ONE attempt across two identities, violating the
+    invariant that both of an attempt's records name the same session; worse, a
+    parent that dies before the response lands leaves the live provider session
+    named nowhere and therefore unresumable.
+
+    Detection reuses :class:`UsageEventAggregator` rather than re-implementing a
+    key scan, so the relay and the tracker can never disagree about what counts
+    as a session announcement.
+    """
+
+    def __init__(
+        self,
+        delegate: Optional[Callable[[str], None]],
+        *,
+        project_root: Optional[Path] = None,
+        flow_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        attempt: int = 0,
+        agent_name: Optional[str] = None,
+        seed_session_id: Optional[str] = None,
+    ) -> None:
+        self._delegate = delegate
+        self._project_root = project_root
+        self._flow_id = flow_id
+        self._step_id = step_id
+        self._attempt = attempt
+        self._agent_name = agent_name
+        self._aggregator = UsageEventAggregator(provider_session_id=seed_session_id)
+        # Already durably recorded for this attempt; the pre-allocating adapters
+        # seed it, so only an id the STREAM announces costs a backfill.
+        self._recorded_session_id: Optional[str] = seed_session_id or None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Session identity observed for this attempt, or the seed."""
+        return self._aggregator.provider_session_id or self._recorded_session_id
+
+    def __call__(self, line: str) -> None:
+        self._capture(line)
+        if self._delegate is not None:
+            self._delegate(line)
+
+    def _capture(self, line: str) -> None:
+        if not line or not line.strip():
+            return
+        try:
+            data = json.loads(line.strip())
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        try:
+            self._aggregator.add_event(data)
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Session capture failed to consume stream line", exc_info=True)
+            return
+        streamed = self._aggregator.provider_session_id
+        if not streamed or streamed == self._recorded_session_id:
+            return
+        self._recorded_session_id = streamed
+        self._backfill(streamed)
+
+    def _backfill(self, session_id: str) -> None:
+        """Point this attempt's prompt record at the just-captured session id.
+
+        Best-effort and never fatal: a failed rewrite degrades to the previous
+        behaviour rather than disturbing the live stream.
+        """
+        if not (self._flow_id and self._step_id):
+            return
+        try:
+            from .chat_history import backfill_prompt_session_id
+
+            backfill_prompt_session_id(
+                self._project_root or Path.cwd(),
+                self._flow_id,
+                self._step_id,
+                attempt=self._attempt,
+                session_id=session_id,
+                agent_name=self._agent_name,
+            )
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Failed to backfill prompt session id", exc_info=True)
+
+
 class LLMCaller:
     """Manages LLM calls within flow engine steps.
 
@@ -818,8 +1115,73 @@ class LLMCaller:
         self_check_pass_index: Optional[int] = None,
         on_agent_change: Optional[Callable[[str, Optional[str]], None]] = None,
         force_read_only: bool = False,
+        resume_strategy: Optional[str] = None,
+        generation: Optional[int] = None,
+        resume_binding: Optional[Dict[str, Any]] = None,
+        resume_fallback_prompt: Optional[str] = None,
+        deny_shell: bool = False,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
+        # Explicit "continue THIS provider session" instruction, used by the
+        # interjection dialog to talk to the working agent inside its own
+        # session. Unlike the history-driven resume plan it needs no flow/step
+        # context — which is the point: the dialog deliberately records nothing
+        # to the step jsonl through LLMCaller, so its machine-facing prompt
+        # never becomes part of a later rebuilt retry context. Its prompt is
+        # sent VERBATIM (no continuation framing): it is a question, not a
+        # resumption of the task.
+        self._resume_binding = dict(resume_binding) if resume_binding else None
+        # The prompt to send when an EXPLICIT resume binding cannot be honoured
+        # (the agent is gone, its runner has no resume, or the provider refused
+        # the session). Such a fallback call is answered by an interlocutor
+        # with none of that session's memory, so the caller supplies a
+        # self-contained prompt — for the dialog, one carrying the rebuilt step
+        # conversation — rather than the session-relative one.
+        self._resume_fallback_prompt = resume_fallback_prompt
+        # Continuation strategy for this caller. ``native`` (the default)
+        # resumes the recorded provider session in place whenever one is
+        # reachable; ``rebuild`` always reconstructs context from the step
+        # jsonl. Resolved once here so a single call sequence cannot straddle
+        # two strategies mid-flight.
+        if resume_strategy is None:
+            try:
+                from ..config import load_resume_strategy
+
+                resume_strategy = load_resume_strategy(self.project_root)
+            except Exception:  # pragma: no cover - config faults must not abort
+                logger.debug("Failed to load resume_strategy", exc_info=True)
+                resume_strategy = "native"
+        self.resume_strategy = resume_strategy
+        # Rewind generation this call belongs to. Records are stamped with it
+        # and the retry-context rebuild filters on it, so a step re-entered
+        # after a rewind never resurrects the generation it was rewound away
+        # from. Resolved per STEP (a rewind re-assigns only the steps it
+        # removes; a pre-target step re-entered by the fix loop keeps its own
+        # generation), read from the ambient flow state so the dozens of
+        # LLMCaller construction sites stay untouched.
+        if generation is None:
+            from .rewind import current_generation
+
+            generation = current_generation(flow_id=flow_id, step_id=step_id)
+        self.generation = int(generation or 0)
+        # 0 means "no flow generation published" (an ad-hoc caller outside a
+        # run_step scope); records stamped 0 read as the legacy wildcard, which
+        # is the right degradation for a call that belongs to no generation.
+        # Instruction text injected into the *rebuilt* prompt by
+        # ``set_extra_prompt``. Captured in ``call()`` so a native resume — which
+        # sends no rebuilt prompt at all — can still carry it as its new user
+        # turn; without this the user's dialog instruction would be silently
+        # dropped exactly on the path the dialog exists to drive.
+        self._pending_injected_instruction: Optional[str] = None
+        # Epochs of the process-wide dialog slots this caller has already taken.
+        # 0 means "nothing taken yet"; the slots' epochs start at 1.
+        self._taken_extra_prompt_epoch = 0
+        self._taken_dialog_resume_epoch = 0
+        # Set when an attempt's native resume was rejected and the sequence fell
+        # back to a rebuilt call. Read by the interjection dialog, which must
+        # stop claiming (and recording) a same-session conversation the provider
+        # has refused.
+        self.native_resume_rejected = False
         # WHY: decouples the step's registry-level read_only from a single LLM
         # call's read-only posture. charter_freshness declares read_only=False
         # (its handler writes tianluo/charter.md), yet its LLM sub-calls must stay
@@ -829,6 +1191,14 @@ class LLMCaller:
         # for that call without touching is_step_read_only (the shared source of
         # truth). Default False preserves current behavior for every other step.
         self.force_read_only = force_read_only
+        # Strict read-only posture: the runner must close the shell (and
+        # subagent delegation) as well as the edit tools. WHY it is not implied
+        # by read-only: the Claude CLIs run with --dangerously-skip-permissions,
+        # so a read-only step keeps Bash on purpose (git diff, grep) — but the
+        # interruption dialog talks to an agent whose workspace the user is
+        # about to decide the fate of, and there "read-only" has to mean the
+        # tree cannot be touched at all.
+        self.deny_shell = deny_shell
         # Optional notification invoked whenever the agent selected for an
         # attempt is known — once as (agent_name, None) when the attempt starts
         # (including each rotation, so retries surface their real agent) and
@@ -995,6 +1365,23 @@ class LLMCaller:
         self._runner = self._get_current_runner()
         return True
 
+    def _fall_back_from_resume(self) -> None:
+        """Hand a rejected native resume back to the ordinary rebuild sequence.
+
+        INVARIANT: a rejected resume leaves the sequence able to reach EVERY
+        configured agent. Planning a resume re-points the index at whichever
+        agent happened to own the recorded session, and the within-sequence
+        rotation only ever moves forward without wrapping — so staying on that
+        index silently excluded every agent before it, and a session recorded on
+        the LAST agent left rotation exhausted on the first failure, spending
+        the whole budget re-running one agent. The resume was a probe that
+        produced no work, so the fallback restarts the sequence where a sequence
+        with no resume plan would have started: the preferred agent.
+        """
+        self.native_resume_rejected = True
+        self._current_agent_index = 0
+        self._runner = self._get_current_runner()
+
     def call(
         self,
         prompt: str,
@@ -1060,18 +1447,26 @@ class LLMCaller:
         # Resolve JSON mode from various parameter combinations
         mode = self._resolve_json_mode(json_mode, require_json, two_phase_json)
 
+        # Each call resolves its own injection: a stale instruction from the
+        # previous call must never be appended to this one's native-resume turn
+        # (the rebuild path re-derives it from the prompt, so only the resume
+        # path could carry it forward).
+        self._pending_injected_instruction = None
+
         # Inject extra prompts if set (persistent for loop context, transient for Ctrl+C)
         with _extra_prompt_lock:
-            global _extra_prompt
             injected_parts = []
             if _persistent_extra_prompt:
                 injected_parts.append(_persistent_extra_prompt)
                 logger.info(f"Injected persistent extra prompt: {_persistent_extra_prompt[:80]}")
-            if _extra_prompt:
+            if _extra_prompt and self._taken_extra_prompt_epoch != _extra_prompt_epoch:
                 injected_parts.append(_extra_prompt)
                 logger.info(f"Injected transient extra prompt: {_extra_prompt[:80]}")
-                _extra_prompt = None  # Consume transient after use
+                # Taken for THIS caller only — a sibling DAG group's caller still
+                # gets its copy; a second call by this caller does not.
+                self._taken_extra_prompt_epoch = _extra_prompt_epoch
         if injected_parts:
+            self._pending_injected_instruction = "\n".join(injected_parts)
             prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 
         # Inject read-only constraint for read-only steps
@@ -1553,6 +1948,15 @@ class LLMCaller:
             # retried two_phase step (external_attempt>0) would hit continue-mode
             # retry-context injection and drop the extraction prompt entirely.
             inject_retry_context=False,
+            # INVARIANT: the extraction round-trip must not become the session a
+            # later continuation resumes into. It opens its own provider session
+            # whose only content is "re-express this text as JSON"; being the
+            # step's newest session-bearing record, it would otherwise win
+            # ``last_session_binding`` and a Retry would natively resume the
+            # re-formatter rather than the agent that did the work. Tagging the
+            # records makes them invisible to binding resolution while keeping
+            # them in history for display.
+            record_kind="extraction",
         )
 
         return parse_json_response(response, required_keys=required_keys)
@@ -1575,13 +1979,28 @@ class LLMCaller:
         }
         return json.dumps(message, ensure_ascii=False)
 
-    def _record_prompt(self, prompt: str, attempt: int, agent_name: Optional[str] = None) -> None:
+    def _record_prompt(
+        self,
+        prompt: str,
+        attempt: int,
+        agent_name: Optional[str] = None,
+        provider_session_id: Optional[str] = None,
+        session_cwd: Optional[str] = None,
+        resume_strategy: Optional[str] = None,
+        runner_type: Optional[str] = None,
+        kind: str = "",
+    ) -> None:
         """Record a prompt to chat history if flow context is available.
 
         ``agent_name`` (default None) records the configuration name of the
         agent that will handle this prompt. Failures inside record_prompt are
         caught and debug-logged so metadata recording never disrupts the LLM
         call.
+
+        INVARIANT: the session-binding arguments are supplied from the runner's
+        startup metadata read BEFORE the subprocess is spawned. That ordering is
+        the whole point — a call interrupted during startup must still leave a
+        named, resumable provider session in history.
         """
         if not self.flow_id or not self.step_id:
             return
@@ -1592,6 +2011,12 @@ class LLMCaller:
                 self.step_type, prompt, attempt,
                 fix_iteration=self.fix_iteration,
                 agent_name=agent_name,
+                provider_session_id=provider_session_id,
+                session_cwd=session_cwd,
+                resume_strategy=resume_strategy,
+                generation=self.generation,
+                runner_type=runner_type,
+                kind=kind,
             )
         except Exception as e:
             logger.debug(f"Failed to record prompt to history: {e}")
@@ -1602,6 +2027,11 @@ class LLMCaller:
         attempt: int,
         agent_name: Optional[str] = None,
         usage_record: Optional[UsageRecord] = None,
+        provider_session_id: Optional[str] = None,
+        session_cwd: Optional[str] = None,
+        resume_strategy: Optional[str] = None,
+        runner_type: Optional[str] = None,
+        kind: str = "",
     ) -> None:
         """Record an LLM response to chat history if flow context is available.
 
@@ -1620,6 +2050,12 @@ class LLMCaller:
                 fix_iteration=self.fix_iteration,
                 agent_name=agent_name,
                 usage_record=usage_record,
+                provider_session_id=provider_session_id,
+                session_cwd=session_cwd,
+                resume_strategy=resume_strategy,
+                generation=self.generation,
+                runner_type=runner_type,
+                kind=kind,
             )
         except Exception as e:
             logger.debug(f"Failed to record response to history: {e}")
@@ -1634,10 +2070,294 @@ class LLMCaller:
                 self.project_root, self.flow_id, self.step_id,
                 mode=self.retry_mode,
                 current_fix_iteration=self.fix_iteration,
+                current_generation=self.generation,
             )
         except Exception as e:
             logger.warning(f"Failed to get retry context (falling back to original prompt): {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Native session resume — strategy selection lives HERE, never in a runner
+    # ------------------------------------------------------------------
+
+    def _take_dialog_resume(self) -> bool:
+        """Per-caller view of the process-wide post-dialog continuation flag.
+
+        Epoch-based rather than consuming: a DAG IMPLEMENT step resumes several
+        groups in parallel and every one of them was interrupted, so every one
+        needs the "you were interrupted, the discussion has concluded" framing.
+        A global consume gave it to whichever thread arrived first.
+        """
+        with _extra_prompt_lock:
+            if not _dialog_resume_pending:
+                return False
+            if self._taken_dialog_resume_epoch == _dialog_resume_epoch:
+                return False
+            self._taken_dialog_resume_epoch = _dialog_resume_epoch
+            return True
+
+    def _agent_index_for_binding(self, binding: Dict[str, Any]) -> Optional[int]:
+        """Locate the recorded session's agent in the CURRENT agents list.
+
+        INVARIANT: BOTH the recorded agent name and the recorded runner type
+        must still match. A session id is only meaningful together with the
+        runner that owns it, so a config edit that re-pointed the same agent
+        name at a different runner type must invalidate the binding rather than
+        hand a Claude session id to codex. A record carrying no runner type at
+        all (legacy jsonl written before the field existed) is likewise
+        unusable: "the name still matches" is not evidence about the provider,
+        and rebuilding context is the safe, always-correct alternative.
+        """
+        name = binding.get("agent_name")
+        if not name:
+            return None
+        recorded_type = str(binding.get("runner_type") or "")
+        if not recorded_type:
+            logger.info(
+                "Native resume unavailable: the recorded session for agent %r "
+                "carries no runner type; rebuilding context instead", name,
+            )
+            return None
+        for index, agent in enumerate(self._agents):
+            if agent.get("name") != name:
+                continue
+            if str(agent.get("type", "claude-code")) != recorded_type:
+                return None
+            return index
+        return None
+
+    def _plan_native_resume(self) -> Optional[Dict[str, Any]]:
+        """Decide whether this attempt can continue a recorded provider session.
+
+        Returns ``{"agent_index", "session_id", "cwd"}`` when every condition
+        holds — configured strategy is ``native``, a session id was recorded for
+        this step/iteration/generation, its agent entry still exists, and that
+        agent's runner declares (and has been verified to have) native resume —
+        otherwise ``None``, which routes the attempt down the rebuild path.
+
+        Never raises: an unreadable history is a reason to rebuild, not to fail
+        the call.
+        """
+        if self.resume_strategy != "native":
+            return None
+        if not self.flow_id or not self.step_id:
+            return None
+        return self._plan_from_history()
+
+    def _plan_explicit_resume(self) -> Optional[Dict[str, Any]]:
+        """Resolve the caller-supplied ``resume_binding`` into a resume plan."""
+        binding = self._resume_binding
+        if not binding or not binding.get("provider_session_id"):
+            return None
+        index = self._agent_index_for_binding(binding)
+        if index is None:
+            return None
+        try:
+            runner = self._create_runner_cached(index)
+        except Exception:  # pragma: no cover - unknown agent type
+            logger.debug("Failed to build runner for explicit resume", exc_info=True)
+            return None
+        if not getattr(runner, "supports_native_resume", False):
+            return None
+        return {
+            "agent_index": index,
+            "session_id": binding["provider_session_id"],
+            "cwd": Path(binding.get("session_cwd") or self.project_root),
+            "verbatim_prompt": True,
+        }
+
+    def _plan_from_history(self) -> Optional[Dict[str, Any]]:
+        try:
+            from .chat_history import last_session_binding
+
+            binding = last_session_binding(
+                self.project_root, self.flow_id, self.step_id,
+                fix_iteration=self.fix_iteration,
+                generation=self.generation,
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("Failed to read session binding", exc_info=True)
+            return None
+        if not binding or not binding.get("provider_session_id"):
+            return None
+        index = self._agent_index_for_binding(binding)
+        if index is None:
+            logger.info(
+                "Native resume unavailable: recorded agent %r is no longer in "
+                "the agent chain; rebuilding context instead",
+                binding.get("agent_name"),
+            )
+            return None
+        try:
+            runner = self._create_runner_cached(index)
+        except Exception:  # pragma: no cover - unknown agent type
+            logger.debug("Failed to build runner for resume", exc_info=True)
+            return None
+        if not getattr(runner, "supports_native_resume", False):
+            return None
+        # INVARIANT: an implicitly planned resume runs in THIS caller's
+        # workspace, never in the directory the record happens to name. A
+        # session whose cwd is some other tree (a DAG group worktree that was
+        # rejected for reuse and rebuilt elsewhere, and whose old directory
+        # still exists) would otherwise be resumed there — the agent would edit
+        # the wrong checkout while this caller's branch stayed empty, and the
+        # group would report success having contributed nothing. Only an
+        # EXPLICIT resume binding may cross workspaces, because its caller
+        # chose the session deliberately.
+        recorded_cwd = binding.get("session_cwd")
+        if recorded_cwd and not _same_directory(recorded_cwd, self.project_root):
+            logger.info(
+                "Native resume unavailable: session %s is bound to %s, not this "
+                "workspace (%s); rebuilding context instead",
+                binding.get("provider_session_id"), recorded_cwd, self.project_root,
+            )
+            return None
+        return {
+            "agent_index": index,
+            "session_id": binding["provider_session_id"],
+            "cwd": Path(recorded_cwd or self.project_root),
+        }
+
+    def _create_runner_cached(self, index: int) -> AgentRunner:
+        """Return (and cache) the runner for the agent at *index*."""
+        agent = self._agents[index]
+        cache_key = agent.get("name", agent.get("cmd", str(index)))
+        if cache_key not in self._runner_cache:
+            self._runner_cache[cache_key] = self._create_runner(agent)
+        return self._runner_cache[cache_key]
+
+    def _build_resume_prompt(
+        self,
+        original_prompt: str,
+        require_json: bool,
+        dialog_resume: bool,
+        directive: Optional[str] = None,
+    ) -> str:
+        """Compose the single user turn a native resume appends to the session.
+
+        The provider still holds the whole conversation, so this carries NO
+        rebuilt context — only what changed since the agent stopped: why it was
+        stopped, what to do first, any instruction the user settled on in the
+        dialog, and a restatement of the step's output contract (the JSON shape
+        in particular, which the agent last saw many turns ago and which the
+        step's parser hard-depends on).
+        """
+        lead = _DIALOG_RESUME_FRAMING if dialog_resume else (
+            "[Continuation]\n"
+            "Continue this task from where you left off. Do NOT repeat "
+            "work already completed. If your previous attempt failed, fix "
+            "the cause and carry on rather than starting over."
+        )
+        # dialog_resume=False here: the framing is already this prompt's lead.
+        return "\n\n".join(
+            [lead]
+            + self._continuation_addenda(
+                original_prompt,
+                require_json,
+                dialog_resume=False,
+                directive=directive,
+            )
+        )
+
+    def _continuation_addenda(
+        self,
+        original_prompt: str,
+        require_json: bool,
+        *,
+        dialog_resume: bool,
+        directive: Optional[str] = None,
+    ) -> List[str]:
+        """Everything a continuation must carry beyond "keep going".
+
+        INVARIANT: shared by BOTH continuation strategies. ``rebuild`` differs
+        from ``native`` only in how the earlier conversation is supplied — it
+        must never drop what the user decided. The dialog's temporary
+        instruction (and the "the task description was replaced" notice that
+        travels with it) reaches the agent through this list on the rebuild
+        path too, where the assembled ``prompt`` carrying them is NOT sent.
+        """
+        parts: List[str] = []
+        if dialog_resume:
+            parts.append(_DIALOG_RESUME_FRAMING)
+        if directive:
+            parts.append(directive)
+        instruction = self._pending_injected_instruction
+        if instruction:
+            parts.append(f"[Additional user instruction]: {instruction}")
+        contract = self._output_contract_reminder(original_prompt, require_json)
+        if contract:
+            parts.append(contract)
+        return parts
+
+    @staticmethod
+    def _output_contract_reminder(
+        original_prompt: str, require_json: bool
+    ) -> Optional[str]:
+        """Restate the step's output contract for a resumed turn.
+
+        A resumed turn is a brand-new user message in a long session; the
+        agent's last sight of the required response shape may be far behind it.
+        The step's parser is unforgiving, so the contract is restated verbatim
+        where the prompt declared it as a fenced ``json`` block, and generically
+        otherwise.
+        """
+        json_required = require_json or "ONLY valid JSON" in (original_prompt or "")
+        fence = None
+        if original_prompt:
+            # Only the step's OWN prompt body may declare the contract; the
+            # framework injections that follow it are reference material.
+            scope = original_prompt
+            for header in _POST_CONTRACT_INJECTION_HEADERS:
+                cut = scope.find(header)
+                if cut > 0:
+                    scope = scope[:cut]
+            marker = "```json"
+            start = scope.rfind(marker)
+            if start >= 0:
+                end = scope.find("```", start + len(marker))
+                if end > start:
+                    fence = scope[start : end + 3]
+        if fence:
+            return (
+                "[Output contract — unchanged]\n"
+                "Your reply for this step must still match this shape:\n" + fence
+            )
+        if json_required:
+            return (
+                "[Output contract — unchanged]\n"
+                "Reply with ONLY the JSON object this step requires. No prose "
+                "before or after it."
+            )
+        return None
+
+    def _add_deny_shell(self, kwargs: Dict[str, Any], builder: Any) -> None:
+        """Add ``deny_shell=True`` to *kwargs* when this caller is strict.
+
+        Introspected rather than passed unconditionally, exactly like
+        ``invocation_intent``: a runner written against the pre-strict interface
+        stays a valid adapter. It cannot enforce the boundary, so the gap is
+        logged rather than passed over silently.
+        """
+        if not getattr(self, "deny_shell", False):
+            return
+        import inspect
+
+        try:
+            params = inspect.signature(builder).parameters.values()
+            accepts = any(
+                p.name == "deny_shell" or p.kind == inspect.Parameter.VAR_KEYWORD
+                for p in params
+            )
+        except (TypeError, ValueError):  # pragma: no cover - builtins/C callables
+            accepts = False
+        if accepts:
+            kwargs["deny_shell"] = True
+        else:
+            logger.warning(
+                "Runner %s cannot express the strict read-only lock; the call "
+                "keeps only the edit-tool denial",
+                type(getattr(builder, "__self__", builder)).__name__,
+            )
 
     def _call_with_retry(
         self,
@@ -1650,6 +2370,8 @@ class LLMCaller:
         max_json_retries: int = 2,
         inject_retry_context: bool = True,
         invocation_intent: AgentInvocationIntent = AgentInvocationIntent.DEFAULT,
+        continuation_directive: Optional[str] = None,
+        record_kind: str = "",
     ) -> str:
         """Internal method to call LLM with retry and agent rotation logic.
 
@@ -1716,8 +2438,41 @@ class LLMCaller:
         # Recording before the rotation branch keeps every attempt accounted for.
         attempt_errors: List[str] = []
         sequence_call_id = uuid.uuid4().hex
+        # Set once a native resume fails for any reason; every later attempt in
+        # this sequence rebuilds instead. A resume failure is never fatal — it
+        # is a reason to fall back, per decision 1.
+        native_resume_disabled = False
+        # Framing for the continuation directive, consumed once per sequence so
+        # a retry inside the same sequence does not re-announce the dialog.
+        dialog_resume = self._take_dialog_resume()
+        # A native resume that the provider refuses is a PROBE, not an attempt:
+        # it says nothing about the agent's health and produced no work. Letting
+        # it eat one of ``max_retries`` meant a rejected resume on agent A could
+        # leave healthy agent C untried (and, at max_retries=1, meant no rebuild
+        # ever ran). Each such fallback therefore hands the slot back, and
+        # ``_fall_back_from_resume`` puts the index back where a sequence with no
+        # resume plan would have started. At most one can occur per sequence —
+        # the fallback also disables further resume planning — so the budget
+        # stays bounded.
+        resume_fallback_slots = 0
 
-        for internal_attempt in range(self.max_retries):
+        internal_attempt = -1
+        while True:
+            internal_attempt += 1
+            attempt_budget = self.max_retries + resume_fallback_slots
+            if internal_attempt >= attempt_budget:
+                break
+            # Cooperative stop, checked before spawning anything: a stop that
+            # arrived while the previous attempt was winding down must not be
+            # answered by starting a fresh subprocess the user just asked us to
+            # stop. Raising here is safe — this runs on the calling thread, and
+            # the DAG scheduler converts a worker-thread raise into a group
+            # result rather than losing it.
+            if get_stop_signal().is_set():
+                logger.info("Stop requested before attempt %d; aborting sequence",
+                            internal_attempt + 1)
+                raise KeyboardInterrupt
+
             # ``is_retry`` gates retry-context injection AND dedup. Phase-2
             # extraction passes inject_retry_context=False so its self-contained
             # extraction prompt always runs verbatim, regardless of the step's
@@ -1725,6 +2480,35 @@ class LLMCaller:
             is_retry = inject_retry_context and (
                 self.external_attempt > 0 or internal_attempt > 0
             )
+
+            # Native resume is considered for exactly the situations that would
+            # otherwise inject a rebuilt retry context (post-dialog continue,
+            # failure retry, --resume of a RUNNING/FAILED step, JSON retry,
+            # internal attempt retry). Selecting it re-points the sequence at
+            # the agent that owns the session — rotation stays LLMCaller's
+            # decision, never the runner's.
+            resume_plan = None
+            if not native_resume_disabled:
+                if self._resume_binding is not None:
+                    # An explicit binding is a direct instruction to talk to a
+                    # specific session — it applies on the very first attempt,
+                    # not only on retries.
+                    resume_plan = self._plan_explicit_resume()
+                elif is_retry:
+                    resume_plan = self._plan_native_resume()
+            if resume_plan is not None:
+                self._current_agent_index = resume_plan["agent_index"]
+                self._runner = self._get_current_runner()
+            elif self._resume_binding is not None:
+                # The caller asked to talk to a SPECIFIC session and this
+                # attempt is not doing so — the recorded agent was removed, its
+                # type was re-pointed, or its runner cannot resume. Whoever
+                # answers now is a standalone interlocutor, and the caller has
+                # to know: the interjection dialog would otherwise keep
+                # announcing "talking to <agent> in its own session" and keep
+                # stamping its history records with a session id it is not
+                # addressing.
+                self.native_resume_rejected = True
 
             # Snapshot the current agent name at the start of this attempt.
             # This captures the agent BEFORE any rotation that might occur
@@ -1738,10 +2522,39 @@ class LLMCaller:
             configured_model = expand_configured_model(attempt_model, env)
             attempt_call_id = f"{sequence_call_id}:attempt:{internal_attempt}"
             active_tracker: Optional[StreamJSONTracker] = None
+            active_session_relay: Optional[SessionCaptureRelay] = None
+
+            def attempt_session_id() -> Optional[str]:
+                """Session identity this attempt actually ran under.
+
+                INVARIANT: every record of one attempt names the same session.
+                A pre-allocating adapter's id is known before the spawn, so the
+                startup metadata is authoritative there; a capture-only provider
+                mints its own mid-stream, so anything written after the run must
+                read it back from whichever observer saw it — the tracker on the
+                default path, the relay when the caller supplied ``on_output`` —
+                instead of persisting the empty pre-spawn seed.
+                """
+                if startup_metadata.provider_session_id:
+                    return startup_metadata.provider_session_id
+                if active_tracker is not None and active_tracker.session_id:
+                    return active_tracker.session_id
+                if active_session_relay is not None:
+                    return active_session_relay.session_id
+                return None
+
             active_call_id = attempt_call_id
             active_usage_recorded = False
             active_response_recorded = False
             active_output = ""
+            # True once the resumed turn has actually produced (and recorded) a
+            # result. WHY it gates the resume-rejection classification below: an
+            # exception raised AFTER the provider answered — the nested JSON
+            # retry exhausting its budget, a post-processing fault — says
+            # nothing about whether the resume was accepted. Treating it as a
+            # rejection dropped a session binding the provider never refused and
+            # granted an extra attempt slot on top of ``max_retries``.
+            resume_produced_result = False
             startup_metadata = RunnerStartupMetadata()
             startup_model: Optional[str] = None
             effective_provider = attempt_provider
@@ -1754,16 +2567,58 @@ class LLMCaller:
             self._notify_agent_change(attempt_agent_name, None)
 
             # On retry (either external or internal), inject previous conversation context
-            if is_retry:
+            if resume_plan is not None:
+                # Native resume: the provider still holds the conversation, so
+                # the prompt is ONLY the new user turn. No retry context, no
+                # dedup, no safety cap — there is nothing rebuilt to bound.
+                effective_prompt = (
+                    prompt
+                    if resume_plan.get("verbatim_prompt")
+                    else self._build_resume_prompt(
+                        original_prompt,
+                        require_json,
+                        dialog_resume,
+                        directive=continuation_directive,
+                    )
+                )
+            elif (
+                self._resume_binding is not None
+                and self._resume_fallback_prompt
+            ):
+                # An explicit resume binding was asked for but is not being
+                # honoured on this attempt (unsupported runner, removed agent,
+                # or a resume that already failed). The interlocutor answering
+                # now holds none of that session's context, so it gets the
+                # caller's self-contained fallback prompt instead of the
+                # session-relative one. Checked BEFORE the retry branch: such a
+                # caller owns its own context assembly, and the generic rebuilt
+                # retry context is not what it asked for.
+                effective_prompt = self._resume_fallback_prompt
+            elif is_retry:
                 retry_context = self._get_retry_context()
                 if retry_context:
                     if self.retry_mode == "continue":
                         # In continue mode, the original prompt is already in the history.
                         # Append a short continuation instruction instead of re-prepending the full prompt.
-                        effective_prompt = (
-                            f"{retry_context}\n"
-                            "Continue the task from where you left off based on the conversation history above. "
-                            "Do NOT repeat work already completed."
+                        # The addenda are NOT optional here: on this path the
+                        # assembled ``prompt`` (which carries the dialog's
+                        # instruction and the revised-description notice) is
+                        # never sent, so dropping them would silently discard
+                        # the user's decision whenever the strategy falls back
+                        # to rebuild.
+                        effective_prompt = "\n\n".join(
+                            [
+                                f"{retry_context}\n"
+                                "Continue the task from where you left off based on "
+                                "the conversation history above. Do NOT repeat work "
+                                "already completed."
+                            ]
+                            + self._continuation_addenda(
+                                original_prompt,
+                                require_json,
+                                dialog_resume=dialog_resume,
+                                directive=continuation_directive,
+                            )
                         )
                     else:
                         # In retry mode, prepend history + original prompt (old behavior)
@@ -1775,7 +2630,7 @@ class LLMCaller:
 
             # Deduplicate repeated line blocks (e.g. spec content repeated across retry attempts).
             # Only on retries — first call has no internal repetition by definition.
-            if is_retry:
+            if is_retry and resume_plan is None:
                 # Convert literal two-char ``\n`` escape sequences (left over from
                 # JSON-encoded tool_result previews in the retry-context body)
                 # into real newlines BEFORE dedup. Without this, multi-line file
@@ -1791,17 +2646,15 @@ class LLMCaller:
                     logger.warning("deduplicate_prompt_lines failed, using original prompt", exc_info=True)
                 effective_prompt = _post_dedup_safety_cap(effective_prompt)
 
-            # Record the original prompt (NOT effective_prompt) to chat history.
-            # effective_prompt on retries contains the retry-context block (marker..separator).
-            # If we recorded that, the next retry's format_history_for_retry would read it back
-            # as a user message and re-embed it inside a fresh retry-context, producing
-            # second-order recursive bloat across attempts. Recording original_prompt keeps
-            # the persistent record clean — the retry-context is rebuilt from history each call.
-            self._record_prompt(original_prompt, self.external_attempt, agent_name=attempt_agent_name)
-
-            try:
-                current_runner = self._get_current_runner()
-                current_agent_name = self._agents[self._current_agent_index].get("name", "?")
+            # INVARIANT: the runner's startup metadata is read BEFORE the prompt
+            # is recorded, so the attempt's provider session id lands in history
+            # ahead of the subprocess it identifies. The reverse order (the
+            # historical one) left an interrupted-at-startup call with a live
+            # provider session that no record named, and therefore no resume
+            # could ever address.
+            current_runner = self._get_current_runner()
+            current_agent_name = self._agents[self._current_agent_index].get("name", "?")
+            if resume_plan is None:
                 try:
                     startup_metadata = current_runner.get_startup_metadata(env)
                 except Exception:
@@ -1813,9 +2666,46 @@ class LLMCaller:
                     startup_metadata = RunnerStartupMetadata()
                 if not isinstance(startup_metadata, RunnerStartupMetadata):
                     startup_metadata = RunnerStartupMetadata()
-                effective_provider = attempt_provider or startup_metadata.provider
-                startup_model = expand_configured_model(startup_metadata.model, env)
+            else:
+                # Resuming: the session identity is the recorded one, not a
+                # freshly minted one. Calling get_startup_metadata here would
+                # allocate a NEW id on the Claude adapters and silently detach
+                # the record from the session actually being continued.
+                startup_metadata = RunnerStartupMetadata(
+                    provider=getattr(current_runner, "startup_provider", None),
+                    model=getattr(current_runner, "startup_model", None),
+                    provider_session_id=resume_plan["session_id"],
+                )
+            effective_provider = attempt_provider or startup_metadata.provider
+            startup_model = expand_configured_model(startup_metadata.model, env)
+            attempt_strategy = "native" if resume_plan is not None else "rebuild"
+            attempt_cwd = (
+                resume_plan["cwd"] if resume_plan is not None else self.project_root
+            )
 
+            # Record the original prompt (NOT effective_prompt) to chat history.
+            # effective_prompt on retries contains the retry-context block (marker..separator).
+            # If we recorded that, the next retry's format_history_for_retry would read it back
+            # as a user message and re-embed it inside a fresh retry-context, producing
+            # second-order recursive bloat across attempts. Recording original_prompt keeps
+            # the persistent record clean — the retry-context is rebuilt from history each call.
+            #
+            # EXCEPTION for a native resume: the original prompt was never sent
+            # to the provider on this attempt, only the short continuation turn
+            # was. Recording the continuation turn is what makes the jsonl a
+            # truthful record of the conversation the session actually holds.
+            self._record_prompt(
+                effective_prompt if resume_plan is not None else original_prompt,
+                self.external_attempt,
+                agent_name=attempt_agent_name,
+                provider_session_id=startup_metadata.provider_session_id,
+                session_cwd=str(attempt_cwd),
+                resume_strategy=attempt_strategy,
+                runner_type=attempt_runner_type,
+                kind=record_kind,
+            )
+
+            try:
                 import inspect
 
                 try:
@@ -1839,19 +2729,44 @@ class LLMCaller:
                 # sub-call read-only, so the runner emits its --disallowedTools
                 # tool-level lock. Never the reverse — a read-only step cannot be
                 # forced writable here.
-                build_kwargs = dict(
-                    prompt=effective_prompt,
-                    read_only=is_step_read_only(self.step_type) or self.force_read_only,
-                    context_files=context_files,
+                read_only_call = (
+                    is_step_read_only(self.step_type) or self.force_read_only
                 )
-                if invocation_intent != AgentInvocationIntent.DEFAULT:
-                    # Third-party runners compiled against the pre-intent
-                    # interface remain valid ordinary direct executors. A
-                    # runner that wants native enhancement opts in by accepting
-                    # the new keyword (or **kwargs) and declaring capability.
-                    if accepts_intent:
-                        build_kwargs["invocation_intent"] = invocation_intent
-                args = current_runner.build_call_args(**build_kwargs)
+                if resume_plan is not None:
+                    resume_kwargs = dict(
+                        session_id=resume_plan["session_id"],
+                        prompt=effective_prompt,
+                        read_only=read_only_call,
+                        context_files=context_files,
+                    )
+                    self._add_deny_shell(
+                        resume_kwargs, current_runner.build_resume_call_args
+                    )
+                    args = current_runner.build_resume_call_args(**resume_kwargs)
+                    logger.info(
+                        "Resuming provider session %s for step '%s' with agent "
+                        "'%s' (cwd=%s)",
+                        resume_plan["session_id"], self.step_type,
+                        current_agent_name, attempt_cwd,
+                    )
+                else:
+                    build_kwargs = dict(
+                        prompt=effective_prompt,
+                        read_only=read_only_call,
+                        context_files=context_files,
+                    )
+                    self._add_deny_shell(
+                        build_kwargs, current_runner.build_call_args
+                    )
+                    if invocation_intent != AgentInvocationIntent.DEFAULT:
+                        # Third-party runners compiled against the pre-intent
+                        # interface remain valid ordinary direct executors. A
+                        # runner that wants native enhancement opts in by
+                        # accepting the new keyword (or **kwargs) and declaring
+                        # capability.
+                        if accepts_intent:
+                            build_kwargs["invocation_intent"] = invocation_intent
+                    args = current_runner.build_call_args(**build_kwargs)
                 logger.debug(
                     f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "
                     f"external_attempt {self.external_attempt}, agent '{current_agent_name}'"
@@ -1872,13 +2787,31 @@ class LLMCaller:
 
                 stream_tracker = None
                 if on_output:
+                    # The caller renders the stream itself, but session identity
+                    # is not the caller's concern — relay through the capture
+                    # sidecar so a capture-only provider's id still lands on
+                    # THIS attempt's prompt record the moment the stream
+                    # announces it (see SessionCaptureRelay).
+                    session_relay = SessionCaptureRelay(
+                        on_output,
+                        project_root=self.project_root,
+                        flow_id=self.flow_id,
+                        step_id=self.step_id,
+                        attempt=self.external_attempt,
+                        agent_name=attempt_agent_name,
+                        seed_session_id=startup_metadata.provider_session_id,
+                    )
+                    active_session_relay = session_relay
                     result = current_runner.run_with_monitor(
                         args=args,
                         wall_timeout=None,  # No wall time limit, only inactivity timeout
                         inactivity_timeout=1800,  # 30 minutes
-                        cwd=self.project_root,
+                        # A provider session is bound to the cwd it was opened
+                        # in, so a resume MUST be issued from the recorded one
+                        # (a DAG group's session lives in its own worktree).
+                        cwd=attempt_cwd,
                         env=env,
-                        on_output=on_output,
+                        on_output=session_relay,
                         on_confirm=on_confirm,
                     )
                 else:
@@ -1934,7 +2867,9 @@ class LLMCaller:
                         args=args,
                         wall_timeout=None,  # No wall time limit, only inactivity timeout
                         inactivity_timeout=1800,  # 30 minutes
-                        cwd=self.project_root,
+                        # See above: sessions are cwd-bound, so a resume runs
+                        # in the cwd recorded with the session.
+                        cwd=attempt_cwd,
                         env=env,
                         on_output=on_stream_output,
                         on_confirm=on_confirm,
@@ -1964,7 +2899,7 @@ class LLMCaller:
                         agent_name=attempt_agent_name,
                         runner_type=attempt_runner_type,
                         provider=effective_provider,
-                        provider_session_id=startup_metadata.provider_session_id,
+                        provider_session_id=attempt_session_id(),
                         configured_model=configured_model,
                         runner_startup_model=startup_model,
                     )
@@ -1978,8 +2913,14 @@ class LLMCaller:
                     self.external_attempt,
                     agent_name=attempt_agent_name,
                     usage_record=attempt_usage,
+                    provider_session_id=attempt_session_id(),
+                    session_cwd=str(attempt_cwd),
+                    resume_strategy=attempt_strategy,
+                    runner_type=attempt_runner_type,
+                    kind=record_kind,
                 )
                 active_response_recorded = True
+                resume_produced_result = resume_plan is not None
 
                 # Extract the type: "result" message's text for callers that
                 # need the full LLM output (e.g. discovery multi-turn context)
@@ -2010,9 +2951,22 @@ class LLMCaller:
                                 )
                             )
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
-                            # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
-                            json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries
-                            self._record_prompt(json_prompt, json_attempt, agent_name=attempt_agent_name)
+                            # The corrective instruction travels as the
+                            # continuation directive, not only inside the
+                            # rebuilt prompt: a continuation (native resume or
+                            # ``retry_mode: continue``) sends neither the
+                            # original prompt nor ``json_prompt``, so without
+                            # this the agent would be told merely to "continue"
+                            # and never learn its reply was not JSON.
+                            #
+                            # WHY no prompt record is written here: the
+                            # recursive call records what it ACTUALLY sends,
+                            # with this attempt's session/strategy fields. A
+                            # record written now would claim a prompt that no
+                            # strategy necessarily delivers.
+                            json_directive = self._create_json_retry_directive(
+                                result.output
+                            )
                             # Increment external_attempt to ensure retry context is injected
                             # This is crucial because JSON retry needs the previous conversation context
                             # (including tool calls/results) to avoid re-reading files
@@ -2026,11 +2980,37 @@ class LLMCaller:
                                 json_retry_count=json_retry_count + 1,
                                 max_json_retries=max_json_retries,
                                 invocation_intent=AgentInvocationIntent.DEFAULT,
+                                continuation_directive=json_directive,
+                                record_kind=record_kind,
                             )
 
                     duration_s = time.time() - start_time
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
                     return result.output
+
+                # --- Native-resume fallback, BEFORE any rotation ---
+                # A resume can fail for reasons that say nothing about the
+                # agent: the session was pruned provider-side, the flag is
+                # unsupported by an older CLI, the transcript ends on a
+                # tool_use the provider refuses to continue. None of those are
+                # a reason to rotate away — they are a reason to rebuild
+                # context and run the sequence as if no resume had been planned.
+                if resume_plan is not None:
+                    logger.warning(
+                        "Native resume of session %s failed (exit=%s) on agent "
+                        "'%s'; falling back to rebuilt context",
+                        resume_plan["session_id"], result.returncode,
+                        current_agent_name,
+                    )
+                    attempt_errors.append(
+                        f"attempt {internal_attempt + 1}: native resume of "
+                        f"session {resume_plan['session_id']} failed "
+                        f"(exit={result.returncode}) — falling back to rebuild"
+                    )
+                    native_resume_disabled = True
+                    resume_fallback_slots += 1
+                    self._fall_back_from_resume()
+                    continue
 
                 # --- Failure path: always attempt agent rotation ---
                 # detect_infra_error is retained for diagnostic labeling only;
@@ -2058,6 +3038,9 @@ class LLMCaller:
                 if self._rotate_agent():
                     # Rotation succeeded — next iteration uses the new agent.
                     # This consumes one of the max_retries attempt slots.
+                    # A rotated-to agent has no session of its own for this
+                    # step, so every attempt after a rotation rebuilds.
+                    native_resume_disabled = True
                     time.sleep(self.retry_delay)
                     continue
                 # Rotation exhausted — fall through; remaining attempts run on
@@ -2065,7 +3048,7 @@ class LLMCaller:
 
                 logger.warning(
                     f"LLM call failed: {attempt_errors[-1]}, "
-                    f"internal attempt {internal_attempt + 1}/{self.max_retries}"
+                    f"internal attempt {internal_attempt + 1}/{attempt_budget}"
                 )
 
             except Exception as e:
@@ -2080,9 +3063,7 @@ class LLMCaller:
                             agent_name=attempt_agent_name,
                             runner_type=attempt_runner_type,
                             provider=effective_provider,
-                            provider_session_id=(
-                                startup_metadata.provider_session_id
-                            ),
+                            provider_session_id=attempt_session_id(),
                             configured_model=configured_model,
                             runner_startup_model=startup_model,
                         )
@@ -2094,20 +3075,54 @@ class LLMCaller:
                             self.external_attempt,
                             agent_name=attempt_agent_name,
                             usage_record=failed_usage,
+                            provider_session_id=attempt_session_id(),
+                            session_cwd=str(attempt_cwd),
+                            resume_strategy=attempt_strategy,
+                            runner_type=attempt_runner_type,
+                            kind=record_kind,
                         )
                         active_response_recorded = True
+                # A native resume can fail by RAISING as readily as by exiting
+                # non-zero: an installed CLI that rejects the resume argv, a
+                # runner whose build_resume_call_args cannot express the
+                # request, a subprocess that never starts. All of those are
+                # reasons to rebuild context — never reasons to spend every
+                # remaining slot re-issuing the same broken resume, which is
+                # what left the sequence ending in a hard LLMCallError without
+                # a single rebuild attempt.
+                #
+                # ``resume_produced_result`` bounds the classification to the
+                # launch/run itself: once the resumed turn has answered and been
+                # recorded, anything raised downstream is an ordinary attempt
+                # failure and must neither mark the session rejected nor buy an
+                # extra slot.
+                if resume_plan is not None and not resume_produced_result:
+                    logger.warning(
+                        "Native resume of session %s raised on agent '%s'; "
+                        "falling back to rebuilt context",
+                        resume_plan["session_id"], attempt_agent_name,
+                    )
+                    attempt_errors.append(
+                        f"attempt {internal_attempt + 1}: native resume of "
+                        f"session {resume_plan['session_id']} raised "
+                        f"{type(e).__name__}: {e} — falling back to rebuild"
+                    )
+                    native_resume_disabled = True
+                    resume_fallback_slots += 1
+                    self._fall_back_from_resume()
+                    continue
                 attempt_errors.append(
                     f"attempt {internal_attempt + 1}: agent '{attempt_agent_name}' "
                     f"raised {type(e).__name__}: {e}"
                 )
-                logger.warning(f"LLM call exception: {e}, internal attempt {internal_attempt + 1}/{self.max_retries}")
+                logger.warning(f"LLM call exception: {e}, internal attempt {internal_attempt + 1}/{attempt_budget}")
 
-            if internal_attempt < self.max_retries - 1:
+            if internal_attempt < attempt_budget - 1:
                 time.sleep(self.retry_delay)
 
         reasons = "\n".join(attempt_errors) if attempt_errors else "no failure reason recorded"
         raise LLMCallError(
-            f"LLM call failed after {self.max_retries} attempts:\n{reasons}"
+            f"LLM call failed after {internal_attempt} attempts:\n{reasons}"
         )
 
     @staticmethod
@@ -2193,6 +3208,42 @@ class LLMCaller:
         from .utils.json_parser import parse_json_response
         result = parse_json_response(output)
         return result is not None
+
+    @classmethod
+    def _create_json_retry_directive(cls, bad_output: str) -> str:
+        """The JSON-fix request on its own, for a continuation turn.
+
+        Same content as :meth:`_create_json_retry_prompt` minus the original
+        prompt: a continuation is appended to a conversation that already holds
+        it, so re-sending it would be noise the model has to reconcile.
+        """
+        text_content = cls._extract_assistant_text(bad_output)
+        return (
+            "IMPORTANT: Your previous response was not in the required JSON "
+            "format. You responded with:\n---\n"
+            f"{text_content[:1500]}\n---\n\n"
+            "Please respond ONLY with valid JSON as specified in the "
+            "instructions for this step. Do not include any explanatory text "
+            "before or after the JSON."
+        )
+
+    @staticmethod
+    def _extract_assistant_text(bad_output: str) -> str:
+        """Concatenate the assistant text of a stream-json output."""
+        text_content = ""
+        for line in (bad_output or "").strip().split("\n"):
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get("type") == "assistant":
+                message = data.get("message", {})
+                for item in message.get("content", []) or []:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            text_content += text
+        return text_content
 
     @staticmethod
     def _create_json_retry_prompt(original_prompt: str, bad_output: str) -> str:

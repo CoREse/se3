@@ -1,0 +1,8 @@
+id: '304'
+description: retry一个session似乎会把同项目下在worktree的因为种种原因暂停的session（出现的情况里这个session在discovery阶段）也resume了。
+status: open
+tags: []
+source: human
+created_at: '2026-09-04T10:21:19.337222'
+updated_at: '2026-09-04T10:21:19.337222'
+type: bug

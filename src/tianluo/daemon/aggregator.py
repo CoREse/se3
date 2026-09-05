@@ -69,6 +69,13 @@ HISTORICAL_ROOTS_TTL = 60.0
 # step by construction, and routing it this way keeps step / kind decoupled so
 # a future decision-class kind (``partial_decision`` etc.) joins this set
 # without re-touching the filter body.
+#
+# ``dialog`` is deliberately NOT a member: its rule is strictly broader than
+# this exemption (it survives EVERY processed status on the current step, not
+# only ``failed`` — a stop request that lands as a step finishes files the
+# dialog against a COMPLETED/PARTIAL step), so it is handled by its own branch
+# in the filter. Listing it here as well would be dead membership that reads
+# like the narrower rule is the one in force.
 _FAILED_EXEMPT_CALL_KINDS: FrozenSet[str] = frozenset(
     {protocol.CALL_KIND_RETRY_DECISION}
 )
@@ -1427,9 +1434,14 @@ class DaemonAggregator:
         than hard-coding ``retry_decision`` so a future decision-class kind
         joins the set without re-touching the filter body.
 
-        A call whose step cannot be resolved (no ``step_id``, or a ``step_id``
-        absent from ``state.steps``) is kept untouched, so a genuinely pending
-        interaction is never lost to an over-eager progress heuristic.
+        A ``dialog`` call is exempt from the processed-status rule altogether
+        while it is keyed to the CURRENT step: an interjection dialog opened
+        just as a step finished is filed against that COMPLETED/PARTIAL step,
+        and it is the flow's one open interaction until it settles — dropping
+        it would show a PAUSED flow with no answerable call, and the daemon's
+        resume-on-answer would never fire. Only the flow walking PAST the step
+        retires it; an answered dialog is removed by its response file long
+        before that.
         """
         if not isinstance(state, dict):
             return list(calls)
@@ -1450,6 +1462,12 @@ class DaemonAggregator:
             status = ""
             if isinstance(step, dict):
                 status = str(step.get("status") or "").lower()
+            if call.kind == protocol.CALL_KIND_DIALOG:
+                # Open dialog on the current step: survives ANY step status
+                # (see the docstring); only walking past the step retires it.
+                if step_id == current_step_id:
+                    result.append(call)
+                continue
             processed_for_call = (
                 processed - {"failed"}
                 if call.kind in _FAILED_EXEMPT_CALL_KINDS
